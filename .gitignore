@@ -1,0 +1,17 @@
+kicad2gcode/
+
+# Rust build artifacts
+target/
+**/target/
+
+# Local vendored/reference crate clone (not part of this plugin repo)
+gcoder_rust/kicad-rs/
+
+# Logs
+*.log
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
