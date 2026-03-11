@@ -1,0 +1,11 @@
+[package]
+name = "gcode-rhai-lab"
+version = "0.1.0"
+edition = "2024"
+description = "Prototype RHAI-driven GCode template parser"
+license = "MIT"
+
+[dependencies]
+rhai = "1.21"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+thiserror = "1"
