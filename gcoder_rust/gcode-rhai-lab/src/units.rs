@@ -270,8 +270,6 @@ impl FeedRateUnit {
     fn parse(unit: &str) -> Option<Self> {
         match unit {
             "mm/min" => Some(Self::MmPerMin),
-            "cm/min" => Some(Self::CmPerMin),
-            "m/min" => Some(Self::MPerMin),
             "in/min" => Some(Self::InPerMin),
             "ipm" => Some(Self::Ipm),
             "inch/min" => Some(Self::InchPerMin),
@@ -292,20 +290,6 @@ impl FeedRate {
         Self {
             scalar: ScalarValue::Float(mm_per_min),
             unit: FeedRateUnit::MmPerMin,
-        }
-    }
-
-    pub fn from_cm_per_min(cm_per_min: f64) -> Self {
-        Self {
-            scalar: ScalarValue::Float(cm_per_min),
-            unit: FeedRateUnit::CmPerMin,
-        }
-    }
-
-    pub fn from_m_per_min(m_per_min: f64) -> Self {
-        Self {
-            scalar: ScalarValue::Float(m_per_min),
-            unit: FeedRateUnit::MPerMin,
         }
     }
 
@@ -335,14 +319,6 @@ impl FeedRate {
 
     pub fn as_mm_per_min(self) -> f64 {
         self.scalar.as_f64() * self.unit.factor_to_mm_per_min()
-    }
-
-    pub fn as_cm_per_min(self) -> f64 {
-        self.as_mm_per_min() / FeedRateUnit::CmPerMin.factor_to_mm_per_min()
-    }
-
-    pub fn as_m_per_min(self) -> f64 {
-        self.as_mm_per_min() / FeedRateUnit::MPerMin.factor_to_mm_per_min()
     }
 
     pub fn as_in_per_min(self) -> f64 {
