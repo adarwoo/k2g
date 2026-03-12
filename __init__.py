@@ -1,1 +1,1 @@
-from .Plugin_action import ActionKiCadPlugin
+from .info_action import ActionKiCadPlugin

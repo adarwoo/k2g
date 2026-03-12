@@ -54,7 +54,6 @@ class MyDialog(wx.Dialog):
 
 
 class KiCadPlugin(MyDialog):
-
     def __init__(self):
         super(KiCadPlugin, self).__init__(None)
         self.kicad = KiCad()
