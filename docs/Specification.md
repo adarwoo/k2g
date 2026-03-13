@@ -234,6 +234,7 @@ Fields and controls:
    - Auto (uses CNC preference)
    - Angle (`-180` to `+180`)
 - If ATC is available, rack generation mode
+   - Use manual tool change
    - Reuse rack
    - Overwrite rack (new rack for this job)
 - Routing options (when routing selected)

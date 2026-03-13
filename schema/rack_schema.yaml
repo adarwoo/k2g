@@ -1,0 +1,88 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: "rack schema"
+revision: "1.0"
+type: object
+description: |
+  kicad2gcode rack(s) description and selection
+
+  Note: You may edit this file, but it may be regenerated.
+  During the regenerations, exiting comments and settings are preserved where
+  possible.
+properties:
+  datetime:
+    type: string
+    description: Last time the file was re-generated
+    format: datetime
+    default: 19710101T00:00:00
+  issue:
+    type: integer
+    description: Increments for every update
+    default: 0
+  use:
+    type: ["string", "null"]
+    description: |
+      'id' of the rack to use.
+      If 'empty' or null, no rack is used, an manual tool change will be applied
+  size:
+    type: integer
+    description: |
+      Usable size of the racks, that is, maximum number of tools to load for all
+      If manual tool change is selected, limit the number of tool change.
+      If 0, no limit is applied.
+    default: 0
+  racks:
+    type: object
+    description: |
+      Lists all available racks.
+      Example of a rack:
+        class2_pcb_db:
+          - slot: 1  # Describes the slot number. Starts from 1.
+            drill: 0.7 # Read 0.7mm. Units can be specified from mm, in, mil and thou
+          - drill: 0.8mm # The slot number is auto-incrementating. Here, it is 2
+          - router: 1/16in # Use drill or router
+          - slot: 4
+            use: false # Slot 4 should not be used
+          - use: false # Nor 5
+          - drill: 0.4 # Meaning 0.4mm in slot 6
+
+    patternProperties:
+      "^[a-zA-Z0-9_-]+$":
+        type: array
+        items:
+          type: object
+          properties:
+            slot:
+              type: integer
+              minimum: 1
+            drill:
+              unit: Length(mm)
+              anyOf:
+                - type: number
+                - type: string
+                  pattern: "^(?:\\d+(?:\\.\\d+)?|\\d+\\/\\d+)(?:mm|in|mil|thou|inch|cm)$"
+            router:
+              unit: Length(mm)
+              anyOf:
+                - type: number
+                - type: string
+                  pattern: "^(?:\\d+(?:\\.\\d+)?|\\d+\\/\\d+)(?:mm|in|mil|thou|inch|cm)$"
+            use:
+              type: boolean
+              description: If set to false, the slot will not be used. Defaults to true.
+          oneOf:
+            - required:
+                - drill
+              not:
+                required:
+                  - router
+            - required:
+                - router
+              not:
+                required:
+                  - drill
+            - required:
+                - use
+          additionalProperties: false
+required:
+  - size
+additionalProperties: false

@@ -1,0 +1,181 @@
+$schema: http://json-schema.org/draft-07/schema#
+type: object
+description: |
+  This file controls the emitted GCode templates for the Masso G3 profile.
+
+  Placeholders in templates are rendered with Python's str.format().
+  Unknown placeholders are left as-is to avoid hard failures while editing.
+
+properties:
+  machine:
+    description: Physical machine configuration.
+    type: object
+    properties:
+      fixture_plate:
+        description: Maximum usable fixture plate size in mm.
+        type: object
+        properties:
+          x:
+            description: Maximum X axis travel in mm.
+            type: number
+            default: 300.0
+          y:
+            description: Maximum Y axis travel in mm.
+            type: number
+            default: 200.0
+        required: [x, y]
+      max_feed_rate:
+        description: Maximum feed rate in mm/min.
+        type: number
+        default: 2000.0
+      spindle_rpm_min:
+        description: Minimum spindle RPM.
+        type: integer
+        default: 1000
+      spindle_rpm_max:
+        description: Maximum spindle RPM.
+        type: integer
+        default: 24000
+      atc_slot_count:
+        description: Number of ATC slots. 0 means ATC is disabled (manual tool change only).
+        type: integer
+        minimum: 0
+        default: 0
+      origin:
+        description: Machine coordinate origin orientation.
+        type: object
+        properties:
+          x0:
+            description: X axis zero orientation.
+            type: string
+            enum: [Left, Right, Front, Back]
+            default: Left
+          y0:
+            description: Y axis zero orientation.
+            type: string
+            enum: [Front, Back, Left, Right]
+            default: Front
+        required: [x0, y0]
+      scaling:
+        description: Axis scaling in percent. Default is 100.0 for both axes (no scaling).
+        type: object
+        properties:
+          x:
+            description: X axis scaling percentage.
+            type: number
+            default: 100.0
+          y:
+            description: Y axis scaling percentage.
+            type: number
+            default: 100.0
+        required: [x, y]
+      line_numbering:
+        description: Program line numbering configuration.
+        type: object
+        properties:
+          enabled:
+            description: Whether to emit line numbers in the generated program.
+            type: boolean
+            default: false
+          increment:
+            description: Line number increment value (e.g. 10 produces N10, N20, N30...).
+            type: integer
+            minimum: 1
+            default: 10
+        required: [enabled, increment]
+    required: [fixture_plate, max_feed_rate, spindle_rpm_min, spindle_rpm_max, atc_slot_count, origin, scaling, line_numbering]
+
+  header:
+    description: Header generated once at the beginning of the file.
+    type: string
+    default: |
+      (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+      (Reset all back to safe defaults)
+      G17 G54 G40 G49 G80 G90
+      G21
+      G10 P0
+      (Establish the Z-Safe)
+      G0 Z{z_safe}
+
+  footer:
+    description: Footer generated once at the end of the file.
+    type: string
+    default: |
+      (end of file)
+
+  drill:
+    description: Templates for drilling canned-cycle output.
+    type: object
+    properties:
+      first_move:
+        description: First move to the first hole, including safe Z.
+        type: string
+        default: G0 X{x} Y{y} Z{z_safe}
+      cycle_mode_last:
+        description: Canned cycle retract mode when this is the last hole.
+        type: string
+        default: G98
+      cycle_mode_series:
+        description: Canned cycle retract mode when more holes follow.
+        type: string
+        default: G99
+      cycle_start:
+        description: Canned cycle start for the first hole.
+        type: string
+        default: G81 Z{z_bottom} R{z_retract} F{z_feedrate}
+      next_hole:
+        description: Move for subsequent holes while cycle is active.
+        type: string
+        default: X{x} Y{y}
+      cycle_cancel:
+        description: Cancel canned cycle after the last hole.
+        type: string
+        default: G80
+    required: [first_move, cycle_mode_last, cycle_mode_series, cycle_start, next_hole, cycle_cancel]
+
+  route:
+    description: Templates for routed hole output.
+    type: object
+    properties:
+      plunge_and_offset:
+        description: Initial move and plunge sequence.
+        type: string
+        default: |
+          G90 G0 X{x} Y{y}
+          G1 Z{z_bottom} F{z_feedrate}
+          G1 Y{y_plus_id}
+      arc_up:
+        description: Arc command for UP / UPDOWN cutting direction.
+        type: string
+        default: G2 I0 J-{id}
+      arc_down:
+        description: Arc command for DOWN cutting direction.
+        type: string
+        default: G3 I0 J-{id}
+      retract:
+        description: Retract after routing the hole.
+        type: string
+        default: G0 Z{z_safe}
+    required: [plunge_and_offset, arc_up, arc_down, retract]
+
+  tool_change:
+    description: Templates for spindle stop, optional manual prompt, tool change and speed.
+    type: object
+    properties:
+      manual_prompt:
+        description: Prompt emitted only when rack is manual.
+        type: string
+        default: |
+          MSG Load {tool_name} {tool_diameter}
+          M01
+      command:
+        description: Main tool change command block.
+        type: string
+        default: |
+          M05
+          {manual_message}
+          T{slot} M06
+          S{rpm}
+    required: [manual_prompt, command]
+
+required: [machine, header, footer, drill, route, tool_change]
