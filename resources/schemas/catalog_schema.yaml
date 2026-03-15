@@ -1,0 +1,148 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+description: |
+  Tool catalog file. Contains drillbit and router bit entries grouped into
+  named sections (e.g. product series).
+
+  Dimensions may be entered in native units.  Each section declares defaults
+  for diameter and flute length units.  Individual tools may override those
+  defaults.
+
+    diameter       mm|in
+    flute_length   mm|in
+    spindle        rpm
+    feeds          section default feed unit (default_feed_unit)
+
+  When a catalog is loaded its entries are prefixed with the file stem in
+  square brackets to prevent ID clashes across catalogs, e.g.:
+    [kyocera] Series 100 / 0.20mm
+
+required: [name, sections]
+additionalProperties: false
+
+properties:
+  name:
+    type: string
+    minLength: 1
+    description: "Vendor or catalog name (e.g. \"Kyocera\", \"Generic\")"
+
+  description:
+    type: string
+    description: "Optional free-text description of the catalog"
+
+  sections:
+    type: array
+    description: "Tool sections — one per product series or category"
+    minItems: 1
+    items:
+      $ref: "#/definitions/section"
+
+definitions:
+  section:
+    type: object
+    required: [name, default_diameter_unit, default_feed_unit, tools]
+    additionalProperties: false
+    properties:
+      name:
+        type: string
+        minLength: 1
+        description: "Section name (e.g. \"Series 100\", \"Router bits\")"
+
+      default_diameter_unit:
+        type: string
+        enum: [mm, in]
+        description: "Default unit used by tool.diameter in this section"
+
+      default_feed_unit:
+        type: string
+        enum: [mm_min, ipm]
+        description: "Default unit used by tool.z_feed and tool.table_feed in this section"
+
+      default_flute_length_unit:
+        type: string
+        enum: [mm, in]
+        description: "Optional default unit used by tool.flute_length in this section"
+
+      description:
+        type: string
+        description: "Optional description of this section"
+
+      tools:
+        type: array
+        description: "List of tools in this section (may be empty)"
+        items:
+          $ref: "#/definitions/tool"
+
+  tool:
+    type: object
+    required: [type, diameter, sku_name, point_angle]
+    additionalProperties: false
+    description: "A single drill bit or router bit entry"
+    properties:
+      type:
+        type: string
+        enum: [drillbit, routerbit]
+        description: "Tool type discriminator"
+
+      diameter:
+        type: number
+        minimum: 0.001
+        description: "Nominal tool diameter in the section default unit unless overridden"
+
+      diameter_unit:
+        type: string
+        enum: [mm, in]
+        description: "Optional per-tool unit override for diameter"
+
+      flute_length:
+        type: number
+        minimum: 0
+        description: "Flute length in the section default unit unless overridden"
+
+      flute_length_unit:
+        type: string
+        enum: [mm, in]
+        description: "Optional per-tool unit override for flute length"
+
+      sku_name:
+        type: string
+        minLength: 1
+        description: "Tool identifier (SKU or vendor/name string)"
+
+      point_angle:
+        type: number
+        minimum: 60
+        maximum: 180
+        description: "Tool point angle in degrees (router bits use 180 for flat end)"
+
+      spindle_rpm:
+        type: integer
+        minimum: 0
+        description: "Recommended spindle speed in RPM"
+
+      z_feed:
+        type: number
+        minimum: 0
+        description: "Recommended Z-axis (plunge) feed rate in the section default_feed_unit"
+
+      table_feed:
+        type: number
+        minimum: 0
+        description: "Recommended XY table feed rate in the section default_feed_unit — router bits only"
+
+      max_hits:
+        type: integer
+        minimum: 1
+        description: "Maximum recommended hit count before tool change"
+
+      notes:
+        type: string
+        description: "Free-text note (substrate, coating, condition, caveat, etc.)"
+
+    allOf:
+      - if:
+          properties:
+            type:
+              const: drillbit
+        then:
+          required: [spindle_rpm, z_feed, max_hits]

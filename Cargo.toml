@@ -1,0 +1,24 @@
+[package]
+name = "k2g"
+version = "0.1.0"
+edition = "2021"
+description = "GCode generator"
+
+[dependencies]
+kicad-ipc-rs = { version = "0.4", features = ["blocking"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+dioxus = { version = "0.6", features = ["desktop"] }
+clap = { version = "4", features = ["derive"] }
+rhai = "1"
+thiserror = "2"
+serde_json = "1"
+serde_yaml = "0.9"
+jsonschema = "0.28"
+log = "0.4"
+
+[patch.crates-io]
+kicad-ipc-rs = { git = "https://github.com/adarwoo/kicad-ipc-rs", rev = "e7a17a93b6f6d0139490a72ca87eaadcf75d6799" }
+
+[target.'cfg(windows)']
+rustflags = ["-l", "advapi32", "--cap-lints=allow"]

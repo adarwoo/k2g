@@ -1,15 +1,15 @@
 {
   "$schema": "https://go.kicad.org/api/schemas/v1",
-  "identifier": "com.github.adarwoo.gcoder",
-  "name": "GCoder",
+  "identifier": "com.github.adarwoo.k2g",
+  "name": "k2g",
   "description": "Suite of tools to convert KiCad PCB designs to GCode for CNC milling.",
   "runtime": {
-    "type": "python",
+    "type": "rust",
     "version": "3"
   },
   "actions": [
     {
-      "identifier": "GCoder-action",
+      "identifier": "k2g-action",
       "name": "Create GCode",
       "description": "Export GCode",
       "show-button": true,
@@ -17,7 +17,7 @@
         "pcb",
         "schematic"
       ],
-      "entrypoint": "info_action.py",
+      "entrypoint": "info_action.rs",
       "icons-light": [
         "icon.png"
       ],
