@@ -6,36 +6,48 @@ description: |
   Placeholders in templates are rendered with Python's str.format().
   Unknown placeholders are left as-is to avoid hard failures while editing.
 
+  All dimensional fields (lengths, feed rates, spindle speeds) are expressed as
+  unit-bearing strings so the file is self-describing and unit-system agnostic.
+  Examples:
+    length     : "300mm"  or  "11 3/4in"  or  "1/16in"
+    feed rate  : "2000mm/min"  or  "78.74in/min"
+    spindle RPM: "24000rpm"
+
 properties:
   machine:
     description: Physical machine configuration.
     type: object
     properties:
       fixture_plate:
-        description: Maximum usable fixture plate size in mm.
+        description: Maximum usable fixture plate size.
         type: object
         properties:
           x:
-            description: Maximum X axis travel in mm.
-            type: number
-            default: 300.0
+            description: Maximum X axis travel (unit-bearing string, e.g. "300mm" or "11.81in").
+            type: string
+            pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:mm|cm|m|in|inch|")\s*$'
+            default: "300mm"
           y:
-            description: Maximum Y axis travel in mm.
-            type: number
-            default: 200.0
+            description: Maximum Y axis travel (unit-bearing string, e.g. "200mm" or "7.87in").
+            type: string
+            pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:mm|cm|m|in|inch|")\s*$'
+            default: "200mm"
         required: [x, y]
       max_feed_rate:
-        description: Maximum feed rate in mm/min.
-        type: number
-        default: 2000.0
+        description: Maximum feed rate (unit-bearing string, e.g. "2000mm/min" or "78.74in/min").
+        type: string
+        pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:mm\s*/\s*min|cm\s*/\s*min|m\s*/\s*min|in\s*/\s*min|inch\s*/\s*min|ipm)\s*$'
+        default: "2000mm/min"
       spindle_rpm_min:
-        description: Minimum spindle RPM.
-        type: integer
-        default: 1000
+        description: Minimum spindle speed (unit-bearing string, e.g. "1000rpm").
+        type: string
+        pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*rpm\s*$'
+        default: "1000rpm"
       spindle_rpm_max:
-        description: Maximum spindle RPM.
-        type: integer
-        default: 24000
+        description: Maximum spindle speed (unit-bearing string, e.g. "24000rpm").
+        type: string
+        pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*rpm\s*$'
+        default: "24000rpm"
       atc_slot_count:
         description: Number of ATC slots. 0 means ATC is disabled (manual tool change only).
         type: integer

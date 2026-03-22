@@ -212,5 +212,12 @@ properties:
         type: number
         minimum: 0
         maximum: 1000
+  selected_cnc_profile_id:
+    description: |
+      ID of the currently selected CNC profile.
+      This is used to restore the active profile when the application starts.
+    type: [string, "null"]
+    default: null
 
-required: [resolution, spindle_speed, feedrates, z_keep_safe_distance, board_exit_depth_min, drillbit_point_angle, slot_peck_drilling, oversizing_allowance_percent, downsizing_allowance_percent, router_diameter_for_contour, backboard_thickness, gcode]
+required: [resolution, spindle_speed, feedrates, z_keep_safe_distance, board_exit_depth_min, drillbit_point_angle, slot_peck_drilling, oversizing_allowance_percent, downsizing_allowance_percent, router_diameter_for_contour, backboard_thickness, gcode, selected_cnc_profile_id]
+additionalProperties: false

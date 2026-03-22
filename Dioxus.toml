@@ -1,0 +1,7 @@
+[bundle]
+icon = [
+   "resources/icons/icon.png"
+]
+
+[bundle.windows]
+icon_path = "resources/icons/icon.png"

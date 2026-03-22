@@ -1,4 +1,4 @@
-﻿name: Kyocera
+name: Kyocera
 description: >
   Kyocera Series 100 drill catalog imported from manufacturer data.
   Speed/feed data from Kyocera PCB Drill Speed and Feed Guide (80K spindle).
@@ -7,133 +7,129 @@ description: >
 
 sections:
   - name: Series 100 (in)
-    default_diameter_unit: in
-    default_feed_unit: ipm
     description: Inch stock drill sizes (# and fractional). Feed rates in inch/min.
     tools:
-      - { type: drillbit, diameter: 0.0200, sku_name: '100.0200.360 / #76', point_angle: 130, spindle_rpm: 72000, z_feed: 96, max_hits: 750 }
-      - { type: drillbit, diameter: 0.0210, sku_name: '100.0210.360 / #75', point_angle: 130, spindle_rpm: 68000, z_feed: 98, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0225, sku_name: '100.0225.360 / #74', point_angle: 130, spindle_rpm: 64000, z_feed: 104, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0240, sku_name: '100.0240.400 / #73', point_angle: 130, spindle_rpm: 60000, z_feed: 108, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0250, sku_name: '100.0250.400 / #72', point_angle: 130, spindle_rpm: 57000, z_feed: 112, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0260, sku_name: '100.0260.400 / #71', point_angle: 130, spindle_rpm: 55000, z_feed: 118, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0280, sku_name: '100.0280.400 / #70', point_angle: 130, spindle_rpm: 51000, z_feed: 126, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0292, sku_name: '100.0292.400 / #69', point_angle: 130, spindle_rpm: 49000, z_feed: 123, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0310, sku_name: '100.0310.400 / #68', point_angle: 130, spindle_rpm: 46000, z_feed: 115, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0320, sku_name: '100.0320.400 / #67', point_angle: 130, spindle_rpm: 45000, z_feed: 113, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0330, sku_name: '100.0330.400 / #66', point_angle: 130, spindle_rpm: 43000, z_feed: 108, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0350, sku_name: '100.0350.400 / #65', point_angle: 130, spindle_rpm: 41000, z_feed: 103, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0360, sku_name: '100.0360.400 / #64', point_angle: 130, spindle_rpm: 40000, z_feed: 100, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0370, sku_name: '100.0370.400 / #63', point_angle: 130, spindle_rpm: 39000, z_feed: 98, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0380, sku_name: '100.0380.400 / #62', point_angle: 130, spindle_rpm: 38000, z_feed: 95, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0390, sku_name: '100.0390.400 / #61', point_angle: 130, spindle_rpm: 37000, z_feed: 93, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0400, sku_name: '100.0400.400 / #60', point_angle: 130, spindle_rpm: 36000, z_feed: 90, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0410, sku_name: '100.0410.400 / #59', point_angle: 130, spindle_rpm: 35000, z_feed: 88, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0420, sku_name: '100.0420.400 / #58', point_angle: 130, spindle_rpm: 34000, z_feed: 85, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0430, sku_name: '100.0430.400 / #57', point_angle: 130, spindle_rpm: 33000, z_feed: 83, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0465, sku_name: '100.0465.400 / #56', point_angle: 130, spindle_rpm: 31000, z_feed: 78, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0520, sku_name: '100.0520.400 / #55', point_angle: 130, spindle_rpm: 28000, z_feed: 70, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0550, sku_name: '100.0550.400 / #54', point_angle: 130, spindle_rpm: 26000, z_feed: 65, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0595, sku_name: '100.0595.400 / #53', point_angle: 130, spindle_rpm: 24000, z_feed: 60, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0625, sku_name: '100.0625.400 / 1/16"', point_angle: 130, spindle_rpm: 23000, z_feed: 58, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0635, sku_name: '100.0635.400 / #52', point_angle: 130, spindle_rpm: 21000, z_feed: 58, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0670, sku_name: '100.0670.400 / #51', point_angle: 130, spindle_rpm: 21000, z_feed: 53, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0700, sku_name: '100.0700.400 / #50', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0730, sku_name: '100.0730.400 / #49', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0760, sku_name: '100.0760.400 / #48', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0781, sku_name: '100.0781.400 / 5/64"', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0785, sku_name: '100.0785.400 / #47', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0810, sku_name: '100.0810.400 / #46', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0820, sku_name: '100.0820.400 / #45', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0860, sku_name: '100.0860.400 / #44', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0890, sku_name: '100.0890.400 / #43', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0935, sku_name: '100.0935.400 / #42', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0938, sku_name: '100.0938.400 / 3/32"', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0960, sku_name: '100.0960.400 / #41', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0980, sku_name: '100.0980.400 / #40', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.0995, sku_name: '100.0995.400 / #39', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 1000 }
-      - { type: drillbit, diameter: 0.1015, sku_name: '100.1015.400 / #38', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1040, sku_name: '100.1040.400 / #37', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1065, sku_name: '100.1065.400 / #36', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1094, sku_name: '100.1094.400 / 7/64"', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1100, sku_name: '100.1100.400 / #35', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1110, sku_name: '100.1110.400 / #34', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1130, sku_name: '100.1130.400 / #33', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1160, sku_name: '100.1160.400 / #32', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1200, sku_name: '100.1200.400 / #31', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 800 }
-      - { type: drillbit, diameter: 0.1250, sku_name: '100.1250.394 / 1/8"', point_angle: 130, spindle_rpm: 20000, z_feed: 50, max_hits: 500 }
-      - { type: drillbit, diameter: 0.1250, sku_name: '100.1250.400 / 1/8"', point_angle: 165, spindle_rpm: 20000, z_feed: 50, max_hits: 500 }
+      - { type: drillbit, diameter: '0.0200in', sku_name: '100.0200.360 / #76', point_angle: '130deg', spindle_rpm: '72000rpm', z_feed: '96ipm', max_hits: 750 }
+      - { type: drillbit, diameter: '0.0210in', sku_name: '100.0210.360 / #75', point_angle: '130deg', spindle_rpm: '68000rpm', z_feed: '98ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0225in', sku_name: '100.0225.360 / #74', point_angle: '130deg', spindle_rpm: '64000rpm', z_feed: '104ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0240in', sku_name: '100.0240.400 / #73', point_angle: '130deg', spindle_rpm: '60000rpm', z_feed: '108ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0250in', sku_name: '100.0250.400 / #72', point_angle: '130deg', spindle_rpm: '57000rpm', z_feed: '112ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0260in', sku_name: '100.0260.400 / #71', point_angle: '130deg', spindle_rpm: '55000rpm', z_feed: '118ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0280in', sku_name: '100.0280.400 / #70', point_angle: '130deg', spindle_rpm: '51000rpm', z_feed: '126ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0292in', sku_name: '100.0292.400 / #69', point_angle: '130deg', spindle_rpm: '49000rpm', z_feed: '123ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0310in', sku_name: '100.0310.400 / #68', point_angle: '130deg', spindle_rpm: '46000rpm', z_feed: '115ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0320in', sku_name: '100.0320.400 / #67', point_angle: '130deg', spindle_rpm: '45000rpm', z_feed: '113ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0330in', sku_name: '100.0330.400 / #66', point_angle: '130deg', spindle_rpm: '43000rpm', z_feed: '108ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0350in', sku_name: '100.0350.400 / #65', point_angle: '130deg', spindle_rpm: '41000rpm', z_feed: '103ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0360in', sku_name: '100.0360.400 / #64', point_angle: '130deg', spindle_rpm: '40000rpm', z_feed: '100ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0370in', sku_name: '100.0370.400 / #63', point_angle: '130deg', spindle_rpm: '39000rpm', z_feed: '98ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0380in', sku_name: '100.0380.400 / #62', point_angle: '130deg', spindle_rpm: '38000rpm', z_feed: '95ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0390in', sku_name: '100.0390.400 / #61', point_angle: '130deg', spindle_rpm: '37000rpm', z_feed: '93ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0400in', sku_name: '100.0400.400 / #60', point_angle: '130deg', spindle_rpm: '36000rpm', z_feed: '90ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0410in', sku_name: '100.0410.400 / #59', point_angle: '130deg', spindle_rpm: '35000rpm', z_feed: '88ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0420in', sku_name: '100.0420.400 / #58', point_angle: '130deg', spindle_rpm: '34000rpm', z_feed: '85ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0430in', sku_name: '100.0430.400 / #57', point_angle: '130deg', spindle_rpm: '33000rpm', z_feed: '83ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0465in', sku_name: '100.0465.400 / #56', point_angle: '130deg', spindle_rpm: '31000rpm', z_feed: '78ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0520in', sku_name: '100.0520.400 / #55', point_angle: '130deg', spindle_rpm: '28000rpm', z_feed: '70ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0550in', sku_name: '100.0550.400 / #54', point_angle: '130deg', spindle_rpm: '26000rpm', z_feed: '65ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0595in', sku_name: '100.0595.400 / #53', point_angle: '130deg', spindle_rpm: '24000rpm', z_feed: '60ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0625in', sku_name: '100.0625.400 / 1/16"', point_angle: '130deg', spindle_rpm: '23000rpm', z_feed: '58ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0635in', sku_name: '100.0635.400 / #52', point_angle: '130deg', spindle_rpm: '21000rpm', z_feed: '58ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0670in', sku_name: '100.0670.400 / #51', point_angle: '130deg', spindle_rpm: '21000rpm', z_feed: '53ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0700in', sku_name: '100.0700.400 / #50', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0730in', sku_name: '100.0730.400 / #49', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0760in', sku_name: '100.0760.400 / #48', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0781in', sku_name: '100.0781.400 / 5/64"', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0785in', sku_name: '100.0785.400 / #47', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0810in', sku_name: '100.0810.400 / #46', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0820in', sku_name: '100.0820.400 / #45', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0860in', sku_name: '100.0860.400 / #44', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0890in', sku_name: '100.0890.400 / #43', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0935in', sku_name: '100.0935.400 / #42', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0938in', sku_name: '100.0938.400 / 3/32"', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0960in', sku_name: '100.0960.400 / #41', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0980in', sku_name: '100.0980.400 / #40', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.0995in', sku_name: '100.0995.400 / #39', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 1000 }
+      - { type: drillbit, diameter: '0.1015in', sku_name: '100.1015.400 / #38', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1040in', sku_name: '100.1040.400 / #37', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1065in', sku_name: '100.1065.400 / #36', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1094in', sku_name: '100.1094.400 / 7/64"', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1100in', sku_name: '100.1100.400 / #35', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1110in', sku_name: '100.1110.400 / #34', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1130in', sku_name: '100.1130.400 / #33', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1160in', sku_name: '100.1160.400 / #32', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1200in', sku_name: '100.1200.400 / #31', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 800 }
+      - { type: drillbit, diameter: '0.1250in', sku_name: '100.1250.394 / 1/8"', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 500 }
+      - { type: drillbit, diameter: '0.1250in', sku_name: '100.1250.400 / 1/8"', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '50ipm', max_hits: 500 }
 
   - name: Series 100 (mm)
-    default_diameter_unit: mm
-    default_feed_unit: ipm
     description: Metric stock drill sizes (mm). Feed rates in ipm.
     tools:
-      - { type: drillbit, diameter: 0.500, sku_name: '100.0197.360', point_angle: 130, spindle_rpm: 80000, z_feed: 109, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.550, sku_name: '100.0217.360', point_angle: 130, spindle_rpm: 80000, z_feed: 128, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.600, sku_name: '100.0236.360', point_angle: 130, spindle_rpm: 80000, z_feed: 148, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.650, sku_name: '100.0256.400', point_angle: 130, spindle_rpm: 80000, z_feed: 173, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.700, sku_name: '100.0276.400', point_angle: 130, spindle_rpm: 80000, z_feed: 193, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.750, sku_name: '100.0295.400', point_angle: 130, spindle_rpm: 78000, z_feed: 206, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.800, sku_name: '100.0315.400', point_angle: 130, spindle_rpm: 73000, z_feed: 215, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.850, sku_name: '100.0335.400', point_angle: 130, spindle_rpm: 68000, z_feed: 204, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.900, sku_name: '100.0354.400', point_angle: 130, spindle_rpm: 65000, z_feed: 195, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.950, sku_name: '100.0374.400', point_angle: 130, spindle_rpm: 61000, z_feed: 183, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.000, sku_name: '100.0394.400', point_angle: 130, spindle_rpm: 58000, z_feed: 174, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.050, sku_name: '100.0413.400', point_angle: 130, spindle_rpm: 56000, z_feed: 168, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.100, sku_name: '100.0433.400', point_angle: 130, spindle_rpm: 53000, z_feed: 159, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.120, sku_name: '100.0441.400', point_angle: 130, spindle_rpm: 53000, z_feed: 153, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.150, sku_name: '100.0453.400', point_angle: 130, spindle_rpm: 51000, z_feed: 148, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.200, sku_name: '100.0472.400', point_angle: 130, spindle_rpm: 49000, z_feed: 147, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.250, sku_name: '100.0492.400', point_angle: 130, spindle_rpm: 47000, z_feed: 141, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.300, sku_name: '100.0512.400', point_angle: 130, spindle_rpm: 45000, z_feed: 135, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.350, sku_name: '100.0531.400', point_angle: 130, spindle_rpm: 43000, z_feed: 129, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.400, sku_name: '100.0551.400', point_angle: 130, spindle_rpm: 41000, z_feed: 126, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.450, sku_name: '100.0571.400', point_angle: 130, spindle_rpm: 40000, z_feed: 120, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.500, sku_name: '100.0591.400', point_angle: 130, spindle_rpm: 39000, z_feed: 117, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.550, sku_name: '100.0610.400', point_angle: 130, spindle_rpm: 38000, z_feed: 114, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.600, sku_name: '100.0630.400', point_angle: 130, spindle_rpm: 36000, z_feed: 108, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.650, sku_name: '100.0650.400', point_angle: 130, spindle_rpm: 35000, z_feed: 105, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.700, sku_name: '100.0669.400', point_angle: 130, spindle_rpm: 34000, z_feed: 102, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.750, sku_name: '100.0689.400', point_angle: 130, spindle_rpm: 33000, z_feed: 99, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.800, sku_name: '100.0709.400', point_angle: 130, spindle_rpm: 32000, z_feed: 96, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.850, sku_name: '100.0728.400', point_angle: 130, spindle_rpm: 31000, z_feed: 93, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.900, sku_name: '100.0748.400', point_angle: 130, spindle_rpm: 31000, z_feed: 93, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.950, sku_name: '100.0768.400', point_angle: 130, spindle_rpm: 30000, z_feed: 90, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.000, sku_name: '100.0787.400', point_angle: 130, spindle_rpm: 29000, z_feed: 87, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.050, sku_name: '100.0807.400', point_angle: 130, spindle_rpm: 28000, z_feed: 84, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.100, sku_name: '100.0827.400', point_angle: 130, spindle_rpm: 28000, z_feed: 84, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.150, sku_name: '100.0846.400', point_angle: 130, spindle_rpm: 27000, z_feed: 81, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.200, sku_name: '100.0866.400', point_angle: 130, spindle_rpm: 26000, z_feed: 78, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.250, sku_name: '100.0886.400', point_angle: 130, spindle_rpm: 26000, z_feed: 78, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.300, sku_name: '100.0906.400', point_angle: 130, spindle_rpm: 25000, z_feed: 75, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.350, sku_name: '100.0925.400', point_angle: 130, spindle_rpm: 25000, z_feed: 75, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.400, sku_name: '100.0945.400', point_angle: 130, spindle_rpm: 24000, z_feed: 72, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.450, sku_name: '100.0965.400', point_angle: 130, spindle_rpm: 24000, z_feed: 72, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.500, sku_name: '100.0984.400', point_angle: 130, spindle_rpm: 23000, z_feed: 69, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.550, sku_name: '100.1004.394', point_angle: 130, spindle_rpm: 23000, z_feed: 69, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.550, sku_name: '100.1004.400', point_angle: 165, spindle_rpm: 23000, z_feed: 66, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.600, sku_name: '100.1024.394', point_angle: 130, spindle_rpm: 22000, z_feed: 66, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.600, sku_name: '100.1024.400', point_angle: 165, spindle_rpm: 22000, z_feed: 66, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.650, sku_name: '100.1043.394', point_angle: 130, spindle_rpm: 22000, z_feed: 63, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.650, sku_name: '100.1043.400', point_angle: 165, spindle_rpm: 22000, z_feed: 63, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.700, sku_name: '100.1063.394', point_angle: 130, spindle_rpm: 22000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.700, sku_name: '100.1063.400', point_angle: 165, spindle_rpm: 22000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.750, sku_name: '100.1083.394', point_angle: 130, spindle_rpm: 21000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.750, sku_name: '100.1083.400', point_angle: 165, spindle_rpm: 21000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.800, sku_name: '100.1102.394', point_angle: 130, spindle_rpm: 21000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.800, sku_name: '100.1102.400', point_angle: 165, spindle_rpm: 21000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.850, sku_name: '100.1122.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.850, sku_name: '100.1122.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.900, sku_name: '100.1142.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.900, sku_name: '100.1142.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.950, sku_name: '100.1161.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.950, sku_name: '100.1161.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.000, sku_name: '100.1181.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.000, sku_name: '100.1181.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.050, sku_name: '100.1201.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.050, sku_name: '100.1201.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.100, sku_name: '100.1220.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.100, sku_name: '100.1220.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.150, sku_name: '100.1240.394', point_angle: 130, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.150, sku_name: '100.1240.400', point_angle: 165, spindle_rpm: 20000, z_feed: 60, max_hits: 1800 }
+      - { type: drillbit, diameter: '0.500mm', sku_name: '100.0197.360', point_angle: '130deg', spindle_rpm: '80000rpm', z_feed: '109ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.550mm', sku_name: '100.0217.360', point_angle: '130deg', spindle_rpm: '80000rpm', z_feed: '128ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.600mm', sku_name: '100.0236.360', point_angle: '130deg', spindle_rpm: '80000rpm', z_feed: '148ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.650mm', sku_name: '100.0256.400', point_angle: '130deg', spindle_rpm: '80000rpm', z_feed: '173ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.700mm', sku_name: '100.0276.400', point_angle: '130deg', spindle_rpm: '80000rpm', z_feed: '193ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.750mm', sku_name: '100.0295.400', point_angle: '130deg', spindle_rpm: '78000rpm', z_feed: '206ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.800mm', sku_name: '100.0315.400', point_angle: '130deg', spindle_rpm: '73000rpm', z_feed: '215ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.850mm', sku_name: '100.0335.400', point_angle: '130deg', spindle_rpm: '68000rpm', z_feed: '204ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.900mm', sku_name: '100.0354.400', point_angle: '130deg', spindle_rpm: '65000rpm', z_feed: '195ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.950mm', sku_name: '100.0374.400', point_angle: '130deg', spindle_rpm: '61000rpm', z_feed: '183ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.000mm', sku_name: '100.0394.400', point_angle: '130deg', spindle_rpm: '58000rpm', z_feed: '174ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.050mm', sku_name: '100.0413.400', point_angle: '130deg', spindle_rpm: '56000rpm', z_feed: '168ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.100mm', sku_name: '100.0433.400', point_angle: '130deg', spindle_rpm: '53000rpm', z_feed: '159ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.120mm', sku_name: '100.0441.400', point_angle: '130deg', spindle_rpm: '53000rpm', z_feed: '153ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.150mm', sku_name: '100.0453.400', point_angle: '130deg', spindle_rpm: '51000rpm', z_feed: '148ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.200mm', sku_name: '100.0472.400', point_angle: '130deg', spindle_rpm: '49000rpm', z_feed: '147ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.250mm', sku_name: '100.0492.400', point_angle: '130deg', spindle_rpm: '47000rpm', z_feed: '141ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.300mm', sku_name: '100.0512.400', point_angle: '130deg', spindle_rpm: '45000rpm', z_feed: '135ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.350mm', sku_name: '100.0531.400', point_angle: '130deg', spindle_rpm: '43000rpm', z_feed: '129ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.400mm', sku_name: '100.0551.400', point_angle: '130deg', spindle_rpm: '41000rpm', z_feed: '126ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.450mm', sku_name: '100.0571.400', point_angle: '130deg', spindle_rpm: '40000rpm', z_feed: '120ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.500mm', sku_name: '100.0591.400', point_angle: '130deg', spindle_rpm: '39000rpm', z_feed: '117ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.550mm', sku_name: '100.0610.400', point_angle: '130deg', spindle_rpm: '38000rpm', z_feed: '114ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.600mm', sku_name: '100.0630.400', point_angle: '130deg', spindle_rpm: '36000rpm', z_feed: '108ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.650mm', sku_name: '100.0650.400', point_angle: '130deg', spindle_rpm: '35000rpm', z_feed: '105ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.700mm', sku_name: '100.0669.400', point_angle: '130deg', spindle_rpm: '34000rpm', z_feed: '102ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.750mm', sku_name: '100.0689.400', point_angle: '130deg', spindle_rpm: '33000rpm', z_feed: '99ipm', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.800mm', sku_name: '100.0709.400', point_angle: '130deg', spindle_rpm: '32000rpm', z_feed: '96ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.850mm', sku_name: '100.0728.400', point_angle: '130deg', spindle_rpm: '31000rpm', z_feed: '93ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.900mm', sku_name: '100.0748.400', point_angle: '130deg', spindle_rpm: '31000rpm', z_feed: '93ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.950mm', sku_name: '100.0768.400', point_angle: '130deg', spindle_rpm: '30000rpm', z_feed: '90ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.000mm', sku_name: '100.0787.400', point_angle: '130deg', spindle_rpm: '29000rpm', z_feed: '87ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.050mm', sku_name: '100.0807.400', point_angle: '130deg', spindle_rpm: '28000rpm', z_feed: '84ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.100mm', sku_name: '100.0827.400', point_angle: '130deg', spindle_rpm: '28000rpm', z_feed: '84ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.150mm', sku_name: '100.0846.400', point_angle: '130deg', spindle_rpm: '27000rpm', z_feed: '81ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.200mm', sku_name: '100.0866.400', point_angle: '130deg', spindle_rpm: '26000rpm', z_feed: '78ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.250mm', sku_name: '100.0886.400', point_angle: '130deg', spindle_rpm: '26000rpm', z_feed: '78ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.300mm', sku_name: '100.0906.400', point_angle: '130deg', spindle_rpm: '25000rpm', z_feed: '75ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.350mm', sku_name: '100.0925.400', point_angle: '130deg', spindle_rpm: '25000rpm', z_feed: '75ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.400mm', sku_name: '100.0945.400', point_angle: '130deg', spindle_rpm: '24000rpm', z_feed: '72ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.450mm', sku_name: '100.0965.400', point_angle: '130deg', spindle_rpm: '24000rpm', z_feed: '72ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.500mm', sku_name: '100.0984.400', point_angle: '130deg', spindle_rpm: '23000rpm', z_feed: '69ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.550mm', sku_name: '100.1004.394', point_angle: '130deg', spindle_rpm: '23000rpm', z_feed: '69ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.550mm', sku_name: '100.1004.400', point_angle: '165deg', spindle_rpm: '23000rpm', z_feed: '66ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.600mm', sku_name: '100.1024.394', point_angle: '130deg', spindle_rpm: '22000rpm', z_feed: '66ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.600mm', sku_name: '100.1024.400', point_angle: '165deg', spindle_rpm: '22000rpm', z_feed: '66ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.650mm', sku_name: '100.1043.394', point_angle: '130deg', spindle_rpm: '22000rpm', z_feed: '63ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.650mm', sku_name: '100.1043.400', point_angle: '165deg', spindle_rpm: '22000rpm', z_feed: '63ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.700mm', sku_name: '100.1063.394', point_angle: '130deg', spindle_rpm: '22000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.700mm', sku_name: '100.1063.400', point_angle: '165deg', spindle_rpm: '22000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.750mm', sku_name: '100.1083.394', point_angle: '130deg', spindle_rpm: '21000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.750mm', sku_name: '100.1083.400', point_angle: '165deg', spindle_rpm: '21000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.800mm', sku_name: '100.1102.394', point_angle: '130deg', spindle_rpm: '21000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.800mm', sku_name: '100.1102.400', point_angle: '165deg', spindle_rpm: '21000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.850mm', sku_name: '100.1122.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.850mm', sku_name: '100.1122.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.900mm', sku_name: '100.1142.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.900mm', sku_name: '100.1142.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.950mm', sku_name: '100.1161.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.950mm', sku_name: '100.1161.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.000mm', sku_name: '100.1181.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.000mm', sku_name: '100.1181.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.050mm', sku_name: '100.1201.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.050mm', sku_name: '100.1201.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.100mm', sku_name: '100.1220.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.100mm', sku_name: '100.1220.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.150mm', sku_name: '100.1240.394', point_angle: '130deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.150mm', sku_name: '100.1240.400', point_angle: '165deg', spindle_rpm: '20000rpm', z_feed: '60ipm', max_hits: 1800 }

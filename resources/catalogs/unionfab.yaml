@@ -9,111 +9,107 @@ description: >
 
 sections:
   - name: P-Series drill
-    default_diameter_unit: mm
-    default_feed_unit: mm_min
     default_flute_length_unit: mm
     description: Carbide twist drills for FR4, spindle up to 100 kRPM, double-sided
     tools:
-      - { type: drillbit, diameter: 0.05,  spindle_rpm:  10000, z_feed:  5000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.05', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.07,  spindle_rpm:  10000, z_feed:  5000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.07', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.09,  spindle_rpm:  10000, z_feed:  5000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.09', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.10,  spindle_rpm:  10000, z_feed:  5000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.10', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.12,  spindle_rpm:  10000, z_feed:  5000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.12', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.15,  spindle_rpm:  10000, z_feed:  7500, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.15', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.20,  spindle_rpm:  10000, z_feed: 15000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.20', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.25,  spindle_rpm:  10000, z_feed: 20000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.25', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.27,  spindle_rpm:  10000, z_feed: 20000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.27', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.30,  spindle_rpm:  10000, z_feed: 20000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.30', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.35,  spindle_rpm:  10000, z_feed: 23000, notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.35', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.40,  spindle_rpm:  95000, z_feed: 23800, sku_name: 'unionfab-PSeriesdrill-D0.40', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.45,  spindle_rpm:  85000, z_feed: 21300, sku_name: 'unionfab-PSeriesdrill-D0.45', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.50,  spindle_rpm:  75000, z_feed: 21000, sku_name: 'unionfab-PSeriesdrill-D0.50', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.55,  spindle_rpm:  70000, z_feed: 19600, sku_name: 'unionfab-PSeriesdrill-D0.55', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.60,  spindle_rpm:  65000, z_feed: 19500, sku_name: 'unionfab-PSeriesdrill-D0.60', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.65,  spindle_rpm:  65000, z_feed: 19500, sku_name: 'unionfab-PSeriesdrill-D0.65', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.70,  spindle_rpm:  60000, z_feed: 18000, sku_name: 'unionfab-PSeriesdrill-D0.70', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.75,  spindle_rpm:  60000, z_feed: 18000, sku_name: 'unionfab-PSeriesdrill-D0.75', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.80,  spindle_rpm:  57000, z_feed: 17100, sku_name: 'unionfab-PSeriesdrill-D0.80', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.85,  spindle_rpm:  57000, z_feed: 17100, sku_name: 'unionfab-PSeriesdrill-D0.85', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.90,  spindle_rpm:  55000, z_feed: 16500, sku_name: 'unionfab-PSeriesdrill-D0.90', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.95,  spindle_rpm:  52000, z_feed: 15600, sku_name: 'unionfab-PSeriesdrill-D0.95', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.00,  spindle_rpm:  48000, z_feed: 14400, sku_name: 'unionfab-PSeriesdrill-D1.00', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.05,  spindle_rpm:  47000, z_feed: 14100, sku_name: 'unionfab-PSeriesdrill-D1.05', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.10,  spindle_rpm:  45000, z_feed: 13500, sku_name: 'unionfab-PSeriesdrill-D1.10', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.15,  spindle_rpm:  43000, z_feed: 12900, sku_name: 'unionfab-PSeriesdrill-D1.15', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.20,  spindle_rpm:  41000, z_feed: 16400, sku_name: 'unionfab-PSeriesdrill-D1.20', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.25,  spindle_rpm:  39000, z_feed: 15600, sku_name: 'unionfab-PSeriesdrill-D1.25', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.30,  spindle_rpm:  38000, z_feed: 15200, sku_name: 'unionfab-PSeriesdrill-D1.30', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.35,  spindle_rpm:  36000, z_feed: 14400, sku_name: 'unionfab-PSeriesdrill-D1.35', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.40,  spindle_rpm:  34000, z_feed: 13600, sku_name: 'unionfab-PSeriesdrill-D1.40', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.45,  spindle_rpm:  32000, z_feed: 12800, sku_name: 'unionfab-PSeriesdrill-D1.45', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.50,  spindle_rpm:  30000, z_feed: 12000, sku_name: 'unionfab-PSeriesdrill-D1.50', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.55,  spindle_rpm:  30000, z_feed: 12000, sku_name: 'unionfab-PSeriesdrill-D1.55', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.60,  spindle_rpm:  30000, z_feed: 12000, sku_name: 'unionfab-PSeriesdrill-D1.60', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.65,  spindle_rpm:  30000, z_feed: 18000, sku_name: 'unionfab-PSeriesdrill-D1.65', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.70,  spindle_rpm:  27000, z_feed: 16200, sku_name: 'unionfab-PSeriesdrill-D1.70', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.75,  spindle_rpm:  27000, z_feed: 16200, sku_name: 'unionfab-PSeriesdrill-D1.75', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.80,  spindle_rpm:  25000, z_feed: 15000, sku_name: 'unionfab-PSeriesdrill-D1.80', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.85,  spindle_rpm:  25000, z_feed: 15000, sku_name: 'unionfab-PSeriesdrill-D1.85', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.90,  spindle_rpm:  22000, z_feed: 13200, sku_name: 'unionfab-PSeriesdrill-D1.90', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 1.95,  spindle_rpm:  22000, z_feed: 13200, sku_name: 'unionfab-PSeriesdrill-D1.95', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.00,  spindle_rpm:  20000, z_feed: 12000, sku_name: 'unionfab-PSeriesdrill-D2.00', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.05,  spindle_rpm:  20000, z_feed: 12000, sku_name: 'unionfab-PSeriesdrill-D2.05', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.10,  spindle_rpm:  18000, z_feed: 10800, sku_name: 'unionfab-PSeriesdrill-D2.10', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.15,  spindle_rpm:  18000, z_feed: 10800, sku_name: 'unionfab-PSeriesdrill-D2.15', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.20,  spindle_rpm:  16000, z_feed:  9600, sku_name: 'unionfab-PSeriesdrill-D2.20', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.25,  spindle_rpm:  16000, z_feed:  9600, sku_name: 'unionfab-PSeriesdrill-D2.25', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.30,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.30', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.35,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.35', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.40,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.40', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.45,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.45', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.50,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.50', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.55,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.55', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.60,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.60', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.65,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.65', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.70,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.70', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.75,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.75', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.80,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.80', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.85,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.85', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.90,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.90', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.95,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D2.95', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.00,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D3.00', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.05,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D3.05', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.10,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D3.10', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.15,  spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D3.15', point_angle: 130, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.175, spindle_rpm:  15000, z_feed:  9000, sku_name: 'unionfab-PSeriesdrill-D3.175', point_angle: 130, max_hits: 1800 }
+      - { type: drillbit, diameter: '0.05mm',  spindle_rpm:  '10000rpm', z_feed:  '5000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.05', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.07mm',  spindle_rpm:  '10000rpm', z_feed:  '5000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.07', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.09mm',  spindle_rpm:  '10000rpm', z_feed:  '5000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.09', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.10mm',  spindle_rpm:  '10000rpm', z_feed:  '5000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.10', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.12mm',  spindle_rpm:  '10000rpm', z_feed:  '5000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.12', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.15mm',  spindle_rpm:  '10000rpm', z_feed:  '7500mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.15', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.20mm',  spindle_rpm:  '10000rpm', z_feed: '15000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.20', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.25mm',  spindle_rpm:  '10000rpm', z_feed: '20000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.25', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.27mm',  spindle_rpm:  '10000rpm', z_feed: '20000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.27', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.30mm',  spindle_rpm:  '10000rpm', z_feed: '20000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.30', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.35mm',  spindle_rpm:  '10000rpm', z_feed: '23000mm/min', notes: "Placeholder speed — verify with datasheet", sku_name: 'unionfab-PSeriesdrill-D0.35', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.40mm',  spindle_rpm:  '95000rpm', z_feed: '23800mm/min', sku_name: 'unionfab-PSeriesdrill-D0.40', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.45mm',  spindle_rpm:  '85000rpm', z_feed: '21300mm/min', sku_name: 'unionfab-PSeriesdrill-D0.45', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.50mm',  spindle_rpm:  '75000rpm', z_feed: '21000mm/min', sku_name: 'unionfab-PSeriesdrill-D0.50', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.55mm',  spindle_rpm:  '70000rpm', z_feed: '19600mm/min', sku_name: 'unionfab-PSeriesdrill-D0.55', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.60mm',  spindle_rpm:  '65000rpm', z_feed: '19500mm/min', sku_name: 'unionfab-PSeriesdrill-D0.60', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.65mm',  spindle_rpm:  '65000rpm', z_feed: '19500mm/min', sku_name: 'unionfab-PSeriesdrill-D0.65', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.70mm',  spindle_rpm:  '60000rpm', z_feed: '18000mm/min', sku_name: 'unionfab-PSeriesdrill-D0.70', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.75mm',  spindle_rpm:  '60000rpm', z_feed: '18000mm/min', sku_name: 'unionfab-PSeriesdrill-D0.75', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.80mm',  spindle_rpm:  '57000rpm', z_feed: '17100mm/min', sku_name: 'unionfab-PSeriesdrill-D0.80', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.85mm',  spindle_rpm:  '57000rpm', z_feed: '17100mm/min', sku_name: 'unionfab-PSeriesdrill-D0.85', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.90mm',  spindle_rpm:  '55000rpm', z_feed: '16500mm/min', sku_name: 'unionfab-PSeriesdrill-D0.90', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.95mm',  spindle_rpm:  '52000rpm', z_feed: '15600mm/min', sku_name: 'unionfab-PSeriesdrill-D0.95', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.00mm',  spindle_rpm:  '48000rpm', z_feed: '14400mm/min', sku_name: 'unionfab-PSeriesdrill-D1.00', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.05mm',  spindle_rpm:  '47000rpm', z_feed: '14100mm/min', sku_name: 'unionfab-PSeriesdrill-D1.05', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.10mm',  spindle_rpm:  '45000rpm', z_feed: '13500mm/min', sku_name: 'unionfab-PSeriesdrill-D1.10', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.15mm',  spindle_rpm:  '43000rpm', z_feed: '12900mm/min', sku_name: 'unionfab-PSeriesdrill-D1.15', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.20mm',  spindle_rpm:  '41000rpm', z_feed: '16400mm/min', sku_name: 'unionfab-PSeriesdrill-D1.20', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.25mm',  spindle_rpm:  '39000rpm', z_feed: '15600mm/min', sku_name: 'unionfab-PSeriesdrill-D1.25', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.30mm',  spindle_rpm:  '38000rpm', z_feed: '15200mm/min', sku_name: 'unionfab-PSeriesdrill-D1.30', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.35mm',  spindle_rpm:  '36000rpm', z_feed: '14400mm/min', sku_name: 'unionfab-PSeriesdrill-D1.35', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.40mm',  spindle_rpm:  '34000rpm', z_feed: '13600mm/min', sku_name: 'unionfab-PSeriesdrill-D1.40', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.45mm',  spindle_rpm:  '32000rpm', z_feed: '12800mm/min', sku_name: 'unionfab-PSeriesdrill-D1.45', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.50mm',  spindle_rpm:  '30000rpm', z_feed: '12000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.50', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.55mm',  spindle_rpm:  '30000rpm', z_feed: '12000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.55', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.60mm',  spindle_rpm:  '30000rpm', z_feed: '12000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.60', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.65mm',  spindle_rpm:  '30000rpm', z_feed: '18000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.65', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.70mm',  spindle_rpm:  '27000rpm', z_feed: '16200mm/min', sku_name: 'unionfab-PSeriesdrill-D1.70', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.75mm',  spindle_rpm:  '27000rpm', z_feed: '16200mm/min', sku_name: 'unionfab-PSeriesdrill-D1.75', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.80mm',  spindle_rpm:  '25000rpm', z_feed: '15000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.80', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.85mm',  spindle_rpm:  '25000rpm', z_feed: '15000mm/min', sku_name: 'unionfab-PSeriesdrill-D1.85', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.90mm',  spindle_rpm:  '22000rpm', z_feed: '13200mm/min', sku_name: 'unionfab-PSeriesdrill-D1.90', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '1.95mm',  spindle_rpm:  '22000rpm', z_feed: '13200mm/min', sku_name: 'unionfab-PSeriesdrill-D1.95', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.00mm',  spindle_rpm:  '20000rpm', z_feed: '12000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.00', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.05mm',  spindle_rpm:  '20000rpm', z_feed: '12000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.05', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.10mm',  spindle_rpm:  '18000rpm', z_feed: '10800mm/min', sku_name: 'unionfab-PSeriesdrill-D2.10', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.15mm',  spindle_rpm:  '18000rpm', z_feed: '10800mm/min', sku_name: 'unionfab-PSeriesdrill-D2.15', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.20mm',  spindle_rpm:  '16000rpm', z_feed:  '9600mm/min', sku_name: 'unionfab-PSeriesdrill-D2.20', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.25mm',  spindle_rpm:  '16000rpm', z_feed:  '9600mm/min', sku_name: 'unionfab-PSeriesdrill-D2.25', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.30mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.30', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.35mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.35', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.40mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.40', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.45mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.45', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.50mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.50', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.55mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.55', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.60mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.60', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.65mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.65', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.70mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.70', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.75mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.75', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.80mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.80', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.85mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.85', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.90mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.90', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.95mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D2.95', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.00mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D3.00', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.05mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D3.05', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.10mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D3.10', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.15mm',  spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D3.15', point_angle: '130deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.175mm', spindle_rpm:  '15000rpm', z_feed:  '9000mm/min', sku_name: 'unionfab-PSeriesdrill-D3.175', point_angle: '130deg', max_hits: 1800 }
 
   - name: Router
-    default_diameter_unit: mm
-    default_feed_unit: mm_min
     default_flute_length_unit: mm
     description: >
       Carbide router bits for FR4 board outline routing.
       Reference: https://www.uniontool.co.jp/en/product/drill_router/technical_info/router_condi/fr4.html
       table_feed and z_feed are in mm/min (source values converted from m/min).
     tools:
-      - { type: routerbit, diameter: 0.80,  spindle_rpm: 60000, table_feed:  400, z_feed: 200, sku_name: 'unionfab-Router-R0.80', point_angle: 180 }
-      - { type: routerbit, diameter: 0.90,  spindle_rpm: 53000, table_feed:  600, z_feed: 200, sku_name: 'unionfab-Router-R0.90', point_angle: 180 }
-      - { type: routerbit, diameter: 1.00,  spindle_rpm: 48000, table_feed:  800, z_feed: 200, sku_name: 'unionfab-Router-R1.00', point_angle: 180 }
-      - { type: routerbit, diameter: 1.10,  spindle_rpm: 38000, table_feed:  900, z_feed: 200, sku_name: 'unionfab-Router-R1.10', point_angle: 180 }
-      - { type: routerbit, diameter: 1.20,  spindle_rpm: 35000, table_feed: 1000, z_feed: 200, sku_name: 'unionfab-Router-R1.20', point_angle: 180 }
-      - { type: routerbit, diameter: 1.30,  spindle_rpm: 32000, table_feed: 1000, z_feed: 200, sku_name: 'unionfab-Router-R1.30', point_angle: 180 }
-      - { type: routerbit, diameter: 1.40,  spindle_rpm: 30000, table_feed: 1100, z_feed: 200, sku_name: 'unionfab-Router-R1.40', point_angle: 180 }
-      - { type: routerbit, diameter: 1.50,  spindle_rpm: 29000, table_feed: 1100, z_feed: 400, sku_name: 'unionfab-Router-R1.50', point_angle: 180 }
-      - { type: routerbit, diameter: 1.60,  spindle_rpm: 27000, table_feed: 1200, z_feed: 400, sku_name: 'unionfab-Router-R1.60', point_angle: 180 }
-      - { type: routerbit, diameter: 1.70,  spindle_rpm: 27000, table_feed: 1200, z_feed: 400, sku_name: 'unionfab-Router-R1.70', point_angle: 180 }
-      - { type: routerbit, diameter: 1.80,  spindle_rpm: 25000, table_feed: 1200, z_feed: 400, sku_name: 'unionfab-Router-R1.80', point_angle: 180 }
-      - { type: routerbit, diameter: 1.90,  spindle_rpm: 24000, table_feed: 1200, z_feed: 600, sku_name: 'unionfab-Router-R1.90', point_angle: 180 }
-      - { type: routerbit, diameter: 2.00,  spindle_rpm: 23000, table_feed: 1200, z_feed: 600, sku_name: 'unionfab-Router-R2.00', point_angle: 180 }
-      - { type: routerbit, diameter: 2.10,  spindle_rpm: 22000, table_feed: 1200, z_feed: 600, sku_name: 'unionfab-Router-R2.10', point_angle: 180 }
-      - { type: routerbit, diameter: 2.20,  spindle_rpm: 21000, table_feed: 1250, z_feed: 600, sku_name: 'unionfab-Router-R2.20', point_angle: 180 }
-      - { type: routerbit, diameter: 2.30,  spindle_rpm: 20000, table_feed: 1250, z_feed: 600, sku_name: 'unionfab-Router-R2.30', point_angle: 180 }
-      - { type: routerbit, diameter: 2.40,  spindle_rpm: 20000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.40', point_angle: 180 }
-      - { type: routerbit, diameter: 2.50,  spindle_rpm: 19000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.50', point_angle: 180 }
-      - { type: routerbit, diameter: 2.60,  spindle_rpm: 19000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.60', point_angle: 180 }
-      - { type: routerbit, diameter: 2.70,  spindle_rpm: 18000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.70', point_angle: 180 }
-      - { type: routerbit, diameter: 2.80,  spindle_rpm: 18000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.80', point_angle: 180 }
-      - { type: routerbit, diameter: 2.90,  spindle_rpm: 17000, table_feed: 1300, z_feed: 400, sku_name: 'unionfab-Router-R2.90', point_angle: 180 }
-      - { type: routerbit, diameter: 3.00,  spindle_rpm: 17000, table_feed: 1300, z_feed: 200, sku_name: 'unionfab-Router-R3.00', point_angle: 180 }
-      - { type: routerbit, diameter: 3.10,  spindle_rpm: 16000, table_feed: 1300, z_feed: 200, sku_name: 'unionfab-Router-R3.10', point_angle: 180 }
-      - { type: routerbit, diameter: 3.175, spindle_rpm: 16000, table_feed: 1300, z_feed: 200, sku_name: 'unionfab-Router-R3.175', point_angle: 180 }
+      - { type: routerbit, diameter: '0.80mm',  spindle_rpm: '60000rpm', table_feed:  '400mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R0.80', point_angle: '180deg' }
+      - { type: routerbit, diameter: '0.90mm',  spindle_rpm: '53000rpm', table_feed:  '600mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R0.90', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.00mm',  spindle_rpm: '48000rpm', table_feed:  '800mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R1.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.10mm',  spindle_rpm: '38000rpm', table_feed:  '900mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R1.10', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.20mm',  spindle_rpm: '35000rpm', table_feed: '1000mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R1.20', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.30mm',  spindle_rpm: '32000rpm', table_feed: '1000mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R1.30', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.40mm',  spindle_rpm: '30000rpm', table_feed: '1100mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R1.40', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.50mm',  spindle_rpm: '29000rpm', table_feed: '1100mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R1.50', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.60mm',  spindle_rpm: '27000rpm', table_feed: '1200mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R1.60', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.70mm',  spindle_rpm: '27000rpm', table_feed: '1200mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R1.70', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.80mm',  spindle_rpm: '25000rpm', table_feed: '1200mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R1.80', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.90mm',  spindle_rpm: '24000rpm', table_feed: '1200mm/min', z_feed: '600mm/min', sku_name: 'unionfab-Router-R1.90', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.00mm',  spindle_rpm: '23000rpm', table_feed: '1200mm/min', z_feed: '600mm/min', sku_name: 'unionfab-Router-R2.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.10mm',  spindle_rpm: '22000rpm', table_feed: '1200mm/min', z_feed: '600mm/min', sku_name: 'unionfab-Router-R2.10', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.20mm',  spindle_rpm: '21000rpm', table_feed: '1250mm/min', z_feed: '600mm/min', sku_name: 'unionfab-Router-R2.20', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.30mm',  spindle_rpm: '20000rpm', table_feed: '1250mm/min', z_feed: '600mm/min', sku_name: 'unionfab-Router-R2.30', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.40mm',  spindle_rpm: '20000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.40', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.50mm',  spindle_rpm: '19000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.50', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.60mm',  spindle_rpm: '19000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.60', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.70mm',  spindle_rpm: '18000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.70', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.80mm',  spindle_rpm: '18000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.80', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.90mm',  spindle_rpm: '17000rpm', table_feed: '1300mm/min', z_feed: '400mm/min', sku_name: 'unionfab-Router-R2.90', point_angle: '180deg' }
+      - { type: routerbit, diameter: '3.00mm',  spindle_rpm: '17000rpm', table_feed: '1300mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R3.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '3.10mm',  spindle_rpm: '16000rpm', table_feed: '1300mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R3.10', point_angle: '180deg' }
+      - { type: routerbit, diameter: '3.175mm', spindle_rpm: '16000rpm', table_feed: '1300mm/min', z_feed: '200mm/min', sku_name: 'unionfab-Router-R3.175', point_angle: '180deg' }

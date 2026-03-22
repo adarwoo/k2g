@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+
 /// Discriminates between the two supported tool categories.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,27 +40,21 @@ pub enum FeedUnit {
 /// A single tool entry within a catalog section.
 ///
 /// Dimensions and feed rates use native section units:
-///   - `diameter`    mm|in (per section `default_diameter_unit`)
-///   - `flute_len`   mm|in (per section `default_flute_length_unit`)
-///   - `spindle_rpm` rpm (always)
-///   - `z_feed`      per section `default_feed_unit`
-///   - `table_feed`  per section `default_feed_unit`, router bits only
+///   - `diameter`    preserved as a native `Length`
+///   - `flute_len`   preserved as a native `Length`
+///   - `spindle_rpm` preserved as a native `RotationalSpeed`
+///   - `z_feed`      preserved as a native `FeedRate`
+///   - `table_feed`  preserved as a native `FeedRate`, router bits only
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEntry {
     #[serde(rename = "type")]
     pub tool_type: ToolType,
 
-    /// Nominal tool diameter in section default units unless overridden.
-    pub diameter: f64,
+    /// Nominal tool diameter in native units.
+    pub diameter: Length,
 
-    /// Optional per-tool diameter unit override.
-    pub diameter_unit: Option<LinearUnit>,
-
-    /// Flute length in section default units unless overridden.
-    pub flute_length: Option<f64>,
-
-    /// Optional per-tool flute length unit override.
-    pub flute_length_unit: Option<LinearUnit>,
+    /// Flute length in native units.
+    pub flute_length: Option<Length>,
 
     /// Tool identifier (SKU or vendor/name string).
     pub sku_name: String,
@@ -66,16 +62,22 @@ pub struct ToolEntry {
     /// Tool point angle in degrees.
     ///
     /// Router bits should use `180.0` to represent a flat end.
-    pub point_angle: f64,
+    pub point_angle: Angle,
+
+    /// Minimum depth to exit the hole cleanly.
+    ///
+    /// For drill bits, this can be automatically suggested based on
+    /// point angle and diameter during editing, but catalogs must provide a value.
+    pub z_min_depth: Length,
 
     /// Recommended spindle speed in RPM.
-    pub spindle_rpm: Option<u32>,
+    pub spindle_rpm: Option<RotationalSpeed>,
 
     /// Recommended Z-axis (plunge) feed rate in native section units.
-    pub z_feed: Option<f64>,
+    pub z_feed: Option<FeedRate>,
 
     /// Recommended XY table feed rate in native section units — router bits only.
-    pub table_feed: Option<f64>,
+    pub table_feed: Option<FeedRate>,
 
     /// Maximum recommended hit count before tool change.
     pub max_hits: Option<u32>,
@@ -86,14 +88,9 @@ pub struct ToolEntry {
 
 impl ToolEntry {
     /// Short human-readable identifier using the diameter and unit,
-    /// e.g. `"0.20mm"` or `"0.0200in"`.
-    pub fn diameter_label(&self, default_unit: LinearUnit) -> String {
-        let unit = self.diameter_unit.unwrap_or(default_unit);
-        if unit == LinearUnit::In {
-            format!("{:.4}{}", self.diameter, unit.suffix())
-        } else {
-            format!("{:.3}{}", self.diameter, unit.suffix())
-        }
+    /// e.g. `"0.2mm"` or `"1/8in"`.
+    pub fn diameter_label(&self) -> String {
+        self.diameter.to_string()
     }
 }
 
@@ -102,12 +99,6 @@ impl ToolEntry {
 pub struct CatalogSection {
     /// Section name (e.g. `"Series 100"`, `"Router bits"`).
     pub name: String,
-
-    /// Default unit used for tool diameters in this section.
-    pub default_diameter_unit: LinearUnit,
-
-    /// Default unit used for z/table feed rates in this section.
-    pub default_feed_unit: FeedUnit,
 
     /// Optional default unit used for tool flute lengths in this section.
     pub default_flute_length_unit: Option<LinearUnit>,

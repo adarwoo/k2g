@@ -17,10 +17,11 @@ use log::{error, warn};
 use serde_json::Value;
 
 use crate::config::SchemaValidator;
+use super::init::normalize_catalog_fields;
 use super::types::{Catalog, ToolEntry, ToolType};
 
 /// The catalog JSON Schema embedded at compile time.
-const CATALOG_SCHEMA: &str = include_str!("../../resources/schemas/catalog_schema.yaml");
+const CATALOG_SCHEMA: &str = include_str!("../../resources/schemas/catalog.schema.yaml");
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -136,7 +137,7 @@ impl CatalogManager {
                         "[{}] {} / {}",
                         lc.stem,
                         sec.name,
-                        tool.diameter_label(sec.default_diameter_unit)
+                        tool.diameter_label()
                     );
                     (id, tool)
                 })
@@ -178,10 +179,12 @@ impl CatalogManager {
                 error: e.to_string(),
             })?;
 
-        let json_val: Value = serde_json::to_value(yaml_val).map_err(|e| CatalogError::YamlParse {
+        let mut json_val: Value = serde_json::to_value(yaml_val).map_err(|e| CatalogError::YamlParse {
             path: path.display().to_string(),
             error: e.to_string(),
         })?;
+
+        normalize_catalog_fields(&mut json_val, stem, false, true);
 
         self.validator.validate(&json_val).map_err(|e| CatalogError::Validation {
             path: path.display().to_string(),

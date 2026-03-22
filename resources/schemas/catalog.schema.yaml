@@ -4,21 +4,22 @@ description: |
   Tool catalog file. Contains drillbit and router bit entries grouped into
   named sections (e.g. product series).
 
-  Dimensions may be entered in native units.  Each section declares defaults
-  for diameter and flute length units.  Individual tools may override those
-  defaults.
+  Dimensions and machining parameters must be entered as strings with explicit
+  units so values remain unambiguous and preserve their native representation.
 
     diameter       mm|in
     flute_length   mm|in
+    point_angle    deg
+    z_min_depth    mm|in
     spindle        rpm
-    feeds          section default feed unit (default_feed_unit)
+    feeds          mm/min|cm/min|m/min|in/min|ipm
 
   When a catalog is loaded its entries are prefixed with the file stem in
   square brackets to prevent ID clashes across catalogs, e.g.:
     [kyocera] Series 100 / 0.20mm
 
 required: [name, sections]
-additionalProperties: false
+additionalProperties: true
 
 properties:
   name:
@@ -38,25 +39,35 @@ properties:
       $ref: "#/definitions/section"
 
 definitions:
+  length_with_unit:
+    type: string
+    minLength: 2
+    pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:mm|in|mil|thou|um|nm|cm)\s*$'
+
+  angle_with_unit:
+    type: string
+    minLength: 2
+    pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:deg|°|rad)\s*$'
+
+  feed_rate_with_unit:
+    type: string
+    minLength: 3
+    pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*(?:mm\s*/\s*min|cm\s*/\s*min|m\s*/\s*min|in\s*/\s*min|inch\s*/\s*min|ipm)\s*$'
+
+  rpm_with_unit:
+    type: string
+    minLength: 4
+    pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*rpm\s*$'
+
   section:
     type: object
-    required: [name, default_diameter_unit, default_feed_unit, tools]
-    additionalProperties: false
+    required: [name, tools]
+    additionalProperties: true
     properties:
       name:
         type: string
         minLength: 1
         description: "Section name (e.g. \"Series 100\", \"Router bits\")"
-
-      default_diameter_unit:
-        type: string
-        enum: [mm, in]
-        description: "Default unit used by tool.diameter in this section"
-
-      default_feed_unit:
-        type: string
-        enum: [mm_min, ipm]
-        description: "Default unit used by tool.z_feed and tool.table_feed in this section"
 
       default_flute_length_unit:
         type: string
@@ -75,8 +86,8 @@ definitions:
 
   tool:
     type: object
-    required: [type, diameter, sku_name, point_angle]
-    additionalProperties: false
+    required: [type, diameter, sku_name, point_angle, z_min_depth]
+    additionalProperties: true
     description: "A single drill bit or router bit entry"
     properties:
       type:
@@ -85,24 +96,12 @@ definitions:
         description: "Tool type discriminator"
 
       diameter:
-        type: number
-        minimum: 0.001
-        description: "Nominal tool diameter in the section default unit unless overridden"
-
-      diameter_unit:
-        type: string
-        enum: [mm, in]
-        description: "Optional per-tool unit override for diameter"
+        $ref: "#/definitions/length_with_unit"
+        description: "Nominal tool diameter as a native length with explicit unit"
 
       flute_length:
-        type: number
-        minimum: 0
-        description: "Flute length in the section default unit unless overridden"
-
-      flute_length_unit:
-        type: string
-        enum: [mm, in]
-        description: "Optional per-tool unit override for flute length"
+        $ref: "#/definitions/length_with_unit"
+        description: "Flute length as a native length with explicit unit"
 
       sku_name:
         type: string
@@ -110,25 +109,24 @@ definitions:
         description: "Tool identifier (SKU or vendor/name string)"
 
       point_angle:
-        type: number
-        minimum: 60
-        maximum: 180
-        description: "Tool point angle in degrees (router bits use 180 for flat end)"
+        $ref: "#/definitions/angle_with_unit"
+        description: "Tool point angle with explicit unit (typically deg)"
+
+      z_min_depth:
+        $ref: "#/definitions/length_with_unit"
+        description: "Minimum depth to exit the hole cleanly with explicit unit"
 
       spindle_rpm:
-        type: integer
-        minimum: 0
-        description: "Recommended spindle speed in RPM"
+        $ref: "#/definitions/rpm_with_unit"
+        description: "Recommended spindle speed with explicit rpm unit"
 
       z_feed:
-        type: number
-        minimum: 0
-        description: "Recommended Z-axis (plunge) feed rate in the section default_feed_unit"
+        $ref: "#/definitions/feed_rate_with_unit"
+        description: "Recommended Z-axis (plunge) feed rate with explicit unit"
 
       table_feed:
-        type: number
-        minimum: 0
-        description: "Recommended XY table feed rate in the section default_feed_unit — router bits only"
+        $ref: "#/definitions/feed_rate_with_unit"
+        description: "Recommended XY table feed rate with explicit unit — router bits only"
 
       max_hits:
         type: integer

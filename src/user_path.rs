@@ -21,6 +21,10 @@ pub struct AppDirs {
     pub last_session: PathBuf,
     /// JSON Schema reference copies — written once, not intended for editing.
     pub schemas: PathBuf,
+    /// Persisted configuration files (global.setting.yaml, stock.yaml).
+    pub configs: PathBuf,
+    /// Persisted CNC profile files (subdirectory of configs).
+    pub cnc_profiles: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,22 +45,27 @@ pub fn k2g_data_dir() -> Option<PathBuf> {
     platform_data_dir()
 }
 
-/// Ensure the full application directory tree exists and is writable.
-///
-/// Creates `catalogs/`, `last_session/`, and `schemas/` under the k2g data
-/// root if they are absent. Each directory is probed for write access by
-/// creating and immediately removing a sentinel file.
-pub fn ensure_app_dirs() -> Result<AppDirs, UserPathError> {
-    let root = k2g_data_dir().ok_or(UserPathError::NoPlatformDir)?;
+    /// Ensure the full application directory tree exists and is writable.
+    ///
+    /// Creates `catalogs/`, `last_session/`, `schemas/`, `configs/`, and `configs/cnc_profiles/`
+    /// under the k2g data root if they are absent. Each directory is probed for write access by
+    /// creating and immediately removing a sentinel file.
+    pub fn ensure_app_dirs() -> Result<AppDirs, UserPathError> {
+        let root = k2g_data_dir().ok_or(UserPathError::NoPlatformDir)?;
+
+        let configs = root.join("configs");
+        let cnc_profiles = configs.join("cnc_profiles");
 
     let dirs = AppDirs {
         catalogs: root.join("catalogs"),
         last_session: root.join("last_session"),
         schemas: root.join("schemas"),
+        configs,
+        cnc_profiles,
         root,
     };
 
-    for dir in [&dirs.root, &dirs.catalogs, &dirs.last_session, &dirs.schemas] {
+    for dir in [&dirs.root, &dirs.catalogs, &dirs.last_session, &dirs.schemas, &dirs.configs, &dirs.cnc_profiles] {
         create_if_missing(dir)?;
         check_writable(dir)?;
     }

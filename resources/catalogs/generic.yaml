@@ -7,41 +7,37 @@ description: >
 
 sections:
   - name: Drillbits
-    default_diameter_unit: mm
-    default_feed_unit: mm_min
     default_flute_length_unit: mm
     description: Metric sizes — conservative parameters for unbranded carbide PCB drills
     tools:
-      - { type: drillbit, diameter: 0.30,  spindle_rpm:  60000, z_feed:  1500, sku_name: 'generic-Drillbits-D0.30', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.40,  spindle_rpm:  50000, z_feed:  1500, sku_name: 'generic-Drillbits-D0.40', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.50,  spindle_rpm:  40000, z_feed:  1600, sku_name: 'generic-Drillbits-D0.50', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.60,  spindle_rpm:  35000, z_feed:  1750, sku_name: 'generic-Drillbits-D0.60', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.70,  spindle_rpm:  30000, z_feed:  1800, sku_name: 'generic-Drillbits-D0.70', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.80,  spindle_rpm:  25000, z_feed:  1750, sku_name: 'generic-Drillbits-D0.80', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 0.90,  spindle_rpm:  22000, z_feed:  1760, sku_name: 'generic-Drillbits-D0.90', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.00,  spindle_rpm:  20000, z_feed:  1800, sku_name: 'generic-Drillbits-D1.00', point_angle: 130, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.20,  spindle_rpm:  17000, z_feed:  1870, sku_name: 'generic-Drillbits-D1.20', point_angle: 132, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.50,  spindle_rpm:  13000, z_feed:  1820, sku_name: 'generic-Drillbits-D1.50', point_angle: 135, max_hits: 2000 }
-      - { type: drillbit, diameter: 1.60,  spindle_rpm:  12500, z_feed:  1875, sku_name: 'generic-Drillbits-D1.60', point_angle: 135, max_hits: 2000 }
-      - { type: drillbit, diameter: 2.00,  spindle_rpm:  10000, z_feed:  1800, sku_name: 'generic-Drillbits-D2.00', point_angle: 140, max_hits: 1800 }
-      - { type: drillbit, diameter: 2.50,  spindle_rpm:   8000, z_feed:  1800, sku_name: 'generic-Drillbits-D2.50', point_angle: 140, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.00,  spindle_rpm:   6700, z_feed:  1675, sku_name: 'generic-Drillbits-D3.00', point_angle: 145, max_hits: 1800 }
-      - { type: drillbit, diameter: 3.175, spindle_rpm:   6300, z_feed:  1575, sku_name: 'generic-Drillbits-D3.175', point_angle: 145, max_hits: 1800 }
-      - { type: drillbit, diameter: 4.00,  spindle_rpm:   5000, z_feed:  1500, sku_name: 'generic-Drillbits-D4.00', point_angle: 150, max_hits: 1800 }
-      - { type: drillbit, diameter: 5.00,  spindle_rpm:   4000, z_feed:  1400, sku_name: 'generic-Drillbits-D5.00', point_angle: 150, max_hits: 1800 }
-      - { type: drillbit, diameter: 6.00,  spindle_rpm:   3300, z_feed:  1320, sku_name: 'generic-Drillbits-D6.00', point_angle: 150, max_hits: 1800 }
+      - { type: drillbit, diameter: '0.30mm',  spindle_rpm:  '60000rpm', z_feed:  '1500mm/min', sku_name: 'generic-Drillbits-D0.30', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.40mm',  spindle_rpm:  '50000rpm', z_feed:  '1500mm/min', sku_name: 'generic-Drillbits-D0.40', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.50mm',  spindle_rpm:  '40000rpm', z_feed:  '1600mm/min', sku_name: 'generic-Drillbits-D0.50', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.60mm',  spindle_rpm:  '35000rpm', z_feed:  '1750mm/min', sku_name: 'generic-Drillbits-D0.60', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.70mm',  spindle_rpm:  '30000rpm', z_feed:  '1800mm/min', sku_name: 'generic-Drillbits-D0.70', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.80mm',  spindle_rpm:  '25000rpm', z_feed:  '1750mm/min', sku_name: 'generic-Drillbits-D0.80', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '0.90mm',  spindle_rpm:  '22000rpm', z_feed:  '1760mm/min', sku_name: 'generic-Drillbits-D0.90', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.00mm',  spindle_rpm:  '20000rpm', z_feed:  '1800mm/min', sku_name: 'generic-Drillbits-D1.00', point_angle: '130deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.20mm',  spindle_rpm:  '17000rpm', z_feed:  '1870mm/min', sku_name: 'generic-Drillbits-D1.20', point_angle: '132deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.50mm',  spindle_rpm:  '13000rpm', z_feed:  '1820mm/min', sku_name: 'generic-Drillbits-D1.50', point_angle: '135deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '1.60mm',  spindle_rpm:  '12500rpm', z_feed:  '1875mm/min', sku_name: 'generic-Drillbits-D1.60', point_angle: '135deg', max_hits: 2000 }
+      - { type: drillbit, diameter: '2.00mm',  spindle_rpm:  '10000rpm', z_feed:  '1800mm/min', sku_name: 'generic-Drillbits-D2.00', point_angle: '140deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '2.50mm',  spindle_rpm:   '8000rpm', z_feed:  '1800mm/min', sku_name: 'generic-Drillbits-D2.50', point_angle: '140deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.00mm',  spindle_rpm:   '6700rpm', z_feed:  '1675mm/min', sku_name: 'generic-Drillbits-D3.00', point_angle: '145deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '3.175mm', spindle_rpm:   '6300rpm', z_feed:  '1575mm/min', sku_name: 'generic-Drillbits-D3.175', point_angle: '145deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '4.00mm',  spindle_rpm:   '5000rpm', z_feed:  '1500mm/min', sku_name: 'generic-Drillbits-D4.00', point_angle: '150deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '5.00mm',  spindle_rpm:   '4000rpm', z_feed:  '1400mm/min', sku_name: 'generic-Drillbits-D5.00', point_angle: '150deg', max_hits: 1800 }
+      - { type: drillbit, diameter: '6.00mm',  spindle_rpm:   '3300rpm', z_feed:  '1320mm/min', sku_name: 'generic-Drillbits-D6.00', point_angle: '150deg', max_hits: 1800 }
 
   - name: Router bits
-    default_diameter_unit: mm
-    default_feed_unit: mm_min
     default_flute_length_unit: mm
     description: Metric sizes — conservative parameters for PCB outline routing in FR4
     tools:
-      - { type: routerbit, diameter: 0.80,  spindle_rpm: 32000, table_feed:  400, z_feed: 150, sku_name: 'generic-Routerbits-R0.80', point_angle: 180 }
-      - { type: routerbit, diameter: 1.00,  spindle_rpm: 32000, table_feed:  600, z_feed: 200, sku_name: 'generic-Routerbits-R1.00', point_angle: 180 }
-      - { type: routerbit, diameter: 1.20,  spindle_rpm: 28000, table_feed:  720, z_feed: 200, sku_name: 'generic-Routerbits-R1.20', point_angle: 180 }
-      - { type: routerbit, diameter: 1.50,  spindle_rpm: 22000, table_feed:  770, z_feed: 250, sku_name: 'generic-Routerbits-R1.50', point_angle: 180 }
-      - { type: routerbit, diameter: 2.00,  spindle_rpm: 16000, table_feed:  800, z_feed: 300, sku_name: 'generic-Routerbits-R2.00', point_angle: 180 }
-      - { type: routerbit, diameter: 2.40,  spindle_rpm: 14000, table_feed:  840, z_feed: 300, sku_name: 'generic-Routerbits-R2.40', point_angle: 180 }
-      - { type: routerbit, diameter: 3.00,  spindle_rpm: 11000, table_feed:  880, z_feed: 200, sku_name: 'generic-Routerbits-R3.00', point_angle: 180 }
-      - { type: routerbit, diameter: 3.175, spindle_rpm: 10000, table_feed:  800, z_feed: 200, sku_name: 'generic-Routerbits-R3.175', point_angle: 180 }
+      - { type: routerbit, diameter: '0.80mm',  spindle_rpm: '32000rpm', table_feed:  '400mm/min', z_feed: '150mm/min', sku_name: 'generic-Routerbits-R0.80', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.00mm',  spindle_rpm: '32000rpm', table_feed:  '600mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R1.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.20mm',  spindle_rpm: '28000rpm', table_feed:  '720mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R1.20', point_angle: '180deg' }
+      - { type: routerbit, diameter: '1.50mm',  spindle_rpm: '22000rpm', table_feed:  '770mm/min', z_feed: '250mm/min', sku_name: 'generic-Routerbits-R1.50', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.00mm',  spindle_rpm: '16000rpm', table_feed:  '800mm/min', z_feed: '300mm/min', sku_name: 'generic-Routerbits-R2.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '2.40mm',  spindle_rpm: '14000rpm', table_feed:  '840mm/min', z_feed: '300mm/min', sku_name: 'generic-Routerbits-R2.40', point_angle: '180deg' }
+      - { type: routerbit, diameter: '3.00mm',  spindle_rpm: '11000rpm', table_feed:  '880mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R3.00', point_angle: '180deg' }
+      - { type: routerbit, diameter: '3.175mm', spindle_rpm: '10000rpm', table_feed:  '800mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R3.175', point_angle: '180deg' }

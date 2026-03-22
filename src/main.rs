@@ -1,4 +1,5 @@
 mod catalog;
+mod board;
 mod cli;
 mod config;
 mod ui;
@@ -23,12 +24,22 @@ fn main() {
 
     let vars = collect_env_vars();
 
-    let kicad_status = match KiCadClientBlocking::connect() {
+    let (kicad_status, board_snapshot) = match KiCadClientBlocking::connect() {
         Ok(client) => match client.get_version() {
-            Ok(v) => format!("Connected - KiCad {}", v.full_version),
-            Err(e) => format!("Connected but version query failed: {e}"),
+            Ok(v) => {
+                let status = format!("Connected - KiCad {}", v.full_version);
+                let snapshot = match board::collect_board_snapshot(&client) {
+                    Ok(s) => Some(s),
+                    Err(err) => {
+                        eprintln!("warning: could not collect board snapshot: {err}");
+                        None
+                    }
+                };
+                (status, snapshot)
+            }
+            Err(e) => (format!("Connected but version query failed: {e}"), None),
         },
-        Err(e) => format!("Not connected: {e}"),
+        Err(e) => (format!("Not connected: {e}"), None),
     };
 
     let summary = format_summary(&args, vars.len());
@@ -37,6 +48,7 @@ fn main() {
         env_summary: summary,
         cli_args,
         kicad_status,
+        board_snapshot,
         save_filename_override: args.save_filename_override(),
     });
 }

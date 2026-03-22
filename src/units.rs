@@ -2,10 +2,13 @@
 //!
 //! This module supports scalar inputs from YAML/GUI strings, including fractions
 //! like `4/3mm` or `69/8 cm/min`, while preserving the original scalar form.
+#![allow(dead_code)]
 
 use std::fmt;
 
 use rhai::{Dynamic, Map};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const EPS: f64 = 1e-12;
 
@@ -30,6 +33,23 @@ impl fmt::Display for UnitParseError {
 }
 
 impl std::error::Error for UnitParseError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserUnitSystem {
+    Metric,
+    Imperial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitDisplay {
+    pub user: String,
+    pub native: Option<String>,
+}
+
+pub trait UserUnitDisplay {
+    fn unit_display(&self, user_unit_system: UserUnitSystem) -> UnitDisplay;
+    fn user_value(&self, user_unit_system: UserUnitSystem) -> f64;
+}
 
 /// Scalar representation preserving whether input was integer, float, or fraction.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -168,7 +188,7 @@ impl Length {
         }
     }
 
-    pub fn from_scalar(value: f64) -> Self {
+    pub fn from_kicad(value: f64) -> Self {
         Self {
             scalar: ScalarValue::Float(value),
             unit: LengthUnit::Mm,
@@ -230,9 +250,120 @@ impl Length {
     }
 }
 
+impl UserUnitDisplay for Length {
+    fn unit_display(&self, user_unit_system: UserUnitSystem) -> UnitDisplay {
+        let user = match user_unit_system {
+            UserUnitSystem::Metric => {
+                let value = round_to_step(self.as_mm(), 0.001);
+                format_with_unit(value, "mm", 3)
+            }
+            UserUnitSystem::Imperial => {
+                let mm = round_to_step(self.as_mm(), 0.001);
+                let inch = round_to_step(mm / 25.4, 0.0001);
+                format_with_unit(inch, "in", 4)
+            }
+        };
+
+        let native = match (user_unit_system, self.unit) {
+            (UserUnitSystem::Metric, LengthUnit::Mm) => None,
+            (UserUnitSystem::Imperial, LengthUnit::In | LengthUnit::Inch) => None,
+            _ => Some(format_native_length(*self)),
+        };
+
+        UnitDisplay { user, native }
+    }
+
+    fn user_value(&self, user_unit_system: UserUnitSystem) -> f64 {
+        match user_unit_system {
+            UserUnitSystem::Metric => round_to_step(self.as_mm(), 0.001),
+            UserUnitSystem::Imperial => {
+                let mm = round_to_step(self.as_mm(), 0.001);
+                round_to_step(mm / 25.4, 0.0001)
+            }
+        }
+    }
+}
+
 impl fmt::Display for Length {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.scalar, self.unit.name())
+    }
+}
+
+impl Serialize for Length {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Length {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct LengthVisitor;
+
+        impl<'de> Visitor<'de> for LengthVisitor {
+            type Value = Length;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a length string like '1/3in' or a numeric millimeter value")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Length {
+                    scalar: ScalarValue::Integer(value),
+                    unit: LengthUnit::Mm,
+                })
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let scalar = match i64::try_from(value) {
+                    Ok(integer) => ScalarValue::Integer(integer),
+                    Err(_) => ScalarValue::Float(value as f64),
+                };
+
+                Ok(Length {
+                    scalar,
+                    unit: LengthUnit::Mm,
+                })
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Length {
+                    scalar: ScalarValue::Float(value),
+                    unit: LengthUnit::Mm,
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Length::from_string(value, None).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(LengthVisitor)
     }
 }
 
@@ -302,7 +433,7 @@ impl FeedRate {
         }
     }
 
-    pub fn from_scalar(value: f64) -> Self {
+    pub fn from_kicad(value: f64) -> Self {
         Self {
             scalar: ScalarValue::Float(value),
             unit: FeedRateUnit::MmPerMin,
@@ -326,11 +457,128 @@ impl FeedRate {
     pub fn as_in_per_min(self) -> f64 {
         self.as_mm_per_min() / FeedRateUnit::InPerMin.factor_to_mm_per_min()
     }
+
+    pub const fn unit(self) -> FeedRateUnit {
+        self.unit
+    }
+}
+
+impl UserUnitDisplay for FeedRate {
+    fn unit_display(&self, user_unit_system: UserUnitSystem) -> UnitDisplay {
+        let user = match user_unit_system {
+            UserUnitSystem::Metric => {
+                let value = round_to_step(self.as_mm_per_min(), 0.001);
+                format_with_unit(value, "mm/min", 3)
+            }
+            UserUnitSystem::Imperial => {
+                let value = round_to_step(self.as_in_per_min(), 0.0001);
+                format_with_unit(value, "ipm", 4)
+            }
+        };
+
+        let native_matches_user = matches!(
+            (user_unit_system, self.unit),
+            (UserUnitSystem::Metric, FeedRateUnit::MmPerMin)
+                | (UserUnitSystem::Imperial, FeedRateUnit::Ipm | FeedRateUnit::InPerMin | FeedRateUnit::InchPerMin)
+        );
+
+        let native = if native_matches_user {
+            None
+        } else {
+            Some(format_native_feed_rate(*self))
+        };
+
+        UnitDisplay { user, native }
+    }
+
+    fn user_value(&self, user_unit_system: UserUnitSystem) -> f64 {
+        match user_unit_system {
+            UserUnitSystem::Metric => round_to_step(self.as_mm_per_min(), 0.001),
+            UserUnitSystem::Imperial => round_to_step(self.as_in_per_min(), 0.0001),
+        }
+    }
 }
 
 impl fmt::Display for FeedRate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.scalar, self.unit.name())
+    }
+}
+
+impl Serialize for FeedRate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for FeedRate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FeedRateVisitor;
+
+        impl<'de> Visitor<'de> for FeedRateVisitor {
+            type Value = FeedRate;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a feed rate string like '96ipm' or a numeric mm/min value")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(FeedRate {
+                    scalar: ScalarValue::Integer(value),
+                    unit: FeedRateUnit::MmPerMin,
+                })
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let scalar = match i64::try_from(value) {
+                    Ok(integer) => ScalarValue::Integer(integer),
+                    Err(_) => ScalarValue::Float(value as f64),
+                };
+
+                Ok(FeedRate {
+                    scalar,
+                    unit: FeedRateUnit::MmPerMin,
+                })
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(FeedRate {
+                    scalar: ScalarValue::Float(value),
+                    unit: FeedRateUnit::MmPerMin,
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                FeedRate::from_string(value, None).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(FeedRateVisitor)
     }
 }
 
@@ -376,7 +624,7 @@ impl Angle {
         Self::from_degrees(radians.to_degrees())
     }
 
-    pub fn from_scalar(value: f64) -> Self {
+    pub fn from_kicad(value: f64) -> Self {
         Self {
             scalar: ScalarValue::Float(value),
             unit: AngleUnit::Degree,
@@ -402,9 +650,100 @@ impl Angle {
     }
 }
 
+impl UserUnitDisplay for Angle {
+    fn unit_display(&self, _user_unit_system: UserUnitSystem) -> UnitDisplay {
+        let value = round_to_step(self.as_degrees(), 0.01);
+        UnitDisplay {
+            user: format_with_unit(value, "deg", 2),
+            native: None,
+        }
+    }
+
+    fn user_value(&self, _user_unit_system: UserUnitSystem) -> f64 {
+        round_to_step(self.as_degrees(), 0.01)
+    }
+}
+
 impl fmt::Display for Angle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.scalar, self.unit.name())
+    }
+}
+
+impl Serialize for Angle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Angle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct AngleVisitor;
+
+        impl<'de> Visitor<'de> for AngleVisitor {
+            type Value = Angle;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an angle string like '130deg' or a numeric degree value")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Angle {
+                    scalar: ScalarValue::Integer(value),
+                    unit: AngleUnit::Degree,
+                })
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let scalar = match i64::try_from(value) {
+                    Ok(integer) => ScalarValue::Integer(integer),
+                    Err(_) => ScalarValue::Float(value as f64),
+                };
+
+                Ok(Angle {
+                    scalar,
+                    unit: AngleUnit::Degree,
+                })
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(Angle {
+                    scalar: ScalarValue::Float(value),
+                    unit: AngleUnit::Degree,
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Angle::from_string(value, None).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(AngleVisitor)
     }
 }
 
@@ -441,7 +780,7 @@ impl RotationalSpeed {
         }
     }
 
-    pub fn from_scalar(value: f64) -> Self {
+    pub fn from_kicad(value: f64) -> Self {
         Self::from_rpm(value)
     }
 
@@ -461,11 +800,106 @@ impl RotationalSpeed {
     pub fn as_rpm(self) -> f64 {
         self.scalar.as_f64()
     }
+
+    pub const fn unit(self) -> RotationalSpeedUnit {
+        self.unit
+    }
+}
+
+impl UserUnitDisplay for RotationalSpeed {
+    fn unit_display(&self, _user_unit_system: UserUnitSystem) -> UnitDisplay {
+        let value = round_to_step(self.as_rpm(), 1.0);
+        UnitDisplay {
+            user: format_with_unit(value, "rpm", 0),
+            native: None,
+        }
+    }
+
+    fn user_value(&self, _user_unit_system: UserUnitSystem) -> f64 {
+        round_to_step(self.as_rpm(), 1.0)
+    }
 }
 
 impl fmt::Display for RotationalSpeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.scalar, self.unit.name())
+    }
+}
+
+impl Serialize for RotationalSpeed {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for RotationalSpeed {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RotationalSpeedVisitor;
+
+        impl<'de> Visitor<'de> for RotationalSpeedVisitor {
+            type Value = RotationalSpeed;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a spindle speed string like '8000rpm' or a numeric rpm value")
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(RotationalSpeed {
+                    scalar: ScalarValue::Integer(value),
+                    unit: RotationalSpeedUnit::Rpm,
+                })
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let scalar = match i64::try_from(value) {
+                    Ok(integer) => ScalarValue::Integer(integer),
+                    Err(_) => ScalarValue::Float(value as f64),
+                };
+
+                Ok(RotationalSpeed {
+                    scalar,
+                    unit: RotationalSpeedUnit::Rpm,
+                })
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(RotationalSpeed {
+                    scalar: ScalarValue::Float(value),
+                    unit: RotationalSpeedUnit::Rpm,
+                })
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                RotationalSpeed::from_string(value, None).map_err(E::custom)
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(RotationalSpeedVisitor)
     }
 }
 
@@ -575,6 +1009,59 @@ fn parse_scalar_token(number_raw: &str) -> Result<ScalarValue, UnitParseError> {
     }
 }
 
+fn round_to_step(value: f64, step: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    (value / step).round() * step
+}
+
+fn format_with_unit(value: f64, unit_suffix: &str, max_decimals: usize) -> String {
+    let mut text = if max_decimals == 0 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.max_decimals$}")
+    };
+
+    if max_decimals > 0 {
+        while text.contains('.') && text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+
+    format!("{text}{unit_suffix}")
+}
+
+fn format_native_length(value: Length) -> String {
+    match value.unit {
+        LengthUnit::Nm => format_with_unit(round_to_step(value.as_nm(), 1_000.0), "nm", 0),
+        LengthUnit::Um => format_with_unit(round_to_step(value.as_um(), 1.0), "um", 0),
+        LengthUnit::Mm => format_with_unit(round_to_step(value.as_mm(), 0.001), "mm", 3),
+        LengthUnit::Cm => format_with_unit(round_to_step(value.as_cm(), 0.0001), "cm", 4),
+        LengthUnit::Mil => format_with_unit(round_to_step(value.as_mil(), 0.1), "mil", 1),
+        LengthUnit::Thou => format_with_unit(round_to_step(value.as_mil(), 0.1), "thou", 1),
+        LengthUnit::Inch | LengthUnit::In => {
+            format_with_unit(round_to_step(value.as_inch(), 0.0001), "in", 4)
+        }
+    }
+}
+
+fn format_native_feed_rate(value: FeedRate) -> String {
+    match value.unit {
+        FeedRateUnit::MmPerMin => format_with_unit(round_to_step(value.as_mm_per_min(), 0.001), "mm/min", 3),
+        FeedRateUnit::CmPerMin => format_with_unit(round_to_step(value.as_mm_per_min() / 10.0, 0.0001), "cm/min", 4),
+        FeedRateUnit::MPerMin => format_with_unit(round_to_step(value.as_mm_per_min() / 1000.0, 0.000001), "m/min", 6),
+        FeedRateUnit::InPerMin => format_with_unit(round_to_step(value.as_in_per_min(), 0.0001), "in/min", 4),
+        FeedRateUnit::Ipm => format_with_unit(round_to_step(value.as_in_per_min(), 0.0001), "ipm", 4),
+        FeedRateUnit::InchPerMin => {
+            format_with_unit(round_to_step(value.as_in_per_min(), 0.0001), "inch/min", 4)
+        }
+    }
+}
+
 fn round_significant(value: f64, digits: usize) -> f64 {
     if value == 0.0 {
         return 0.0;
@@ -607,7 +1094,7 @@ fn insert_number(map: &mut Map, key: &str, value: f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Angle, FeedRate, Length, ScalarValue};
+    use super::{Angle, FeedRate, Length, ScalarValue, UserUnitDisplay, UserUnitSystem};
 
     #[test]
     fn stores_fraction_scalar_for_length_string() {
@@ -672,5 +1159,54 @@ mod tests {
         let map = len.to_rhai_map();
         let nm = map.get("nm").expect("nm should exist").clone().cast::<i64>();
         assert_eq!(nm, 12_500_000);
+    }
+
+    #[test]
+    fn serde_round_trips_native_length_string() {
+        let value: Length = serde_json::from_str("\"1 1/8\\\"\"")
+            .expect("serde should parse native imperial fractions");
+        assert_eq!(value.to_string(), "9/8in");
+
+        let encoded = serde_json::to_string(&value).expect("serde should serialize length");
+        assert_eq!(encoded, "\"9/8in\"");
+    }
+
+    #[test]
+    fn serde_round_trips_native_feedrate_string() {
+        let value: FeedRate = serde_json::from_str("\"69/8cm/min\"")
+            .expect("serde should parse native feedrate fractions");
+        assert_eq!(value.to_string(), "69/8cm/min");
+    }
+
+    #[test]
+    fn length_user_display_rounds_to_um() {
+        let length = Length::from_mm(1.000_02);
+        let display = length.unit_display(UserUnitSystem::Metric);
+        assert_eq!(display.user, "1mm");
+
+        let length = Length::from_mm(1.100_02);
+        let display = length.unit_display(UserUnitSystem::Metric);
+        assert_eq!(display.user, "1.1mm");
+
+        let length = Length::from_mm(1.149_992);
+        let display = length.unit_display(UserUnitSystem::Metric);
+        assert_eq!(display.user, "1.15mm");
+
+        let length = Length::from_mm(0.80000001192093);
+        let display = length.unit_display(UserUnitSystem::Metric);
+        assert_eq!(display.user, "0.8mm");
+    }
+
+    #[test]
+    fn length_display_provides_native_when_units_differ() {
+        let length = Length::from_string("1/8in", None).expect("length should parse");
+
+        let metric_display = length.unit_display(UserUnitSystem::Metric);
+        assert_eq!(metric_display.user, "3.175mm");
+        assert_eq!(metric_display.native.as_deref(), Some("0.125in"));
+
+        let imperial_display = length.unit_display(UserUnitSystem::Imperial);
+        assert_eq!(imperial_display.user, "0.125in");
+        assert_eq!(imperial_display.native, None);
     }
 }

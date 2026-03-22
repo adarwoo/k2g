@@ -1,0 +1,62 @@
+# Masso G3 - Manual Tool Change
+# Suitable for a standard Masso G3 build without an automatic tool changer.
+# Operator is prompted to load each tool manually.
+
+name: "Masso G3 - Manual Tool Change"
+
+machine:
+  fixture_plate:
+    x: "300mm"
+    y: "200mm"
+  max_feed_rate: "2000mm/min"
+  spindle_rpm_min: "3000rpm"
+  spindle_rpm_max: "24000rpm"
+  atc_slot_count: 0
+  origin:
+    x0: Left
+    y0: Front
+  scaling:
+    x: 100.0
+    y: 100.0
+  line_numbering:
+    enabled: false
+    increment: 10
+
+header: |
+  (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+  (Reset all back to safe defaults)
+  G17 G54 G40 G49 G80 G90
+  G21
+  G10 P0
+  (Establish the Z-Safe)
+  G0 Z{z_safe}
+
+footer: |
+  (end of file)
+
+drill:
+  first_move: "G0 X{x} Y{y} Z{z_safe}"
+  cycle_mode_last: "G98"
+  cycle_mode_series: "G99"
+  cycle_start: "G81 Z{z_bottom} R{z_retract} F{z_feedrate}"
+  next_hole: "X{x} Y{y}"
+  cycle_cancel: "G80"
+
+route:
+  plunge_and_offset: |
+    G90 G0 X{x} Y{y}
+    G1 Z{z_bottom} F{z_feedrate}
+    G1 Y{y_plus_id}
+  arc_up: "G2 I0 J-{id}"
+  arc_down: "G3 I0 J-{id}"
+  retract: "G0 Z{z_safe}"
+
+tool_change:
+  manual_prompt: |
+    MSG Load {tool_name} {tool_diameter}
+    M01
+  command: |
+    M05
+    {manual_message}
+    T{slot} M06
+    S{rpm}

@@ -28,7 +28,7 @@ impl YamlConfigManager {
         schema_dir: &Path,
         config_dir: &Path,
     ) -> Result<Self, ConfigError> {
-        let schema_path = schema_dir.join(format!("{}{}", section_name, SCHEMA_SUFFIX));
+        let schema_path = schema_dir.join(format!("{}_schema{}", section_name, SCHEMA_SUFFIX));
         let config_path = config_dir.join(format!("{}{}", section_name, SCHEMA_SUFFIX));
 
         // --- Load & compile schema ---

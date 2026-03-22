@@ -1,0 +1,57 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+type: "object"
+description: "Persisted tool stock inventory configuration"
+properties:
+  tools:
+    description: "List of tools in the current stock inventory"
+    type: "array"
+    default: []
+    items:
+      type: "object"
+      description: "A single tool in stock"
+      properties:
+        id:
+          type: "string"
+          description: "Unique identifier for this tool"
+          minLength: 1
+        name:
+          type: "string"
+          description: "Display name (e.g., '0.8mm Carbide Drill', '1.0mm End Mill')"
+          minLength: 1
+        kind:
+          type: "string"
+          description: "Tool type (e.g., 'Drill', 'Router', 'Endmill')"
+          minLength: 1
+        diameter_mm:
+          type: "number"
+          description: "Tool diameter in millimeters"
+          minimum: 0
+        feed_rate_mm_min:
+          type: ["number", "null"]
+          description: "Recommended feed rate in mm/min, or null if unspecified"
+          minimum: 0
+        spindle_rpm:
+          type: ["number", "null"]
+          description: "Recommended spindle speed in RPM, or null if unspecified"
+          minimum: 0
+        status:
+          type: "string"
+          description: "Current status of the tool"
+          enum: ["in_stock", "in_rack", "out_of_stock", "new", "not_preferred"]
+          default: "in_stock"
+        operation_count:
+          type: "integer"
+          description: "Number of operations this tool has been used for"
+          minimum: 0
+          default: 0
+        manufacturer:
+          type: ["string", "null"]
+          description: "Tool manufacturer name (optional)"
+        sku:
+          type: ["string", "null"]
+          description: "Manufacturer SKU or part number (optional)"
+      required: [id, name, kind, diameter_mm, status, operation_count]
+      additionalProperties: false
+
+required: [tools]
+additionalProperties: false
