@@ -9,6 +9,10 @@ pub use model::UiLaunchData;
 static BOOT_DATA: OnceLock<UiLaunchData> = OnceLock::new();
 
 pub fn launch(data: UiLaunchData) {
+    // 1. Create a custom config and set the menu to None
+    LaunchBuilder::desktop()
+        .with_cfg(cfg)
+        .launch(app);
     let _ = BOOT_DATA.set(data);
     dioxus::launch(app::AppRoot);
 }
