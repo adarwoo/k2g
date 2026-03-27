@@ -2622,6 +2622,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -6499,8 +6500,3 @@ dependencies = [
  "syn 2.0.117",
  "winnow 0.7.15",
 ]
-
-[[patch.unused]]
-name = "kicad-ipc-rs"
-version = "0.4.0"
-source = "git+https://github.com/adarwoo/kicad-ipc-rs?rev=e7a17a93b6f6d0139490a72ca87eaadcf75d6799#e7a17a93b6f6d0139490a72ca87eaadcf75d6799"

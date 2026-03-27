@@ -83,6 +83,7 @@ pub fn first_run_init() -> Result<(), UserPathError> {
 
 /// Return the path to the user catalogs directory, creating the directory
 /// tree first if needed.
+#[allow(dead_code)]
 pub fn catalog_dir() -> Result<std::path::PathBuf, UserPathError> {
     ensure_app_dirs().map(|d| d.catalogs)
 }

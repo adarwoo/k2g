@@ -17,5 +17,7 @@ pub mod init;
 pub mod manager;
 pub mod types;
 
+#[allow(unused_imports)]
 pub use manager::{CatalogError, CatalogManager};
+#[allow(unused_imports)]
 pub use types::{Catalog, CatalogSection, ToolEntry, ToolType};

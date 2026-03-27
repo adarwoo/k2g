@@ -10,6 +10,7 @@
 //! [<file-stem>] <section-name> / <diameter><unit>
 //! ```
 //! For example:  `[kyocera] Series 100 (in) / 0.0200in`
+#![allow(dead_code)]
 
 use std::path::Path;
 

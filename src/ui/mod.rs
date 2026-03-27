@@ -54,6 +54,7 @@ pub fn boot_data() -> &'static UiLaunchData {
         .expect("UI launch data must be initialized before launch")
 }
 
+#[allow(dead_code)]
 pub fn persistence_state() -> Option<&'static PersistenceState> {
     PERSISTENCE_STATE.get()
 }
