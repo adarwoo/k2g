@@ -1,9 +1,60 @@
 use dioxus::prelude::*;
 
-use crate::board::collect_board_snapshot;
-use crate::board::HoleKind;
+use crate::board::{collect_board_snapshot, BoardEdgeShape, HoleKind};
+use crate::stitching::stitch_edge_shapes;
 use kicad_ipc_rs::KiCadClientBlocking;
 use super::super::model::*;
+
+/// Pre-computed SVG primitive for one edge-shape segment.
+#[derive(Clone)]
+enum SvgShape {
+    Line { x1: f64, y1: f64, x2: f64, y2: f64 },
+    Path(String),
+    Rect { x: f64, y: f64, w: f64, h: f64, rx: f64 },
+    Circle { cx: f64, cy: f64, r: f64 },
+}
+
+/// Given three points (start, mid, end) that lie on a circular arc, return
+/// an SVG path string `M ... A ... ` for that arc.  Falls back to a straight
+/// line if the points are collinear.
+fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String {
+    let d = 2.0 * (sx * (my - ey) + mx * (ey - sy) + ex * (sy - my));
+    if d.abs() < 1e-9 {
+        // Collinear – draw a straight line.
+        return format!("M {sx} {sy} L {ex} {ey}");
+    }
+    let sq = |v: f64| v * v;
+    let mag1 = sq(sx) + sq(sy);
+    let mag2 = sq(mx) + sq(my);
+    let mag3 = sq(ex) + sq(ey);
+    let cx = (mag1 * (my - ey) + mag2 * (ey - sy) + mag3 * (sy - my)) / d;
+    let cy = (mag1 * (ex - mx) + mag2 * (sx - ex) + mag3 * (mx - sx)) / d;
+    let r = ((sx - cx).powi(2) + (sy - cy).powi(2)).sqrt();
+
+    let angle = |px: f64, py: f64| (py - cy).atan2(px - cx);
+    let t1 = angle(sx, sy);
+    let t2 = angle(mx, my);
+    let t3 = angle(ex, ey);
+
+    // Determine if the arc from t1 to t3 going clockwise (increasing atan2 in
+    // SVG y-down space) passes through t2.
+    let cw_span = (t3 - t1).rem_euclid(std::f64::consts::TAU);
+    let cw_to_mid = (t2 - t1).rem_euclid(std::f64::consts::TAU);
+    let mid_on_cw = cw_to_mid <= cw_span;
+
+    let (sweep, large_arc) = if mid_on_cw {
+        // CW arc through mid.
+        let large = if cw_span > std::f64::consts::PI { 1 } else { 0 };
+        (1, large)
+    } else {
+        // CCW arc through mid.
+        let ccw_span = std::f64::consts::TAU - cw_span;
+        let large = if ccw_span > std::f64::consts::PI { 1 } else { 0 };
+        (0, large)
+    };
+
+    format!("M {sx} {sy} A {r} {r} 0 {large_arc} {sweep} {ex} {ey}")
+}
 
 #[component]
 pub fn JobScreen(state: Signal<UiState>) -> Element {
@@ -117,20 +168,34 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         })
         .collect();
 
-    let board_view_size = 1000.0_f64;
+    // Board coordinate space: width is always 1000 SVG units; height is scaled
+    // proportionally so the aspect ratio matches the real board dimensions.
+    // KiCad uses screen coordinates (Y increases downward), same as SVG, so no
+    // Y-flip is needed.
+    let board_view_width = 1000.0_f64;
+    let board_view_height = {
+        let aspect = snapshot.board.as_ref()
+            .and_then(|b| b.bounding_box.as_ref())
+            .filter(|bbox| bbox.width.as_mm() > 0.0 && bbox.height.as_mm() > 0.0)
+            .map(|bbox| bbox.height.as_mm() / bbox.width.as_mm())
+            .unwrap_or(1.0);
+        board_view_width * aspect
+    };
     let zoom_value = *board_zoom.read();
     let pan_x_value = *board_pan_x.read();
     let pan_y_value = *board_pan_y.read();
-    let viewport_size = (board_view_size / zoom_value).clamp(50.0, board_view_size);
-    let max_pan = (board_view_size - viewport_size).max(0.0);
-    let view_x = pan_x_value.clamp(0.0, max_pan);
-    let view_y = pan_y_value.clamp(0.0, max_pan);
-    let board_view_box = format!("{view_x} {view_y} {viewport_size} {viewport_size}");
+    let viewport_w = (board_view_width / zoom_value).clamp(10.0, board_view_width);
+    let viewport_h = (board_view_height / zoom_value).clamp(10.0, board_view_height);
+    let max_pan_x = (board_view_width - viewport_w).max(0.0);
+    let max_pan_y = (board_view_height - viewport_h).max(0.0);
+    let view_x = pan_x_value.clamp(0.0, max_pan_x);
+    let view_y = pan_y_value.clamp(0.0, max_pan_y);
+    let board_view_box = format!("{view_x} {view_y} {viewport_w} {viewport_h}");
     let zoom_percent = (zoom_value * 100.0).round() as i32;
     let board_hole_markers: Vec<(f64, f64, f64, HoleKind)> = if let Some(board) = snapshot.board.as_ref() {
         if let Some(bbox) = board.bounding_box.as_ref() {
             let min_x = bbox.x.as_mm();
-            let max_y = bbox.y.as_mm() + bbox.height.as_mm();
+            let min_y = bbox.y.as_mm();
             let width = bbox.width.as_mm();
             let height = bbox.height.as_mm();
 
@@ -140,19 +205,96 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                     .iter()
                     .map(|hole| {
                         let x = ((hole.position.x.as_mm() - min_x) / width).clamp(0.0, 1.0)
-                            * board_view_size;
-                        // Flip Y so KiCad-style coordinates render with top at SVG y=0.
-                        let y = ((max_y - hole.position.y.as_mm()) / height).clamp(0.0, 1.0)
-                            * board_view_size;
+                            * board_view_width;
+                        let y = ((hole.position.y.as_mm() - min_y) / height).clamp(0.0, 1.0)
+                            * board_view_height;
                         let cross_half = hole
                             .drill_x
                             .as_ref()
-                            .map(|d| (d.as_mm() / width) * board_view_size * 1.5)
+                            .map(|d| (d.as_mm() / width) * board_view_width * 1.5)
                             .unwrap_or(6.0)
                             .clamp(4.0, 20.0);
                         (x, y, cross_half, hole.kind.clone())
                     })
                     .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let board_edge_shapes_svg: Vec<SvgShape> = if let Some(board) = snapshot.board.as_ref() {
+        if let Some(bbox) = board.bounding_box.as_ref() {
+            let min_x = bbox.x.as_mm();
+            let min_y = bbox.y.as_mm();
+            let width = bbox.width.as_mm();
+            let height = bbox.height.as_mm();
+
+            if width > 0.0 && height > 0.0 {
+                let tx = |px: f64| ((px - min_x) / width).clamp(0.0, 1.0) * board_view_width;
+                let ty = |py: f64| ((py - min_y) / height).clamp(0.0, 1.0) * board_view_height;
+
+                board.edge_shapes.iter().filter_map(|shape| {
+                    match shape {
+                        BoardEdgeShape::Track { start, end, .. }
+                        | BoardEdgeShape::GraphicSegment { start, end, .. } => {
+                            Some(SvgShape::Line {
+                                x1: tx(start.x.as_mm()),
+                                y1: ty(start.y.as_mm()),
+                                x2: tx(end.x.as_mm()),
+                                y2: ty(end.y.as_mm()),
+                            })
+                        }
+                        BoardEdgeShape::Arc { start, mid, end, .. }
+                        | BoardEdgeShape::GraphicArc { start, mid, end, .. } => {
+                            Some(SvgShape::Path(arc_svg_path(
+                                tx(start.x.as_mm()), ty(start.y.as_mm()),
+                                tx(mid.x.as_mm()),   ty(mid.y.as_mm()),
+                                tx(end.x.as_mm()),   ty(end.y.as_mm()),
+                            )))
+                        }
+                        BoardEdgeShape::GraphicRectangle { top_left, bottom_right, corner_radius, .. } => {
+                            let x = tx(top_left.x.as_mm());
+                            let y = ty(top_left.y.as_mm());
+                            let x2 = tx(bottom_right.x.as_mm());
+                            let y2 = ty(bottom_right.y.as_mm());
+                            let rx_val = corner_radius
+                                .as_ref()
+                                .map(|r| (r.as_mm() / width) * board_view_width)
+                                .unwrap_or(0.0);
+                            Some(SvgShape::Rect {
+                                x: x.min(x2),
+                                y: y.min(y2),
+                                w: (x2 - x).abs(),
+                                h: (y2 - y).abs(),
+                                rx: rx_val,
+                            })
+                        }
+                        BoardEdgeShape::GraphicCircle { center, radius_point, .. } => {
+                            let cx = tx(center.x.as_mm());
+                            let cy = ty(center.y.as_mm());
+                            let rx_pt = tx(radius_point.x.as_mm());
+                            let ry_pt = ty(radius_point.y.as_mm());
+                            let r = ((rx_pt - cx).powi(2) + (ry_pt - cy).powi(2)).sqrt();
+                            Some(SvgShape::Circle { cx, cy, r })
+                        }
+                        BoardEdgeShape::GraphicBezier { start, control1, control2, end, .. } => {
+                            let (sx, sy) = (tx(start.x.as_mm()), ty(start.y.as_mm()));
+                            let (c1x, c1y) = (tx(control1.x.as_mm()), ty(control1.y.as_mm()));
+                            let (c2x, c2y) = (tx(control2.x.as_mm()), ty(control2.y.as_mm()));
+                            let (ex, ey) = (tx(end.x.as_mm()), ty(end.y.as_mm()));
+                            Some(SvgShape::Path(format!(
+                                "M {sx} {sy} C {c1x} {c1y} {c2x} {c2y} {ex} {ey}"
+                            )))
+                        }
+                        // GraphicPolygon only carries a count; skip it.
+                        BoardEdgeShape::GraphicPolygon { .. } => None,
+                    }
+                }).collect()
             } else {
                 Vec::new()
             }
@@ -204,14 +346,20 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     Ok(board_snapshot) => {
                                                         let hole_count = board_snapshot.holes.len();
                                                         let has_bbox = board_snapshot.bounding_box.is_some();
+                                                        let stitch_result = stitch_edge_shapes(&board_snapshot.edge_shapes);
+                                                        let contour_count = stitch_result.contours.len();
                                                         state.with_mut(|s| s.board = Some(board_snapshot));
                                                         let bbox = if has_bbox { "yes" } else { "no" };
-                                                        board_refresh_status
-                                                            .set(
-                                                                format!(
-                                                                    "Board snapshot refreshed: {hole_count} holes, bounding box {bbox}.",
-                                                                ),
-                                                            );
+                                                        if stitch_result.errors.is_empty() {
+                                                            board_refresh_status.set(format!(
+                                                                "Board snapshot refreshed: {hole_count} holes, bounding box {bbox}, {contour_count} contour(s) — OK.",
+                                                            ));
+                                                        } else {
+                                                            let error_list = stitch_result.errors.join("; ");
+                                                            board_refresh_status.set(format!(
+                                                                "Board geometry invalid — cannot process. {error_list}",
+                                                            ));
+                                                        }
                                                     }
                                                     Err(err) => {
                                                         board_refresh_status
@@ -283,10 +431,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
 
                                                 let dx = p.x - last_x;
                                                 let dy = p.y - last_y;
-                                                let unit_per_px = viewport_size / board_view_size;
+                                                let unit_per_px_x = viewport_w / board_view_width;
+                                                let unit_per_px_y = viewport_h / board_view_height;
 
-                                                let next_x = (*board_pan_x.read() - dx * unit_per_px).clamp(0.0, max_pan);
-                                                let next_y = (*board_pan_y.read() - dy * unit_per_px).clamp(0.0, max_pan);
+                                                let next_x = (*board_pan_x.read() - dx * unit_per_px_x).clamp(0.0, max_pan_x);
+                                                let next_y = (*board_pan_y.read() - dy * unit_per_px_y).clamp(0.0, max_pan_y);
                                                 board_pan_x.set(next_x);
                                                 board_pan_y.set(next_y);
                                             },
@@ -299,14 +448,17 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     return;
                                                 }
 
-                                                let old_viewport = (board_view_size / old_zoom).clamp(50.0, board_view_size);
-                                                let new_viewport = (board_view_size / new_zoom).clamp(50.0, board_view_size);
-                                                let center_x = view_x + old_viewport * 0.5;
-                                                let center_y = view_y + old_viewport * 0.5;
-                                                let new_max_pan = (board_view_size - new_viewport).max(0.0);
+                                                let old_vw = (board_view_width / old_zoom).clamp(10.0, board_view_width);
+                                                let old_vh = (board_view_height / old_zoom).clamp(10.0, board_view_height);
+                                                let new_vw = (board_view_width / new_zoom).clamp(10.0, board_view_width);
+                                                let new_vh = (board_view_height / new_zoom).clamp(10.0, board_view_height);
+                                                let center_x = view_x + old_vw * 0.5;
+                                                let center_y = view_y + old_vh * 0.5;
+                                                let new_max_pan_x = (board_view_width - new_vw).max(0.0);
+                                                let new_max_pan_y = (board_view_height - new_vh).max(0.0);
                                                 board_zoom.set(new_zoom);
-                                                board_pan_x.set((center_x - new_viewport * 0.5).clamp(0.0, new_max_pan));
-                                                board_pan_y.set((center_y - new_viewport * 0.5).clamp(0.0, new_max_pan));
+                                                board_pan_x.set((center_x - new_vw * 0.5).clamp(0.0, new_max_pan_x));
+                                                board_pan_y.set((center_y - new_vh * 0.5).clamp(0.0, new_max_pan_y));
                                             },
                                             svg {
                                                 class: "board-svg",
@@ -316,9 +468,47 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 rect {
                                                     x: "0",
                                                     y: "0",
-                                                    width: "{board_view_size}",
-                                                    height: "{board_view_size}",
+                                                    width: "{board_view_width}",
+                                                    height: "{board_view_height}",
                                                     class: "board-svg-frame",
+                                                }
+
+                                                for shape in board_edge_shapes_svg.iter() {
+                                                    match shape {
+                                                        SvgShape::Line { x1, y1, x2, y2 } => rsx! {
+                                                            line {
+                                                                x1: "{x1}",
+                                                                y1: "{y1}",
+                                                                x2: "{x2}",
+                                                                y2: "{y2}",
+                                                                class: "board-edge-shape",
+                                                            }
+                                                        },
+                                                        SvgShape::Path(d) => rsx! {
+                                                            path {
+                                                                d: "{d}",
+                                                                class: "board-edge-shape",
+                                                            }
+                                                        },
+                                                        SvgShape::Rect { x, y, w, h, rx } => rsx! {
+                                                            rect {
+                                                                x: "{x}",
+                                                                y: "{y}",
+                                                                width: "{w}",
+                                                                height: "{h}",
+                                                                rx: "{rx}",
+                                                                class: "board-edge-shape",
+                                                            }
+                                                        },
+                                                        SvgShape::Circle { cx, cy, r } => rsx! {
+                                                            circle {
+                                                                cx: "{cx}",
+                                                                cy: "{cy}",
+                                                                r: "{r}",
+                                                                class: "board-edge-shape",
+                                                            }
+                                                        },
+                                                    }
                                                 }
 
                                                 for (x , y , half , kind) in board_hole_markers.iter() {
@@ -364,7 +554,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 }
                                             }
                                         }
-                                        p { "Board holes: {board.holes.len()} rendered as crosses" }
+                                        p { "Board edge shapes: {board.edge_shapes.len()} · Holes: {board.holes.len()}" }
                                         div { class: "board-legend",
                                             div { class: "board-legend-item",
                                                 svg { class: "board-legend-icon", view_box: "0 0 24 24",
@@ -433,6 +623,15 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     }
                                                 }
                                                 span { "NPTH" }
+                                            }
+                                            div { class: "board-legend-item",
+                                                svg { class: "board-legend-icon", view_box: "0 0 24 24",
+                                                    path {
+                                                        d: "M 3 12 L 9 4 L 21 4 L 21 20 L 3 20 Z",
+                                                        class: "board-edge-shape",
+                                                    }
+                                                }
+                                                span { "Edge cuts" }
                                             }
                                         }
                                     } else {

@@ -110,11 +110,12 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
 
     // Query only item families we need instead of requesting every KiCad object
     // type. This avoids AS_BAD_REQUEST on versions that reject broad type lists.
+
     const KOT_PCB_PAD: i32 = 2;
     const KOT_PCB_SHAPE: i32 = 3;
     const KOT_PCB_TRACE: i32 = 11;
     const KOT_PCB_ARC: i32 = 13;
-
+    
     let vias = client
         .get_vias()
         .map_err(|e| format!("failed to fetch vias: {e}"))?;
@@ -157,8 +158,16 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
     }
 
     let track_items = safe_get_items_by_type_codes(client, vec![KOT_PCB_TRACE]);
+    let mut layers_id: Vec<String> = Vec::new();
     for item in track_items {
         if let PcbItem::Track(track) = item {
+            let layer_name = track.layer.name.as_str();
+
+            if ! layers_id.contains(&layer_name.to_string()) {
+                layers_id.push(layer_name.to_string());
+            }
+
+
             if track.layer.name == "BL_Edge_Cuts" {
                 if let (Some(start), Some(end)) = (track.start_nm, track.end_nm) {
                     edge_shapes.push(BoardEdgeShape::Track {

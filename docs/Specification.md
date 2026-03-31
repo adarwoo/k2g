@@ -152,28 +152,29 @@ Simplest/optimum flow (plugin already configured):
 
 ### 8.1 Stock Page
 The stock page lists tools available for machining.
-
 Each stock item includes:
 
 - Name
 - Auto-generated summary (`router bit`, `drill bit`, `end mill`, including V bits/grooving bits) + diameter
-- Status: `In stock`, `In rack`, `Out of stock`, `New`, `Not preferred`
+- Status: `In stock`, `In rack`, `Out of stock`, `New`
    - `In stock`: available and usable by program
    - `In rack`: currently present in rack based on last job
    - `Out of stock`: unavailable, should be reordered
    - `New`: recently added from catalog; becomes `In stock`/`In rack` once used
+- Not prefered: A boolean to indicate the tool can be used if no other choice
 - Operation counter
    - Routers/end mills: cumulative machining distance
    - Drill bits: number of holes
-- Link to catalog item
-   - Green: valid linked item
-   - Orange/greyed: linked item no longer exists
-   - Grey `manual`: manually created tool
+- Source item SKU
 
 Adding tools:
+- `+` button allows adding from catalog
+   - The catalog offers 'generic' tools for drilling, milling, etc. which can be used to create custom tools
+- Once added, the tool can be edited
+- The tool name must be unique
+   - When adding a tool, a unique name is generated
+   - If changing the name, the <apply> is greyed if the name if not unique and the name become red -with the error message showing
 
-- `+` button allows adding from catalog or `manual`.
-- Added tools must be edited; all fields required; name must be unique.
 - For catalog tools, properties are prefilled.
    - Some properties remain editable.
    - Manufacturer and SKU are read-only.
