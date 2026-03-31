@@ -20,6 +20,7 @@ pub enum LinearUnit {
 }
 
 impl LinearUnit {
+    #[allow(dead_code)]
     pub fn suffix(self) -> &'static str {
         match self {
             Self::Mm => "mm",
@@ -29,6 +30,7 @@ impl LinearUnit {
 }
 
 /// Feed-rate units supported by catalog machining parameters.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FeedUnit {
     #[serde(rename = "mm_min")]
@@ -89,6 +91,7 @@ pub struct ToolEntry {
 impl ToolEntry {
     /// Short human-readable identifier using the diameter and unit,
     /// e.g. `"0.2mm"` or `"1/8in"`.
+    #[allow(dead_code)]
     pub fn diameter_label(&self) -> String {
         self.diameter.to_string()
     }

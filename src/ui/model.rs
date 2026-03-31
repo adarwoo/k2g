@@ -106,6 +106,7 @@ impl Theme {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GenerationState {
     Idle,
@@ -191,6 +192,7 @@ impl Default for MachineProfile {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     InStock,
@@ -222,6 +224,7 @@ impl ToolStatus {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct Tool {
     pub id: String,
@@ -236,6 +239,7 @@ pub struct Tool {
     pub sku: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct CatalogStockTool {
     pub key: String,
@@ -264,6 +268,7 @@ pub struct CatalogStockCatalog {
     pub sections: Vec<CatalogStockSection>,
 }
 
+#[allow(dead_code)]
 pub fn load_stock_catalog_index() -> Vec<CatalogStockCatalog> {
     // Primary source: user catalog directory.  Files are parsed and validated
     // by CatalogManager; only valid catalogs are included.
@@ -380,6 +385,7 @@ impl Side {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RotationMode {
     Auto,
@@ -387,6 +393,7 @@ pub enum RotationMode {
 }
 
 impl RotationMode {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -441,6 +448,7 @@ pub enum CutDepthStrategy {
 }
 
 impl CutDepthStrategy {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Automatic => "automatic",
@@ -449,6 +457,7 @@ impl CutDepthStrategy {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::Automatic => "Automatic (recommended)",
@@ -466,6 +475,7 @@ pub enum BoardThicknessMode {
 }
 
 impl BoardThicknessMode {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Preset => "preset",
@@ -482,6 +492,7 @@ pub enum Z0DeterminationMode {
 }
 
 impl Z0DeterminationMode {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ManualAdjustZ0 => "manual_adjust_z0",
@@ -497,6 +508,7 @@ pub enum TouchProbeSource {
 }
 
 impl TouchProbeSource {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ManualInstallation => "manual_installation",
@@ -516,6 +528,7 @@ pub enum BoardOrientation {
 }
 
 impl BoardOrientation {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Automatic => "automatic",
@@ -528,6 +541,7 @@ impl BoardOrientation {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct JobConfig {
     pub selected_operations: Vec<ProductionOperation>,
@@ -556,6 +570,7 @@ pub struct JobConfig {
     pub board_orientation_custom_degrees: f32,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct AppError {
     pub id: String,
@@ -571,6 +586,7 @@ pub struct RackSlot {
     pub disabled: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct BoardLayers {
     pub holes: bool,
@@ -599,6 +615,7 @@ pub struct UiState {
     pub gcode_modified: bool,
     pub show_first_launch: bool,
     pub rack_slots: BTreeMap<u8, RackSlot>,
+    #[allow(dead_code)]
     pub board_layers: BoardLayers,
     pub board: Option<BoardSnapshot>,
 }
@@ -863,6 +880,7 @@ impl UiState {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_demo_tool(&mut self) {
         let idx = self.tools.len() + 1;
         self.tools.push(Tool {
@@ -1028,6 +1046,7 @@ impl UiState {
         self.gcode_modified = false;
     }
 
+    #[allow(dead_code)]
     pub fn set_rotation_angle(&mut self, angle: i32) {
         self.job_config.rotation_angle = angle;
         self.gcode_modified = false;

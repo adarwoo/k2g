@@ -12,6 +12,7 @@ const SCHEMA_SUFFIX: &str = ".yaml";
 const BACKUP_SUFFIX: &str = "bak"; // no leading dot
 
 pub struct YamlConfigManager {
+    #[allow(dead_code)]
     section_name: String,
     config_path: PathBuf,
     schema: Value,

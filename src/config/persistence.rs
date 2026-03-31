@@ -3,15 +3,16 @@
 
 use crate::user_path::AppDirs;
 use log::{error, info, warn};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::manager::YamlConfigManager;
 use super::ConfigError;
 
 /// Encapsulates all persisted configuration state
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PersistenceState {
     /// Global application settings (spindle speed, feedrates, Z heights, unit system, theme, etc.)
@@ -32,7 +33,7 @@ pub fn load_all_configs(
     info!("Loading configuration from {:?}", app_dirs.configs);
 
     // Load global settings
-    let mut global_mgr =
+    let global_mgr =
         YamlConfigManager::new("global.setting", schema_dir, &app_dirs.configs)?;
     let global_settings = global_mgr.get_content().clone();
     let selected_cnc_profile_id = global_settings
@@ -41,7 +42,7 @@ pub fn load_all_configs(
         .map(|s| s.to_string());
 
     // Load stock config
-    let mut stock_mgr = YamlConfigManager::new("stock", schema_dir, &app_dirs.configs)?;
+    let stock_mgr = YamlConfigManager::new("stock", schema_dir, &app_dirs.configs)?;
     let stock = stock_mgr.get_content().clone();
 
     // Load all CNC profiles from cnc_profiles subdirectory
@@ -98,7 +99,7 @@ fn load_cnc_profiles(
 }
 
 /// Load a single CNC profile YAML file and validate against schema
-fn load_cnc_profile(path: &Path, schema_dir: &Path) -> Result<Value, ConfigError> {
+fn load_cnc_profile(path: &Path, _schema_dir: &Path) -> Result<Value, ConfigError> {
     let text = fs::read_to_string(path).map_err(|e| {
         ConfigError::Io(e)
     })?;
@@ -113,6 +114,7 @@ fn load_cnc_profile(path: &Path, schema_dir: &Path) -> Result<Value, ConfigError
 }
 
 /// Save global settings to global.setting.yaml
+#[allow(dead_code)]
 pub fn save_global_settings(
     app_dirs: &AppDirs,
     global_settings: &Value,
@@ -125,11 +127,13 @@ pub fn save_global_settings(
 }
 
 /// Save tool stock to stock.yaml
+#[allow(dead_code)]
 pub fn save_stock(app_dirs: &AppDirs, stock: &Value) -> Result<(), ConfigError> {
     save_config_file(&app_dirs.configs, "stock", stock)
 }
 
 /// Save a single CNC profile to cnc_profiles/{profile_name}.yaml
+#[allow(dead_code)]
 pub fn save_cnc_profile(
     app_dirs: &AppDirs,
     profile_name: &str,
@@ -165,6 +169,7 @@ pub fn save_cnc_profile(
 }
 
 /// Generic helper to save a config file as YAML
+#[allow(dead_code)]
 fn save_config_file(
     config_dir: &Path,
     file_stem: &str,
