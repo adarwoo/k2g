@@ -387,72 +387,6 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                     match active_view {
                         JobCenterView::Board => rsx! {
                             div { class: "board-preview",
-                                button {
-                                    class: "btn btn-secondary",
-                                    onclick: move |_| {
-                                        match KiCadClientBlocking::connect() {
-                                            Ok(client) => {
-                                                let version_label = client
-                                                    .get_version()
-                                                    .map(|v| v.full_version)
-                                                    .unwrap_or_else(|_| "unknown".to_string());
-                                                match client.get_open_documents(DocumentType::Pcb) {
-                                                    Ok(docs) => {
-                                                        let mut boards: Vec<String> = docs
-                                                            .into_iter()
-                                                            .filter_map(|doc| doc.board_filename)
-                                                            .collect();
-                                                        boards.sort();
-                                                        boards.dedup();
-
-                                                        let current = selected_board_filename.read().clone();
-                                                        let next_selected = if boards.contains(&current) {
-                                                            current
-                                                        } else {
-                                                            boards.first().cloned().unwrap_or_default()
-                                                        };
-
-                                                        open_board_filenames.set(boards.clone());
-                                                        selected_board_filename.set(next_selected.clone());
-
-                                                        let status = if boards.is_empty() {
-                                                            format!(
-                                                                "Connected to KiCad {version_label}, but no open PCB documents were found.",
-                                                            )
-                                                        } else if boards.len() == 1 {
-                                                            format!(
-                                                                "Connected to KiCad {version_label}. 1 open PCB: {}",
-                                                                board_display_label(&boards[0]),
-                                                            )
-                                                        } else {
-                                                            format!(
-                                                                "Connected to KiCad {version_label}. {} open PCBs detected. Select one before refreshing board snapshot.",
-                                                                boards.len(),
-                                                            )
-                                                        };
-                                                        board_refresh_status.set(status);
-                                                    }
-                                                    Err(err) => {
-                                                        open_board_filenames.set(Vec::new());
-                                                        selected_board_filename.set(String::new());
-                                                        board_refresh_status
-                                                            .set(
-                                                                format!(
-                                                                    "Connected to KiCad {version_label}, but listing open boards failed: {err}",
-                                                                ),
-                                                            );
-                                                    }
-                                                }
-                                            }
-                                            Err(err) => {
-                                                open_board_filenames.set(Vec::new());
-                                                selected_board_filename.set(String::new());
-                                                board_refresh_status.set(format!("KiCad check failed: {err}"));
-                                            }
-                                        }
-                                    },
-                                    "Refresh KiCad Boards"
-                                }
                                 if !open_board_filenames_value.is_empty() {
                                     div { class: "field section-subfield",
                                         label { "Open PCB documents" }
@@ -472,68 +406,6 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             }
                                         }
                                     }
-                                }
-                                button {
-                                    class: "btn btn-secondary",
-                                    onclick: move |_| {
-                                        match KiCadClientBlocking::connect() {
-                                            Ok(client) => {
-                                                let requested_board = {
-                                                    let selected = selected_board_filename.read().clone();
-                                                    if selected.trim().is_empty() { None } else { Some(selected) }
-                                                };
-                                                let snapshot_result = if let Some(board_filename) = requested_board
-                                                    .as_deref()
-                                                {
-                                                    collect_board_snapshot_for_board(&client, Some(board_filename))
-                                                } else {
-                                                    collect_board_snapshot(&client)
-                                                };
-                                                match snapshot_result {
-                                                    Ok(board_snapshot) => {
-                                                        let hole_count = board_snapshot.holes.len();
-                                                        let has_bbox = board_snapshot.bounding_box.is_some();
-                                                        let stitch_result =
-                                                            stitch_edge_shapes(&board_snapshot.edge_shapes);
-                                                        let contour_count = stitch_result.contours.len();
-                                                        let thickness_status = board_snapshot
-                                                            .thickness
-                                                            .as_ref()
-                                                            .map(|thickness| { format!("{:.3}mm", thickness.as_mm()) })
-                                                            .unwrap_or_else(|| "unavailable".to_string());
-                                                        state.with_mut(|s| s.board = Some(board_snapshot));
-                                                        let bbox = if has_bbox { "yes" } else { "no" };
-                                                        let board_source_status = requested_board
-                                                            .as_ref()
-                                                            .map(|v| format!("board {}", board_display_label(v)))
-                                                            .unwrap_or_else(|| "auto board selection".to_string());
-                                                        let geometry_status = if stitch_result.errors.is_empty() {
-                                                            format!("{contour_count} contour(s) - OK")
-                                                        } else {
-                                                            format!(
-                                                                "geometry invalid: {}",
-                                                                stitch_result.errors.join("; "),
-                                                            )
-                                                        };
-                                                        board_refresh_status
-                                                            .set(
-                                                                format!(
-                                                                    "Board snapshot refreshed ({board_source_status}): {hole_count} holes, bounding box {bbox}, {geometry_status}, thickness {thickness_status}.",
-                                                                ),
-                                                            );
-                                                    }
-                                                    Err(err) => {
-                                                        board_refresh_status
-                                                            .set(format!("Board snapshot refresh failed: {err}"));
-                                                    }
-                                                }
-                                            }
-                                            Err(err) => {
-                                                board_refresh_status.set(format!("KiCad IPC connection failed: {err}"));
-                                            }
-                                        }
-                                    },
-                                    "Refresh Board Snapshot"
                                 }
                                 if !board_refresh_status.read().is_empty() {
                                     p { class: "diag-status", "{board_refresh_status}" }
@@ -646,10 +518,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                             }
                                                         },
                                                         SvgShape::Path(d) => rsx! {
-                                                            path {
-                                                                d: "{d}",
-                                                                class: "board-edge-shape",
-                                                            }
+                                                            path { d: "{d}", class: "board-edge-shape" }
                                                         },
                                                         SvgShape::Rect { x, y, w, h, rx } => rsx! {
                                                             rect {
@@ -984,10 +853,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                 select {
                                     value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
                                     onchange: move |evt| {
                                         let value = evt.value();
                                         state
@@ -1126,10 +995,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         select {
                                             disabled: snapshot.job_config.outline_router_tool_id.is_none(),
                                             value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
                                             onchange: move |evt| {
                                                 let value = evt.value();
                                                 state

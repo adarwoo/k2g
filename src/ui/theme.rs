@@ -135,6 +135,11 @@ body {
     color: var(--accent);
 }
 
+.status-err {
+    background: color-mix(in srgb, var(--err) 20%, transparent);
+    color: var(--err);
+}
+
 .btn {
     border: 1px solid var(--border);
     background: var(--bg-elev);
@@ -696,7 +701,7 @@ th {
 
 .board-canvas {
     width: min(760px, 95%);
-    border-radius: 12px;
+    border-radius: 0;
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
     overflow: hidden;
@@ -762,8 +767,9 @@ th {
     fill: none;
     stroke: color-mix(in srgb, var(--ok) 70%, var(--accent));
     stroke-width: 3;
-    stroke-linecap: round;
-    stroke-linejoin: round;
+    stroke-linecap: butt;
+    stroke-linejoin: miter;
+    stroke-miterlimit: 10;
     opacity: 0.85;
 }
 
