@@ -5,7 +5,7 @@ edition = "2021"
 description = "GCode generator"
 
 [dependencies]
-kicad-ipc-rs = { version = "0.4.1", features = ["blocking"] }
+kicad-ipc-rs = { path = "crates/kicad-ipc-rs", features = ["blocking"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 dioxus = { version = "0.7", features = ["desktop"] }

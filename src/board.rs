@@ -1,11 +1,13 @@
 use kicad_ipc_rs::{
-    KiCadClientBlocking, PcbGraphicShapeGeometry, PcbItem, PcbPadStack, PcbPadType, Vector2Nm,
+    BoardStackupLayerType, KiCadClientBlocking, PcbGraphicShapeGeometry, PcbItem, PcbPadStack,
+    PcbPadType, Vector2Nm,
 };
 
 use crate::units::Length;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardSnapshot {
+    pub thickness: Option<Length>,
     pub bounding_box: Option<BoardBoundingBox>,
     pub edge_shapes: Vec<BoardEdgeShape>,
     pub holes: Vec<BoardHole>,
@@ -98,11 +100,14 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
         .map_err(|e| format!("failed to query open board state: {e}"))?;
     if !has_board {
         return Ok(BoardSnapshot {
+            thickness: None,
             bounding_box: None,
             edge_shapes: Vec::new(),
             holes: Vec::new(),
         });
     }
+
+    let board_thickness = collect_board_thickness_from_stackup(client);
 
     let mut edge_shapes = Vec::new();
     let mut edge_item_ids = Vec::new();
@@ -276,10 +281,51 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
     });
 
     Ok(BoardSnapshot {
+        thickness: board_thickness,
         bounding_box,
         edge_shapes,
         holes,
     })
+}
+
+pub fn collect_board_snapshot_for_board(
+    client: &KiCadClientBlocking,
+    board_filename: Option<&str>,
+) -> Result<BoardSnapshot, String> {
+    let preferred = board_filename.map(str::to_string);
+    client
+        .set_preferred_board_filename(preferred)
+        .map_err(|e| format!("failed to select board context: {e}"))?;
+    collect_board_snapshot(client)
+}
+
+fn collect_board_thickness_from_stackup(client: &KiCadClientBlocking) -> Option<Length> {
+    let stackup = client.get_board_stackup().ok()?;
+
+    let sum_nm: i64 = stackup
+        .layers
+        .iter()
+        .filter(|layer| layer.enabled)
+        .filter(|layer| !matches!(layer.layer_type, BoardStackupLayerType::SolderPaste))
+        .filter_map(|layer| layer.thickness_nm)
+        .filter(|thickness_nm| *thickness_nm > 0)
+        .sum();
+
+    if sum_nm > 0 {
+        return Some(Length::from_nm(sum_nm));
+    }
+
+    // Some KiCad versions may only populate dielectric child entries.
+    let dielectric_sum_nm: i64 = stackup
+        .layers
+        .iter()
+        .filter(|layer| layer.enabled)
+        .flat_map(|layer| layer.dielectric_layers.iter())
+        .filter_map(|dielectric| dielectric.thickness_nm)
+        .filter(|thickness_nm| *thickness_nm > 0)
+        .sum();
+
+    (dielectric_sum_nm > 0).then(|| Length::from_nm(dielectric_sum_nm))
 }
 
 fn safe_get_items_by_type_codes(client: &KiCadClientBlocking, type_codes: Vec<i32>) -> Vec<PcbItem> {

@@ -469,6 +469,7 @@ impl CutDepthStrategy {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BoardThicknessMode {
+    Automatic,
     Preset,
     UserDefined,
     Probe,
@@ -478,6 +479,7 @@ impl BoardThicknessMode {
     #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Automatic => "automatic",
             Self::Preset => "preset",
             Self::UserDefined => "user_defined",
             Self::Probe => "probe",
@@ -688,7 +690,7 @@ impl UiState {
                 cut_depth_strategy: CutDepthStrategy::Automatic,
                 multi_pass_max_depth_mm: 1.0,
                 outline_router_tool_id: None,
-                board_thickness_mode: BoardThicknessMode::Preset,
+                board_thickness_mode: BoardThicknessMode::Automatic,
                 board_thickness_preset_mm: 1.6,
                 board_thickness_user_value: 1.6,
                 z0_determination_mode: Z0DeterminationMode::ManualAdjustZ0,

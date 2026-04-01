@@ -1,14 +1,26 @@
 use dioxus::prelude::*;
+use std::path::Path;
 
-use crate::board::collect_board_snapshot;
+use crate::board::{collect_board_snapshot, collect_board_snapshot_for_board};
 use crate::board::HoleKind;
-use kicad_ipc_rs::KiCadClientBlocking;
+use kicad_ipc_rs::{DocumentType, KiCadClientBlocking};
 use super::super::model::*;
+
+fn board_display_label(board_filename: &str) -> String {
+    Path::new(board_filename)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("{name} ({board_filename})"))
+        .unwrap_or_else(|| board_filename.to_string())
+}
 
 #[component]
 pub fn JobScreen(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let mut board_refresh_status = use_signal(String::new);
+    let mut open_board_filenames = use_signal(Vec::<String>::new);
+    let mut selected_board_filename = use_signal(String::new);
     let mut board_zoom = use_signal(|| 1.0_f64);
     let mut board_pan_x = use_signal(|| 0.0_f64);
     let mut board_pan_y = use_signal(|| 0.0_f64);
@@ -16,9 +28,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let has_atc = snapshot.selected_machine_has_atc();
     let board_thickness_is_probe = snapshot.job_config.board_thickness_mode == BoardThicknessMode::Probe;
+    let board_thickness_is_automatic =
+        snapshot.job_config.board_thickness_mode == BoardThicknessMode::Automatic;
     let board_thickness_is_entered = matches!(
         snapshot.job_config.board_thickness_mode,
-        BoardThicknessMode::Preset | BoardThicknessMode::UserDefined
+        BoardThicknessMode::Automatic | BoardThicknessMode::Preset | BoardThicknessMode::UserDefined
     );
     let board_thickness_uses_touch_probe = if board_thickness_is_probe {
         true
@@ -36,6 +50,39 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         "0.001"
     } else {
         "0.1"
+    };
+    let board_thickness_auto_mm = snapshot
+        .board
+        .as_ref()
+        .and_then(|board| board.thickness.as_ref())
+        .map(|thickness| thickness.as_mm() as f32);
+    let board_thickness_value_mm = match snapshot.job_config.board_thickness_mode {
+        BoardThicknessMode::Automatic => board_thickness_auto_mm,
+        BoardThicknessMode::Preset => Some(snapshot.job_config.board_thickness_preset_mm),
+        BoardThicknessMode::UserDefined => Some(snapshot.job_config.board_thickness_user_value),
+        BoardThicknessMode::Probe => None,
+    };
+    let board_thickness_stats_value = board_thickness_value_mm.map(|thickness_mm| {
+        if snapshot.unit_system == UnitSystem::Imperial {
+            format!("{:.4} in", thickness_mm / 25.4)
+        } else {
+            format!("{thickness_mm:.3} mm")
+        }
+    });
+    let board_thickness_stats_label = match snapshot.job_config.board_thickness_mode {
+        BoardThicknessMode::Automatic => board_thickness_stats_value
+            .as_ref()
+            .map(|v| format!("Board thickness: Auto from KiCad ({v})"))
+            .unwrap_or_else(|| "Board thickness: Auto from KiCad (unavailable)".to_string()),
+        BoardThicknessMode::Preset => board_thickness_stats_value
+            .as_ref()
+            .map(|v| format!("Board thickness: Preset ({v})"))
+            .unwrap_or_else(|| "Board thickness: Preset".to_string()),
+        BoardThicknessMode::UserDefined => board_thickness_stats_value
+            .as_ref()
+            .map(|v| format!("Board thickness: User defined ({v})"))
+            .unwrap_or_else(|| "Board thickness: User defined".to_string()),
+        BoardThicknessMode::Probe => "Board thickness: Probe at runtime".to_string(),
     };
     let atc_slot_count = snapshot.selected_machine().map(|m| m.atc_slot_count).unwrap_or(0);
     let milling_outline_enabled = snapshot
@@ -118,6 +165,8 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         .collect();
 
     let board_view_size = 1000.0_f64;
+    let selected_board_filename_value = selected_board_filename.read().clone();
+    let open_board_filenames_value = open_board_filenames.read().clone();
     let zoom_value = *board_zoom.read();
     let pan_x_value = *board_pan_x.read();
     let pan_y_value = *board_pan_y.read();
@@ -200,16 +249,122 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                     onclick: move |_| {
                                         match KiCadClientBlocking::connect() {
                                             Ok(client) => {
-                                                match collect_board_snapshot(&client) {
-                                                    Ok(board_snapshot) => {
-                                                        let hole_count = board_snapshot.holes.len();
-                                                        let has_bbox = board_snapshot.bounding_box.is_some();
-                                                        state.with_mut(|s| s.board = Some(board_snapshot));
-                                                        let bbox = if has_bbox { "yes" } else { "no" };
+                                                let version_label = client
+                                                    .get_version()
+                                                    .map(|v| v.full_version)
+                                                    .unwrap_or_else(|_| "unknown".to_string());
+                                                match client.get_open_documents(DocumentType::Pcb) {
+                                                    Ok(docs) => {
+                                                        let mut boards: Vec<String> = docs
+                                                            .into_iter()
+                                                            .filter_map(|doc| doc.board_filename)
+                                                            .collect();
+                                                        boards.sort();
+                                                        boards.dedup();
+
+                                                        let current = selected_board_filename.read().clone();
+                                                        let next_selected = if boards.contains(&current) {
+                                                            current
+                                                        } else {
+                                                            boards.first().cloned().unwrap_or_default()
+                                                        };
+
+                                                        open_board_filenames.set(boards.clone());
+                                                        selected_board_filename.set(next_selected.clone());
+
+                                                        let status = if boards.is_empty() {
+                                                            format!(
+                                                                "Connected to KiCad {version_label}, but no open PCB documents were found.",
+                                                            )
+                                                        } else if boards.len() == 1 {
+                                                            format!(
+                                                                "Connected to KiCad {version_label}. 1 open PCB: {}",
+                                                                board_display_label(&boards[0]),
+                                                            )
+                                                        } else {
+                                                            format!(
+                                                                "Connected to KiCad {version_label}. {} open PCBs detected. Select one before refreshing board snapshot.",
+                                                                boards.len(),
+                                                            )
+                                                        };
+                                                        board_refresh_status.set(status);
+                                                    }
+                                                    Err(err) => {
+                                                        open_board_filenames.set(Vec::new());
+                                                        selected_board_filename.set(String::new());
                                                         board_refresh_status
                                                             .set(
                                                                 format!(
-                                                                    "Board snapshot refreshed: {hole_count} holes, bounding box {bbox}.",
+                                                                    "Connected to KiCad {version_label}, but listing open boards failed: {err}",
+                                                                ),
+                                                            );
+                                                    }
+                                                }
+                                            }
+                                            Err(err) => {
+                                                open_board_filenames.set(Vec::new());
+                                                selected_board_filename.set(String::new());
+                                                board_refresh_status.set(format!("KiCad check failed: {err}"));
+                                            }
+                                        }
+                                    },
+                                    "Refresh KiCad Boards"
+                                }
+                                if !open_board_filenames_value.is_empty() {
+                                    div { class: "field section-subfield",
+                                        label { "Open PCB documents" }
+                                        select {
+                                            disabled: open_board_filenames_value.len() <= 1,
+                                            value: selected_board_filename_value.clone(),
+                                            onchange: move |evt| {
+                                                selected_board_filename.set(evt.value());
+                                            },
+                                            for board_filename in open_board_filenames_value.iter() {
+                                                option { value: board_filename.clone(), "{board_display_label(board_filename)}" }
+                                            }
+                                        }
+                                        if open_board_filenames_value.len() > 1 {
+                                            p { class: "diag-status",
+                                                "Multiple PCBs detected. Selected board will be used for snapshot refresh."
+                                            }
+                                        }
+                                    }
+                                }
+                                button {
+                                    class: "btn btn-secondary",
+                                    onclick: move |_| {
+                                        match KiCadClientBlocking::connect() {
+                                            Ok(client) => {
+                                                let requested_board = {
+                                                    let selected = selected_board_filename.read().clone();
+                                                    if selected.trim().is_empty() { None } else { Some(selected) }
+                                                };
+                                                let snapshot_result = if let Some(board_filename) = requested_board
+                                                    .as_deref()
+                                                {
+                                                    collect_board_snapshot_for_board(&client, Some(board_filename))
+                                                } else {
+                                                    collect_board_snapshot(&client)
+                                                };
+                                                match snapshot_result {
+                                                    Ok(board_snapshot) => {
+                                                        let hole_count = board_snapshot.holes.len();
+                                                        let has_bbox = board_snapshot.bounding_box.is_some();
+                                                        let thickness_status = board_snapshot
+                                                            .thickness
+                                                            .as_ref()
+                                                            .map(|thickness| { format!("{:.3}mm", thickness.as_mm()) })
+                                                            .unwrap_or_else(|| "unavailable".to_string());
+                                                        state.with_mut(|s| s.board = Some(board_snapshot));
+                                                        let bbox = if has_bbox { "yes" } else { "no" };
+                                                        let board_source_status = requested_board
+                                                            .as_ref()
+                                                            .map(|v| format!("board {}", board_display_label(v)))
+                                                            .unwrap_or_else(|| "auto board selection".to_string());
+                                                        board_refresh_status
+                                                            .set(
+                                                                format!(
+                                                                    "Board snapshot refreshed ({board_source_status}): {hole_count} holes, bounding box {bbox}, thickness {thickness_status}.",
                                                                 ),
                                                             );
                                                     }
@@ -480,6 +635,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                     span { "Save target: {snapshot.save_filename}" }
                                     span { "Lines: {snapshot.gcode.lines().count()}" }
                                     span { "Characters: {snapshot.gcode.len()}" }
+                                    span { "{board_thickness_stats_label}" }
                                 }
                             }
                         },
@@ -623,10 +779,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                 select {
                                     value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .unwrap_or_default(),
                                     onchange: move |evt| {
                                         let value = evt.value();
                                         state
@@ -765,10 +921,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         select {
                                             disabled: snapshot.job_config.outline_router_tool_id.is_none(),
                                             value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            .unwrap_or_default(),
                                             onchange: move |evt| {
                                                 let value = evt.value();
                                                 state
@@ -796,6 +952,32 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                     div { class: "field",
                         label { "Board Thickness" }
                         div { class: "radio-group vertical",
+                            div { class: "radio-option",
+                                label {
+                                    input {
+                                        r#type: "radio",
+                                        name: "board_thickness_mode",
+                                        value: "automatic",
+                                        checked: snapshot.job_config.board_thickness_mode == BoardThicknessMode::Automatic,
+                                        onchange: move |_| {
+                                            state
+                                                .with_mut(|s| {
+                                                    s.job_config.board_thickness_mode = BoardThicknessMode::Automatic;
+                                                });
+                                        },
+                                    }
+                                    span { "Automatic (from KiCad board data)" }
+                                }
+                                if board_thickness_is_automatic {
+                                    p { class: "diag-status",
+                                        if let Some(thickness_label) = board_thickness_stats_value.as_ref() {
+                                            "Detected thickness: {thickness_label}"
+                                        } else {
+                                            "Detected thickness: unavailable (refresh board snapshot with board open in KiCad)"
+                                        }
+                                    }
+                                }
+                            }
                             div { class: "radio-option",
                                 label {
                                     input {
