@@ -3,6 +3,8 @@ use dioxus::prelude::*;
 use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
+use crate::board::{collect_board_snapshot, collect_board_snapshot_for_board};
+use kicad_ipc_rs::{DocumentType, KiCadClientBlocking};
 
 mod cnc;
 mod job;
@@ -24,6 +26,34 @@ pub fn AppRoot() -> Element {
         )
     });
     let mut show_error_details = use_signal(|| false);
+    let mut startup_board_sync_done = use_signal(|| false);
+
+    // Auto-load board on startup
+    use_effect(move || {
+        if !*startup_board_sync_done.read() {
+            startup_board_sync_done.set(true);
+            match KiCadClientBlocking::connect() {
+                Ok(client) => {
+                    if let Ok(docs) = client.get_open_documents(DocumentType::Pcb) {
+                        let mut boards: Vec<String> = docs
+                            .into_iter()
+                            .filter_map(|doc| doc.board_filename)
+                            .collect();
+                        boards.sort();
+                        boards.dedup();
+                        if !boards.is_empty() {
+                            if let Ok(board_snapshot) = collect_board_snapshot_for_board(&client, Some(&boards[0])) {
+                                state.with_mut(|s| s.board = Some(board_snapshot));
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    // KiCad not available - that's OK, board will be unavailable
+                }
+            }
+        }
+    });
 
     let snapshot = state.read().clone();
     let nav_screens = Screen::nav_items();

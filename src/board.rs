@@ -120,7 +120,7 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
     const KOT_PCB_SHAPE: i32 = 3;
     const KOT_PCB_TRACE: i32 = 11;
     const KOT_PCB_ARC: i32 = 13;
-    
+
     let vias = client
         .get_vias()
         .map_err(|e| format!("failed to fetch vias: {e}"))?;
@@ -314,8 +314,7 @@ fn collect_board_thickness_from_stackup(client: &KiCadClientBlocking) -> Option<
     let sum_nm: i64 = stackup
         .layers
         .iter()
-        .filter(|layer| layer.enabled)
-        .filter(|layer| !matches!(layer.layer_type, BoardStackupLayerType::SolderPaste))
+        .filter(|layer| matches!(layer.layer_type, BoardStackupLayerType::Copper | BoardStackupLayerType::Dielectric))
         .filter_map(|layer| layer.thickness_nm)
         .filter(|thickness_nm| *thickness_nm > 0)
         .sum();
@@ -324,17 +323,7 @@ fn collect_board_thickness_from_stackup(client: &KiCadClientBlocking) -> Option<
         return Some(Length::from_nm(sum_nm));
     }
 
-    // Some KiCad versions may only populate dielectric child entries.
-    let dielectric_sum_nm: i64 = stackup
-        .layers
-        .iter()
-        .filter(|layer| layer.enabled)
-        .flat_map(|layer| layer.dielectric_layers.iter())
-        .filter_map(|dielectric| dielectric.thickness_nm)
-        .filter(|thickness_nm| *thickness_nm > 0)
-        .sum();
-
-    (dielectric_sum_nm > 0).then(|| Length::from_nm(dielectric_sum_nm))
+    None
 }
 
 fn safe_get_items_by_type_codes(client: &KiCadClientBlocking, type_codes: Vec<i32>) -> Vec<PcbItem> {
