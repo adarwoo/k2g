@@ -525,6 +525,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clipper2-rust"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1b2413560cdbee60201f9a77537f3d575d2c42320064bb021fae0793e39d718"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2612,6 +2621,7 @@ name = "k2g"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "clipper2-rust",
  "dioxus",
  "image",
  "jsonschema",
@@ -2622,7 +2632,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]

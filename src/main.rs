@@ -2,12 +2,14 @@ mod catalog;
 mod board;
 mod cli;
 mod config;
+mod stitching;
 mod ui;
 mod units;
 mod user_path;
 
 use cli::CliArgs;
 use kicad_ipc_rs::KiCadClientBlocking;
+use stitching::stitch_edge_shapes;
 use ui::UiLaunchData;
 
 fn main() {
@@ -29,7 +31,25 @@ fn main() {
             Ok(v) => {
                 let status = format!("Connected - KiCad {}", v.full_version);
                 let snapshot = match board::collect_board_snapshot(&client) {
-                    Ok(s) => Some(s),
+                    Ok(s) => {
+                        let stitch_result = stitch_edge_shapes(&s.edge_shapes);
+                        if stitch_result.errors.is_empty() {
+                            println!(
+                                "[stitch] startup: {} edge shape(s), {} contour(s) — OK",
+                                s.edge_shapes.len(),
+                                stitch_result.contours.len(),
+                            );
+                        } else {
+                            eprintln!(
+                                "[stitch] startup: {} error(s) — board cannot be processed:",
+                                stitch_result.errors.len(),
+                            );
+                            for e in &stitch_result.errors {
+                                eprintln!("[stitch]   {e}");
+                            }
+                        }
+                        Some(s)
+                    }
                     Err(err) => {
                         eprintln!("warning: could not collect board snapshot: {err}");
                         None

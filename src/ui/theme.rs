@@ -696,7 +696,6 @@ th {
 
 .board-canvas {
     width: min(760px, 95%);
-    aspect-ratio: 1 / 1;
     border-radius: 12px;
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
@@ -710,7 +709,7 @@ th {
 
 .board-svg {
     width: 100%;
-    height: 100%;
+    height: auto;
     display: block;
 }
 
@@ -757,6 +756,15 @@ th {
 
 .board-hole-npth-halfbox {
     stroke: color-mix(in srgb, var(--warn) 85%, var(--text));
+}
+
+.board-edge-shape {
+    fill: none;
+    stroke: color-mix(in srgb, var(--ok) 70%, var(--accent));
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
 }
 
 .board-legend {
