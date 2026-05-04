@@ -1,26 +1,29 @@
 # KiCad CNC GCode Plugin Specification
 
 ## 1. Introduction
-This document specifies a portable KiCad plugin for Windows, Linux, and macOS.
+This document specifies a portable application which doubles as a KiCad plugin.
+The application/plugin targets Windows, Linux, and macOS environments.
 
+The application core function is to generate a CNC GCode from a KiCad PCB board data.
+
+## 2. Core technology
 - Implementation language: Rust
+- Configuration files and libraries format: YAML and YAML schemas.
 - KiCad integration: KiCad IPC library
-- Core function: generate CNC GCode from the active KiCad PCB board
-
-## 2. User Interface
-The user interface is implemented in Rust with a React-like component model.
+- The user interface is implemented in Rust with a React-like component model based on the Dioxus API.
 
 ## 3. General UX Principles
 The UI enforces the following principles:
 
-- All actions and configuration are saved automatically.
-- Existing errors and warnings are summarized at the top of the screen.
-- Clicking an error or warning opens full context/details.
-- Code generation is continuous and automatic.
-   - Any relevant change triggers regeneration.
-   - Generation can be stopped and restarted.
-   - There is no explicit "Generate" button.
-- Users can configure preferred units.
+- All actions and configuration are saved automatically
+- Existing errors and warnings are summarized at the top of the screen
+- Changes are reported at the bottom of the screen
+- Clicking an error or warning opens full context/details
+- Code generation is continuous and automatic
+   - Any relevant change triggers regeneration
+   - Generation can be stopped and restarted
+   - There is no explicit "Generate" button
+- Users can configure preferred units
    - If the native value unit differs from user preference, conversion is shown automatically.
 
 ## 4. Screen UX Direction
@@ -29,11 +32,47 @@ The visual intent is similar to PrusaSlicer/Bambu Studio: a large viewport with 
 - The machining surface should be shown whenever applicable (for CNC workflows).
 - Users should immediately see the effect of configuration changes.
 
+Note: Here are all the functions to include in the UX
+1. Global setup
+Units, language etc. at the application level
+2. Job configuration
+After selecting a job profile, allow overridding some of the pre-selections
+3. Profiles
+The profiles allow configuring the correct machining environment.
+We have:
+  - CNC profiles     - Defines a CNC machine
+  - Fixture profiles - Defines how the PCB is fixed to the machining bed
+  - Job profiles     - Define what should be machined
+4. Job profile - Allow editing a given job profile
+5. CNC profile - Allow editing a given CNC profile
+Includes spindle properties (RPM etc.), rack or not etc.
+6. Fixture profile - Allow editing a given fixture profile
+7. Tools catalogs - Allow viewing, copying, cloning tools catalog
+8. Stock - The stock is made of tools imported from tools catalogs
+9. Job setup - Selection of the job profile.
+The job profile includes what to do, the CNC and fixture.
+In the job, it is possible to override some of the profiles settings.
+10. Job code review
+The generated GCode can be reviewed and edited. The changes are meta defined 
+11. Job machining review
+Review what will be machined. A further iteration might display the operations.
+12. PCB view
+View the raw PCB data of interest - as imported from KiKAD.
+13. Error log
+Some of the profiles may generate errors (job profile tolerances, lack of tools etc.)
+The pending errors and warning should show. Click one should expand to a full view.
+14. Actions log
+All actions shall be added to a log and shown breifly at the bottom of the screen.
+15. PCB selection
+If the application is started outside of KiCAD, the user should be able to select which PCB to machine.
+This requires for 1 or more running KiCAD PCB instances.
+As soon as a PCB is selected, the data is imported from KiCAD, and the GCode generated if possible.
+
 ### 4.1 Board View vs Program View
 Both visual board feedback and raw GCode review are important.
 
-- Board view and generated program view should be available on most screens.
-- Alternating between views is acceptable.
+- Board view and generated program view should is available on most screens.
+- Alternating between views is done in the view port (top right selection toggling buttons).
 - In some cases, users need to inspect board and program side-by-side.
 
 ## 5. Setup
@@ -59,17 +98,16 @@ Users can:
 
 - Select a CNC profile
 - Create a new CNC profile
+   - Import a profile
    - Clone an existing profile
    - Start from a built-in template
-- Delete a CNC profile
+- Delete a CNC profile (only created profiles. Stock profiles are readonly)
 - Edit a CNC profile
-
-When freshly installed, no machine exists, so the user must create one.
 
 #### New CNC Profile Wizard
 Clicking `+` opens a mini wizard:
 
-- Shows stock templates (for example: Generic, 3040, Masso)
+- Shows stock profiles (Generic, Genmitsu3040, Masso)
 - Shows existing profiles available for cloning
 - Requires a unique profile name
    - Clone default: `Copy of <profile name>`
@@ -87,6 +125,7 @@ General section fields:
 - Fixture plate max size: `X`, `Y`
 - Max feed rate
 - Spindle min/max RPM
+- Spindle start/stop delay. This is a RHAI field so it can be calculated.
 - ATC slot count (`0` means ATC off)
 - `X0` origin orientation: `Left` (or `Right`, `Front`, `Back`)
 - `Y0` origin orientation: `Front` (or `Back`, `Left`, `Right`)
@@ -94,7 +133,7 @@ General section fields:
 - Program line numbering: `Yes/No`
    - Increment value (for example: `10`)
 
-## 6. Program Section
+## 5.4 CNC profile Program Section
 The program section is organized around:
 
 - Individual machining operations
@@ -114,13 +153,21 @@ Profiles behavior:
 - Application ships with predefined profiles.
 - New machine profiles can be cloned from existing profiles.
 
+All RHAI sections can be dynamically edited by clicking |>. (They are read-only otherwise).
+This displays a dialog listing all the variable passed to the function with default values.
+Click on the variable adds it at the cursor position in the edit field.
+The result value is show automatically, just like parsing errors.
+The resulting output is tested to be valid GCode.
+
+Each function comes with a pre-defined list of variables. Custom attributes are automatically added to the scope of all functions.
+
 ### 6.1 Sanity Check
 The `Sanity check` function generates a string from current configuration.
 
 - If output is non-empty text, job generation is blocked.
 - The returned text is shown as an error.
 
-### 6.2 Custom Attributes
+### 5.5 Custom Attributes
 Users can define CNC-specific custom attributes for jobs.
 
 Supported attribute types:
@@ -131,12 +178,29 @@ Supported attribute types:
 
 Each attribute requires:
 
-- Type (`bool`, `string`, `list`)
+- Name (must be a valid RHAI variable name, and unique)
+- Type (`bool`, `string`, `list`, `percent`, `number`, `date`)
 - Description
-- Default value
-- RHAI validation function
+- For the list type, the user can '+' values. This takes a name and a description
+- Default value. For list, it must be chosen from the list, or no value which sets the content to ().
+- RHAI validation/convertion function
    - Receives all values
-   - Returns a warning string
+   - Returns a value (could be the same) or throw an error
+   Example: If a percentage is expected:
+   Type: percent
+   Description: Apply x,y scaling factor (%)
+   Name: xy_scaling
+   Validation:
+      A RHAI function which gets executed when the value is edited.
+      The function must throw a string on error.
+      It can optionally return a value which becomes the value used.
+      Example:
+      if xy_scaling < 0.0 {
+         throw `Percentage out of range: ${s}`;
+      }
+      Other example with transformation:
+      if xy_scaling.is_float(): // Round the number
+         int(xy_scaling)
 
 ## 7. Main Application Flow
 The application may notify startup errors in a popup.
@@ -155,17 +219,19 @@ The stock page lists tools available for machining.
 Each stock item includes:
 
 - Name
+- Source item SKU (Read-only - copied over from the catalog)
 - Auto-generated summary (`router bit`, `drill bit`, `end mill`, including V bits/grooving bits) + diameter
-- Status: `In stock`, `In rack`, `Out of stock`, `New`
+- Status: `In stock`, `Out of stock`
    - `In stock`: available and usable by program
-   - `In rack`: currently present in rack based on last job
    - `Out of stock`: unavailable, should be reordered
-   - `New`: recently added from catalog; becomes `In stock`/`In rack` once used
-- Not prefered: A boolean to indicate the tool can be used if no other choice
-- Operation counter
+- Prefered / Neutral / Not prefered: A selection to help the engine select the best tool
+   - `Prefered` : If several tool are a good match, the 'Prefered' ones gets selected
+   - `Neutral` : The default. Gets selected over 'Not prefered' but not over 'Prefered'
+   - `Not prefered` : The engine will try to avoid this tools
+- Operation counter (This counter can be reset)
    - Routers/end mills: cumulative machining distance
    - Drill bits: number of holes
-- Source item SKU
+- All properties of the tool can be edited
 
 Adding tools:
 - `+` button allows adding from catalog
@@ -177,14 +243,13 @@ Adding tools:
 
 - For catalog tools, properties are prefilled.
    - Some properties remain editable.
-   - Manufacturer and SKU are read-only.
-- If catalog item disappears, source info is greyed out.
-- If a property differs from catalog default, original value is shown in grey (in brackets).
+   - Catalog source and SKU are read-only.
+- If a property differs from catalog default, original value is shown in grey (in brackets) and a 'refresh' icon button is added to allow reverting the change.
 
 ### 8.2 Catalog
-The app includes a generic tool catalog (drill bits and routers, standard sizes).
+The app includes some tool catalogs (drill bits and routers, standard sizes).
 
-- Catalog is organized in libraries (vendor/manufacturer/category grouping).
+- A catalog has libraries (vendor/manufacturer/category grouping).
 - Example libraries:
    - UnionFab drill bits metric
    - UnionFab router bits imperial
@@ -215,19 +280,22 @@ Catalog access:
 - Supports selecting multiple tools
 - Shown as overlay; closed with `<` back action
 
-### 8.3 Job Page
-The job page is where users decide what to produce.
+### 8.3 Job profiles Page
+The job profiles page is where users decide what to produce.
 
 Fields and controls:
 
-- Selected CNC machine (click navigates to machine configuration)
+- Selected CNC profile (click navigates to machine configuration)
+   - Selected fixture for the PCB from the CNC profile list
+      - Includes the backing board thickness
+      - Includes the entry plate
+   - CNC profile parameters (for example machine coordinate)
 - Job production types (any combination)
    - Drill locating pins
    - Drill PTH holes
    - Drill NPTH
    - Route board
    - Mill board
-- CNC profile parameters (for example machine coordinate)
 - Side to drill
    - Front
    - Back
@@ -321,3 +389,45 @@ An error/warning banner may appear on all pages.
    - Warning: orange
 - Banner shows summary only (no scrolling required).
 - Detailed messages are shown in the data generation view.
+
+## 12. The flow
+
+### 12.1 Simple flow
+
+When launched, the application needs to connect to a KiCAD instance which has a PCB available
+This implies:
+ - Scanning for all KiCad socket (unless passed in environment variable)
+ - Checking for PCBs loaded
+Unless started from a KiCAD PCB (the environment variable is set), the user should select the PCB from a dropdown list.
+This list should be refreshed when the user drops it down.
+If the application was started from KiCAD, the selection is greyed out.
+A refresh icon is shown once the PCB data has been collected. Clicking on the button, restart a computation cycle:
+ - Collection of the PCB data
+ - Creation of the job data
+
+Possible errors:
+ - If the KiCad instance goes away whilst the data is being collected, the job is dropped, an error is reported (lost connection whilst ..) and the user needs to select from the list.
+
+Once the PCB data is collected, the user can configure the job.
+A job is created from a Job profile. (the job profile must have been created previously).
+The Job profile preconfigures all that can be pre-configured.
+The user can override any of the job profile settings in the job.
+Any override shows by changing the color of the attribute to orange, and a small 'revert' icon gets added.
+
+Example use case 1 - Drill PTH for a PCB
+From KiCAD, the user clicks on the Plugin icon.
+The application opens and the PCB data is automatically imported. The PCB name is shown in the list, but it cannot be changed. A refresh icon is added next to the name.
+The user selects a job profile at the top of the screen from a dropdown list.
+The last job profile is automatically selected. (Either the last used, or the last created, whichever comes last)
+The job detail is shown with machining detail.
+The user can review the settings, the generated code and rack, and send the GCode to the CNC (if the CNC allows it).
+
+### 12.2 From installation
+
+When the application is installed fresh, the user must create the following:
+1. A CNC profile (optional - stock profile can be used)
+2. A stock - mandatory.
+   The user selects tools from stock catalogs
+3. A job profile (optional - standard profiles exists, using standard CNC profiles)
+
+So as a minimum, the user must add tools to the stock from catalog.

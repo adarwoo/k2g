@@ -1,4 +1,7 @@
 kicad2gcode/
+design-artifacts/
+_bmad/
+_bmad-output/
 
 # Rust build artifacts
 target/
