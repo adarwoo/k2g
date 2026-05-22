@@ -1,7 +1,8 @@
 # KiCad CNC GCode Plugin Specification
 
 ## 1. Introduction
-This document specifies a portable application which doubles as a KiCad plugin.
+This document documents all requirements identified for the K2G application.
+This application is a portable application which doubles as a KiCad plugin.
 The application/plugin targets Windows, Linux, and macOS environments.
 
 The application core function is to generate a CNC GCode from a KiCad PCB board data.
@@ -21,7 +22,6 @@ The UI enforces the following principles:
 - Clicking an error or warning opens full context/details
 - Code generation is continuous and automatic
    - Any relevant change triggers regeneration
-   - Generation can be stopped and restarted
    - There is no explicit "Generate" button
 - Users can configure preferred units
    - If the native value unit differs from user preference, conversion is shown automatically.
@@ -53,7 +53,7 @@ Includes spindle properties (RPM etc.), rack or not etc.
 The job profile includes what to do, the CNC and fixture.
 In the job, it is possible to override some of the profiles settings.
 10. Job code review
-The generated GCode can be reviewed and edited. The changes are meta defined 
+The generated GCode can be reviewed and edited. The changes are meta defined
 11. Job machining review
 Review what will be machined. A further iteration might display the operations.
 12. PCB view
@@ -431,3 +431,91 @@ When the application is installed fresh, the user must create the following:
 3. A job profile (optional - standard profiles exists, using standard CNC profiles)
 
 So as a minimum, the user must add tools to the stock from catalog.
+
+# Technical implementation details
+
+1. The code shall be fully coded in Rust
+All resource files are built in the library
+2. All dynamic parsing in the application shall be managed by RHAI
+3. When the source of a PCB becomes known, all data are read and stored in memory.
+4. A stiching algorithm is used to connect all items on the same layer (arc, bezier, lines)
+5. The GCode generation uses a travelling salesman problem sorting algorithm leveraging existing library
+6. KiCAD is accessed using the IPC mode. The library used is kicad-ipc-rs
+7. All configuration data, stock, machines etc are specified in Yaml
+All Yaml calls for a schema file in Yaml too
+
+## Application startup
+
+### Parsing of configuration
+When the application starts it first parses all the configuration files.
+Any error during parsing rejects the file and insert an transient error in the log. If the errored file is internal, an error diagnostic is display and the application terminates once the user has acknoledged the error.
+The external errored file is renamed (appending .error). If a file exist, it is deleted.
+If during the processing of the error file, an error occurs (cannot delete, rename etc.), a transient error is added to the log.
+
+### Processing of PCB data
+As soon as the PCB data can be transfered (application started with the KiCAD environment varaible set) or selection of the PCB change by the user, the data is acquired.
+The application checks for a valid board outline (Stiching is applied to the edge items).
+An error is generated if the outline is not valid - and the board cannot be processed.
+The following data is of interest:
+ * All holes for drilling (pads and holes)
+ * All Edge items (lines, arcs, bezier)
+
+Note: This version does do the trace routing for now.
+
+
+### Program generation
+Once the user selects job operations, the GCode program is automatically generated.
+The generation is a background tasks to prevent blocking the UI during generation. The generation could be dropped if the user is making a change requiring to regenerated.
+The generation can generate errors.
+These errors are linked to the generation.
+They are cleared when a new generation is started.
+When the generation completes, the result is loaded.
+The results are clear when a new generation starts.
+
+#### Program algorithm
+The jobs are organised to yeild a generation driven for per job:
+1 - Drilling jobs (all about holes)
+2 - Contouring jobs (routing, scoring, tabs)
+3 - Engraving will be added later on
+
+#### Primitives
+All operations generated from the job types generate primitive instrutions.
+These primitives are only converted by the CNC using the RHAI expression in the final pass.
+A primitive is like:
+ * initialise
+ * Move slow to x,y
+ * Start spindle
+ * Drill
+ * PeckDrill
+ * CutArc
+ * CutBezier
+ * Start spindle
+ * Change tool
+ * conclude
+
+Example: CutBezier
+Some CNC can accept bezier G3.4 on Siemens - others cannot.
+The primitive converts into GCode which the CNC can execute.
+For Bezier, the RHAI can call a built-in primitive bezier-to-arcs.
+
+#### Primitive rendering
+Primitive are used in given context: CNC used, tool used.
+When the primitive renders, it leverages the context.
+The feed rate is obtained from the current tool:
+G1 23 23 F${cuttingTool.feedrate.mmmin}
+
+
+#### Drilling
+1. A list of holes is created
+2. Holes are mapped to tools - including holes that needs routing
+3. For each tool, TSP creates the drilling order
+
+Then the program is generated using:
+Header + foreach hole : [TC + Hole (drill/route)] + Footer
+
+The code generation generates an ordered list of primitives.
+
+#### Countouring
+The is cutting the edge.
+The number of passes is calculated.
+

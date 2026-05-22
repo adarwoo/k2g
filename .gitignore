@@ -18,3 +18,4 @@ gcoder_rust/kicad-rs/
 Thumbs.db
 .vscode/
 .idea/
+.claude/
