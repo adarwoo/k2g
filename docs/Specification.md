@@ -206,26 +206,37 @@ Profiles behavior:
 - Application ships with predefined profiles.
 - New machine profiles can be cloned from existing profiles.
 
-All RHAI sections can be dynamically edited by clicking |>. (They are read-only otherwise).
-This displays a dialog listing all the variable passed to the function with default values.
-Click on the variable adds it at the cursor position in the edit field.
-The result value is show automatically, just like parsing errors.
-The resulting output is tested to be valid GCode.
+All RHAI sections can be dynamically edited.
+- When the user presses enter, the expression is validated.
+- Any errors are shown, and the focus remains. Only ESC reverts to the previous expression.
+- Custom attributes are automatically added to the scope of all functions.
 
-Each function comes with a pre-defined list of variables. Custom attributes are automatically added to the scope of all functions.
+Units of variables:
+- The renderer context knows the rendered units to use.
+- At the start of the rendering, the render units is undefined.
+- Attempting to render a value will trigger an error
+  - Error: Attempted to render value 'x' before units were defined.
+  - Hint: Call {set_metric} or {set_imperial} in initialise.
+- The RHAI function set_unit() must be called once.
+- The built-in primitives set_metric and set_imperial are defined to issue the GCode to the CNC and set the context rendering units.
+
+```
+set_metric: |
+    G21
+    {set_units("mm", "mm_min")}
+
+set_imperial: |
+    G20
+    {set_units("inch", "ipm")}
+```
 
 Examples:
-machine:
-  program_units:
-    length: "mm"
-    feedrate: "mm/min"
-
-primitives:
-  initialise: |
+```
+  initialise: code: |
     (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     (Reset all back to safe defaults)
     G17 G54 G40 G49 G80 G90
-    G21
+    {set_metric}
     G10 P0
     G0 Z{z_safe}
   move_slow: "G0 X{x} Y{y}"
@@ -246,7 +257,7 @@ primitives:
     S{rpm}
   conclude: |
     (end of file)
-
+```
 RHAI parser and expression model:
 
 - The application includes a RHAI expression parser/evaluator used by CNC program snippets and expression-backed profile fields.
