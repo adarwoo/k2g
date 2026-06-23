@@ -82,12 +82,20 @@ On first launch, the product enters a guided readiness flow that can open Setup 
 
 ### 6.1 General Settings
 
+Note, the general settings is about
+
 - Theme:
   - Light
   - Dark
+ 
+- Display Units:
+  - Metric: All units are also shown in metric mm rounded to the nearest 0.001mm
+  - In: All units are also shown in decimal inch (") rounded to the nearest 0.00001"
+  - mil: All units are also shown in decimal mil (mil) rounded to the nearest 0.1mil
 
 General settings are global to the application, not specific to a CNC, fixture, board, or job.
 Unit preferences are controlled from the top bar quick-toggle and are persisted globally.
+Same for theme.
 
 Schema-backed persisted global settings also include:
 
