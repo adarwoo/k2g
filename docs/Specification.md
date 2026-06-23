@@ -216,24 +216,24 @@ Units of variables:
 - At the start of the rendering, the render units is undefined.
 - Attempting to render a value will trigger an error
   - Error: Attempted to render value 'x' before units were defined.
-  - Hint: Call {set_metric} or {set_imperial} in initialise.
+  - Hint: Call {ctx.set_metric} or {ctx.set_imperial} in initialise.
 - The RHAI function set_unit() must be called once.
 - The built-in primitives set_metric and set_imperial are defined to issue the GCode to the CNC and set the context rendering units.
 
 ```
 set_metric: |
     G21
-    {set_units("mm", "mm_min")}
+    {ctx.set_units("mm", "mm_min")}
 
 set_imperial: |
     G20
-    {set_units("inch", "ipm")}
+    {ctx.set_units("inch", "ipm")}
 ```
 
 Examples:
 ```
   initialise: code: |
-    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    (Created by kicad2gcode from '{filename}' - {timestamp})
     (Reset all back to safe defaults)
     G17 G54 G40 G49 G80 G90
     {set_metric}
@@ -274,21 +274,40 @@ Primitive templates as CNC configuration attributes (schema-required):
 
 Required primitive attributes:
 
-- `primitives.initialise` -> maps to primitive `initialise`
-- `primitives.move_slow` -> maps to primitive `move_slow(x, y)`
-- `primitives.start_spindle` -> maps to primitive `start_spindle`
-- `primitives.stop_spindle` -> maps to primitive `stop_spindle`
-- `primitives.drill` -> maps to primitive `drill`
-- `primitives.peck_drill` -> maps to primitive `peck_drill`
-- `primitives.cut_arc` -> maps to primitive `cut_arc`
-- `primitives.cut_bezier` -> maps to primitive `cut_bezier`
-- `primitives.change_tool` -> maps to primitive `change_tool`
-- `primitives.conclude` -> maps to primitive `conclude`
+- `set_metric()` -> maps to primitive `set_metric`
+- `set_imperial()` -> maps to primitive `set_imperial`
+- `initialise()` -> maps to primitive `initialise`
+- `move_slow(x, y, z, feed_rate)` -> maps to primitive `move_slow`
+- `move_fast(x, y, z)` -> maps to primitive `move_fast`
+- `start_spindle()` -> maps to primitive `start_spindle`
+- `stop_spindle()` -> maps to primitive `stop_spindle`
+- `drill(x, y, z_bottom, z_retract, z_feedrate)` -> maps to primitive `drill`
+- `peck_drill(x, y, z_bottom, z_retract, peck, z_feedrate)` -> maps to primitive `peck_drill`
+- `cut_arc(x, y, i, j, xy_feedrate, arc_cmd) ` -> maps to primitive `cut_arc`
+- `cut_bezier` -> maps to primitive `cut_bezier`
+- `change_tool_manual(slot)` -> maps to primitive `change_tool`
+- `change_tool_atc(slot)` -> maps to primitive `change_tool`
+- `conclude` -> maps to primitive `conclude`
 
 Optional primitive attributes:
 
 - `primitives.pause` -> optional pause/message insertion point
 - `primitives.banner` -> optional comment/banner insertion point
+
+Context variables
+
+The application context object is passed to the RHAI parser to open-up the possible.
+It is passed as "ctx".
+
+The context object contains as a minimum:
+
+- ctx.set_units(length, feed) -> Set the context units
+- ctx.filename -> Object with {.ext, .basename, .path} or full name of the PCB file currently being processed
+- ctx.now -> Date and time now in ISO format
+- ctx.units -> array with length and feed strings
+- ctx.tool -> currently selected tool number or -1
+- ctx.tool.diameter -> diameter of the currently selected tool
+- ctx.job -> Job object with .name, .cnc cnc object with .name
 
 Compatibility and fallback requirements:
 
