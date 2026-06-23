@@ -1,0 +1,101 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+description: Fixture profile persisted configuration.
+
+properties:
+  id:
+    type: string
+    minLength: 1
+    description: Unique fixture profile ID.
+  name:
+    type: string
+    minLength: 1
+    description: Fixture profile name.
+  board_holding_method:
+    type: string
+    description: Supported board holding method.
+  work_origin_reference:
+    type: object
+    description: Work origin/reference definition.
+    properties:
+      x0:
+        type: string
+        enum: [Left, Right, Front, Back]
+      y0:
+        type: string
+        enum: [Front, Back, Left, Right]
+      z0_reference:
+        type: string
+    required: [x0, y0]
+    additionalProperties: false
+  locating_pins:
+    type: object
+    description: Locating pin strategy and geometry.
+    properties:
+      strategy:
+        type: string
+      pin_diameter:
+        type: [number, string]
+      pin_positions:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: [number, string]
+            y:
+              type: [number, string]
+          required: [x, y]
+          additionalProperties: false
+    additionalProperties: true
+  keep_out_zones:
+    type: array
+    description: Keep-out or clamp zones.
+    items:
+      type: object
+      properties:
+        x:
+          type: [number, string]
+        y:
+          type: [number, string]
+        width:
+          type: [number, string]
+        height:
+          type: [number, string]
+      required: [x, y, width, height]
+      additionalProperties: false
+  occupancy:
+    type: object
+    description: Fixture occupancy impact on board size range.
+    properties:
+      max_board_x:
+        type: [number, string]
+      max_board_y:
+        type: [number, string]
+      blocked_regions:
+        type: array
+        items:
+          type: object
+    additionalProperties: true
+  probing_alignment:
+    type: object
+    description: Optional probing/alignment parameters.
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      probe_points:
+        type: array
+        items:
+          type: object
+          properties:
+            x:
+              type: [number, string]
+            y:
+              type: [number, string]
+          required: [x, y]
+          additionalProperties: false
+    additionalProperties: true
+
+required: [id, name, board_holding_method, work_origin_reference, locating_pins, keep_out_zones, occupancy]
+additionalProperties: false

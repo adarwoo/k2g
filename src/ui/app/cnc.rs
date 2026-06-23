@@ -3,7 +3,7 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use serde::Serialize;
 use std::fs;
 
-use crate::units::{FeedRate, Length, UserUnitDisplay, UserUnitSystem};
+use crate::units::{FeedRate, Length, UserUnitDisplay};
 use super::super::model::*;
 
 #[component]
@@ -21,15 +21,11 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
 
     let selected_id = machine.id.clone();
 
-    let user_unit_sys = if snapshot.unit_system == UnitSystem::Imperial {
-        UserUnitSystem::Imperial
-    } else {
-        UserUnitSystem::Metric
-    };
-    let length_unit = if snapshot.unit_system == UnitSystem::Imperial { "in" } else { "mm" };
-    let length_step = if snapshot.unit_system == UnitSystem::Imperial { "0.01" } else { "1" };
-    let feed_unit = if snapshot.unit_system == UnitSystem::Imperial { "ipm" } else { "mm/min" };
-    let feed_step = if snapshot.unit_system == UnitSystem::Imperial { "0.1" } else { "1" };
+    let user_unit_sys = snapshot.unit_system.user_unit_system();
+    let length_unit = snapshot.unit_system.length_unit_label();
+    let length_step = snapshot.unit_system.length_step();
+    let feed_unit = snapshot.unit_system.feed_unit_label();
+    let feed_step = snapshot.unit_system.feed_step();
     let fixture_x_val = Length::from_mm(machine.fixture_plate_max_x as f64).user_value(user_unit_sys);
     let fixture_y_val = Length::from_mm(machine.fixture_plate_max_y as f64).user_value(user_unit_sys);
     let feed_val = FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64).user_value(user_unit_sys);
@@ -177,7 +173,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         h4 { "Fixture plate" }
 
                         div { class: "field section-subfield",
-                            label { "X axis ({length_unit})" }
+                            label { "Fixture X ({length_unit})" }
                             input {
                                 r#type: "number",
                                 min: "0",
@@ -205,7 +201,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         }
 
                         div { class: "field section-subfield",
-                            label { "Y axis ({length_unit})" }
+                            label { "Fixture Y ({length_unit})" }
                             input {
                                 r#type: "number",
                                 min: "0",
@@ -692,8 +688,8 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
             section { class: "panel fixed",
                 h3 { "CNC profile summary" }
                 p { "ID: {machine.id}" }
-                p { "Fixture: {fixture_x_val} × {fixture_y_val} {length_unit}" }
-                p { "Max feed: {feed_val} {feed_unit}" }
+                p { "Fixture size: {fixture_x_val} × {fixture_y_val} {length_unit}" }
+                p { "Maximum feed rate: {feed_val} {feed_unit}" }
                 p { "Spindle: {machine.spindle_min_rpm} – {machine.spindle_max_rpm} rpm" }
                 p { "ATC slots: {machine.atc_slot_count}" }
                 p { "Origin: {machine.origin_x0} / {machine.origin_y0}" }

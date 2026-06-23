@@ -1,0 +1,110 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+type: object
+description: Job profile persisted configuration.
+
+properties:
+  id:
+    type: string
+    minLength: 1
+    description: Unique job profile ID.
+  name:
+    type: string
+    minLength: 1
+    description: Job profile name.
+  cnc_profile_id:
+    type: string
+    minLength: 1
+    description: Referenced CNC profile.
+  fixture_profile_id:
+    type: string
+    minLength: 1
+    description: Referenced fixture profile.
+  default_enabled_operations:
+    type: array
+    items:
+      type: string
+      enum: [drill_locating_pins, drill_pth, drill_npth, route_board, mill_board]
+    uniqueItems: true
+  default_machining_strategies:
+    type: object
+    description: Default machining strategies.
+    additionalProperties: true
+  default_tool_selection:
+    type: object
+    description: Default tool selection parameters.
+    properties:
+      oversize_allowance_percent:
+        type: number
+        minimum: 0
+      undersize_allowance_percent:
+        type: number
+        minimum: 0
+      allow_routing_holes:
+        type: boolean
+      drill_then_route:
+        type: boolean
+      pilot_hole:
+        type: boolean
+    additionalProperties: true
+  default_routing_tab:
+    type: object
+    description: Default routing/tab settings.
+    properties:
+      tab_count:
+        type: integer
+        minimum: 0
+      tab_width:
+        type: [number, string]
+      mouse_bite_holes:
+        type: boolean
+      holes_per_tab:
+        type: integer
+        minimum: 1
+      vgroove_depth_percent:
+        type: number
+        minimum: 50
+        maximum: 100
+    additionalProperties: true
+  override_policy:
+    type: object
+    description: Runtime override permissions and bounds.
+    properties:
+      allowed_operation_toggles:
+        type: boolean
+      min_tab_count:
+        type: integer
+        minimum: 0
+      max_tab_count:
+        type: integer
+        minimum: 0
+      board_rotation_range_deg:
+        type: object
+        properties:
+          min:
+            type: number
+            minimum: -180
+            maximum: 180
+          max:
+            type: number
+            minimum: -180
+            maximum: 180
+        required: [min, max]
+        additionalProperties: false
+      tool_matching_tolerance_percent:
+        type: object
+        properties:
+          min:
+            type: number
+            minimum: 0
+          max:
+            type: number
+            minimum: 0
+        required: [min, max]
+        additionalProperties: false
+      allow_routing_fallback_toggle:
+        type: boolean
+    required: [allowed_operation_toggles]
+    additionalProperties: true
+
+required: [id, name, cnc_profile_id, fixture_profile_id, default_enabled_operations, default_machining_strategies, default_tool_selection, default_routing_tab, override_policy]
+additionalProperties: false

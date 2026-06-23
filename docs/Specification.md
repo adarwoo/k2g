@@ -1,145 +1,198 @@
-# KiCad CNC GCode Plugin Specification
+# K2G Unified Product and UX Specification
 
-## 1. Introduction
-This document documents all requirements identified for the K2G application.
-This application is a portable application which doubles as a KiCad plugin.
-The application/plugin targets Windows, Linux, and macOS environments.
+Status: Canonical product and UX requirements source.
 
-The application core function is to generate a CNC GCode from a KiCad PCB board data.
+## 1. Product Context
 
-## 2. Core technology
-- Implementation language: Rust
-- Configuration files and libraries format: YAML and YAML schemas.
-- KiCad integration: KiCad IPC library
-- The user interface is implemented in Rust with a React-like component model based on the Dioxus API.
+K2G is a portable desktop application and KiCad plugin that generates CNC GCode from PCB designs.
 
-## 3. General UX Principles
-The UI enforces the following principles:
+- Platforms: Windows, Linux, macOS
+- Primary users: PCB makers and machinists
+- Workflow style: high-feedback, continuously regenerated output
 
-- All actions and configuration are saved automatically
-- Existing errors and warnings are summarized at the top of the screen
-- Changes are reported at the bottom of the screen
-- Clicking an error or warning opens full context/details
-- Code generation is continuous and automatic
-   - Any relevant change triggers regeneration
-   - There is no explicit "Generate" button
-- Users can configure preferred units
-   - If the native value unit differs from user preference, conversion is shown automatically.
+## 2. Core Product Principles
 
-## 4. Screen UX Direction
-The visual intent is similar to PrusaSlicer/Bambu Studio: a large viewport with configuration panels.
+- All relevant settings changes are auto-saved.
+- GCode regeneration is automatic and continuous when relevant inputs change.
+- The UI must keep machining feedback visible while configuration is edited.
+- Errors and warnings are always visible in summary form and drillable for full detail.
+- Units are user-configurable and converted/displayed consistently across views.
 
-- The machining surface should be shown whenever applicable (for CNC workflows).
-- Users should immediately see the effect of configuration changes.
+## 3. Information Architecture
 
-Note: Here are all the functions to include in the UX
-1. Global setup
-Units, language etc. at the application level
-2. Job configuration
-After selecting a job profile, allow overridding some of the pre-selections
-3. Profiles
-The profiles allow configuring the correct machining environment.
-We have:
-  - CNC profiles     - Defines a CNC machine
-  - Fixture profiles - Defines how the PCB is fixed to the machining bed
-  - Job profiles     - Define what should be machined
-4. Job profile - Allow editing a given job profile
-5. CNC profile - Allow editing a given CNC profile
-Includes spindle properties (RPM etc.), rack or not etc.
-6. Fixture profile - Allow editing a given fixture profile
-7. Tools catalogs - Allow viewing, copying, cloning tools catalog
-8. Stock - The stock is made of tools imported from tools catalogs
-9. Job setup - Selection of the job profile.
-The job profile includes what to do, the CNC and fixture.
-In the job, it is possible to override some of the profiles settings.
-10. Job code review
-The generated GCode can be reviewed and edited. The changes are meta defined
-11. Job machining review
-Review what will be machined. A further iteration might display the operations.
-12. PCB view
-View the raw PCB data of interest - as imported from KiKAD.
-13. Error log
-Some of the profiles may generate errors (job profile tolerances, lack of tools etc.)
-The pending errors and warning should show. Click one should expand to a full view.
-14. Actions log
-All actions shall be added to a log and shown breifly at the bottom of the screen.
-15. PCB selection
-If the application is started outside of KiCAD, the user should be able to select which PCB to machine.
-This requires for 1 or more running KiCAD PCB instances.
-As soon as a PCB is selected, the data is imported from KiCAD, and the GCode generated if possible.
+Primary navigation areas:
 
-### 4.1 Board View vs Program View
-Both visual board feedback and raw GCode review are important.
+- Setup
+- Stock management
+- Catalog (opened as overlay from Stock)
+- Job
 
-- Board view and generated program view should is available on most screens.
-- Alternating between views is done in the view port (top right selection toggling buttons).
-- In some cases, users need to inspect board and program side-by-side.
+Setup contains persistent configuration assets:
 
-## 5. Setup
-Setup is opened from a wheel icon on the main page.
-On first launch, setup is shown automatically.
+- Global settings
+- CNC profiles
+- Fixture profiles
+- Job profiles
 
-### 5.1 General Settings
-General settings include:
+Job is the live machining workspace for a selected board.
+Within Job, the user can switch between:
 
-1. Units
-    - Metric
-       - Sizes: `mm`, `um`
-       - Speeds: `mm/min`, `cm/min`, `m/min`
-    - Imperial
-       - Sizes: `mil`, `thou`, `in`
-       - Speeds: `in/min`, `ipm`
-2. Color scheme
-    - Light
-    - Dark
+- Board View
+- Program View
+- Split View
+- Rack panel (only when ATC is enabled by the active job/CNC configuration)
 
-### 5.2 CNC Machine Management
+The product should support rapid switching between:
+
+- Board visualization mode
+- Program text mode
+
+## 4. Global Layout Direction
+
+The UI should follow a slicer-style workstation layout (PrusaSlicer/Bambu-like structure, not branding):
+
+- Top bar: board/job context, active profile summary, setup entry, global status
+  - Includes a persistent unit system quick-toggle (Metric/Imperial)
+- Main body:
+  - Left: setup or job navigation depending on active area
+  - Center: board/machining viewport or program editor
+  - Right: context settings, diagnostics, and editable parameters
+- Utility area (bottom or side): generation status and action feedback
+
+When the user opens K2G from KiCad, the default landing area is Job, not Setup.
+Setup remains reachable without leaving the current board context.
+
+## 5. Global Interaction Rules
+
+- Auto-save is always on for configuration edits.
+- Any relevant mutation retriggers generation automatically.
+- Generation is single-flight: at most one generation cycle may run at a time.
+  - If a new relevant mutation arrives while generation is in progress, the in-progress cycle is canceled.
+  - The newly requested cycle becomes the active cycle and is the only cycle allowed to commit output.
+- Errors and warnings are summarized in a persistent banner across screens.
+- Clicking the summary opens detailed diagnostics.
+- Unit preferences apply globally, with automatic conversion display where needed.
+- If generated program text has user edits and regeneration would overwrite them, a confirmation prompt is required.
+
+## 6. Setup and Machine Management
+
+Setup is opened from a wheel icon or dedicated navigation entry.
+Setup manages persistent assets that outlive any individual PCB/job.
+On first launch, the product enters a guided readiness flow that can open Setup editors inline or as overlays.
+
+### 6.1 General Settings
+
+- Theme:
+  - Light
+  - Dark
+
+General settings are global to the application, not specific to a CNC, fixture, board, or job.
+Unit preferences are controlled from the top bar quick-toggle and are persisted globally.
+
+Schema-backed persisted global settings also include:
+
+- Selected CNC profile ID
+- Selected fixture profile ID
+- Selected job profile ID
+- Advanced machining defaults used by generation (resolution, spindle/feed practical limits, Z safety/retract and drilling allowances)
+
+### 6.2 CNC Profile Management
+
 Users can:
 
 - Select a CNC profile
-- Create a new CNC profile
-   - Import a profile
-   - Clone an existing profile
-   - Start from a built-in template
-- Delete a CNC profile (only created profiles. Stock profiles are readonly)
-- Edit a CNC profile
+- Create a new profile
+  - Import a profile
+  - Clone an existing profile
+  - Start from a built-in template
+- Delete a created profile
+- Edit a profile
 
-#### New CNC Profile Wizard
-Clicking `+` opens a mini wizard:
+Stock profiles are read-only.
+Profiles that are currently in-use by any job cannot be deleted; the user must switch the job to a different CNC profile before deletion is allowed.
 
-- Shows stock profiles (Generic, Genmitsu3040, Masso)
+### 6.3 Fixture Profile Management
+
+Users can:
+
+- Select a fixture profile
+- Create a new fixture profile
+  - Clone an existing profile
+  - Start from a built-in template when available
+- Delete a created profile
+- Edit a profile
+
+Profiles that are currently in-use by any job cannot be deleted; the user must switch the job to a different fixture profile before deletion is allowed.
+
+Fixture profiles describe how the PCB is physically held and aligned on the machine.
+They are persistent setup assets and are not tied to a single board.
+
+Fixture fields include at minimum:
+
+- Fixture name
+- Supported board holding method
+- Work origin/reference definition
+- Locating pin strategy and geometry
+- Keep-out or clamp zones
+- Fixture occupancy (defines the impact on the board size range)
+- Optional probing/alignment parameters
+
+Fixture profiles are persisted as YAML and validated by `fixture_profile.schema.yaml`.
+
+### 6.4 New Profile Wizard
+
+Clicking + opens a wizard/modal that:
+
+- Shows built-in templates (for example Generic, Genmitsu3040, Masso)
 - Shows existing profiles available for cloning
 - Requires a unique profile name
-   - Clone default: `Copy of <profile name>`
-   - Template default: `My <template profile name>`
-- `New` button creates the profile
-   - Disabled if name is not unique
-   - Inline error explains why
+  - Clone default: Copy of <profile name>
+  - Template default: My <template profile name>
+- Disables New until validation passes
+- Displays inline naming conflict errors
 
 After creation, profile editing starts immediately.
-When a machine is selected, a `>` icon appears to return to the main screen.
 
-### 5.3 CNC Machine Profile Fields
-General section fields:
+### 6.5 CNC Profile Fields
 
-- Fixture plate max size: `X`, `Y`
+General fields include:
+
+- Fixture plate max size X and Y
 - Max feed rate
-- Spindle min/max RPM
-- Spindle start/stop delay. This is a RHAI field so it can be calculated.
-- ATC slot count (`0` means ATC off)
-- `X0` origin orientation: `Left` (or `Right`, `Front`, `Back`)
-- `Y0` origin orientation: `Front` (or `Back`, `Left`, `Right`)
-- Scaling `x`, `y` in `%` (default example: `100.0`, `100.0`)
-- Program line numbering: `Yes/No`
-   - Increment value (for example: `10`)
+- Spindle min and max RPM
+- Spindle start and stop delay
+- ATC slot count (0 disables ATC)
+- Origin orientation:
+  - X0: Left, Right, Front, Back
+  - Y0: Front, Back, Left, Right
+- XY scaling percent
+- Program line numbering toggle and increment value
 
-## 5.4 CNC profile Program Section
-The program section is organized around:
+### 6.6 CNC Program Section and Customization
 
-- Individual machining operations
-- Generic function sub-sections
+CNC profiles include operation-specific and generic program snippets.
 
-This section customizes per-operation GCode snippets.
+- Snippets can include expressions using braces evaluated by the scripting runtime.
+- In expression editors, typing opening brace should allow inserting variables/functions.
+- A read-only to editable toggle is provided for protected sections.
+- Each editable function shows available variables and parsing feedback.
+- Resulting output should be validated as GCode.
+
+Sanity check behavior:
+
+- A configured sanity check function returns a string.
+- Non-empty output blocks job generation and is shown as an error.
+
+Custom attributes:
+
+- Supported types: bool, string, list, percent, number, date
+- Required metadata: unique valid name, type, description, default value
+- List attributes support user-managed options with name and description
+- Attribute values can be validated and transformed by user-defined expressions
+
+#### Custom GCode generation with RHAI
+
+The application GCode generation can be customize using GCode snippets and a built-in RHAI interpretor.
 
 - Low-level operations (for example, "Drill first hole following tool change") are written as machine-code excerpts.
 - Strings between `{}` are interpreted as RHAI.
@@ -161,361 +214,617 @@ The resulting output is tested to be valid GCode.
 
 Each function comes with a pre-defined list of variables. Custom attributes are automatically added to the scope of all functions.
 
-### 6.1 Sanity Check
-The `Sanity check` function generates a string from current configuration.
+Examples:
+machine:
+  program_units:
+    length: "mm"
+    feedrate: "mm/min"
 
-- If output is non-empty text, job generation is blocked.
-- The returned text is shown as an error.
+primitives:
+  initialise: |
+    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    (Reset all back to safe defaults)
+    G17 G54 G40 G49 G80 G90
+    G21
+    G10 P0
+    G0 Z{z_safe}
+  move_slow: "G0 X{x} Y{y}"
+  start_spindle: |
+    S{rpm}
+    M03
+  stop_spindle: "M05"
+  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
+  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+  cut_bezier: |
+    ; cut_bezier fallback
+    ; implementation may expand into one or more arc segments
+  change_tool: |
+    M05
+    {manual_message}
+    T{slot} M06
+    S{rpm}
+  conclude: |
+    (end of file)
 
-### 5.5 Custom Attributes
-Users can define CNC-specific custom attributes for jobs.
+RHAI parser and expression model:
 
-Supported attribute types:
+- The application includes a RHAI expression parser/evaluator used by CNC program snippets and expression-backed profile fields.
+- CNC program fragments that are represented as expressions must be stored and evaluated as RHAI expressions.
+- Expression evaluation is done against the active job context and must be deterministic for identical job inputs.
+- Parse and evaluation failures are surfaced as diagnostics with source location and expression name.
+- Expression editing UX must provide parse feedback before apply/save.
 
-- Boolean (`yes/no`)
-- Free string
-- List
+Primitive templates as CNC configuration attributes (schema-required):
 
-Each attribute requires:
+- Primitive templates are stored as CNC configuration attributes and validated by the CNC profile schema.
+- Each attribute is a string template containing GCode text with optional embedded RHAI expressions in `{}`.
+- Attribute values are compiled/evaluated through the same `parse_exp` path used by expression editors.
 
-- Name (must be a valid RHAI variable name, and unique)
-- Type (`bool`, `string`, `list`, `percent`, `number`, `date`)
-- Description
-- For the list type, the user can '+' values. This takes a name and a description
-- Default value. For list, it must be chosen from the list, or no value which sets the content to ().
-- RHAI validation/convertion function
-   - Receives all values
-   - Returns a value (could be the same) or throw an error
-   Example: If a percentage is expected:
-   Type: percent
-   Description: Apply x,y scaling factor (%)
-   Name: xy_scaling
-   Validation:
-      A RHAI function which gets executed when the value is edited.
-      The function must throw a string on error.
-      It can optionally return a value which becomes the value used.
-      Example:
-      if xy_scaling < 0.0 {
-         throw `Percentage out of range: ${s}`;
-      }
-      Other example with transformation:
-      if xy_scaling.is_float(): // Round the number
-         int(xy_scaling)
+Required primitive attributes:
 
-## 7. Main Application Flow
-The application may notify startup errors in a popup.
+- `primitives.initialise` -> maps to primitive `initialise`
+- `primitives.move_slow` -> maps to primitive `move_slow(x, y)`
+- `primitives.start_spindle` -> maps to primitive `start_spindle`
+- `primitives.stop_spindle` -> maps to primitive `stop_spindle`
+- `primitives.drill` -> maps to primitive `drill`
+- `primitives.peck_drill` -> maps to primitive `peck_drill`
+- `primitives.cut_arc` -> maps to primitive `cut_arc`
+- `primitives.cut_bezier` -> maps to primitive `cut_bezier`
+- `primitives.change_tool` -> maps to primitive `change_tool`
+- `primitives.conclude` -> maps to primitive `conclude`
 
-Simplest/optimum flow (plugin already configured):
+Optional primitive attributes:
 
-1. User starts the plugin.
-2. User configures the job.
-3. Program is generated automatically.
-4. User downloads the program or sends it directly to the CNC.
+- `primitives.pause` -> optional pause/message insertion point
+- `primitives.banner` -> optional comment/banner insertion point
 
-## 8. Tooling and Job Pages
+Compatibility and fallback requirements:
 
-### 8.1 Stock Page
+- If a required primitive attribute is missing, schema validation fails for that CNC profile.
+- `primitives.cut_bezier` may resolve to a native bezier command or an arc-approximation sequence; fallback behavior must be deterministic.
+- Primitive templates may reference custom attributes and active job properties through the RHAI scope.
+
+### 6.7 Job Profile Management
+
+Job profiles define machining defaults and constraints for a family of jobs.
+Each job profile is built on top of exactly one CNC profile and one fixture profile.
+
+Users can:
+
+- Select a job profile
+- Create a new job profile
+  - Clone an existing profile
+  - Start from a template when available
+- Delete a created profile
+- Edit a profile
+
+Profiles that are currently selected in any open job cannot be deleted; the user must switch to a different job profile before deletion is allowed.
+
+Each job profile includes:
+
+- Referenced CNC profile
+- Referenced fixture profile
+- Default enabled operations
+- Default machining strategies
+- Default tool selection parameters
+- Default routing/tab settings
+- Override policy for runtime job editing
+
+Job profiles are persisted as YAML and validated by `job_profile.schema.yaml`.
+
+Override policy defines which values the live job may change and within what bounds.
+Examples include:
+
+- Allowed operation toggles
+- Min/max tab count
+- Allowed board rotation range
+- Allowed tool matching tolerance range
+- Whether routing fallback may be enabled/disabled at runtime
+
+## 7. Stock and Catalog
+
+### 7.1 Stock Page
+
 The stock page lists tools available for machining.
+Stock tools are independent records in stock, even when created from a catalog tool.
+The stock list is presented as one unified table for all tool families.
+Universal filtering and sorting apply across the full stock list.
+
+Single-table behavior requirements:
+
+- The table supports faceted filtering by tool family (drill, router, engraver, v-bit)
+- The table exposes an explicit type filter with: All, Drill, Router, V-bit, Engraving
+- Multiple filter facets can be combined with text search
+- Users can save and reapply filter presets
+- The table supports configurable columns so type-specific fields can be shown without splitting into sublists
 Each stock item includes:
 
-- Name
-- Source item SKU (Read-only - copied over from the catalog)
-- Auto-generated summary (`router bit`, `drill bit`, `end mill`, including V bits/grooving bits) + diameter
-- Status: `In stock`, `Out of stock`
-   - `In stock`: available and usable by program
-   - `Out of stock`: unavailable, should be reordered
-- Prefered / Neutral / Not prefered: A selection to help the engine select the best tool
-   - `Prefered` : If several tool are a good match, the 'Prefered' ones gets selected
-   - `Neutral` : The default. Gets selected over 'Not prefered' but not over 'Prefered'
-   - `Not prefered` : The engine will try to avoid this tools
-- Operation counter (This counter can be reset)
-   - Routers/end mills: cumulative machining distance
-   - Drill bits: number of holes
-- All properties of the tool can be edited
+- Tool family shown in the list as one of: Drill, Router, V-bit, Engraving
+- Tool family is color-coded in the list: blue for Drill, green for Router, yellow for V-bit, red for Engraving
+- Name display always starts with the composite tool label; if the user supplies a practical name in tool properties, it is appended after a dash
+- Source catalog
+- Source SKU (read-only when catalog-derived)
+- Auto-generated summary (type + diameter)
+- Availability status:
+  - In stock
+  - Out of stock
+- Preference property for tool selection:
+  - Preferred
+  - Neutral
+  - Not preferred
+- Indicator (green dot) to show the tool is expected to be in the ATC rack (ATC only)
+- Tool metadata copied from catalog and editable after import in stock
+- Editable stock properties
 
-Adding tools:
-- `+` button allows adding from catalog
-   - The catalog offers 'generic' tools for drilling, milling, etc. which can be used to create custom tools
-- Once added, the tool can be edited
-- The tool name must be unique
-   - When adding a tool, a unique name is generated
-   - If changing the name, the <apply> is greyed if the name if not unique and the name become red -with the error message showing
+Stock table columns:
 
-- For catalog tools, properties are prefilled.
-   - Some properties remain editable.
-   - Catalog source and SKU are read-only.
-- If a property differs from catalog default, original value is shown in grey (in brackets) and a 'refresh' icon button is added to allow reverting the change.
+- Default visible columns, in order: type, diameter, name, source catalog, preference, status
+- Default row ordering is insertion order with the most recently added stock item shown first
+- The list can be sorted by type while preserving deterministic within-type ordering
+- ATC indicator column (shown only when the selected CNC has ATC): green dot with slot index (T1, T2, etc.) if tool is assigned, dash if unassigned
+- Additional configurable columns: spindle RPM, Z feed, ATC expected, usage counter, source SKU, manufacturer, SKU
+- Type-specific columns (available and filterable when relevant): XY/table feed, point angle, tip diameter, flute length, minimum depth, max hits/life limit
+- Type-specific columns may be empty for non-applicable tool families and must not block sorting/filtering
 
-### 8.2 Catalog
-The app includes some tool catalogs (drill bits and routers, standard sizes).
+Selection, detail, and bulk action behavior:
 
-- A catalog has libraries (vendor/manufacturer/category grouping).
-- Example libraries:
-   - UnionFab drill bits metric
-   - UnionFab router bits imperial
-   - Generic drill bits
-- Libraries cannot be edited in the UI; only used.
-   - Libraries are YAML files and can be added manually.
+- Every stock row is selectable by checkbox, with a header checkbox for selecting all visible rows
+- Deleting selected stock tools requires explicit confirmation
+- Double-clicking a stock row opens a dedicated tool detail view for that tool
+- The detail view presents label-left and value-right rows in a vertically scrollable panel
+- The detail view allows editing only: custom name, diameter, tip geometry, feed rate, spindle speed, status, and preference
+- Runtime values like the current ATC slot are not shown as tool properties in the detail view
+- Catalog-derived metadata shown in the detail view is read-only
+- The detail view exposes a clone action for the current tool
+- The list supports multi-selection
+- Multi-selection supports bulk delete
 
-Each catalog tool includes:
+Field editing and validation behavior:
 
-- Manufacturer + SKU
-- Name/description
-- Diameter with explicit unit expression
-   - Supports metric/imperial and float/fraction forms
-   - Examples: `0.65mm`, `1/8\"`, `150um`
-   - Also displayed in user's preferred units if entered differently
-- Recommended RPM
-- Recommended Z feed rate
-- Recommended horizontal feed rate (routers only)
-- `Referenced` flag
-   - If enabled, tool appears in stock (starts at 0 items)
-- End mill type and geometry (required)
+- For editable stock detail fields, pressing Enter is the only action that validates and commits the current field value
+- Pressing Escape reverts the current field to the last committed valid value and exits edit mode for that field
+- If no stock detail field is currently in edit mode, pressing Escape exits the tool detail view and returns to the stock list
+- Losing focus without pressing Enter must not implicitly commit an edited value
+- When Enter validation fails, focus remains in the current field and an inline popup message explains the validation error
+- Validation popup clears when the field is reverted with Escape or successfully committed with Enter
+- Stock detail field changes are applied immediately on commit or selection change; no separate Save Changes action exists
 
-A bit graph is shown.
+### 7.1.1 Stock Field Validity Rules
 
-Catalog access:
+Stock detail field validity requirements:
 
-- Opened from stock page while adding tools
-- Supports selecting multiple tools
-- Shown as overlay; closed with `<` back action
+- Diameter:
+  - Required
+  - Must parse as a valid length expression
+  - Accepts decimal and fraction forms
+  - Accepts explicit unit suffixes (for example `1mm`, `3/4in`)
+  - If unit suffix is omitted during editing, current global unit mode is applied before validation
+  - Value must be strictly greater than zero
+- Feed rate:
+  - Optional
+  - Empty value is valid and clears feed rate
+  - Non-empty value must parse as a valid feed-rate expression
+  - Accepts decimal and fraction forms with optional unit suffix
+  - If unit suffix is omitted during editing, current global unit mode feed unit is applied before validation
+  - Non-empty value must be non-negative
+- Tip geometry:
+  - Required
+  - Must parse as numeric
+  - Value must be greater than 0 and at most 180 degrees
+- Spindle speed:
+  - Optional
+  - Empty value is valid and clears spindle speed
+  - Non-empty value must parse as numeric
+  - Non-empty value must be non-negative
 
-### 8.3 Job profiles Page
-The job profiles page is where users decide what to produce.
+Ordering behavior:
 
-Fields and controls:
+- User can order the unified list by tool size
+- User can order the unified list by addition precedence
+- Addition precedence is internal ordering metadata and is not shown as a visible table column
 
-- Selected CNC profile (click navigates to machine configuration)
-   - Selected fixture for the PCB from the CNC profile list
-      - Includes the backing board thickness
-      - Includes the entry plate
-   - CNC profile parameters (for example machine coordinate)
-- Job production types (any combination)
-   - Drill locating pins
-   - Drill PTH holes
-   - Drill NPTH
-   - Route board
-   - Mill board
-- Side to drill
-   - Front
-   - Back
-- Board rotation
-   - Auto (uses CNC preference)
-   - Angle (`-180` to `+180`)
-- If ATC is available, rack generation mode
-   - Use manual tool change
-   - Reuse rack
-   - Overwrite rack (new rack for this job)
-- Routing options (when routing selected)
-   - Number of tabs (`0-n`)
-      - `n` constrained to feasible values
-      - If `0`, VGroove option becomes available
-   - Tab width
-   - Mouse-bite holes (`yes/no`)
-   - Hole size (from stock)
-      - Disabled if no stock tool smaller than route
-   - Number of holes per tab (`1-n`)
-      - Feasibility-constrained
-      - Show center-to-center spacing in preferred unit
-   - VGroove (if tabs = 0)
-      - Tool selection from stock
-      - Depth in `%` (`50-100`)
-- Tool selection strategy
-   - Oversize allowance `%` (example default `5%`)
-      - Allows tool diameter up to oversize tolerance above target hole size
-   - Undersize allowance `%` (example default `10%`)
-      - Allows smaller tools for holes
-   - Allow routing holes
-      - If true, large holes can be routed when suitable router exists
-      - Drill-then-route option
-         - If true, drill first then enlarge by routing
-   - Pilot hole
-      - If no valid drill solution exists, use largest bit
+Adding/editing rules:
 
-### 8.4 Board View
-Board graph shows all machinable elements.
+- Plus action supports adding from catalog
+- Adding from catalog creates stock copies, not references
+- All catalog metadata is copied into the stock tool at add time
+- Because stock tools are copies, deleting a catalog or catalog entry has no impact on existing stock tools
+- Apply is disabled when uniqueness validation fails
+- Any stock mutation (add, edit, clone, delete, or reorder) is a relevant change and triggers regeneration
 
-- Any relevant change refreshes graph automatically.
-- Holes, routes, and machining paths are filterable.
-- Board view supports pan/zoom and "best fit" reset.
-- Tabs can be moved.
-   - Position is shown.
-   - Position can be adjusted by click/drag.
-   - Algorithm computes tab positions.
+Catalog add UX requirements:
 
-## 9. Data Generation and Program Tab
-GCode generation is automatic.
+- A detailed table view lists catalog tools with key fields visible in columns
+- Users can multi-select any number of catalog tools from the table
+- The primary add action imports all selected tools into stock in one operation
+- Selecting one catalog tool opens a full detail view for that tool
+- In the detail view, an Add button imports that single tool directly to stock
+- Stock tool detail entry fields for diameter and feed rate follow the global unit toggle (Metric/Imperial) for both display and input parsing
+- Diameter values entered with an explicit unit suffix (for example `3/4in`) are treated as unit-bound values and are not auto-converted in-place when the global unit toggle changes
 
-- Any configuration change retriggers generation.
-- Generation may fail; top-level error message indicates problems.
+### 7.2 Catalog Overlay
 
-`Program` tab capabilities:
+The catalog is opened from stock add flow as an overlay.
 
-- Editable generated program window
-- User can add/remove/comment sections
-- Program can be:
-   - Reviewed and edited
-   - Saved to file
-   - Saved to removable media (then eject button is available)
-   - Sent over the air to a CNC machine
+- Libraries are read-only and can be added externally via YAML files
+- Tool detail includes:
+  - Manufacturer and SKU
+  - Name and description
+  - Diameter with unit expression support (metric/imperial, fraction/float)
+  - Recommended RPM
+  - Recommended Z feed
+  - Recommended horizontal feed (routers)
+  - Geometry/type
+  - Referenced flag
+- Detailed table supports multi-selection before adding to stock
+- Add action imports selected tools into stock and keeps copied metadata as informational-only fields
+- Back action closes overlay
+- In stock tool detail editor:
+  - Catalog tool diameters are treated as explicit-unit values
+  - Diameter display includes unit suffix when not actively editing (for example `0.024in`)
+  - If a user enters a diameter number without a unit suffix, the current global unit mode suffix is automatically applied
+  - Persisted stock keeps the original explicit unit representation for unchanged catalog-derived diameters
 
-If user edits program manually and later makes a configuration change that would overwrite edits,
-show a confirmation prompt so user can cancel and save work first.
-
-## 10. Rack Configuration
-Available only when selected CNC supports ATC.
-
-Rack configuration allows users to:
-
-- Define rack organization
-- See changes required for current job
-- Set explicit slot contents
-
-Each slot can:
-
-- Reference a stock tool
-   - Optional lock to prevent replacement when rack is overwritten
-- Be disabled (for example broken slot)
-
-## 11. Error Notifications
-An error/warning banner may appear on all pages.
-
-- Initial expected error: `No tools in stock`
-- Because generation is automatic, configuration changes may trigger new errors/warnings.
-- Errors/warnings are cleared automatically when resolved.
-- Warning severity is supported.
-- Colors:
-   - Error: red
-   - Warning: orange
-- Banner shows summary only (no scrolling required).
-- Detailed messages are shown in the data generation view.
-
-## 12. The flow
-
-### 12.1 Simple flow
-
-When launched, the application needs to connect to a KiCAD instance which has a PCB available
-This implies:
- - Scanning for all KiCad socket (unless passed in environment variable)
- - Checking for PCBs loaded
-Unless started from a KiCAD PCB (the environment variable is set), the user should select the PCB from a dropdown list.
-This list should be refreshed when the user drops it down.
-If the application was started from KiCAD, the selection is greyed out.
-A refresh icon is shown once the PCB data has been collected. Clicking on the button, restart a computation cycle:
- - Collection of the PCB data
- - Creation of the job data
-
-Possible errors:
- - If the KiCad instance goes away whilst the data is being collected, the job is dropped, an error is reported (lost connection whilst ..) and the user needs to select from the list.
-
-Once the PCB data is collected, the user can configure the job.
-A job is created from a Job profile. (the job profile must have been created previously).
-The Job profile preconfigures all that can be pre-configured.
-The user can override any of the job profile settings in the job.
-Any override shows by changing the color of the attribute to orange, and a small 'revert' icon gets added.
-
-Example use case 1 - Drill PTH for a PCB
-From KiCAD, the user clicks on the Plugin icon.
-The application opens and the PCB data is automatically imported. The PCB name is shown in the list, but it cannot be changed. A refresh icon is added next to the name.
-The user selects a job profile at the top of the screen from a dropdown list.
-The last job profile is automatically selected. (Either the last used, or the last created, whichever comes last)
-The job detail is shown with machining detail.
-The user can review the settings, the generated code and rack, and send the GCode to the CNC (if the CNC allows it).
-
-### 12.2 From installation
-
-When the application is installed fresh, the user must create the following:
-1. A CNC profile (optional - stock profile can be used)
-2. A stock - mandatory.
-   The user selects tools from stock catalogs
-3. A job profile (optional - standard profiles exists, using standard CNC profiles)
-
-So as a minimum, the user must add tools to the stock from catalog.
-
-# Technical implementation details
-
-1. The code shall be fully coded in Rust
-All resource files are built in the library
-2. All dynamic parsing in the application shall be managed by RHAI
-3. When the source of a PCB becomes known, all data are read and stored in memory.
-4. A stiching algorithm is used to connect all items on the same layer (arc, bezier, lines)
-5. The GCode generation uses a travelling salesman problem sorting algorithm leveraging existing library
-6. KiCAD is accessed using the IPC mode. The library used is kicad-ipc-rs
-7. All configuration data, stock, machines etc are specified in Yaml
-All Yaml calls for a schema file in Yaml too
-
-## Application startup
-
-### Parsing of configuration
-When the application starts it first parses all the configuration files.
-Any error during parsing rejects the file and insert an transient error in the log. If the errored file is internal, an error diagnostic is display and the application terminates once the user has acknoledged the error.
-The external errored file is renamed (appending .error). If a file exist, it is deleted.
-If during the processing of the error file, an error occurs (cannot delete, rename etc.), a transient error is added to the log.
-
-### Processing of PCB data
-As soon as the PCB data can be transfered (application started with the KiCAD environment varaible set) or selection of the PCB change by the user, the data is acquired.
-The application checks for a valid board outline (Stiching is applied to the edge items).
-An error is generated if the outline is not valid - and the board cannot be processed.
-The following data is of interest:
- * All holes for drilling (pads and holes)
- * All Edge items (lines, arcs, bezier)
-
-Note: This version does do the trace routing for now.
+When a tool from a catalog is highlighted, the detail view is shown.
+The detail view includes an Add button to import that tool directly to stock.
 
 
-### Program generation
-Once the user selects job operations, the GCode program is automatically generated.
-The generation is a background tasks to prevent blocking the UI during generation. The generation could be dropped if the user is making a change requiring to regenerated.
-The generation can generate errors.
-These errors are linked to the generation.
-They are cleared when a new generation is started.
-When the generation completes, the result is loaded.
-The results are clear when a new generation starts.
 
-#### Program algorithm
-The jobs are organised to yeild a generation driven for per job:
-1 - Drilling jobs (all about holes)
-2 - Contouring jobs (routing, scoring, tabs)
-3 - Engraving will be added later on
+## 8. Job Workspace
 
-#### Primitives
-All operations generated from the job types generate primitive instrutions.
-These primitives are only converted by the CNC using the RHAI expression in the final pass.
-A primitive is like:
- * initialise
- * Move slow to x,y
- * Start spindle
- * Drill
- * PeckDrill
- * CutArc
- * CutBezier
- * Start spindle
- * Change tool
- * conclude
+The job is the live execution context for machining one selected board.
+It combines:
 
-Example: CutBezier
-Some CNC can accept bezier G3.4 on Siemens - others cannot.
-The primitive converts into GCode which the CNC can execute.
-For Bezier, the RHAI can call a built-in primitive bezier-to-arcs.
+- One board
+- One selected job profile
+- The CNC and fixture profiles referenced by that job profile
+- Runtime overrides allowed by the job profile
+- Generated machining outputs and diagnostics
 
-#### Primitive rendering
-Primitive are used in given context: CNC used, tool used.
-When the primitive renders, it leverages the context.
-The feed rate is obtained from the current tool:
-G1 23 23 F${cuttingTool.feedrate.mmmin}
+The job is the heart of the product and is the default focus when launched from a PCB.
 
+### 8.1 Job Context and Runtime Model
 
-#### Drilling
-1. A list of holes is created
-2. Holes are mapped to tools - including holes that needs routing
-3. For each tool, TSP creates the drilling order
+- A job is created when the user selects or opens a board.
+- Exactly one active job exists at a time in the application context.
+- The board and the active job profile are the primary context objects for that job.
+- CNC and fixture are normally inherited from the selected job profile.
+- Changing CNC or fixture directly is treated as editing or replacing the active job profile, not as an ad hoc job mutation.
+- Runtime overrides are allowed only for values explicitly permitted by the active job profile.
+- Overrides affect the current job instance and do not silently mutate the saved profile.
+- The active job references one selected job profile and carries all runtime overrides as effective values.
+- The active job exposes property access APIs used by RHAI evaluation and generation.
 
-Then the program is generated using:
-Header + foreach hole : [TC + Hole (drill/route)] + Footer
+### 8.2 Core Job Controls
 
-The code generation generates an ordered list of primitives.
+- Selected board / PCB source
+- Selected job profile with quick link to setup
+  - Last used job profile is selected automatically on open
+  - On startup, generation proceeds immediately with the reused profile.
+  - A profile is never treated as inherently incompatible at selection time.
+  - Feasibility is determined dynamically by generation.
+  - If constraints are violated (for example board size limits, missing tools, fixture constraints), generation raises detailed errors in diagnostics.
+- Derived CNC profile with quick link to setup
+- Derived fixture profile with quick link to setup
+- Production operations (multi-select):
+  - Drill locating pins
+  - Drill PTH
+  - Drill NPTH
+  - Route board
+  - Mill board
+- Side selection: Component, Solder
+  - Note: By default, the PCB is laid on the CNC bed in the same orientation as displayed in KiCad. The actual coordinate system origin (X0, Y0) is defined by the CNC profile.
+- Board rotation:
+  - Auto
+    - Generation determines the best fit rotation automatically.
+    - The resolved rotation value from the most recent successful generation is written back to the job state and shown in the UI.
+    - If the board cannot fit within machine constraints for any rotation, generation raises an explicit fit error.
+  - Manual:
+    - 0
+    - 90
+    - Free entry -180.0 to +180.0
 
-#### Countouring
-The is cutting the edge.
-The number of passes is calculated.
+Note: The board rotation configuration is validated and constrained by the active job profile override policy.
 
+### 8.3 Override UX Rules
+
+- The UI clearly distinguishes profile defaults from live job overrides.
+- When a value is overridden, it is shown in orange with a small revert icon beside it.
+- Reverting restores the profile default for that field.
+- Values outside the profile's allowed override range cannot be entered.
+- If the user wants to change the saved default rather than the current job, the UI should offer an explicit Edit Profile action.
+
+### 8.4 Job Workspace Composition
+
+The live job workspace should keep the board and machining result at the center at all times.
+
+- Left area: job navigation and section switching
+  - Board
+  - Program
+  - Split
+  - Rack when relevant
+- Center area: board viewport or GCode editor
+- Right area: live job controls grouped by meaning
+  - Job context
+  - Operations
+  - Placement/orientation
+  - Tooling strategy
+  - Routing/tab settings
+  - Diagnostics and warnings
+
+Setup editing from the job should use overlays, drawers, or focused subpages that preserve the current board context whenever possible.
+The user should never feel they have left the machining task just to adjust a profile.
+
+### 8.5 ATC Strategy (when ATC is available)
+
+Rack generation mode (user-selectable):
+
+- Manual tool change: no rack is generated; operator changes tools by hand
+- Overwrite rack: a new rack is computed from scratch for this job
+
+For the first iteration, only Overwrite rack is implemented.
+An error is generated if there are not enough slots for the job.
+
+### 8.6 Routing Controls (when routing enabled)
+
+- Tab count (0 to feasible max)
+- Tab width
+- Mouse-bite holes toggle
+- Hole size selector from stock
+  - Disabled when no compatible stock tool exists
+- Holes per tab (1 to feasible max)
+- Computed center-to-center spacing display in preferred units
+
+If tab count is 0, VGroove options are shown:
+
+- Tool selection from stock
+- Depth percent from 50 to 100 [defaults to 80%]
+
+### 8.7 Tool Selection Strategy
+
+- Oversize allowance percent (for hole matching, example default 5%)
+- Undersize allowance percent (for fallback matching, example default 10%)
+- Allow routing holes toggle
+  - When enabled: large holes without a matching drill can be routed
+  - Drill-then-route sub-option: drill to nearest smaller size first, then enlarge by routing
+  - Pilot hole sub-option: for holes that are routed because no suitable drill exists, drill a pilot hole first, then route
+    - Pilot hole uses the largest available drill bit that is strictly larger than the router bit and valid for the hole geometry
+    - If no suitable pilot drill is available, route the hole without a pilot
+
+Algorithm definition (normative):
+
+1. Build the hole demand set.
+   - Collect all drillable holes requested by enabled operations (PTH, NPTH, locating).
+   - For each hole, normalize to an effective target diameter:
+     - Circular: nominal drill diameter.
+     - Slot/oval: minor axis for drill suitability, full geometry retained for routing fallback.
+
+2. Build candidate tool sets per hole.
+   - For each hole $h$ with target diameter $d_h$, build candidate set $C_h$ from in-stock and available tools:
+     - Drill candidates satisfy: $d_t \in [d_h(1-u),\ d_h(1+o)]$, where:
+       - $d_t$ is tool diameter
+       - $u$ is undersize allowance
+       - $o$ is oversize allowance
+     - Router candidates are included only when `Allow routing holes` is enabled and geometry/process allows routing for that hole kind.
+     - Pilot-hole candidates are evaluated only for holes assigned to routing due lack of suitable drill candidates.
+   - Add all tools already required by non-hole routing operations (board contour, internal cutouts, tabs, V-groove) to a mandatory routing set $R_{job}$.
+   - Effective candidate set for assignment is $C'_h = C_h \cup (C_h \cap R_{job})$; this ensures routers already needed by contouring are always considered for hole fallback.
+
+3. Initialize the working tool universe.
+   - Start from union of all feasible tools plus required routers:
+     - $U_0 = R_{job} \cup \bigcup_h C'_h$
+   - If any hole has $C'_h = \varnothing$, raise an immediate generation error with actionable diagnostics (hole id/type/size and closest stock tools).
+
+4. Compute preferred per-hole assignment (before rack shrinking).
+   - For each hole, rank candidates by score and pick the best available tool in $U$:
+     - Primary strategy weight: drilling preferred over routing when `Drill-then-route` is enabled.
+     - Size fit: absolute normalized diameter error.
+     - Stock preference property: Preferred > Neutral > Not preferred.
+     - Stability tie-breaker: prefer tools already in $R_{job}$ to reduce tool changes.
+     - Tie-break rule: when candidates are still tied, smaller diameter tools win.
+     - Final tie-break rule: if still tied, keep first candidate by stable ordering.
+     - Numeric precision rule: all diameter/fit comparisons are evaluated at 1 um precision.
+   - For holes assigned to routing because no suitable drill exists:
+     - If pilot-hole option is enabled, attempt to add a pilot drill pass before routing.
+     - Pilot selection rule: choose the largest valid drill bit with diameter strictly greater than the selected router bit diameter.
+     - If pilot selection fails, fallback is full routing only (router plunge then elliptical interpolation to cut the hole).
+   - Recommended score form:
+     - $S(h,t)=W_s\cdot strategy(h,t)+W_f\cdot fit(h,t)+W_p\cdot pref(t)+W_r\cdot reuse(t)$
+     - with $W_s$ dominant so drilling wins unless no valid drill exists.
+
+5. Shrink to rack capacity iteratively (ATC mode).
+   - Let rack capacity be $K$ and current set be $U$.
+   - If $|U| \le K$, finish.
+   - Otherwise, repeatedly remove one non-mandatory tool $t \in U \setminus R_{job}$ with minimum global regret:
+     - Regret of removing $t$ is the weighted loss after reassigning all holes currently using $t$ to their next-best candidate in $U \setminus \{t\}$.
+     - Infeasible reassignments add a prohibitive penalty (effectively infinite regret).
+     - Additional penalty applies when removal forces drill -> route transitions.
+   - Recompute assignments after each removal.
+   - Stop when $|U| = K$ or no removable tool preserves feasibility.
+
+6. Failure and degradation behavior when rack is too small.
+   - If no feasible shrink reaches $K$, return:
+     - Error: required tool count exceeds rack capacity.
+     - Minimal feasible count $K_{min}$.
+     - Holes that become uncovered under current constraints.
+   - If rack shrinking removes pilot drill tools but routed-hole coverage remains feasible:
+     - Do not raise an error.
+     - Raise a warning that pilot holes were disabled by rack capacity.
+     - Affected holes are machined as full-route holes (router plunge followed by elliptical hole cut).
+   - Suggested remediations (in UI order):
+     - Increase rack slots.
+     - Enable routing fallback for holes.
+     - Increase oversize/undersize allowances.
+     - Disable optional operations.
+
+7. Determinism and explainability requirements.
+   - Given identical inputs, selected tool set and per-hole assignments must be deterministic.
+   - Deterministic ranking uses the following tie-break order after strategy and fit scoring:
+     - Smaller tool diameter wins.
+     - If still tied, first candidate in stable ordering wins.
+   - Numeric precision for tool-diameter and fit comparisons is 1 um.
+   - For each hole assignment, store explainable reason fields:
+     - selected tool id
+     - strategy (drill/route)
+     - fit error
+     - whether assignment changed due to rack shrink
+   - For each removed tool during shrink, store removal reason and incremental regret.
+
+## 9. Board View
+
+Board view shows machinable elements with direct feedback.
+
+- Auto-refresh on relevant changes
+- Filter toggles for holes, routes, and paths
+- Pan/zoom and reset-to-fit
+- Editable tab markers:
+  - Visual position display
+  - Drag and numeric adjustment
+  - Algorithmic placement assistance
+
+## 10. Program View
+
+Program view exposes generated GCode with controlled editing and export workflows.
+
+- Monospace editor is available only after generation completes successfully.
+- During an active generation cycle, program editing is disabled.
+- User can add, remove, and comment sections within the generated program.
+- Program edit workflow:
+  - When program is modified after generation, a warning is displayed indicating changes will be lost on regeneration.
+  - User can save changes (persisting edits locally) or cancel (discarding edits).
+  - Program is invalidated as soon as a user mutation triggers a new generation cycle.
+  - If generation fails, the current program is deleted and the editor shows empty state with error diagnostics.
+- Program actions:
+  - Save to file
+  - Save to removable media
+  - Eject media (when applicable)
+  - Send over network to CNC
+
+## 11. Rack Configuration
+
+Visible only when selected CNC supports ATC.
+
+- Rack slot grid/list
+- Per-slot controls:
+  - Assign stock tool
+  - Disable slot
+- Job impact panel showing required rack changes
+
+## 12. Error and Action UX
+
+Error/warning behavior:
+
+- Persistent cross-screen summary banner
+- Severity color coding:
+  - Error: red
+  - Warning: orange
+- Summary view is compact and always visible
+- Detailed diagnostics are available on click
+- Errors and warnings clear automatically when conditions are resolved
+- Initial expected empty-state error includes No tools in stock
+
+Action feedback behavior:
+
+- User actions and system events are logged
+- Brief action summaries are surfaced in a bottom status/log area
+
+## 13. KiCad Connection and PCB Selection Flow
+
+Startup flow:
+
+- Detect KiCad connection context
+- If launched from KiCad PCB context, board is preselected and locked into the current job
+- Otherwise, show selectable list of active KiCad PCB instances
+- PCB list should refresh when dropdown is opened
+- After selection, import PCB data and open or refresh the live job workspace
+
+Startup routing rules:
+
+- If setup readiness is satisfied, enter Job directly.
+- If setup readiness is incomplete, still enter Job when launched from a PCB, but show blocking readiness tasks and direct links to the missing setup editors.
+- The system should avoid forcing the user into a disconnected setup-first experience when a board is already open.
+
+Refresh behavior:
+
+- A refresh control retriggers board data acquisition and generation cycle
+
+Failure behavior:
+
+- If KiCad disconnect occurs after all required board/job input data has already been cached in the app, generation and UI state continue without interruption.
+- If KiCad disconnect occurs before required input data is fully cached, the acquisition is treated as a connection failure:
+  - Incomplete data is discarded.
+  - Current acquisition attempt is aborted.
+  - An explicit error is shown in diagnostics.
+
+## 14. First-Run and Installation Flow
+
+Fresh install minimum setup:
+
+1. CNC profile selection or creation (stock profile acceptable)
+2. Add stock tools from catalog (required)
+3. Fixture profile selection or creation
+4. Job profile selection or creation
+
+At minimum, valid generation requires one usable CNC profile, one fixture profile, one job profile, and sufficient stock tools for the requested operations.
+
+First-run UX rules:
+
+- The first meaningful destination is still the Job workspace when a board is present.
+- Missing setup assets are presented as a readiness checklist, not as an abstract admin task.
+- The first job is expected to be iterative: users may bounce between the live job and setup editors while tuning CNC, fixture, and job profile definitions.
+- The product should preserve board context while the user edits setup assets for the first time.
+- When no board is present, the product may start in Setup/readiness mode.
+
+## 15. Regeneration State Model
+
+The UI should clearly represent generation states:
+
+- Idle
+- Generating
+- Generation failed
+- Generation paused/stopped
+
+Generation performance expectation:
+
+- Typical regeneration latency target is 1 to 2 seconds for normal board/job edits.
+
+Generation output should refresh atomically per completed cycle.
+
+## 16. UI Delivery Expectations
+
+For UI generation/design workflows, deliverables should include:
+
+- Information architecture map
+- High-level wireframes for major screens
+- Reusable component inventory with state variants
+- Interaction flows for first-run, setup asset creation, live job editing, review, and export/send
+- Error-state and empty-state variants
+- Responsive behavior definition
+
+Responsive rules:
+
+- Desktop-first layout
+- On narrower widths:
+  - Collapse right settings panel into tabs/drawer
+  - Preserve viewport priority
+  - Keep quick access to error banner and primary actions
+
+## 17. Out of Scope for This Document
+
+This is a product and UX requirements document only.
+
+Behavioral requirements are in scope here, including normative rules for selection, fallback, warnings, and error conditions.
+
+- Internal algorithm implementation design (data structures, optimization approach, and execution internals)
+- Internal threading/concurrency design
+- Primitive rendering internals
+- Data structure and module implementation details
+
+These belong in architecture and engineering design documents.
+
+## 18. Document Relationships
+
+- Canonical source for product and UX requirements: this document
+- Canonical source for technical design and implementation: architecture.md
+- Derived, non-canonical UI brief: UI_Generator_Brief.md

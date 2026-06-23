@@ -1,22 +1,22 @@
 use dioxus::prelude::*;
-use rfd::FileDialog;
-use std::fs;
 use std::path::Path;
 
 use crate::units::{FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, RotationalSpeedUnit};
 use super::super::model::*;
+use super::setup_sections::{CatalogManagementPanel, GeneralSettingsPanel, MachineProfilesPanel, SetupSidebar, SetupTab};
 
 #[component]
 pub fn SetupScreen(state: Signal<UiState>, boot: UiLaunchData) -> Element {
     let snapshot = state.read().clone();
     let library_profiles = cnc_profile_library();
-    let mut selected_library_profile = use_signal(|| {
+    let selected_library_profile = use_signal(|| {
         library_profiles
             .first()
             .map(|p| p.key.clone())
             .unwrap_or_default()
     });
-    let mut import_feedback = use_signal(String::new);
+    let import_feedback = use_signal(String::new);
+    let active_tab = use_signal(|| SetupTab::Cnc);
     let board_snapshot_summary = snapshot.board.as_ref().map(|board| {
         let bbox_label = if board.bounding_box.is_some() {
             "available"
@@ -31,257 +31,32 @@ pub fn SetupScreen(state: Signal<UiState>, boot: UiLaunchData) -> Element {
     });
 
     rsx! {
-        div { class: "screen split",
-            section { class: "panel fixed",
-                h3 { "Setup" }
+        div { class: "screen setup-shell",
+            SetupSidebar { active_tab }
 
-                div { class: "field",
-                    label { "Unit System" }
-                    select {
-                        value: snapshot.unit_system.as_str(),
-                        onchange: move |evt| {
-                            let v = evt.value();
-                            state
-                                .with_mut(|s| {
-                                    s.unit_system = if v == "imperial" {
-                                        UnitSystem::Imperial
-                                    } else {
-                                        UnitSystem::Metric
-                                    };
-                                });
-                        },
-                        option { value: "metric", "Metric" }
-                        option { value: "imperial", "Imperial" }
-                    }
-                }
-
-                div { class: "field",
-                    label { "Theme" }
-                    select {
-                        value: snapshot.theme.as_str(),
-                        onchange: move |evt| {
-                            let v = evt.value();
-                            state
-                                .with_mut(|s| {
-                                    s.theme = if v == "light" { Theme::Light } else { Theme::Dark };
-                                });
-                        },
-                        option { value: "light", "Light" }
-                        option { value: "dark", "Dark" }
-                    }
-                }
-
-                div { class: "diagnostics",
-                    h4 { "Runtime Diagnostics" }
-                    p { class: "diag-status", "{boot.kicad_status}" }
-                    p { class: "diag-status", "{boot.env_summary}" }
-                    if let Some(summary) = board_snapshot_summary.as_ref() {
-                        p { class: "diag-status", "{summary}" }
-                    } else {
-                        p { class: "diag-status", "Board snapshot: unavailable" }
-                    }
-                }
-            }
-
-            section { class: "panel grow",
-                div { class: "panel",
-                    h3 { "CNC profile management" }
-                    p { "Add a CNC profile from library or import a CNC profile from file." }
-
-                    div { class: "field",
-                        label { "Add CNC profile from library" }
-                        select {
-                            value: selected_library_profile.read().clone(),
-                            onchange: move |evt| selected_library_profile.set(evt.value()),
-                            for profile in library_profiles.iter() {
-                                option { value: profile.key.clone(), "{profile.name}" }
-                            }
+            div { class: "setup-main",
+                match *active_tab.read() {
+                    SetupTab::General => rsx! {
+                        GeneralSettingsPanel {
+                            state,
+                            kicad_status: boot.kicad_status.clone(),
+                            env_summary: boot.env_summary.clone(),
+                            board_snapshot_summary: board_snapshot_summary.clone(),
                         }
-                        button {
-                            class: "btn btn-primary",
-                            onclick: {
-                                let profiles = library_profiles.clone();
-                                move |_| {
-                                    let key = selected_library_profile.read().clone();
-                                    let selected = profiles.iter().find(|p| p.key == key).cloned();
-                                    if let Some(profile) = selected {
-                                        state.with_mut(|s| s.add_machine_profile(profile.machine));
-                                        import_feedback.set("CNC profile added from library".to_string());
-                                    } else {
-                                        import_feedback
-                                            .set("Unable to add CNC profile from library".to_string());
-                                    }
-                                }
-                            },
-                            "Add CNC profile"
-                        }
-                    }
-
-                    div { class: "field",
-                        label { "Import CNC profile" }
-                        button {
-                            class: "btn btn-primary",
-                            onclick: move |_| {
-                                let picked = FileDialog::new()
-                                    .set_title("Import CNC profile")
-                                    .add_filter("CNC profile YAML", &["yaml", "yml"])
-                                    .pick_file();
-
-                                let Some(path) = picked else {
-                                    import_feedback.set("Import canceled".to_string());
-                                    return;
-                                };
-
-                                let file_name = path
-                                    .file_name()
-                                    .and_then(|f| f.to_str())
-                                    .unwrap_or_default()
-                                    .to_ascii_lowercase();
-                                let valid_name = file_name.ends_with(".cnc-profile.yaml")
-                                    || file_name.ends_with(".cnc-profile.yml");
-                                if !valid_name {
-                                    import_feedback
-                                        .set(
-                                            "CNC profile import failed: file name must end with .cnc-profile.yaml or .cnc-profile.yml"
-                                                .to_string(),
-                                        );
-                                    return;
-                                }
-                                let text = match fs::read_to_string(&path) {
-                                    Ok(text) => text,
-                                    Err(_) => {
-                                        import_feedback
-                                            .set("CNC profile import failed: file not readable".to_string());
-                                        return;
-                                    }
-                                };
-                                let path_str = path.to_string_lossy().to_string();
-                                let profile = match parse_machine_profile_yaml(&text, &path_str) {
-                                    Some(profile) => profile,
-                                    None => {
-                                        import_feedback
-                                            .set(
-                                                "CNC profile import failed: file is missing required machine fields"
-                                                    .to_string(),
-                                            );
-                                        return;
-                                    }
-                                };
-                                state.with_mut(|s| s.add_machine_profile(profile));
-                                import_feedback.set("CNC profile imported and selected".to_string());
-                            },
-                            "Import CNC profile"
-                        }
-                    }
-                }
-
-                div { class: "panel",
-                    div { class: "panel-header",
-                        h3 { "Tools catalog management" }
-                        button {
-                            class: "btn btn-primary",
-                            onclick: move |_| {
-                                let picked = FileDialog::new()
-                                    .set_title("Import catalog")
-                                    .add_filter("Catalog YAML", &["yaml", "yml"])
-                                    .pick_file();
-
-                                let Some(path) = picked else {
-                                    import_feedback.set("Catalog import canceled".to_string());
-                                    return;
-                                };
-
-                                let text = match fs::read_to_string(&path) {
-                                    Ok(text) => text,
-                                    Err(_) => {
-                                        import_feedback
-                                            .set("Catalog import failed: file not readable".to_string());
-                                        return;
-                                    }
-                                };
-                                let stem = path
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("catalog")
-                                    .to_string();
-                                state
-                                    .with_mut(|s| {
-                                        match s.import_catalog_text(&stem, &text) {
-                                            Ok(name) => {
-                                                import_feedback.set(format!("Catalog '{}' imported", name));
-                                            }
-                                            Err(msg) => {
-                                                import_feedback.set(msg);
-                                            }
-                                        }
-                                    });
-                            },
-                            "Import catalog"
-                        }
-                    }
-
-                    div { class: "table-wrap",
-                        table {
-                            thead {
-                                tr {
-                                    th { "Catalog" }
-                                    th { "Type" }
-                                    th { "Sections" }
-                                    th { "Actions" }
-                                }
-                            }
-                            tbody {
-                                for catalog in snapshot.catalogs.iter() {
-                                    tr {
-                                        td { "{catalog.name}" }
-                                        td {
-                                            if catalog.built_in {
-                                                "Built-in"
-                                            } else {
-                                                "Imported"
-                                            }
-                                        }
-                                        td { "{catalog.sections.len()}" }
-                                        td {
-                                            if catalog.built_in {
-                                                span { class: "status-chip status-new",
-                                                    "Protected"
-                                                }
-                                            } else {
-                                                button {
-                                                    class: "btn btn-danger btn-small",
-                                                    onclick: {
-                                                        let key = catalog.key.clone();
-                                                        move |_| {
-                                                            state
-                                                                .with_mut(|s| {
-                                                                    match s.remove_catalog(&key) {
-                                                                        Ok(_) => import_feedback.set("Catalog deleted".to_string()),
-                                                                        Err(msg) => import_feedback.set(msg),
-                                                                    }
-                                                                });
-                                                        }
-                                                    },
-                                                    "Delete"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !import_feedback.read().is_empty() {
-                    p { class: "diag-status", "{import_feedback}" }
+                    },
+                    SetupTab::Cnc => rsx! {
+                        MachineProfilesPanel { state, selected_library_profile, import_feedback }
+                    },
+                    SetupTab::Catalogs => rsx! {
+                        CatalogManagementPanel { state, import_feedback }
+                    },
                 }
             }
         }
     }
 }
 
-fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Option<MachineProfile> {
+pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Option<MachineProfile> {
     let root: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
     let machine = root.get("machine")?;
 
@@ -431,13 +206,13 @@ fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Option<MachinePr
 }
 
 #[derive(Clone)]
-struct LibraryProfile {
-    key: String,
-    name: String,
-    machine: MachineProfile,
+pub(super) struct LibraryProfile {
+    pub(super) key: String,
+    pub(super) name: String,
+    pub(super) machine: MachineProfile,
 }
 
-fn cnc_profile_library() -> Vec<LibraryProfile> {
+pub(super) fn cnc_profile_library() -> Vec<LibraryProfile> {
     vec![
         LibraryProfile {
             key: "masso-g3-compact".to_string(),

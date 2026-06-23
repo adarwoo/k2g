@@ -13,6 +13,8 @@ machine:
   max_feed_rate: "1200mm/min"
   spindle_rpm_min: "1000rpm"
   spindle_rpm_max: "10000rpm"
+  spindle_start_delay_s: 0
+  spindle_stop_delay_s: 0
   atc_slot_count: 0
   origin:
     x0: Left
@@ -23,42 +25,38 @@ machine:
   line_numbering:
     enabled: false
     increment: 10
+  program_units:
+    length: "mm"
+    feedrate: "mm/min"
 
-header: |
-  (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-  (Reset all back to safe defaults)
-  G17 G54 G40 G49 G80 G90
-  G21
-  G10 P0
-  (Establish the Z-Safe)
-  G0 Z{z_safe}
-
-footer: |
-  (end of file)
-
-drill:
-  first_move: "G0 X{x} Y{y} Z{z_safe}"
-  cycle_mode_last: "G98"
-  cycle_mode_series: "G99"
-  cycle_start: "G81 Z{z_bottom} R{z_retract} F{z_feedrate}"
-  next_hole: "X{x} Y{y}"
-  cycle_cancel: "G80"
-
-route:
-  plunge_and_offset: |
-    G90 G0 X{x} Y{y}
-    G1 Z{z_bottom} F{z_feedrate}
-    G1 Y{y_plus_id}
-  arc_up: "G2 I0 J-{id}"
-  arc_down: "G3 I0 J-{id}"
-  retract: "G0 Z{z_safe}"
-
-tool_change:
-  manual_prompt: |
-    MSG Load {tool_name} {tool_diameter}
-    M01
-  command: |
+primitives:
+  initialise: |
+    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    (Reset all back to safe defaults)
+    G17 G54 G40 G49 G80 G90
+    G21
+    G10 P0
+    (Establish the Z-Safe)
+    G0 Z{z_safe}
+  move_slow: "G0 X{x} Y{y}"
+  start_spindle: |
+    S{rpm}
+    M03
+  stop_spindle: "M05"
+  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
+  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+  cut_bezier: |
+    ; cut_bezier fallback
+    ; implementation may expand into one or more arc segments
+  change_tool: |
     M05
     {manual_message}
     T{slot} M06
     S{rpm}
+  conclude: |
+    (end of file)
+  pause: |
+    MSG {message}
+    M01
+  banner: "( {text} )"

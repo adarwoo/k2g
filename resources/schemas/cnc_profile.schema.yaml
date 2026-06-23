@@ -3,8 +3,8 @@ type: object
 description: |
   This file controls the emitted GCode templates for the Masso G3 profile.
 
-  Placeholders in templates are rendered with Python's str.format().
-  Unknown placeholders are left as-is to avoid hard failures while editing.
+  Templates are evaluated through the application's RHAI expression path.
+  Template text may include placeholders in braces, for example {x}, {y}, {z_safe}.
 
   All dimensional fields (lengths, feed rates, spindle speeds) are expressed as
   unit-bearing strings so the file is self-describing and unit-system agnostic.
@@ -48,6 +48,16 @@ properties:
         type: string
         pattern: '^\s*[+-]?(?:\d+(?:\.\d+)?|\d*\.\d+|\d+(?:\.\d+)?\s*/\s*\d+)\s*rpm\s*$'
         default: "24000rpm"
+      spindle_start_delay_s:
+        description: Delay in seconds after spindle start before machining moves.
+        type: number
+        minimum: 0
+        default: 0
+      spindle_stop_delay_s:
+        description: Delay in seconds after spindle stop before tool change or conclude.
+        type: number
+        minimum: 0
+        default: 0
       atc_slot_count:
         description: Number of ATC slots. 0 means ATC is disabled (manual tool change only).
         type: integer
@@ -95,99 +105,91 @@ properties:
             minimum: 1
             default: 10
         required: [enabled, increment]
-    required: [fixture_plate, max_feed_rate, spindle_rpm_min, spindle_rpm_max, atc_slot_count, origin, scaling, line_numbering]
+      program_units:
+        description: Units used while rendering the generated CNC program.
+        type: object
+        properties:
+          length:
+            description: Program length unit.
+            type: string
+            enum: [mm, in]
+            default: mm
+          feedrate:
+            description: Program feedrate unit.
+            type: string
+            enum: [mm/min, in/min, ipm]
+            default: mm/min
+        required: [length, feedrate]
+    required: [fixture_plate, max_feed_rate, spindle_rpm_min, spindle_rpm_max, spindle_start_delay_s, spindle_stop_delay_s, atc_slot_count, origin, scaling, line_numbering, program_units]
 
-  header:
-    description: Header generated once at the beginning of the file.
-    type: string
-    default: |
-      (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-      (Reset all back to safe defaults)
-      G17 G54 G40 G49 G80 G90
-      G21
-      G10 P0
-      (Establish the Z-Safe)
-      G0 Z{z_safe}
-
-  footer:
-    description: Footer generated once at the end of the file.
-    type: string
-    default: |
-      (end of file)
-
-  drill:
-    description: Templates for drilling canned-cycle output.
+  primitives:
+    description: Primitive templates evaluated through RHAI for CNC-specific GCode emission.
     type: object
     properties:
-      first_move:
-        description: First move to the first hole, including safe Z.
-        type: string
-        default: G0 X{x} Y{y} Z{z_safe}
-      cycle_mode_last:
-        description: Canned cycle retract mode when this is the last hole.
-        type: string
-        default: G98
-      cycle_mode_series:
-        description: Canned cycle retract mode when more holes follow.
-        type: string
-        default: G99
-      cycle_start:
-        description: Canned cycle start for the first hole.
-        type: string
-        default: G81 Z{z_bottom} R{z_retract} F{z_feedrate}
-      next_hole:
-        description: Move for subsequent holes while cycle is active.
-        type: string
-        default: X{x} Y{y}
-      cycle_cancel:
-        description: Cancel canned cycle after the last hole.
-        type: string
-        default: G80
-    required: [first_move, cycle_mode_last, cycle_mode_series, cycle_start, next_hole, cycle_cancel]
-
-  route:
-    description: Templates for routed hole output.
-    type: object
-    properties:
-      plunge_and_offset:
-        description: Initial move and plunge sequence.
+      initialise:
+        description: Program initialization block.
         type: string
         default: |
-          G90 G0 X{x} Y{y}
-          G1 Z{z_bottom} F{z_feedrate}
-          G1 Y{y_plus_id}
-      arc_up:
-        description: Arc command for UP / UPDOWN cutting direction.
+          (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+          (Reset all back to safe defaults)
+          G17 G54 G40 G49 G80 G90
+          G21
+          G10 P0
+          (Establish the Z-Safe)
+          G0 Z{z_safe}
+      move_slow:
+        description: Positioning move primitive.
         type: string
-        default: G2 I0 J-{id}
-      arc_down:
-        description: Arc command for DOWN cutting direction.
+        default: G0 X{x} Y{y}
+      start_spindle:
+        description: Start spindle primitive.
         type: string
-        default: G3 I0 J-{id}
-      retract:
-        description: Retract after routing the hole.
+        default: S{rpm}\nM03
+      stop_spindle:
+        description: Stop spindle primitive.
         type: string
-        default: G0 Z{z_safe}
-    required: [plunge_and_offset, arc_up, arc_down, retract]
-
-  tool_change:
-    description: Templates for spindle stop, optional manual prompt, tool change and speed.
-    type: object
-    properties:
-      manual_prompt:
-        description: Prompt emitted only when rack is manual.
+        default: M05
+      drill:
+        description: Drill primitive template.
+        type: string
+        default: G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+      peck_drill:
+        description: Peck drill primitive template.
+        type: string
+        default: G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}
+      cut_arc:
+        description: Arc cutting primitive template.
+        type: string
+        default: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+      cut_bezier:
+        description: Bezier primitive template. May be native or an arc-approximation sequence.
         type: string
         default: |
-          MSG Load {tool_name} {tool_diameter}
-          M01
-      command:
-        description: Main tool change command block.
+          ; cut_bezier fallback
+          ; implementation may expand into one or more arc segments
+      change_tool:
+        description: Tool change primitive template.
         type: string
         default: |
           M05
           {manual_message}
           T{slot} M06
           S{rpm}
-    required: [manual_prompt, command]
+      conclude:
+        description: Program conclude/finalization block.
+        type: string
+        default: |
+          (end of file)
+      pause:
+        description: Optional pause/message insertion primitive.
+        type: string
+        default: |
+          MSG {message}
+          M01
+      banner:
+        description: Optional comment/banner insertion primitive.
+        type: string
+        default: ( {text} )
+    required: [initialise, move_slow, start_spindle, stop_spindle, drill, peck_drill, cut_arc, cut_bezier, change_tool, conclude]
 
-required: [machine, header, footer, drill, route, tool_change]
+required: [machine, primitives]

@@ -54,6 +54,13 @@ properties:
             slot:
               type: integer
               minimum: 1
+            tool_id:
+              type: ["string", "null"]
+              description: Assigned stock tool ID for this slot.
+            enabled:
+              type: boolean
+              description: Whether the slot is enabled.
+              default: true
             drill:
               unit: Length(mm)
               anyOf:
@@ -70,6 +77,8 @@ properties:
               type: boolean
               description: If set to false, the slot will not be used. Defaults to true.
           oneOf:
+            - required:
+                - tool_id
             - required:
                 - drill
               not:

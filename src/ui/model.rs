@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::board::BoardSnapshot;
 use crate::catalog::init::{catalog_dir, parse_catalog_with_backfill};
 use crate::catalog::types::{Catalog, ToolType};
 use crate::catalog::CatalogManager;
-use crate::units::{FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
+use crate::units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
+use super::persistence_state;
 
 #[derive(Clone, PartialEq)]
 pub struct UiLaunchData {
@@ -41,10 +42,6 @@ impl Screen {
             Self::Stock => "stock",
             Self::Cnc => "cnc",
         }
-    }
-
-    pub fn nav_items() -> [Self; 3] {
-        [Self::Job, Self::Stock, Self::Cnc]
     }
 }
 
@@ -87,6 +84,41 @@ impl UnitSystem {
         match self {
             Self::Metric => "metric",
             Self::Imperial => "imperial",
+        }
+    }
+
+    pub fn user_unit_system(self) -> UserUnitSystem {
+        match self {
+            Self::Metric => UserUnitSystem::Metric,
+            Self::Imperial => UserUnitSystem::Imperial,
+        }
+    }
+
+    pub fn length_unit_label(self) -> &'static str {
+        match self {
+            Self::Metric => "mm",
+            Self::Imperial => "in",
+        }
+    }
+
+    pub fn feed_unit_label(self) -> &'static str {
+        match self {
+            Self::Metric => "mm/min",
+            Self::Imperial => "ipm",
+        }
+    }
+
+    pub fn length_step(self) -> &'static str {
+        match self {
+            Self::Metric => "1",
+            Self::Imperial => "0.01",
+        }
+    }
+
+    pub fn feed_step(self) -> &'static str {
+        match self {
+            Self::Metric => "1",
+            Self::Imperial => "0.1",
         }
     }
 }
@@ -196,29 +228,46 @@ impl Default for MachineProfile {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
     InStock,
-    InRack,
     OutOfStock,
-    New,
-    NotPreferred,
 }
 
 impl ToolStatus {
     pub fn label(self) -> &'static str {
         match self {
-            Self::InStock => "In Stock",
-            Self::InRack => "In Rack",
-            Self::OutOfStock => "Out Of Stock",
-            Self::New => "New",
-            Self::NotPreferred => "Not Preferred",
+            Self::InStock => "In stock",
+            Self::OutOfStock => "Out of stock",
         }
     }
 
     pub fn class_name(self) -> &'static str {
         match self {
             Self::InStock => "status-in-stock",
-            Self::InRack => "status-in-rack",
             Self::OutOfStock => "status-out-of-stock",
-            Self::New => "status-new",
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolPreference {
+    Preferred,
+    Neutral,
+    NotPreferred,
+}
+
+impl ToolPreference {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Preferred => "Preferred",
+            Self::Neutral => "Neutral",
+            Self::NotPreferred => "Not preferred",
+        }
+    }
+
+    pub fn class_name(self) -> &'static str {
+        match self {
+            Self::Preferred => "status-preferred",
+            Self::Neutral => "status-neutral",
             Self::NotPreferred => "status-not-preferred",
         }
     }
@@ -228,15 +277,31 @@ impl ToolStatus {
 #[derive(Clone)]
 pub struct Tool {
     pub id: String,
+    pub composite_name: String,
     pub name: String,
     pub kind: String,
     pub diameter: Length,
+    pub point_angle: Angle,
     pub feed_rate: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub status: ToolStatus,
-    pub operation_count: u32,
+    pub preference: ToolPreference,
+    pub source_catalog: String,
     pub manufacturer: Option<String>,
     pub sku: Option<String>,
+}
+
+impl Tool {
+    pub fn display_name(&self) -> String {
+        let composite = self.composite_name.trim();
+        let nickname = self.name.trim();
+
+        if nickname.is_empty() {
+            composite.to_string()
+        } else {
+            format!("{} - {}", composite, nickname)
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -248,6 +313,7 @@ pub struct CatalogStockTool {
     pub display_name: String,
     pub kind: String,
     pub diameter: Length,
+    pub point_angle: Angle,
     pub feed_rate: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub sku: Option<String>,
@@ -331,6 +397,7 @@ pub fn load_stock_catalog_index() -> Vec<CatalogStockCatalog> {
                     display_name,
                     kind,
                     diameter: tool.diameter,
+                    point_angle: tool.point_angle,
                     feed_rate,
                     spindle_speed: tool.spindle_rpm,
                     sku: Some(tool.sku_name.clone()),
@@ -573,7 +640,7 @@ pub struct JobConfig {
 }
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct AppError {
     pub id: String,
     pub is_error: bool,
@@ -627,37 +694,46 @@ impl UiState {
         let tools = vec![
             Tool {
                 id: "tool-1".to_string(),
-                name: "0.8mm Carbide Drill".to_string(),
+                composite_name: "0.8mm Carbide Drill".to_string(),
+                name: "Pilot holes".to_string(),
                 kind: "Drill".to_string(),
                 diameter: Length::from_mm(0.8),
+                point_angle: Angle::from_degrees(130.0),
                 feed_rate: Some(FeedRate::from_mm_per_min(120.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(18_000.0)),
                 status: ToolStatus::InStock,
-                operation_count: 2,
+                preference: ToolPreference::Preferred,
+                source_catalog: "CNCLab / Drills".to_string(),
                 manufacturer: Some("CNCLab".to_string()),
                 sku: Some("DRL-08".to_string()),
             },
             Tool {
                 id: "tool-2".to_string(),
-                name: "1.0mm End Mill".to_string(),
+                composite_name: "1.0mm End Mill".to_string(),
+                name: "Outline router".to_string(),
                 kind: "End Mill".to_string(),
                 diameter: Length::from_mm(1.0),
+                point_angle: Angle::from_degrees(180.0),
                 feed_rate: Some(FeedRate::from_mm_per_min(280.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(16_000.0)),
-                status: ToolStatus::InRack,
-                operation_count: 3,
+                status: ToolStatus::InStock,
+                preference: ToolPreference::Neutral,
+                source_catalog: "CNCLab / End Mills".to_string(),
                 manufacturer: Some("CNCLab".to_string()),
                 sku: Some("EM-10".to_string()),
             },
             Tool {
                 id: "tool-3".to_string(),
-                name: "30deg V-Bit".to_string(),
+                composite_name: "30deg V-Bit".to_string(),
+                name: String::new(),
                 kind: "V-Bit".to_string(),
                 diameter: Length::from_mm(0.2),
+                point_angle: Angle::from_degrees(30.0),
                 feed_rate: None,
                 spindle_speed: None,
-                status: ToolStatus::New,
-                operation_count: 1,
+                status: ToolStatus::OutOfStock,
+                preference: ToolPreference::NotPreferred,
+                source_catalog: "Manual".to_string(),
                 manufacturer: None,
                 sku: None,
             },
@@ -666,7 +742,7 @@ impl UiState {
         let mut state = Self {
             selected_screen: Screen::Job,
             selected_job_view: JobCenterView::Board,
-            unit_system: UnitSystem::Metric,
+            unit_system: load_persisted_unit_system(),
             theme: Theme::Dark,
             machines: vec![],
             selected_machine_id: None,
@@ -887,13 +963,16 @@ impl UiState {
         let idx = self.tools.len() + 1;
         self.tools.push(Tool {
             id: format!("tool-{idx}"),
-            name: format!("Manual Tool {idx}"),
+            composite_name: format!("0.6mm End Mill {idx}"),
+            name: String::new(),
             kind: "End Mill".to_string(),
             diameter: Length::from_mm(0.6),
+            point_angle: Angle::from_degrees(180.0),
             feed_rate: None,
             spindle_speed: None,
             status: ToolStatus::InStock,
-            operation_count: 0,
+            preference: ToolPreference::Neutral,
+            source_catalog: "Manual".to_string(),
             manufacturer: None,
             sku: None,
         });
@@ -907,6 +986,32 @@ impl UiState {
                 return candidate;
             }
             idx += 1;
+        }
+    }
+
+    fn unique_tool_clone_name(&self, source: &Tool) -> String {
+        let base = if source.name.trim().is_empty() {
+            "Copy".to_string()
+        } else {
+            format!("{} copy", source.name.trim())
+        };
+
+        let mut index = 1usize;
+        loop {
+            let candidate = if index == 1 {
+                base.clone()
+            } else {
+                format!("{} {}", base, index)
+            };
+            let display_name = format!("{} - {}", source.composite_name.trim(), candidate);
+            if !self
+                .tools
+                .iter()
+                .any(|tool| tool.display_name().eq_ignore_ascii_case(&display_name))
+            {
+                return candidate;
+            }
+            index += 1;
         }
     }
 
@@ -1002,7 +1107,7 @@ impl UiState {
                         .tools
                         .iter()
                         .any(|existing| {
-                            existing.name == tool.display_name
+                            existing.composite_name == tool.display_name
                                 && existing.kind == tool.kind
                                 && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001
                         });
@@ -1012,13 +1117,16 @@ impl UiState {
 
                     self.tools.push(Tool {
                         id: self.next_tool_id(),
-                        name: tool.display_name.clone(),
+                        composite_name: tool.display_name.clone(),
+                        name: String::new(),
                         kind: tool.kind.clone(),
                         diameter: tool.diameter,
+                        point_angle: tool.point_angle,
                         feed_rate: tool.feed_rate,
                         spindle_speed: tool.spindle_speed,
-                        status: ToolStatus::New,
-                        operation_count: 0,
+                        status: ToolStatus::InStock,
+                        preference: ToolPreference::Neutral,
+                        source_catalog: format!("{} / {}", catalog.name, section.name),
                         manufacturer: Some(format!("{} / {}", catalog.name, section.name)),
                         sku: tool.sku.clone(),
                     });
@@ -1028,6 +1136,62 @@ impl UiState {
         }
 
         added
+    }
+
+    pub fn clone_tool(&mut self, tool_id: &str) -> Option<String> {
+        let source = self.tools.iter().find(|tool| tool.id == tool_id).cloned()?;
+        let new_id = self.next_tool_id();
+        let clone = Tool {
+            id: new_id.clone(),
+            name: self.unique_tool_clone_name(&source),
+            ..source
+        };
+        self.tools.push(clone);
+        Some(new_id)
+    }
+
+    pub fn remove_tools(&mut self, tool_ids: &[String]) -> usize {
+        if tool_ids.is_empty() {
+            return 0;
+        }
+
+        let to_remove: BTreeSet<&str> = tool_ids.iter().map(|tool_id| tool_id.as_str()).collect();
+        let before = self.tools.len();
+
+        self.tools.retain(|tool| !to_remove.contains(tool.id.as_str()));
+
+        for slot in self.rack_slots.values_mut() {
+            if slot
+                .tool_id
+                .as_deref()
+                .map(|tool_id| to_remove.contains(tool_id))
+                .unwrap_or(false)
+            {
+                slot.tool_id = None;
+            }
+        }
+
+        if self
+            .job_config
+            .outline_router_tool_id
+            .as_deref()
+            .map(|tool_id| to_remove.contains(tool_id))
+            .unwrap_or(false)
+        {
+            self.job_config.outline_router_tool_id = None;
+        }
+
+        if self
+            .job_config
+            .mouse_bite_drill_tool_id
+            .as_deref()
+            .map(|tool_id| to_remove.contains(tool_id))
+            .unwrap_or(false)
+        {
+            self.job_config.mouse_bite_drill_tool_id = None;
+        }
+
+        before.saturating_sub(self.tools.len())
     }
 
     pub fn select_screen(&mut self, screen: Screen) {
@@ -1062,6 +1226,22 @@ impl UiState {
                 disabled: false,
             });
         }
+    }
+}
+
+fn load_persisted_unit_system() -> UnitSystem {
+    let Some(state) = persistence_state() else {
+        return UnitSystem::Metric;
+    };
+
+    match state
+        .global_settings
+        .get("units")
+        .and_then(|units| units.get("system"))
+        .and_then(|system| system.as_str())
+    {
+        Some("imperial") => UnitSystem::Imperial,
+        _ => UnitSystem::Metric,
     }
 }
 
@@ -1116,6 +1296,7 @@ fn catalog_to_stock_catalog(
                 display_name: display_tool_name,
                 kind,
                 diameter: tool.diameter,
+                point_angle: tool.point_angle,
                 feed_rate,
                 spindle_speed: tool.spindle_rpm,
                 sku: Some(tool.sku_name.clone()),
