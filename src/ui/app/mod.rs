@@ -4,7 +4,8 @@ use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
 use crate::board::collect_board_snapshot_for_board;
-use kicad_ipc_rs::{DocumentType, KiCadClientBlocking};
+use crate::kicad_wrapper::KiCadClientBlocking;
+use kicad_ipc_rs::DocumentType;
 
 mod cnc;
 mod catalog;

@@ -105,7 +105,7 @@ impl UnitSystem {
     pub fn length_unit_label(self) -> &'static str {
         match self {
             Self::Metric => "mm",
-            Self::Imperial => "in",
+            Self::Imperial => "\"",
             Self::Mil => "mil",
         }
     }

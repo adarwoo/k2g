@@ -94,7 +94,6 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
     };
     let board_thickness_uses_atc_probe = board_thickness_uses_touch_probe
         && snapshot.job_config.touch_probe_source == TouchProbeSource::AtcSlot;
-    let board_thickness_unit = unit_service::length_unit_label(snapshot.unit_system);
     let board_thickness_step = unit_service::length_input_step(snapshot.unit_system);
     let board_thickness_auto_mm = snapshot
         .board
@@ -133,23 +132,34 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         .job_config
         .selected_operations
         .contains(&ProductionOperation::MillBoard);
-    let tab_width_display = unit_service::display_length_value_from_mm(
+    let tab_width_display = unit_service::format_length_input_value_from_mm(
         snapshot.job_config.tab_width_mm as f64,
         snapshot.unit_system,
-    ) as f32;
+    );
     let tab_width_is_overridden =
         (snapshot.job_config.tab_width_mm - snapshot.job_config.tab_width_baseline_mm).abs() > 1e-6;
-    let tab_width_unit = unit_service::length_unit_label(snapshot.unit_system);
     let tab_width_step = unit_service::length_input_step(snapshot.unit_system);
+    let tab_width_display_label = unit_service::format_length_display(
+        Length::from_mm(snapshot.job_config.tab_width_mm as f64),
+        snapshot.unit_system,
+    );
+    let mouse_bite_pitch_display_label = unit_service::format_length_display(
+        Length::from_mm(snapshot.job_config.mouse_bite_pitch_mm as f64),
+        snapshot.unit_system,
+    );
+    let board_thickness_user_display_label = unit_service::format_length_display(
+        Length::from_mm(snapshot.job_config.board_thickness_user_value as f64),
+        snapshot.unit_system,
+    );
     let tab_width_hint = match snapshot.unit_system {
         UnitSystem::Metric => "2.4mm",
         UnitSystem::Imperial => "1/16in",
         UnitSystem::Mil => "95mil",
     };
-    let mouse_bite_pitch_display = unit_service::display_length_value_from_mm(
+    let mouse_bite_pitch_display = unit_service::format_length_input_value_from_mm(
         snapshot.job_config.mouse_bite_pitch_mm as f64,
         snapshot.unit_system,
-    ) as f32;
+    );
     let mouse_bite_pitch_min = match snapshot.unit_system {
         UnitSystem::Metric => "0.6",
         UnitSystem::Imperial => "0.024",
@@ -835,10 +845,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                 select {
                                     value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
                                     onchange: move |evt| {
                                         let value = evt.value();
                                         state
@@ -917,7 +927,6 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     });
                                             },
                                         }
-                                        span { " {tab_width_unit}" }
                                         if tab_width_is_overridden {
                                             div { class: "stock-detail-original-group",
                                                 span { class: "stock-detail-original-value",
@@ -938,6 +947,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             }
                                         }
                                     }
+                                    p { class: "diag-status", "{tab_width_display_label}" }
                                 }
 
                                 div { class: "field section-subfield",
@@ -957,7 +967,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
 
                                 if snapshot.job_config.mouse_bites_enabled {
                                     div { class: "field section-subfield",
-                                        label { "Center-to-center ({tab_width_unit})" }
+                                        label { "Center-to-center" }
                                         div { class: "sub-field",
                                             input {
                                                 r#type: "number",
@@ -977,6 +987,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 },
                                             }
                                         }
+                                        p { class: "diag-status", "{mouse_bite_pitch_display_label}" }
                                     }
 
                                     div { class: "field section-subfield",
@@ -987,10 +998,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         select {
                                             disabled: snapshot.job_config.outline_router_tool_id.is_none(),
                                             value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    .unwrap_or_default(),
                                             onchange: move |evt| {
                                                 let value = evt.value();
                                                 state
@@ -1103,7 +1114,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         input {
                                             r#type: "number",
                                             step: "{board_thickness_step}",
-                                            value: "{unit_service::display_length_value_from_mm(snapshot.job_config.board_thickness_user_value as f64, snapshot.unit_system)}",
+                                            value: "{unit_service::format_length_input_value_from_mm(snapshot.job_config.board_thickness_user_value as f64, snapshot.unit_system)}",
                                             oninput: move |evt| {
                                                 let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
                                                 state
@@ -1115,8 +1126,8 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     });
                                             },
                                         }
-                                        span { " {board_thickness_unit}" }
                                     }
+                                    p { class: "diag-status", "{board_thickness_user_display_label}" }
                                 }
                             }
                             div { class: "radio-option",
@@ -1375,7 +1386,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                         state.with_mut(|s| s.job_config.board_orientation_custom_degrees = value);
                                                     },
                                                 }
-                                                span { " degrees" }
+                                                span { "Custom angle" }
                                             }
                                         }
                                     }

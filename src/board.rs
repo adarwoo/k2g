@@ -1,7 +1,8 @@
 use kicad_ipc_rs::{
-    BoardStackupLayerType, KiCadClientBlocking, PcbGraphicShapeGeometry, PcbItem, PcbPadStack,
+    BoardStackupLayerType, PcbGraphicShapeGeometry, PcbItem, PcbPadStack,
     PcbPadType, Vector2Nm,
 };
+use crate::kicad_wrapper::KiCadClientBlocking;
 
 use crate::units::Length;
 

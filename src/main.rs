@@ -2,13 +2,14 @@ mod catalog;
 mod board;
 mod cli;
 mod config;
+mod kicad_wrapper;
 mod stitching;
 mod ui;
 mod units;
 mod user_path;
 
 use cli::CliArgs;
-use kicad_ipc_rs::KiCadClientBlocking;
+use kicad_wrapper::KiCadClientBlocking;
 use stitching::stitch_edge_shapes;
 use ui::UiLaunchData;
 

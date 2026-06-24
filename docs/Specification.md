@@ -73,14 +73,17 @@ When the user opens K2G from KiCad, the default landing area is Job.
 - A global units service must be used for parse, conversion, and display formatting across screens.
 - Length values are persisted with their original explicit unit expression (for example `mm`, `in`, `mil`, including inch fractions).
 - Feed-rate values are persisted with explicit units and must always include a feed-rate unit.
-- Values whose domain has one canonical unit (for example angle in degrees or spindle speed in rpm) may omit unit suffixes.
+- Angle values are displayed with the `°` symbol.
+- Rotational-speed values are displayed with the `rpm` label and may omit a suffix only when the surrounding label already states the unit.
 - Frontend formatting always shows preferred user units first; if persisted unit/expression differs, append the original value in brackets.
 - When preference is inch and source value is an inch fraction, show decimal inch first and original fraction in brackets.
 - Display precision is global: `mm` at 0.001, `in` at 0.00001, `mil` at 0.1.
 - Display-unit mapping is global: `mm -> mm/min`, `in -> in/min`, `mil -> in/min`.
+- Angle display is global: degrees are shown consistently as `°` across the UI.
+- Rotational-speed display is global: spindle speeds are shown consistently as `rpm` across the UI.
 - For any user-entered measurement that accepts units, the current user preference unit is assumed when no unit suffix is provided.
 - In non-editing context, editable measurements are shown in the preference unit system; if native/original unit differs, the native/original value is appended in brackets.
-- On entering edit mode, the field value is converted to a raw numeric value in the currently selected unit system (no bracketed companion value while editing).
+- On entering edit mode, matching units are stripped to a raw value; angle and rotational-speed suffixes are always removed; when the active unit does not match the stored length/feed unit, the original expression is preserved for editing.
 - While editing, users may enter decimal or fractional values and may optionally override with an explicit unit suffix.
 - Enter validates and commits the edited value as the new reference value and exits edit mode.
 - If Enter validation fails, an inline error is shown and focus must remain in the same field.
@@ -178,6 +181,8 @@ General fields include:
 - Max feed rate
 - Spindle min and max RPM
 - Spindle start and stop delay
+- Board rotation values and tool point-angle values are displayed with the `°` symbol.
+- Tool spindle speeds are displayed with the `rpm` label.
 - ATC slot count (0 disables ATC)
 - Origin orientation:
   - X0: Left, Right, Front, Back

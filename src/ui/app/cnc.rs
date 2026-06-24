@@ -7,23 +7,6 @@ use super::super::model::*;
 use crate::ui::unit_service;
 use crate::units::{FeedRate, Length};
 
-fn format_numeric_input(mut value: f64, step: f64, digits: usize) -> String {
-    if step > 0.0 {
-        value = (value / step).round() * step;
-    }
-    if value.abs() < step / 2.0 {
-        value = 0.0;
-    }
-    let mut out = format!("{value:.digits$}");
-    while out.contains('.') && out.ends_with('0') {
-        out.pop();
-    }
-    if out.ends_with('.') {
-        out.pop();
-    }
-    out
-}
-
 #[component]
 pub fn CncScreen(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
@@ -40,42 +23,48 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
     let selected_id = machine.id.clone();
     let delete_selected_id = selected_id.clone();
 
-    let length_unit = unit_service::length_unit_label(snapshot.unit_system);
-    let length_step = unit_service::length_input_step(snapshot.unit_system);
-    let feed_unit = unit_service::feed_unit_label(snapshot.unit_system);
-    let feed_step = unit_service::feed_input_step(snapshot.unit_system);
-    let fixture_x_val = unit_service::display_length_value_from_mm(
-        machine.fixture_plate_max_x as f64,
-        snapshot.unit_system,
-    );
-    let fixture_y_val = unit_service::display_length_value_from_mm(
-        machine.fixture_plate_max_y as f64,
-        snapshot.unit_system,
-    );
-    let feed_val = unit_service::display_feed_value_from_mm_per_min(
-        machine.max_feed_rate_mm_per_min as f64,
-        snapshot.unit_system,
-    );
-    let (length_step_val, length_digits) = match snapshot.unit_system {
-        UnitSystem::Metric => (0.001_f64, 3),
-        UnitSystem::Imperial => (0.00001_f64, 5),
-        UnitSystem::Mil => (0.1_f64, 1),
-    };
-    let (feed_step_val, feed_digits) = match snapshot.unit_system {
-        UnitSystem::Metric => (0.001_f64, 3),
-        UnitSystem::Imperial | UnitSystem::Mil => (0.00001_f64, 5),
-    };
-    let fixture_x_input = format_numeric_input(fixture_x_val, length_step_val, length_digits);
-    let fixture_y_input = format_numeric_input(fixture_y_val, length_step_val, length_digits);
-    let feed_input = format_numeric_input(feed_val, feed_step_val, feed_digits);
+    let mut field_error_message = use_signal(|| None::<String>);
+    let mut fixture_x_is_editing = use_signal(|| false);
+    let mut fixture_x_draft = use_signal(String::new);
+    let mut fixture_y_is_editing = use_signal(|| false);
+    let mut fixture_y_draft = use_signal(String::new);
+    let mut feed_is_editing = use_signal(|| false);
+    let mut feed_draft = use_signal(String::new);
+    let mut spindle_min_is_editing = use_signal(|| false);
+    let mut spindle_min_draft = use_signal(String::new);
+    let mut spindle_max_is_editing = use_signal(|| false);
+    let mut spindle_max_draft = use_signal(String::new);
+    let mut scaling_error_message = use_signal(|| None::<String>);
+    let mut scaling_x_is_editing = use_signal(|| false);
+    let mut scaling_x_draft = use_signal(String::new);
+    let mut scaling_y_is_editing = use_signal(|| false);
+    let mut scaling_y_draft = use_signal(String::new);
+
+    let fixture_x_value = Length::from_mm(machine.fixture_plate_max_x as f64);
+    let fixture_y_value = Length::from_mm(machine.fixture_plate_max_y as f64);
+    let feed_value = FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64);
+    let spindle_min_value = crate::units::RotationalSpeed::from_rpm(machine.spindle_min_rpm as f64);
+    let spindle_max_value = crate::units::RotationalSpeed::from_rpm(machine.spindle_max_rpm as f64);
+
+    let fixture_x_edit_seed =
+        unit_service::format_length_edit_display(fixture_x_value, snapshot.unit_system);
+    let fixture_y_edit_seed =
+        unit_service::format_length_edit_display(fixture_y_value, snapshot.unit_system);
+    let feed_edit_seed = unit_service::format_feed_edit_display(feed_value, snapshot.unit_system);
+    let spindle_min_edit_seed = unit_service::format_rotational_speed_edit_display(spindle_min_value);
+    let spindle_max_edit_seed = unit_service::format_rotational_speed_edit_display(spindle_max_value);
+    let scaling_x_edit_seed = unit_service::format_percentage_edit_display(machine.scaling_x as f64);
+    let scaling_y_edit_seed = unit_service::format_percentage_edit_display(machine.scaling_y as f64);
+
     let fixture_x_display =
-        unit_service::format_length_display(Length::from_mm(machine.fixture_plate_max_x as f64), snapshot.unit_system);
+        unit_service::format_length_display(fixture_x_value, snapshot.unit_system);
     let fixture_y_display =
-        unit_service::format_length_display(Length::from_mm(machine.fixture_plate_max_y as f64), snapshot.unit_system);
-    let feed_display = unit_service::format_feed_display(
-        FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64),
-        snapshot.unit_system,
-    );
+        unit_service::format_length_display(fixture_y_value, snapshot.unit_system);
+    let feed_display = unit_service::format_feed_display(feed_value, snapshot.unit_system);
+    let spindle_min_display = unit_service::format_rotational_speed_display(spindle_min_value);
+    let spindle_max_display = unit_service::format_rotational_speed_display(spindle_max_value);
+    let scaling_x_display = unit_service::format_percentage_display(machine.scaling_x as f64);
+    let scaling_y_display = unit_service::format_percentage_display(machine.scaling_y as f64);
     let default_machine = MachineProfile::default();
     let header_rows = rows_for_template(&default_machine.gcode_header, 6, 18);
     let footer_rows = rows_for_template(&default_machine.gcode_footer, 2, 8);
@@ -225,85 +214,260 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                     div { class: "field section-block",
                         h4 { "Fixture plate" }
 
-                        div { class: "field section-subfield",
-                            label { "Fixture X ({length_unit})" }
-                            input {
-                                r#type: "number",
-                                min: "0",
-                                step: "{length_step}",
-                                value: "{fixture_x_input}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let val = evt.value().parse::<f64>().unwrap_or(0.0).max(0.0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.fixture_plate_max_x = unit_service::mm_from_display_length(
-                                                        val,
-                                                        s.unit_system,
-                                                    ) as u32;
-                                                }
-                                            });
-                                    }
-                                },
-                            }
-                            p { class: "diag-status", "{fixture_x_display}" }
+                        if let Some(message) = field_error_message.read().clone() {
+                            p { class: "diag-status", "{message}" }
                         }
 
                         div { class: "field section-subfield",
-                            label { "Fixture Y ({length_unit})" }
-                            input {
-                                r#type: "number",
-                                min: "0",
-                                step: "{length_step}",
-                                value: "{fixture_y_input}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let val = evt.value().parse::<f64>().unwrap_or(0.0).max(0.0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.fixture_plate_max_y = unit_service::mm_from_display_length(
-                                                        val,
-                                                        s.unit_system,
-                                                    ) as u32;
+                            label { "Fixture X" }
+                            div { class: "sub-field",
+                                if *fixture_x_is_editing.read() {
+                                    input {
+                                        class: "stock-detail-input",
+                                        value: fixture_x_draft.read().clone(),
+                                        autofocus: true,
+                                        onmounted: move |evt| async move {
+                                            let _ = evt.set_focus(true).await;
+                                        },
+                                        oninput: move |evt| {
+                                            fixture_x_draft.set(evt.value());
+                                        },
+                                        onkeydown: {
+                                            let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                            let selected_id = selected_id.clone();
+                                            move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let raw = fixture_x_draft.read().trim().to_string();
+                                                    match unit_service::parse_length_with_preference(
+                                                        &raw,
+                                                        snapshot.unit_system,
+                                                    ) {
+                                                        Ok(length) if length.as_mm() >= 0.0 => {
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        t.fixture_plate_max_x = length.as_mm().round().max(0.0)
+                                                                            as u32;
+                                                                    }
+                                                                });
+                                                            fixture_x_is_editing.set(false);
+                                                            field_error_message.set(None);
+                                                        }
+                                                        _ => {
+                                                            field_error_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Fixture X must be a valid non-negative length".to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                    fixture_x_is_editing.set(false);
+                                                    field_error_message.set(None);
                                                 }
-                                            });
+                                            }
+                                        },
+                                        onfocusout: {
+                                            let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                            move |_| {
+                                                fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                fixture_x_is_editing.set(false);
+                                            }
+                                        },
                                     }
-                                },
+                                } else {
+                                    button {
+                                        r#type: "button",
+                                        class: "stock-detail-input stock-detail-trigger",
+                                        onclick: {
+                                            let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                            move |_| {
+                                                fixture_x_is_editing.set(true);
+                                                fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                field_error_message.set(None);
+                                            }
+                                        },
+                                        "{fixture_x_display}"
+                                    }
+                                }
                             }
-                            p { class: "diag-status", "{fixture_y_display}" }
                         }
 
                         div { class: "field section-subfield",
-                            label { "Max feed rate ({feed_unit})" }
-                            input {
-                                r#type: "number",
-                                min: "0",
-                                step: "{feed_step}",
-                                value: "{feed_input}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let val = evt.value().parse::<f64>().unwrap_or(0.0).max(0.0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.max_feed_rate_mm_per_min = unit_service::mm_per_min_from_display_feed(
-                                                        val,
-                                                        s.unit_system,
-                                                    ) as u32;
+                            label { "Fixture Y" }
+                            div { class: "sub-field",
+                                if *fixture_y_is_editing.read() {
+                                    input {
+                                        class: "stock-detail-input",
+                                        value: fixture_y_draft.read().clone(),
+                                        autofocus: true,
+                                        onmounted: move |evt| async move {
+                                            let _ = evt.set_focus(true).await;
+                                        },
+                                        oninput: move |evt| {
+                                            fixture_y_draft.set(evt.value());
+                                        },
+                                        onkeydown: {
+                                            let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                            let selected_id = selected_id.clone();
+                                            move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let raw = fixture_y_draft.read().trim().to_string();
+                                                    match unit_service::parse_length_with_preference(
+                                                        &raw,
+                                                        snapshot.unit_system,
+                                                    ) {
+                                                        Ok(length) if length.as_mm() >= 0.0 => {
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        t.fixture_plate_max_y = length.as_mm().round().max(0.0)
+                                                                            as u32;
+                                                                    }
+                                                                });
+                                                            fixture_y_is_editing.set(false);
+                                                            field_error_message.set(None);
+                                                        }
+                                                        _ => {
+                                                            field_error_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Fixture Y must be a valid non-negative length".to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                    fixture_y_is_editing.set(false);
+                                                    field_error_message.set(None);
                                                 }
-                                            });
+                                            }
+                                        },
+                                        onfocusout: {
+                                            let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                            move |_| {
+                                                fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                fixture_y_is_editing.set(false);
+                                            }
+                                        },
                                     }
-                                },
+                                } else {
+                                    button {
+                                        r#type: "button",
+                                        class: "stock-detail-input stock-detail-trigger",
+                                        onclick: {
+                                            let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                            move |_| {
+                                                fixture_y_is_editing.set(true);
+                                                fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                field_error_message.set(None);
+                                            }
+                                        },
+                                        "{fixture_y_display}"
+                                    }
+                                }
                             }
-                            p { class: "diag-status", "{feed_display}" }
+                        }
+
+                        div { class: "field section-subfield",
+                            label { "Max feed rate" }
+                            div { class: "sub-field",
+                                if *feed_is_editing.read() {
+                                    input {
+                                        class: "stock-detail-input",
+                                        value: feed_draft.read().clone(),
+                                        autofocus: true,
+                                        onmounted: move |evt| async move {
+                                            let _ = evt.set_focus(true).await;
+                                        },
+                                        oninput: move |evt| {
+                                            feed_draft.set(evt.value());
+                                        },
+                                        onkeydown: {
+                                            let feed_edit_seed = feed_edit_seed.clone();
+                                            let selected_id = selected_id.clone();
+                                            move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let raw = feed_draft.read().trim().to_string();
+                                                    match unit_service::parse_feed_with_preference(
+                                                        &raw,
+                                                        snapshot.unit_system,
+                                                    ) {
+                                                        Ok(feed_rate) if feed_rate.as_mm_per_min() >= 0.0 => {
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        t.max_feed_rate_mm_per_min = feed_rate
+                                                                            .as_mm_per_min()
+                                                                            .round()
+                                                                            .max(0.0) as u32;
+                                                                    }
+                                                                });
+                                                            feed_is_editing.set(false);
+                                                            field_error_message.set(None);
+                                                        }
+                                                        _ => {
+                                                            field_error_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Max feed rate must be a valid non-negative feed rate"
+                                                                            .to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    feed_draft.set(feed_edit_seed.clone());
+                                                    feed_is_editing.set(false);
+                                                    field_error_message.set(None);
+                                                }
+                                            }
+                                        },
+                                        onfocusout: {
+                                            let feed_edit_seed = feed_edit_seed.clone();
+                                            move |_| {
+                                                feed_draft.set(feed_edit_seed.clone());
+                                                feed_is_editing.set(false);
+                                            }
+                                        },
+                                    }
+                                } else {
+                                    button {
+                                        r#type: "button",
+                                        class: "stock-detail-input stock-detail-trigger",
+                                        onclick: {
+                                            let feed_edit_seed = feed_edit_seed.clone();
+                                            move |_| {
+                                                feed_is_editing.set(true);
+                                                feed_draft.set(feed_edit_seed.clone());
+                                                field_error_message.set(None);
+                                            }
+                                        },
+                                        "{feed_display}"
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -311,48 +475,162 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         h4 { "Spindle" }
 
                         div { class: "field section-subfield",
-                            label { "Min RPM" }
-                            input {
-                                r#type: "number",
-                                min: "0",
-                                step: "100",
-                                value: "{machine.spindle_min_rpm}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let value = evt.value().parse::<u32>().unwrap_or(0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.spindle_min_rpm = value;
+                            label { "Min" }
+                            div { class: "sub-field",
+                                if *spindle_min_is_editing.read() {
+                                    input {
+                                        class: "stock-detail-input",
+                                        value: spindle_min_draft.read().clone(),
+                                        autofocus: true,
+                                        onmounted: move |evt| async move {
+                                            let _ = evt.set_focus(true).await;
+                                        },
+                                        oninput: move |evt| {
+                                            spindle_min_draft.set(evt.value());
+                                        },
+                                        onkeydown: {
+                                            let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                            let selected_id = selected_id.clone();
+                                            move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let raw = spindle_min_draft.read().trim().to_string();
+                                                    match unit_service::parse_rotational_speed(&raw) {
+                                                        Ok(speed) if speed.as_rpm() >= 0.0 => {
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        t.spindle_min_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                    }
+                                                                });
+                                                            spindle_min_is_editing.set(false);
+                                                            field_error_message.set(None);
+                                                        }
+                                                        _ => {
+                                                            field_error_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Spindle min must be a valid non-negative rpm value"
+                                                                            .to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                    spindle_min_is_editing.set(false);
+                                                    field_error_message.set(None);
                                                 }
-                                            });
+                                            }
+                                        },
+                                        onfocusout: {
+                                            let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                            move |_| {
+                                                spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                spindle_min_is_editing.set(false);
+                                            }
+                                        },
                                     }
-                                },
+                                } else {
+                                    button {
+                                        r#type: "button",
+                                        class: "stock-detail-input stock-detail-trigger",
+                                        onclick: {
+                                            let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                            move |_| {
+                                                spindle_min_is_editing.set(true);
+                                                spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                field_error_message.set(None);
+                                            }
+                                        },
+                                        "{spindle_min_display}"
+                                    }
+                                }
                             }
                         }
 
                         div { class: "field section-subfield",
-                            label { "Max RPM" }
-                            input {
-                                r#type: "number",
-                                min: "0",
-                                step: "100",
-                                value: "{machine.spindle_max_rpm}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let value = evt.value().parse::<u32>().unwrap_or(0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.spindle_max_rpm = value;
+                            label { "Max" }
+                            div { class: "sub-field",
+                                if *spindle_max_is_editing.read() {
+                                    input {
+                                        class: "stock-detail-input",
+                                        value: spindle_max_draft.read().clone(),
+                                        autofocus: true,
+                                        onmounted: move |evt| async move {
+                                            let _ = evt.set_focus(true).await;
+                                        },
+                                        oninput: move |evt| {
+                                            spindle_max_draft.set(evt.value());
+                                        },
+                                        onkeydown: {
+                                            let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                            let selected_id = selected_id.clone();
+                                            move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let raw = spindle_max_draft.read().trim().to_string();
+                                                    match unit_service::parse_rotational_speed(&raw) {
+                                                        Ok(speed) if speed.as_rpm() >= 0.0 => {
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        t.spindle_max_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                    }
+                                                                });
+                                                            spindle_max_is_editing.set(false);
+                                                            field_error_message.set(None);
+                                                        }
+                                                        _ => {
+                                                            field_error_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Spindle max must be a valid non-negative rpm value"
+                                                                            .to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                    spindle_max_is_editing.set(false);
+                                                    field_error_message.set(None);
                                                 }
-                                            });
+                                            }
+                                        },
+                                        onfocusout: {
+                                            let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                            move |_| {
+                                                spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                spindle_max_is_editing.set(false);
+                                            }
+                                        },
                                     }
-                                },
+                                } else {
+                                    button {
+                                        r#type: "button",
+                                        class: "stock-detail-input stock-detail-trigger",
+                                        onclick: {
+                                            let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                            move |_| {
+                                                spindle_max_is_editing.set(true);
+                                                spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                field_error_message.set(None);
+                                            }
+                                        },
+                                        "{spindle_max_display}"
+                                    }
+                                }
                             }
                         }
                     }
@@ -412,51 +690,153 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                     div { class: "field section-block",
                         h4 { "Axis scaling" }
 
+                        if let Some(message) = scaling_error_message.read().clone() {
+                            p { class: "diag-status", "{message}" }
+                        }
+
                         div { class: "field section-subfield",
-                            label { "X scale (%)" }
-                            input {
-                                r#type: "number",
-                                min: "1",
-                                max: "500",
-                                step: "0.1",
-                                value: "{machine.scaling_x}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let value = evt.value().parse::<f32>().unwrap_or(100.0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.scaling_x = value;
+                            label { "X scale" }
+                            if *scaling_x_is_editing.read() {
+                                input {
+                                    class: "stock-detail-input",
+                                    value: scaling_x_draft.read().clone(),
+                                    autofocus: true,
+                                    onmounted: move |evt| async move {
+                                        let _ = evt.set_focus(true).await;
+                                    },
+                                    oninput: move |evt| {
+                                        scaling_x_draft.set(evt.value());
+                                    },
+                                    onkeydown: {
+                                        let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                        let selected_id = selected_id.clone();
+                                        move |evt| {
+                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                            if key == "enter" || key == "numpadenter" {
+                                                let raw = scaling_x_draft.read().trim().to_string();
+                                                match unit_service::parse_percentage(&raw) {
+                                                    Ok(value) if (1.0..=500.0).contains(&value) => {
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.scaling_x = value as f32;
+                                                                }
+                                                            });
+                                                        scaling_x_is_editing.set(false);
+                                                        scaling_error_message.set(None);
+                                                    }
+                                                    _ => {
+                                                        scaling_error_message
+                                                            .set(Some("X scale must be between 1 and 500".to_string()));
+                                                    }
                                                 }
-                                            });
-                                    }
-                                },
+                                            } else if key == "escape" || key == "esc" {
+                                                evt.stop_propagation();
+                                                scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                                scaling_x_is_editing.set(false);
+                                                scaling_error_message.set(None);
+                                            }
+                                        }
+                                    },
+                                    onfocusout: {
+                                        let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                        move |_| {
+                                            scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                            scaling_x_is_editing.set(false);
+                                        }
+                                    },
+                                }
+                            } else {
+                                button {
+                                    r#type: "button",
+                                    class: "stock-detail-input stock-detail-trigger",
+                                    onclick: {
+                                        let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                        move |_| {
+                                            scaling_x_is_editing.set(true);
+                                            scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                            scaling_error_message.set(None);
+                                        }
+                                    },
+                                    "{scaling_x_display}"
+                                }
                             }
                         }
 
                         div { class: "field section-subfield",
-                            label { "Y scale (%)" }
-                            input {
-                                r#type: "number",
-                                min: "1",
-                                max: "500",
-                                step: "0.1",
-                                value: "{machine.scaling_y}",
-                                oninput: {
-                                    let selected_id = selected_id.clone();
-                                    move |evt| {
-                                        let value = evt.value().parse::<f32>().unwrap_or(100.0);
-                                        state
-                                            .with_mut(|s| {
-                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                {
-                                                    t.scaling_y = value;
+                            label { "Y scale" }
+                            if *scaling_y_is_editing.read() {
+                                input {
+                                    class: "stock-detail-input",
+                                    value: scaling_y_draft.read().clone(),
+                                    autofocus: true,
+                                    onmounted: move |evt| async move {
+                                        let _ = evt.set_focus(true).await;
+                                    },
+                                    oninput: move |evt| {
+                                        scaling_y_draft.set(evt.value());
+                                    },
+                                    onkeydown: {
+                                        let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                        let selected_id = selected_id.clone();
+                                        move |evt| {
+                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                            if key == "enter" || key == "numpadenter" {
+                                                let raw = scaling_y_draft.read().trim().to_string();
+                                                match unit_service::parse_percentage(&raw) {
+                                                    Ok(value) if (1.0..=500.0).contains(&value) => {
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.scaling_y = value as f32;
+                                                                }
+                                                            });
+                                                        scaling_y_is_editing.set(false);
+                                                        scaling_error_message.set(None);
+                                                    }
+                                                    _ => {
+                                                        scaling_error_message
+                                                            .set(Some("Y scale must be between 1 and 500".to_string()));
+                                                    }
                                                 }
-                                            });
-                                    }
-                                },
+                                            } else if key == "escape" || key == "esc" {
+                                                evt.stop_propagation();
+                                                scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                                scaling_y_is_editing.set(false);
+                                                scaling_error_message.set(None);
+                                            }
+                                        }
+                                    },
+                                    onfocusout: {
+                                        let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                        move |_| {
+                                            scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                            scaling_y_is_editing.set(false);
+                                        }
+                                    },
+                                }
+                            } else {
+                                button {
+                                    r#type: "button",
+                                    class: "stock-detail-input stock-detail-trigger",
+                                    onclick: {
+                                        let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                        move |_| {
+                                            scaling_y_is_editing.set(true);
+                                            scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                            scaling_error_message.set(None);
+                                        }
+                                    },
+                                    "{scaling_y_display}"
+                                }
                             }
                         }
                     }
@@ -739,7 +1119,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                 p { "ID: {machine.id}" }
                 p { "Fixture size: {fixture_x_display} x {fixture_y_display}" }
                 p { "Maximum feed rate: {feed_display}" }
-                p { "Spindle: {machine.spindle_min_rpm} – {machine.spindle_max_rpm} rpm" }
+                p { "Spindle: {spindle_min_display} – {spindle_max_display}" }
                 p { "ATC slots: {machine.atc_slot_count}" }
                 p { "Origin: {machine.origin_x0} / {machine.origin_y0}" }
                 p { "Scaling: {machine.scaling_x}% × {machine.scaling_y}%" }
@@ -871,8 +1251,12 @@ fn machine_profile_to_yaml(machine: &MachineProfile) -> Result<String, serde_yam
                 y: format!("{}mm", machine.fixture_plate_max_y),
             },
             max_feed_rate: format!("{}mm/min", machine.max_feed_rate_mm_per_min),
-            spindle_rpm_min: format!("{}rpm", machine.spindle_min_rpm),
-            spindle_rpm_max: format!("{}rpm", machine.spindle_max_rpm),
+            spindle_rpm_min: unit_service::format_rotational_speed_display(
+                crate::units::RotationalSpeed::from_rpm(machine.spindle_min_rpm as f64),
+            ),
+            spindle_rpm_max: unit_service::format_rotational_speed_display(
+                crate::units::RotationalSpeed::from_rpm(machine.spindle_max_rpm as f64),
+            ),
             atc_slot_count: machine.atc_slot_count,
             origin: ExportOrigin {
                 x0: machine.origin_x0.clone(),

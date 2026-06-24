@@ -2649,7 +2649,9 @@ dependencies = [
 
 [[package]]
 name = "kicad-ipc-rs"
-version = "0.4.0"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17270cabeef7d717f31b94caa7540b59a99b4a0935c36ca3645f319594f7a3ff"
 dependencies = [
  "nng",
  "prost",

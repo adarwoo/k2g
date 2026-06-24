@@ -1,9 +1,7 @@
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
-use crate::units::{
-    Angle, FeedRate, Length, RotationalSpeed,
-};
+use crate::units::{FeedRate, Length, RotationalSpeed};
 use crate::ui::unit_service;
 
 use super::super::model::*;
@@ -84,8 +82,6 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let has_atc = snapshot.selected_machine_has_atc();
     let unit_system = snapshot.unit_system;
-    let stock_length_unit_label = snapshot.unit_system.length_unit_label();
-    let stock_feed_unit_label = snapshot.unit_system.feed_unit_label();
 
     let mut show_catalog_picker = use_signal(|| false);
     let mut selected_catalog_tool_keys = use_signal(|| BTreeSet::<String>::new());
@@ -171,28 +167,49 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
 
     let detail_diameter_display = if *detail_diameter_is_editing.read() {
         detail_diameter_draft.read().clone()
+    } else if let Some(tool) = active_tool.as_ref() {
+        format_length_for_user(tool.diameter, unit_system)
     } else {
         format_length_field_display(&detail_diameter_mm.read(), unit_system)
     };
     let detail_point_angle_display = if *detail_point_angle_is_editing.read() {
         detail_point_angle_draft.read().clone()
+    } else if let Some(tool) = active_tool.as_ref() {
+        unit_service::format_angle_display(tool.point_angle)
     } else {
-        detail_point_angle_degrees.read().clone()
+        format_angle_field_display(&detail_point_angle_degrees.read())
     };
     let detail_feed_rate_display = if *detail_feed_rate_is_editing.read() {
         detail_feed_rate_draft.read().clone()
+    } else if let Some(tool) = active_tool.as_ref() {
+        tool.feed_rate
+            .map(|value| format_feed_rate_for_user(value, unit_system))
+            .unwrap_or_default()
     } else {
         format_feed_rate_field_display(&detail_feed_rate_mm_per_min.read(), unit_system)
     };
     let detail_spindle_speed_display = if *detail_spindle_speed_is_editing.read() {
         detail_spindle_speed_draft.read().clone()
+    } else if let Some(tool) = active_tool.as_ref() {
+        tool.spindle_speed
+            .map(unit_service::format_rotational_speed_display)
+            .unwrap_or_default()
     } else {
-        detail_spindle_speed_rpm.read().clone()
+        format_rotational_speed_field_display(&detail_spindle_speed_rpm.read())
     };
+    let diameter_edit_seed = active_tool
+        .as_ref()
+        .map(|tool| unit_service::format_length_edit_display(tool.diameter, unit_system))
+        .unwrap_or_else(|| detail_diameter_mm.read().clone());
+    let feed_rate_edit_seed = active_tool
+        .as_ref()
+        .and_then(|tool| tool.feed_rate)
+        .map(|feed_rate| format_feed_rate_edit_display(feed_rate, unit_system))
+        .unwrap_or_default();
 
     let detail_diameter_original_display = active_tool.as_ref().and_then(|tool| {
         tool.catalog_diameter
-            .map(|value| format_length_field_display(&value.to_string(), unit_system))
+            .map(|value| unit_service::format_length_display(value, unit_system))
     });
     let detail_diameter_is_modified = active_tool
         .as_ref()
@@ -202,9 +219,10 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
         })
         .unwrap_or(false);
 
-    let detail_point_angle_original_display = active_tool
-        .as_ref()
-        .and_then(|tool| tool.catalog_point_angle.map(|value| format_decimal(value.as_degrees())));
+    let detail_point_angle_original_display = active_tool.as_ref().and_then(|tool| {
+        tool.catalog_point_angle
+            .map(unit_service::format_angle_display)
+    });
     let detail_point_angle_is_modified = active_tool
         .as_ref()
         .and_then(|tool| {
@@ -215,16 +233,17 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
 
     let detail_feed_rate_original_display = active_tool.as_ref().and_then(|tool| {
         tool.catalog_feed_rate
-            .map(|value| format_feed_rate_field_display(&value.to_string(), unit_system))
+            .map(|value| format_feed_rate_for_user(value, unit_system))
     });
     let detail_feed_rate_is_modified = active_tool
         .as_ref()
         .map(|tool| option_feed_rate_changed(tool.feed_rate, tool.catalog_feed_rate))
         .unwrap_or(false);
 
-    let detail_spindle_speed_original_display = active_tool
-        .as_ref()
-        .and_then(|tool| tool.catalog_spindle_speed.map(|value| format_decimal(value.as_rpm())));
+    let detail_spindle_speed_original_display = active_tool.as_ref().and_then(|tool| {
+        tool.catalog_spindle_speed
+            .map(unit_service::format_rotational_speed_display)
+    });
     let detail_spindle_speed_is_modified = active_tool
         .as_ref()
         .map(|tool| option_spindle_speed_changed(tool.spindle_speed, tool.catalog_spindle_speed))
@@ -455,7 +474,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                 }
             }
 
-            if let Some(tool) = active_tool {
+            if let Some(tool) = active_tool.as_ref() {
                 div {
                     class: "stock-detail-page",
                     tabindex: "0",
@@ -504,6 +523,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                             if let Some(clone) = cloned_tool {
                                                 load_tool_editor(
                                                     &clone,
+                                                    unit_system,
                                                     detail_tool_id,
                                                     detail_composite_name,
                                                     detail_custom_name,
@@ -573,9 +593,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 div { class: "stock-detail-readonly", "{detail_kind.read()}" }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label",
-                                    "Diameter ({stock_length_unit_label})"
-                                }
+                                div { class: "stock-detail-label", "Diameter" }
                                 div { class: "stock-detail-field-value",
                                     if *detail_diameter_is_editing.read() {
                                         input {
@@ -608,8 +626,12 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
 
                                                     match parse_length_for_display_input(&normalized_input, unit_system) {
                                                         Ok(length) if length.as_mm() > 0.0 => {
-                                                            detail_diameter_mm.set(length.to_string());
-                                                            detail_diameter_draft.set(length.to_string());
+                                                            let normalized = unit_service::format_length_edit_display(
+                                                                length,
+                                                                unit_system,
+                                                            );
+                                                            detail_diameter_mm.set(normalized.clone());
+                                                            detail_diameter_draft.set(normalized);
                                                             detail_diameter_is_editing.set(false);
                                                             detail_pending_focus_field.set(None);
                                                             detail_field_popup_message.set(None);
@@ -643,50 +665,59 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                     detail_field_popup_message.set(None);
                                                 }
                                             },
-                                            onfocusout: move |_| {
-                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                detail_diameter_is_editing.set(false);
-                                                if let Some(next) = *detail_pending_focus_field.read() {
-                                                    if next != StockDetailField::Diameter {
-                                                        match next {
-                                                            StockDetailField::PointAngle => {
-                                                                detail_point_angle_is_editing.set(true);
-                                                                detail_point_angle_draft
-                                                                    .set(detail_point_angle_degrees.read().clone());
+                                            onfocusout: {
+                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
+                                                move |_| {
+                                                    detail_diameter_draft.set(detail_diameter_mm.read().clone());
+                                                    detail_diameter_is_editing.set(false);
+                                                    if let Some(next) = *detail_pending_focus_field.read() {
+                                                        if next != StockDetailField::Diameter {
+                                                            match next {
+                                                                StockDetailField::PointAngle => {
+                                                                    detail_point_angle_is_editing.set(true);
+                                                                    detail_point_angle_draft
+                                                                        .set(detail_point_angle_degrees.read().clone());
+                                                                }
+                                                                StockDetailField::FeedRate => {
+                                                                    detail_feed_rate_is_editing.set(true);
+                                                                    detail_feed_rate_draft
+                                                                        .set(feed_rate_edit_seed.clone());
+                                                                }
+                                                                StockDetailField::SpindleSpeed => {
+                                                                    detail_spindle_speed_is_editing.set(true);
+                                                                    detail_spindle_speed_draft
+                                                                        .set(detail_spindle_speed_rpm.read().clone());
+                                                                }
+                                                                StockDetailField::Diameter => {}
                                                             }
-                                                            StockDetailField::FeedRate => {
-                                                                detail_feed_rate_is_editing.set(true);
-                                                                detail_feed_rate_draft
-                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                            }
-                                                            StockDetailField::SpindleSpeed => {
-                                                                detail_spindle_speed_is_editing.set(true);
-                                                                detail_spindle_speed_draft
-                                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                            }
-                                                            StockDetailField::Diameter => {}
+                                                            detail_field_popup_message.set(None);
                                                         }
-                                                        detail_field_popup_message.set(None);
                                                     }
+                                                    detail_pending_focus_field.set(None);
                                                 }
-                                                detail_pending_focus_field.set(None);
                                             },
                                         }
                                     } else {
                                         button {
                                             r#type: "button",
                                             class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: move |_| {
-                                                detail_pending_focus_field.set(Some(StockDetailField::Diameter));
-                                                detail_diameter_is_editing.set(true);
-                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                detail_field_popup_message.set(None);
+                                            onmousedown: {
+                                                let diameter_edit_seed = diameter_edit_seed.clone();
+                                                move |_| {
+                                                    detail_pending_focus_field.set(Some(StockDetailField::Diameter));
+                                                    detail_diameter_is_editing.set(true);
+                                                    detail_diameter_draft.set(diameter_edit_seed.clone());
+                                                    detail_field_popup_message.set(None);
+                                                }
                                             },
-                                            onclick: move |_| {
-                                                detail_pending_focus_field.set(None);
-                                                detail_diameter_is_editing.set(true);
-                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                detail_field_popup_message.set(None);
+                                            onclick: {
+                                                let diameter_edit_seed = diameter_edit_seed.clone();
+                                                move |_| {
+                                                    detail_pending_focus_field.set(None);
+                                                    detail_diameter_is_editing.set(true);
+                                                    detail_diameter_draft.set(diameter_edit_seed.clone());
+                                                    detail_field_popup_message.set(None);
+                                                }
                                             },
                                             "{detail_diameter_display}"
                                         }
@@ -707,8 +738,12 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                         let original_diameter = tool.catalog_diameter;
                                                         move |_| {
                                                             if let Some(original_diameter) = original_diameter {
-                                                                detail_diameter_mm.set(original_diameter.to_string());
-                                                                detail_diameter_draft.set(original_diameter.to_string());
+                                                                let normalized = unit_service::format_length_edit_display(
+                                                                    original_diameter,
+                                                                    unit_system,
+                                                                );
+                                                                detail_diameter_mm.set(normalized.clone());
+                                                                detail_diameter_draft.set(normalized);
                                                                 detail_diameter_is_editing.set(false);
                                                                 detail_pending_focus_field.set(None);
                                                                 detail_field_popup_message.set(None);
@@ -733,7 +768,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Tip Geometry (deg)" }
+                                div { class: "stock-detail-label", "Tip Geometry" }
                                 div { class: "stock-detail-field-value",
                                     if *detail_point_angle_is_editing.read() {
                                         input {
@@ -749,9 +784,9 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                 let key = evt.key().to_string().to_ascii_lowercase();
                                                 if key == "enter" || key == "numpadenter" {
                                                     let draft_value = detail_point_angle_draft.read().clone();
-                                                    match parse_required_f64(&draft_value, "Tip geometry") {
-                                                        Ok(value) if value > 0.0 && value <= 180.0 => {
-                                                            let normalized = format_decimal(value);
+                                                    match unit_service::parse_angle(&draft_value) {
+                                                        Ok(angle) if angle.as_degrees() > 0.0 && angle.as_degrees() <= 180.0 => {
+                                                            let normalized = unit_service::format_angle_edit_display(angle);
                                                             detail_point_angle_degrees.set(normalized.clone());
                                                             detail_point_angle_draft.set(normalized);
                                                             detail_point_angle_is_editing.set(false);
@@ -765,7 +800,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
-                                                                            target.point_angle = Angle::from_degrees(value);
+                                                                            target.point_angle = angle;
                                                                         }
                                                                     });
                                                             }
@@ -779,8 +814,9 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                     ),
                                                                 );
                                                         }
-                                                        Err(message) => {
-                                                            detail_field_popup_message.set(Some(message));
+                                                        Err(_) => {
+                                                            detail_field_popup_message
+                                                                .set(Some("Tip geometry must be a valid angle".to_string()));
                                                         }
                                                     }
                                                 } else if key == "escape" || key == "esc" {
@@ -791,34 +827,38 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                     detail_field_popup_message.set(None);
                                                 }
                                             },
-                                            onfocusout: move |_| {
-                                                detail_point_angle_draft
-                                                    .set(detail_point_angle_degrees.read().clone());
-                                                detail_point_angle_is_editing.set(false);
-                                                if let Some(next) = *detail_pending_focus_field.read() {
-                                                    if next != StockDetailField::PointAngle {
-                                                        match next {
-                                                            StockDetailField::Diameter => {
-                                                                detail_diameter_is_editing.set(true);
-                                                                detail_diameter_draft
-                                                                    .set(detail_diameter_mm.read().clone());
+                                            onfocusout: {
+                                                let diameter_edit_seed = diameter_edit_seed.clone();
+                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
+                                                move |_| {
+                                                    detail_point_angle_draft
+                                                        .set(detail_point_angle_degrees.read().clone());
+                                                    detail_point_angle_is_editing.set(false);
+                                                    if let Some(next) = *detail_pending_focus_field.read() {
+                                                        if next != StockDetailField::PointAngle {
+                                                            match next {
+                                                                StockDetailField::Diameter => {
+                                                                    detail_diameter_is_editing.set(true);
+                                                                    detail_diameter_draft
+                                                                        .set(diameter_edit_seed.clone());
+                                                                }
+                                                                StockDetailField::FeedRate => {
+                                                                    detail_feed_rate_is_editing.set(true);
+                                                                    detail_feed_rate_draft
+                                                                        .set(feed_rate_edit_seed.clone());
+                                                                }
+                                                                StockDetailField::SpindleSpeed => {
+                                                                    detail_spindle_speed_is_editing.set(true);
+                                                                    detail_spindle_speed_draft
+                                                                        .set(detail_spindle_speed_rpm.read().clone());
+                                                                }
+                                                                StockDetailField::PointAngle => {}
                                                             }
-                                                            StockDetailField::FeedRate => {
-                                                                detail_feed_rate_is_editing.set(true);
-                                                                detail_feed_rate_draft
-                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                            }
-                                                            StockDetailField::SpindleSpeed => {
-                                                                detail_spindle_speed_is_editing.set(true);
-                                                                detail_spindle_speed_draft
-                                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                            }
-                                                            StockDetailField::PointAngle => {}
+                                                            detail_field_popup_message.set(None);
                                                         }
-                                                        detail_field_popup_message.set(None);
                                                     }
+                                                    detail_pending_focus_field.set(None);
                                                 }
-                                                detail_pending_focus_field.set(None);
                                             },
                                         }
                                     } else {
@@ -857,7 +897,9 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             let original_point_angle = tool.catalog_point_angle;
                                                             move |_| {
                                                                 if let Some(original_point_angle) = original_point_angle {
-                                                                    let normalized = format_decimal(original_point_angle.as_degrees());
+                                                                    let normalized = unit_service::format_angle_edit_display(
+                                                                        original_point_angle,
+                                                                    );
                                                                     detail_point_angle_degrees.set(normalized.clone());
                                                                     detail_point_angle_draft.set(normalized);
                                                                     detail_point_angle_is_editing.set(false);
@@ -885,9 +927,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label",
-                                    "Feed rate ({stock_feed_unit_label})"
-                                }
+                                div { class: "stock-detail-label", "Feed rate" }
                                 div { class: "stock-detail-field-value",
                                     if *detail_feed_rate_is_editing.read() {
                                         input {
@@ -931,7 +971,10 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                     };
                                                     match parse_optional_feed_rate(&normalized_input, unit_system, "Feed rate") {
                                                         Ok(Some(feed_rate)) => {
-                                                            let normalized = feed_rate.to_string();
+                                                            let normalized = format_feed_rate_edit_display(
+                                                                feed_rate,
+                                                                unit_system,
+                                                            );
                                                             detail_feed_rate_mm_per_min.set(normalized.clone());
                                                             detail_feed_rate_draft.set(normalized);
                                                             detail_feed_rate_is_editing.set(false);
@@ -1015,19 +1058,23 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                         button {
                                             r#type: "button",
                                             class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: move |_| {
-                                                detail_pending_focus_field.set(Some(StockDetailField::FeedRate));
-                                                detail_feed_rate_is_editing.set(true);
-                                                detail_feed_rate_draft
-                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                detail_field_popup_message.set(None);
+                                            onmousedown: {
+                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
+                                                move |_| {
+                                                    detail_pending_focus_field.set(Some(StockDetailField::FeedRate));
+                                                    detail_feed_rate_is_editing.set(true);
+                                                    detail_feed_rate_draft.set(feed_rate_edit_seed.clone());
+                                                    detail_field_popup_message.set(None);
+                                                }
                                             },
-                                            onclick: move |_| {
-                                                detail_pending_focus_field.set(None);
-                                                detail_feed_rate_is_editing.set(true);
-                                                detail_feed_rate_draft
-                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                detail_field_popup_message.set(None);
+                                            onclick: {
+                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
+                                                move |_| {
+                                                    detail_pending_focus_field.set(None);
+                                                    detail_feed_rate_is_editing.set(true);
+                                                    detail_feed_rate_draft.set(feed_rate_edit_seed.clone());
+                                                    detail_field_popup_message.set(None);
+                                                }
                                             },
                                             if detail_feed_rate_display.is_empty() {
                                                 "Optional"
@@ -1051,7 +1098,10 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             let original_feed_rate = tool.catalog_feed_rate;
                                                             move |_| {
                                                                 if let Some(original_feed_rate) = original_feed_rate {
-                                                                    let normalized = original_feed_rate.to_string();
+                                                                    let normalized = format_feed_rate_edit_display(
+                                                                        original_feed_rate,
+                                                                        unit_system,
+                                                                    );
                                                                     detail_feed_rate_mm_per_min.set(normalized.clone());
                                                                     detail_feed_rate_draft.set(normalized);
                                                                     detail_feed_rate_is_editing.set(false);
@@ -1079,7 +1129,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Spindle speed (RPM)" }
+                                div { class: "stock-detail-label", "Spindle speed" }
                                 div { class: "stock-detail-field-value",
                                     if *detail_spindle_speed_is_editing.read() {
                                         input {
@@ -1096,9 +1146,11 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                 let key = evt.key().to_string().to_ascii_lowercase();
                                                 if key == "enter" || key == "numpadenter" {
                                                     let draft_value = detail_spindle_speed_draft.read().clone();
-                                                    match parse_optional_f64(&draft_value, "Spindle speed") {
-                                                        Ok(Some(value)) => {
-                                                            let normalized = format_decimal(value);
+                                                    match unit_service::parse_rotational_speed(&draft_value) {
+                                                        Ok(value) => {
+                                                            let normalized = unit_service::format_rotational_speed_edit_display(
+                                                                value,
+                                                            );
                                                             detail_spindle_speed_rpm.set(normalized.clone());
                                                             detail_spindle_speed_draft.set(normalized);
                                                             detail_spindle_speed_is_editing.set(false);
@@ -1112,34 +1164,16 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
-                                                                            target.spindle_speed = Some(
-                                                                                RotationalSpeed::from_rpm(value),
-                                                                            );
+                                                                            target.spindle_speed = Some(value);
                                                                         }
                                                                     });
                                                             }
                                                         }
-                                                        Ok(None) => {
-                                                            detail_spindle_speed_rpm.set(String::new());
-                                                            detail_spindle_speed_draft.set(String::new());
-                                                            detail_spindle_speed_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.spindle_speed = None;
-                                                                        }
-                                                                    });
-                                                            }
-                                                        }
-                                                        Err(message) => {
-                                                            detail_field_popup_message.set(Some(message));
+                                                        Err(_) => {
+                                                            detail_field_popup_message
+                                                                .set(
+                                                                    Some("Spindle speed must be a valid rpm value".to_string()),
+                                                                );
                                                         }
                                                     }
                                                 } else if key == "escape" || key == "esc" {
@@ -1220,7 +1254,9 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             let original_spindle_speed = tool.catalog_spindle_speed;
                                                             move |_| {
                                                                 if let Some(original_spindle_speed) = original_spindle_speed {
-                                                                    let normalized = format_decimal(original_spindle_speed.as_rpm());
+                                                                    let normalized = unit_service::format_rotational_speed_edit_display(
+                                                                        original_spindle_speed,
+                                                                    );
                                                                     detail_spindle_speed_rpm.set(normalized.clone());
                                                                     detail_spindle_speed_draft.set(normalized);
                                                                     detail_spindle_speed_is_editing.set(false);
@@ -1387,6 +1423,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                     move |_| {
                                                         load_tool_editor(
                                                             &tool_for_detail,
+                                                            unit_system,
                                                             detail_tool_id,
                                                             detail_composite_name,
                                                             detail_custom_name,
@@ -1499,6 +1536,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
 
 fn load_tool_editor(
     tool: &Tool,
+    unit_system: UnitSystem,
     mut detail_tool_id: Signal<Option<String>>,
     mut detail_composite_name: Signal<String>,
     mut detail_custom_name: Signal<String>,
@@ -1525,52 +1563,33 @@ fn load_tool_editor(
     detail_composite_name.set(tool.composite_name.clone());
     detail_custom_name.set(tool.name.clone());
     detail_kind.set(tool.kind.clone());
-    detail_diameter_mm.set(tool.diameter.to_string());
-    detail_diameter_draft.set(tool.diameter.to_string());
+    let diameter_display = unit_service::format_length_edit_display(tool.diameter, unit_system);
+    detail_diameter_mm.set(diameter_display.clone());
+    detail_diameter_draft.set(diameter_display);
     detail_diameter_is_editing.set(false);
-    detail_point_angle_degrees.set(format_decimal(tool.point_angle.as_degrees()));
-    detail_point_angle_draft.set(format_decimal(tool.point_angle.as_degrees()));
+    let point_angle_display = unit_service::format_angle_edit_display(tool.point_angle);
+    detail_point_angle_degrees.set(point_angle_display.clone());
+    detail_point_angle_draft.set(point_angle_display);
     detail_point_angle_is_editing.set(false);
-    detail_feed_rate_mm_per_min.set(
-        tool.feed_rate
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-    );
-    detail_feed_rate_draft.set(
-        tool.feed_rate
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-    );
+    let feed_rate_display = tool
+        .feed_rate
+        .map(|value| format_feed_rate_edit_display(value, unit_system))
+        .unwrap_or_default();
+    detail_feed_rate_mm_per_min.set(feed_rate_display.clone());
+    detail_feed_rate_draft.set(feed_rate_display);
     detail_feed_rate_is_editing.set(false);
-    detail_spindle_speed_rpm.set(
-        tool.spindle_speed
-            .map(|value| format_decimal(value.as_rpm()))
-            .unwrap_or_default(),
-    );
-    detail_spindle_speed_draft.set(
-        tool.spindle_speed
-            .map(|value| format_decimal(value.as_rpm()))
-            .unwrap_or_default(),
-    );
+    let spindle_speed_display = tool
+        .spindle_speed
+        .map(unit_service::format_rotational_speed_edit_display)
+        .unwrap_or_default();
+    detail_spindle_speed_rpm.set(spindle_speed_display.clone());
+    detail_spindle_speed_draft.set(spindle_speed_display);
     detail_spindle_speed_is_editing.set(false);
     detail_source_catalog.set(tool.source_catalog.clone());
     detail_manufacturer.set(tool.manufacturer.clone().unwrap_or_default());
     detail_sku.set(tool.sku.clone().unwrap_or_default());
     detail_status.set(tool_status_value(tool.status).to_string());
     detail_preference.set(tool_preference_value(tool.preference).to_string());
-}
-
-fn parse_required_f64(value: &str, label: &str) -> Result<f64, String> {
-    value.trim().parse::<f64>().map_err(|_| format!("{} must be a number", label))
-}
-
-fn parse_optional_f64(value: &str, label: &str) -> Result<Option<f64>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        trimmed.parse::<f64>().map(Some).map_err(|_| format!("{} must be a number", label))
-    }
 }
 
 fn parse_optional_feed_rate(
@@ -1657,6 +1676,36 @@ fn format_length_field_display(raw_value: &str, unit_system: UnitSystem) -> Stri
     format_length_for_user(length, unit_system)
 }
 
+fn format_angle_field_display(raw_value: &str) -> String {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Ok(angle) = unit_service::parse_angle(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    unit_service::format_angle_display(angle)
+}
+
+fn format_rotational_speed_field_display(raw_value: &str) -> String {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let Ok(speed) = unit_service::parse_rotational_speed(trimmed) else {
+        return trimmed.to_string();
+    };
+
+    unit_service::format_rotational_speed_display(speed)
+}
+
+fn format_feed_rate_edit_display(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
+    unit_service::format_feed_edit_display(feed_rate, unit_system)
+}
+
 fn format_feed_rate_for_user(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
     unit_service::format_feed_display(feed_rate, unit_system)
 }
@@ -1676,17 +1725,6 @@ fn format_feed_rate_field_display(raw_value: &str, unit_system: UnitSystem) -> S
     };
 
     format_feed_rate_for_user(feed_rate, unit_system)
-}
-
-fn format_decimal(value: f64) -> String {
-    let mut out = format!("{value:.3}");
-    while out.contains('.') && out.ends_with('0') {
-        out.pop();
-    }
-    if out.ends_with('.') {
-        out.pop();
-    }
-    out
 }
 
 fn tool_preference_value(preference: ToolPreference) -> &'static str {

@@ -1,6 +1,7 @@
 use super::model::UnitSystem;
 use crate::units::{
-    FeedRate, FeedRateUnit, Length, LengthUnit, ScalarValue, UnitParseError,
+    Angle, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, ScalarValue,
+    UnitParseError,
 };
 
 const MM_PRECISION: f64 = 0.001;
@@ -59,6 +60,22 @@ fn preferred_feed_matches(feed_rate: FeedRate, unit_system: UnitSystem) -> bool 
     }
 }
 
+fn strip_suffix<'a>(value: &'a str, suffix: &str) -> Option<&'a str> {
+    value.strip_suffix(suffix).map(str::trim_end)
+}
+
+fn symbolized_inch_value(length: Length) -> String {
+    let text = length.to_string();
+    if let Some(value) = strip_suffix(&text, "inch") {
+        return format!("{value}\"");
+    }
+    if let Some(value) = strip_suffix(&text, "in") {
+        return format!("{value}\"");
+    }
+
+    text
+}
+
 fn is_fractional_inch(length: Length) -> bool {
     matches!(length.unit(), LengthUnit::In | LengthUnit::Inch)
         && matches!(length.scalar(), ScalarValue::Fraction { .. })
@@ -67,7 +84,7 @@ fn is_fractional_inch(length: Length) -> bool {
 pub fn length_unit_label(unit_system: UnitSystem) -> &'static str {
     match unit_system {
         UnitSystem::Metric => "mm",
-        UnitSystem::Imperial => "in",
+        UnitSystem::Imperial => "\"",
         UnitSystem::Mil => "mil",
     }
 }
@@ -77,6 +94,18 @@ pub fn feed_unit_label(unit_system: UnitSystem) -> &'static str {
         UnitSystem::Metric => "mm/min",
         UnitSystem::Imperial | UnitSystem::Mil => "in/min",
     }
+}
+
+pub fn angle_unit_label() -> &'static str {
+    "°"
+}
+
+pub fn rotational_speed_unit_label() -> &'static str {
+    "rpm"
+}
+
+pub fn percentage_unit_label() -> &'static str {
+    "%"
 }
 
 pub fn length_input_step(unit_system: UnitSystem) -> &'static str {
@@ -100,6 +129,25 @@ pub fn default_length_suffix(unit_system: UnitSystem) -> &'static str {
 
 pub fn default_feed_suffix(unit_system: UnitSystem) -> &'static str {
     feed_unit_label(unit_system)
+}
+
+pub fn format_angle_display(angle: Angle) -> String {
+    let value = format_trimmed(angle.as_degrees(), 0.01, 2);
+    format!("{value}{}", angle_unit_label())
+}
+
+pub fn format_rotational_speed_display(speed: RotationalSpeed) -> String {
+    let value = format_trimmed(speed.as_rpm(), 1.0, 0);
+    format!("{value} {}", rotational_speed_unit_label())
+}
+
+pub fn format_percentage_display(value: f64) -> String {
+    let out = format_trimmed(value, 0.1, 1);
+    format!("{out}{}", percentage_unit_label())
+}
+
+pub fn format_percentage_edit_display(value: f64) -> String {
+    format_trimmed(value, 0.1, 1)
 }
 
 pub fn display_length_value_from_mm(value_mm: f64, unit_system: UnitSystem) -> f64 {
@@ -132,23 +180,106 @@ pub fn mm_per_min_from_display_feed(display_value: f64, unit_system: UnitSystem)
     }
 }
 
+pub fn format_length_input_value_from_mm(value_mm: f64, unit_system: UnitSystem) -> String {
+    let display_value = display_length_value_from_mm(value_mm, unit_system);
+    let (step, digits) = length_precision(unit_system);
+    format_trimmed(display_value, step, digits)
+}
+
+pub fn format_feed_input_value_from_mm_per_min(
+    value_mm_per_min: f64,
+    unit_system: UnitSystem,
+) -> String {
+    let display_value = display_feed_value_from_mm_per_min(value_mm_per_min, unit_system);
+    let (step, digits) = feed_precision(unit_system);
+    format_trimmed(display_value, step, digits)
+}
+
 pub fn format_length_display(length: Length, unit_system: UnitSystem) -> String {
     let display_value = display_length_value_from_mm(length.as_mm(), unit_system);
     let (step, digits) = length_precision(unit_system);
-    let display = format!(
-        "{} {}",
-        format_trimmed(display_value, step, digits),
-        length_unit_label(unit_system)
-    );
+    let display = if unit_system == UnitSystem::Imperial {
+        format!(
+            "{}{}",
+            format_trimmed(display_value, step, digits),
+            length_unit_label(unit_system)
+        )
+    } else {
+        format!(
+            "{} {}",
+            format_trimmed(display_value, step, digits),
+            length_unit_label(unit_system)
+        )
+    };
 
     let show_native = !preferred_length_matches(length, unit_system)
         || (unit_system == UnitSystem::Imperial && is_fractional_inch(length));
 
     if show_native {
-        format!("{} [{}]", display, length)
+        let native = if matches!(length.unit(), LengthUnit::In | LengthUnit::Inch) {
+            symbolized_inch_value(length)
+        } else {
+            length.to_string()
+        };
+        format!("{} [{}]", display, native)
     } else {
         display
     }
+}
+
+pub fn format_length_edit_display(length: Length, unit_system: UnitSystem) -> String {
+    let raw = length.to_string();
+
+    if preferred_length_matches(length, unit_system) {
+        return match length.unit() {
+            LengthUnit::In | LengthUnit::Inch => strip_suffix(&raw, "inch")
+                .or_else(|| strip_suffix(&raw, "in"))
+                .unwrap_or(&raw)
+                .to_string(),
+            LengthUnit::Mm => strip_suffix(&raw, "mm").unwrap_or(&raw).to_string(),
+            LengthUnit::Mil => strip_suffix(&raw, "mil").unwrap_or(&raw).to_string(),
+            LengthUnit::Thou => strip_suffix(&raw, "thou").unwrap_or(&raw).to_string(),
+            LengthUnit::Cm => strip_suffix(&raw, "cm").unwrap_or(&raw).to_string(),
+            LengthUnit::Nm => strip_suffix(&raw, "nm").unwrap_or(&raw).to_string(),
+            LengthUnit::Um => strip_suffix(&raw, "um").unwrap_or(&raw).to_string(),
+        };
+    }
+
+    if matches!(length.unit(), LengthUnit::In | LengthUnit::Inch) {
+        symbolized_inch_value(length)
+    } else {
+        raw
+    }
+}
+
+pub fn format_feed_edit_display(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
+    let raw = feed_rate.to_string();
+
+    if preferred_feed_matches(feed_rate, unit_system) {
+        return match feed_rate.unit() {
+            FeedRateUnit::MmPerMin => strip_suffix(&raw, "mm/min").unwrap_or(&raw).to_string(),
+            FeedRateUnit::InPerMin => strip_suffix(&raw, "in/min").unwrap_or(&raw).to_string(),
+            FeedRateUnit::Ipm => strip_suffix(&raw, "ipm").unwrap_or(&raw).to_string(),
+            FeedRateUnit::InchPerMin => strip_suffix(&raw, "inch/min").unwrap_or(&raw).to_string(),
+            FeedRateUnit::CmPerMin => strip_suffix(&raw, "cm/min").unwrap_or(&raw).to_string(),
+            FeedRateUnit::MPerMin => strip_suffix(&raw, "m/min").unwrap_or(&raw).to_string(),
+        };
+    }
+
+    raw
+}
+
+pub fn format_angle_edit_display(angle: Angle) -> String {
+    let raw = angle.to_string();
+    strip_suffix(&raw, "degree")
+        .or_else(|| strip_suffix(&raw, "deg"))
+        .unwrap_or(&raw)
+        .to_string()
+}
+
+pub fn format_rotational_speed_edit_display(speed: RotationalSpeed) -> String {
+    let raw = speed.to_string();
+    strip_suffix(&raw, "rpm").unwrap_or(&raw).to_string()
 }
 
 pub fn format_feed_display(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
@@ -188,4 +319,21 @@ pub fn parse_feed_with_preference(
         UnitSystem::Imperial | UnitSystem::Mil => FeedRateUnit::InPerMin,
     };
     FeedRate::from_string(value, Some(default))
+}
+
+pub fn parse_angle(value: &str) -> Result<Angle, UnitParseError> {
+    Angle::from_string(value, Some(crate::units::AngleUnit::Degree))
+}
+
+pub fn parse_rotational_speed(value: &str) -> Result<RotationalSpeed, UnitParseError> {
+    RotationalSpeed::from_string(value, Some(crate::units::RotationalSpeedUnit::Rpm))
+}
+
+pub fn parse_percentage(value: &str) -> Result<f64, UnitParseError> {
+    let raw = value.trim();
+    let value = strip_suffix(raw, "%").unwrap_or(raw);
+    value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| UnitParseError::InvalidNumberFormat)
 }

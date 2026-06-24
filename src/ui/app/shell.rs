@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use super::super::model::*;
 use super::super::UiLaunchData;
 use crate::config::save_global_settings;
+use crate::ui::unit_service;
 use crate::ui::persistence_state;
 use crate::user_path::ensure_app_dirs;
 
@@ -365,11 +366,7 @@ fn persist_unit_system(unit_system: UnitSystem) {
     if !units.contains_key("speed_unit") {
         units.insert(
             "speed_unit".to_string(),
-            Value::String(match unit_system {
-                UnitSystem::Metric => "mm/min".to_string(),
-                UnitSystem::Imperial => "in/min".to_string(),
-                UnitSystem::Mil => "in/min".to_string(),
-            }),
+            Value::String(unit_service::feed_unit_label(unit_system).to_string()),
         );
     }
 
