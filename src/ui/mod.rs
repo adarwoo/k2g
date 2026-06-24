@@ -1,6 +1,7 @@
 pub mod app;
 pub mod model;
 pub mod theme;
+pub mod unit_service;
 
 use std::sync::OnceLock;
 

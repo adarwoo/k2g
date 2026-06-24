@@ -7,16 +7,21 @@ use crate::board::collect_board_snapshot_for_board;
 use kicad_ipc_rs::{DocumentType, KiCadClientBlocking};
 
 mod cnc;
+mod catalog;
+mod fixture;
 mod job;
 mod setup;
 mod setup_sections;
+mod job_profiles;
 mod shell;
 mod stock;
 
 use cnc::CncScreen;
+use catalog::CatalogScreen;
+use fixture::FixtureProfilesScreen;
 use job::JobScreen;
+use job_profiles::JobProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, NavigationRail, StatusBar};
-use setup::SetupScreen;
 use stock::StockScreen;
 
 #[component]
@@ -83,7 +88,7 @@ pub fn AppRoot() -> Element {
                                     state
                                         .with_mut(|s| {
                                             s.show_first_launch = false;
-                                            s.selected_screen = Screen::Setup;
+                                            s.selected_screen = Screen::CncProfiles;
                                         });
                                 },
                                 "Skip"
@@ -107,17 +112,23 @@ pub fn AppRoot() -> Element {
                 main { class: "shell-content",
                     div { class: "screen-host",
                         match snapshot.selected_screen {
-                            Screen::Setup => rsx! {
-                                SetupScreen { state, boot: boot.clone() }
-                            },
                             Screen::Job => rsx! {
                                 JobScreen { state }
+                            },
+                            Screen::CncProfiles => rsx! {
+                                CncScreen { state }
+                            },
+                            Screen::FixtureProfiles => rsx! {
+                                FixtureProfilesScreen { state }
+                            },
+                            Screen::JobProfiles => rsx! {
+                                JobProfilesScreen { state }
                             },
                             Screen::Stock => rsx! {
                                 StockScreen { state }
                             },
-                            Screen::Cnc => rsx! {
-                                CncScreen { state }
+                            Screen::Catalog => rsx! {
+                                CatalogScreen { state }
                             },
                         }
                     }

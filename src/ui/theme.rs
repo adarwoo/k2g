@@ -251,7 +251,7 @@ body {
 }
 
 .shell-rail {
-    width: 88px;
+    width: 132px;
     padding: 12px 10px;
     border-right: 1px solid var(--border);
     background: var(--bg-subtle);
@@ -283,11 +283,11 @@ body {
 
 .rail-button-text {
     display: block;
-    font-size: 11px;
+    font-size: 10px;
     line-height: 1.25;
     font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+    text-transform: none;
+    letter-spacing: 0.04em;
 }
 
 .shell-content {
@@ -947,14 +947,45 @@ body {
     font-size: 12px;
 }
 
-.stock-detail-input {
-    width: 100%;
-}
-
 .stock-detail-trigger {
     justify-content: flex-start;
     text-align: left;
     cursor: text;
+}
+
+.stock-detail-field-value {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+}
+
+.stock-detail-original-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.stock-detail-original-value {
+    color: #c2410c;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.stock-detail-revert-btn {
+    border: 1px solid color-mix(in srgb, #c2410c 45%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, #c2410c 12%, var(--bg-elev));
+    color: #c2410c;
+    min-width: 28px;
+    min-height: 28px;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.stock-detail-revert-btn:hover {
+    background: color-mix(in srgb, #c2410c 18%, var(--bg-elev));
 }
 
 .stock-detail-readonly {

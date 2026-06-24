@@ -14,11 +14,16 @@ pub fn AppTopBar(
     warning_count: usize,
 ) -> Element {
     let snapshot = state.read().clone();
+    let mut show_defaults = use_signal(|| false);
 
     let machine_name = snapshot
         .selected_machine()
         .map(|machine| machine.name.clone())
         .unwrap_or_else(|| "No CNC profile".to_string());
+    let job_profile_name = snapshot
+        .selected_job_profile()
+        .map(|profile| profile.name.clone())
+        .unwrap_or_else(|| "No job profile".to_string());
     let board_name = snapshot
         .board
         .as_ref()
@@ -60,7 +65,7 @@ pub fn AppTopBar(
                             state.with_mut(|s| s.unit_system = UnitSystem::Metric);
                             persist_unit_system(UnitSystem::Metric);
                         },
-                        "Metric"
+                        "mm"
                     }
                     button {
                         class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
@@ -68,9 +73,18 @@ pub fn AppTopBar(
                             state.with_mut(|s| s.unit_system = UnitSystem::Imperial);
                             persist_unit_system(UnitSystem::Imperial);
                         },
-                        "Imperial"
+                        "in"
+                    }
+                    button {
+                        class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                        onclick: move |_| {
+                            state.with_mut(|s| s.unit_system = UnitSystem::Mil);
+                            persist_unit_system(UnitSystem::Mil);
+                        },
+                        "mil"
                     }
                 }
+                SummaryChip { label: "Profile", value: job_profile_name }
                 SummaryChip { label: "Job", value: ops_label }
             }
 
@@ -91,8 +105,87 @@ pub fn AppTopBar(
 
                 button {
                     class: "icon-button",
-                    onclick: move |_| state.with_mut(|s| s.select_screen(Screen::Setup)),
-                    "Setup"
+                    onclick: move |_| {
+                        let next = if snapshot.theme == Theme::Dark {
+                            Theme::Light
+                        } else {
+                            Theme::Dark
+                        };
+                        state.with_mut(|s| s.theme = next);
+                        persist_theme(next);
+                    },
+                    if snapshot.theme == Theme::Dark {
+                        "Theme: Dark"
+                    } else {
+                        "Theme: Light"
+                    }
+                }
+
+                button {
+                    class: "icon-button",
+                    onclick: move |_| show_defaults.set(true),
+                    "Defaults"
+                }
+            }
+
+            if *show_defaults.read() {
+                div { class: "wizard-overlay",
+                    div { class: "wizard-dialog",
+                        h3 { "Default settings" }
+                        p { "Theme and units are global defaults and are persisted." }
+
+                        div { class: "field",
+                            label { "Theme" }
+                            select {
+                                value: snapshot.theme.as_str(),
+                                onchange: move |evt| {
+                                    let selected = Theme::from_str(&evt.value());
+                                    state.with_mut(|s| s.theme = selected);
+                                    persist_theme(selected);
+                                },
+                                option { value: "dark", "Dark" }
+                                option { value: "light", "Light" }
+                            }
+                        }
+
+                        div { class: "field",
+                            label { "Display units" }
+                            div { class: "unit-toggle",
+                                button {
+                                    class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                                    onclick: move |_| {
+                                        state.with_mut(|s| s.unit_system = UnitSystem::Metric);
+                                        persist_unit_system(UnitSystem::Metric);
+                                    },
+                                    "mm"
+                                }
+                                button {
+                                    class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                                    onclick: move |_| {
+                                        state.with_mut(|s| s.unit_system = UnitSystem::Imperial);
+                                        persist_unit_system(UnitSystem::Imperial);
+                                    },
+                                    "in"
+                                }
+                                button {
+                                    class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                                    onclick: move |_| {
+                                        state.with_mut(|s| s.unit_system = UnitSystem::Mil);
+                                        persist_unit_system(UnitSystem::Mil);
+                                    },
+                                    "mil"
+                                }
+                            }
+                        }
+
+                        div { class: "wizard-actions",
+                            button {
+                                class: "btn btn-primary",
+                                onclick: move |_| show_defaults.set(false),
+                                "Close"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -177,7 +270,14 @@ pub fn DiagnosticsBanner(
 #[component]
 pub fn NavigationRail(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
-    let nav_items = [Screen::Job, Screen::Setup, Screen::Stock, Screen::Cnc];
+    let nav_items = [
+        Screen::Job,
+        Screen::CncProfiles,
+        Screen::FixtureProfiles,
+        Screen::JobProfiles,
+        Screen::Stock,
+        Screen::Catalog,
+    ];
 
     rsx! {
         aside { class: "shell-rail",
@@ -258,6 +358,7 @@ fn persist_unit_system(unit_system: UnitSystem) {
             Value::String(match unit_system {
                 UnitSystem::Metric => "mm".to_string(),
                 UnitSystem::Imperial => "in".to_string(),
+                UnitSystem::Mil => "mil".to_string(),
             }),
         );
     }
@@ -266,10 +367,42 @@ fn persist_unit_system(unit_system: UnitSystem) {
             "speed_unit".to_string(),
             Value::String(match unit_system {
                 UnitSystem::Metric => "mm/min".to_string(),
-                UnitSystem::Imperial => "ipm".to_string(),
+                UnitSystem::Imperial => "in/min".to_string(),
+                UnitSystem::Mil => "in/min".to_string(),
             }),
         );
     }
+
+    let _ = save_global_settings(&app_dirs, &global_settings);
+}
+
+fn persist_theme(theme: Theme) {
+    let Ok(app_dirs) = ensure_app_dirs() else {
+        return;
+    };
+
+    let mut global_settings = persistence_state()
+        .map(|state| state.global_settings.clone())
+        .unwrap_or_else(|| json!({}));
+
+    if !global_settings.is_object() {
+        global_settings = json!({});
+    }
+
+    let Some(root) = global_settings.as_object_mut() else {
+        return;
+    };
+
+    let theme_value = root.entry("theme".to_string()).or_insert_with(|| json!({}));
+    if !theme_value.is_object() {
+        *theme_value = json!({});
+    }
+
+    let Some(theme_root) = theme_value.as_object_mut() else {
+        return;
+    };
+
+    theme_root.insert("mode".to_string(), Value::String(theme.as_str().to_string()));
 
     let _ = save_global_settings(&app_dirs, &global_settings);
 }

@@ -19,28 +19,34 @@ pub struct UiLaunchData {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Setup,
     Job,
+    CncProfiles,
+    FixtureProfiles,
+    JobProfiles,
     Stock,
-    Cnc,
+    Catalog,
 }
 
 impl Screen {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Setup => "Setup",
             Self::Job => "Job",
+            Self::CncProfiles => "CNC",
+            Self::FixtureProfiles => "Fixture",
+            Self::JobProfiles => "Job Profiles",
             Self::Stock => "Stock",
-            Self::Cnc => "CNC profile",
+            Self::Catalog => "Catalog",
         }
     }
 
     pub fn key(self) -> &'static str {
         match self {
-            Self::Setup => "setup",
             Self::Job => "job",
+            Self::CncProfiles => "cnc-profiles",
+            Self::FixtureProfiles => "fixture-profiles",
+            Self::JobProfiles => "job-profiles",
             Self::Stock => "stock",
-            Self::Cnc => "cnc",
+            Self::Catalog => "catalog",
         }
     }
 }
@@ -77,6 +83,7 @@ impl JobCenterView {
 pub enum UnitSystem {
     Metric,
     Imperial,
+    Mil,
 }
 
 impl UnitSystem {
@@ -84,13 +91,14 @@ impl UnitSystem {
         match self {
             Self::Metric => "metric",
             Self::Imperial => "imperial",
+            Self::Mil => "mil",
         }
     }
 
     pub fn user_unit_system(self) -> UserUnitSystem {
         match self {
             Self::Metric => UserUnitSystem::Metric,
-            Self::Imperial => UserUnitSystem::Imperial,
+            Self::Imperial | Self::Mil => UserUnitSystem::Imperial,
         }
     }
 
@@ -98,29 +106,17 @@ impl UnitSystem {
         match self {
             Self::Metric => "mm",
             Self::Imperial => "in",
+            Self::Mil => "mil",
         }
     }
 
     pub fn feed_unit_label(self) -> &'static str {
         match self {
             Self::Metric => "mm/min",
-            Self::Imperial => "ipm",
+            Self::Imperial | Self::Mil => "in/min",
         }
     }
 
-    pub fn length_step(self) -> &'static str {
-        match self {
-            Self::Metric => "1",
-            Self::Imperial => "0.01",
-        }
-    }
-
-    pub fn feed_step(self) -> &'static str {
-        match self {
-            Self::Metric => "1",
-            Self::Imperial => "0.1",
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,6 +130,13 @@ impl Theme {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "light" => Self::Light,
+            _ => Self::Dark,
         }
     }
 }
@@ -224,6 +227,29 @@ impl Default for MachineProfile {
     }
 }
 
+#[derive(Clone)]
+pub struct FixtureProfile {
+    pub id: String,
+    pub name: String,
+    pub coordinate_context: String,
+    pub backing_board: String,
+}
+
+#[derive(Clone)]
+pub struct JobProfile {
+    pub id: String,
+    pub name: String,
+    pub cnc_profile_id: String,
+    pub fixture_profile_id: String,
+}
+
+#[derive(Clone, Default)]
+pub struct CascadeDeleteImpact {
+    pub primary_profiles: Vec<String>,
+    pub dependent_job_profiles: Vec<String>,
+    pub deleted_live_jobs: Vec<String>,
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {
@@ -281,9 +307,13 @@ pub struct Tool {
     pub name: String,
     pub kind: String,
     pub diameter: Length,
+    pub catalog_diameter: Option<Length>,
     pub point_angle: Angle,
+    pub catalog_point_angle: Option<Angle>,
     pub feed_rate: Option<FeedRate>,
+    pub catalog_feed_rate: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
+    pub catalog_spindle_speed: Option<RotationalSpeed>,
     pub status: ToolStatus,
     pub preference: ToolPreference,
     pub source_catalog: String,
@@ -620,6 +650,7 @@ pub struct JobConfig {
     pub atc_strategy: AtcRackStrategy,
     pub tab_count: u8,
     pub tab_width_mm: f32,
+    pub tab_width_baseline_mm: f32,
     pub allow_routing_holes: bool,
     pub drill_then_route: bool,
     pub pilot_hole_fallback: bool,
@@ -672,6 +703,10 @@ pub struct UiState {
     pub theme: Theme,
     pub machines: Vec<MachineProfile>,
     pub selected_machine_id: Option<String>,
+    pub fixtures: Vec<FixtureProfile>,
+    pub selected_fixture_id: Option<String>,
+    pub job_profiles: Vec<JobProfile>,
+    pub selected_job_profile_id: Option<String>,
     pub machine_mru: Vec<String>,
     pub focus_profile_name_editor: bool,
     pub catalogs: Vec<CatalogStockCatalog>,
@@ -698,9 +733,13 @@ impl UiState {
                 name: "Pilot holes".to_string(),
                 kind: "Drill".to_string(),
                 diameter: Length::from_mm(0.8),
+                catalog_diameter: Some(Length::from_mm(0.8)),
                 point_angle: Angle::from_degrees(130.0),
+                catalog_point_angle: Some(Angle::from_degrees(130.0)),
                 feed_rate: Some(FeedRate::from_mm_per_min(120.0)),
+                catalog_feed_rate: Some(FeedRate::from_mm_per_min(120.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(18_000.0)),
+                catalog_spindle_speed: Some(RotationalSpeed::from_rpm(18_000.0)),
                 status: ToolStatus::InStock,
                 preference: ToolPreference::Preferred,
                 source_catalog: "CNCLab / Drills".to_string(),
@@ -713,9 +752,13 @@ impl UiState {
                 name: "Outline router".to_string(),
                 kind: "End Mill".to_string(),
                 diameter: Length::from_mm(1.0),
+                catalog_diameter: Some(Length::from_mm(1.0)),
                 point_angle: Angle::from_degrees(180.0),
+                catalog_point_angle: Some(Angle::from_degrees(180.0)),
                 feed_rate: Some(FeedRate::from_mm_per_min(280.0)),
+                catalog_feed_rate: Some(FeedRate::from_mm_per_min(280.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(16_000.0)),
+                catalog_spindle_speed: Some(RotationalSpeed::from_rpm(16_000.0)),
                 status: ToolStatus::InStock,
                 preference: ToolPreference::Neutral,
                 source_catalog: "CNCLab / End Mills".to_string(),
@@ -728,9 +771,13 @@ impl UiState {
                 name: String::new(),
                 kind: "V-Bit".to_string(),
                 diameter: Length::from_mm(0.2),
+                catalog_diameter: None,
                 point_angle: Angle::from_degrees(30.0),
+                catalog_point_angle: None,
                 feed_rate: None,
+                catalog_feed_rate: None,
                 spindle_speed: None,
+                catalog_spindle_speed: None,
                 status: ToolStatus::OutOfStock,
                 preference: ToolPreference::NotPreferred,
                 source_catalog: "Manual".to_string(),
@@ -743,9 +790,18 @@ impl UiState {
             selected_screen: Screen::Job,
             selected_job_view: JobCenterView::Board,
             unit_system: load_persisted_unit_system(),
-            theme: Theme::Dark,
+            theme: load_persisted_theme(),
             machines: vec![],
             selected_machine_id: None,
+            fixtures: vec![FixtureProfile {
+                id: "fixture-default".to_string(),
+                name: "Default fixture".to_string(),
+                coordinate_context: "PCB origin aligned to fixture origin".to_string(),
+                backing_board: "MDF spoilboard".to_string(),
+            }],
+            selected_fixture_id: Some("fixture-default".to_string()),
+            job_profiles: vec![],
+            selected_job_profile_id: None,
             machine_mru: vec![],
             focus_profile_name_editor: false,
             catalogs: built_in_catalogs(),
@@ -760,6 +816,7 @@ impl UiState {
                 atc_strategy: AtcRackStrategy::Reuse,
                 tab_count: 4,
                 tab_width_mm: 3.0,
+                tab_width_baseline_mm: 3.0,
                 allow_routing_holes: true,
                 drill_then_route: false,
                 pilot_hole_fallback: true,
@@ -800,6 +857,18 @@ impl UiState {
         self.selected_machine_id
             .as_ref()
             .and_then(|id| self.machines.iter().find(|m| &m.id == id))
+    }
+
+    pub fn selected_fixture(&self) -> Option<&FixtureProfile> {
+        self.selected_fixture_id
+            .as_ref()
+            .and_then(|id| self.fixtures.iter().find(|fixture| &fixture.id == id))
+    }
+
+    pub fn selected_job_profile(&self) -> Option<&JobProfile> {
+        self.selected_job_profile_id
+            .as_ref()
+            .and_then(|id| self.job_profiles.iter().find(|profile| &profile.id == id))
     }
 
     pub fn selected_machine_has_atc(&self) -> bool {
@@ -885,6 +954,23 @@ impl UiState {
         self.seed_rack_slots(profile.atc_slot_count);
         self.show_first_launch = false;
         self.select_machine_profile_by_id(Some(selected));
+
+        if self.job_profiles.is_empty() {
+            let fixture_id = self
+                .selected_fixture_id
+                .clone()
+                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
+            if let Some(fixture_id) = fixture_id {
+                let job_profile = JobProfile {
+                    id: "job-profile-default".to_string(),
+                    name: "Default job profile".to_string(),
+                    cnc_profile_id: profile.id.clone(),
+                    fixture_profile_id: fixture_id,
+                };
+                self.selected_job_profile_id = Some(job_profile.id.clone());
+                self.job_profiles.push(job_profile);
+            }
+        }
     }
 
     pub fn rename_selected_machine(&mut self, new_name: &str) -> Result<String, String> {
@@ -935,27 +1021,247 @@ impl UiState {
         self.focus_profile_name_editor = true;
     }
 
-    pub fn remove_selected_machine(&mut self) {
-        let Some(selected) = self.selected_machine_id.clone() else {
+    pub fn add_fixture_profile(&mut self, name: &str) {
+        let base = if name.trim().is_empty() {
+            "Fixture profile"
+        } else {
+            name.trim()
+        };
+        let mut idx = 1usize;
+        let unique_name = loop {
+            let candidate = if idx == 1 {
+                base.to_string()
+            } else {
+                format!("{} ({})", base, idx)
+            };
+            if !self.fixtures.iter().any(|fixture| fixture.name == candidate) {
+                break candidate;
+            }
+            idx += 1;
+        };
+        let fixture_id = format!("fixture-{}", slug(&unique_name));
+        self.fixtures.push(FixtureProfile {
+            id: fixture_id.clone(),
+            name: unique_name,
+            coordinate_context: "Fixture-defined board origin".to_string(),
+            backing_board: "MDF spoilboard".to_string(),
+        });
+        self.selected_fixture_id = Some(fixture_id);
+    }
+
+    pub fn add_job_profile(&mut self, name: &str) {
+        let Some(cnc_id) = self
+            .selected_machine_id
+            .clone()
+            .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
+        else {
+            return;
+        };
+        let Some(fixture_id) = self
+            .selected_fixture_id
+            .clone()
+            .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
+        else {
             return;
         };
 
-        self.machines.retain(|m| m.id != selected);
-        self.machine_mru.retain(|m| m != &selected);
+        let base = if name.trim().is_empty() {
+            "Job profile"
+        } else {
+            name.trim()
+        };
+        let mut idx = 1usize;
+        let unique_name = loop {
+            let candidate = if idx == 1 {
+                base.to_string()
+            } else {
+                format!("{} ({})", base, idx)
+            };
+            if !self.job_profiles.iter().any(|profile| profile.name == candidate) {
+                break candidate;
+            }
+            idx += 1;
+        };
+
+        let id = format!("job-profile-{}", slug(&unique_name));
+        self.job_profiles.push(JobProfile {
+            id: id.clone(),
+            name: unique_name,
+            cnc_profile_id: cnc_id,
+            fixture_profile_id: fixture_id,
+        });
+        self.selected_job_profile_id = Some(id);
+    }
+
+    pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {
+        let mut impact = CascadeDeleteImpact::default();
+        if let Some(cnc) = self.machines.iter().find(|machine| machine.id == cnc_id) {
+            impact.primary_profiles.push(format!("CNC profile: {}", cnc.name));
+        }
+
+        let dependent_ids: BTreeSet<String> = self
+            .job_profiles
+            .iter()
+            .filter(|profile| profile.cnc_profile_id == cnc_id)
+            .map(|profile| profile.id.clone())
+            .collect();
+
+        for profile in self
+            .job_profiles
+            .iter()
+            .filter(|profile| dependent_ids.contains(&profile.id))
+        {
+            impact
+                .dependent_job_profiles
+                .push(format!("Job profile: {}", profile.name));
+        }
+
+        if self
+            .selected_job_profile_id
+            .as_ref()
+            .map(|id| dependent_ids.contains(id))
+            .unwrap_or(false)
+        {
+            impact.deleted_live_jobs.push("Active job session".to_string());
+        }
+
+        impact
+    }
+
+    pub fn impact_delete_fixture_profile(&self, fixture_id: &str) -> CascadeDeleteImpact {
+        let mut impact = CascadeDeleteImpact::default();
+        if let Some(fixture) = self.fixtures.iter().find(|item| item.id == fixture_id) {
+            impact
+                .primary_profiles
+                .push(format!("Fixture profile: {}", fixture.name));
+        }
+
+        let dependent_ids: BTreeSet<String> = self
+            .job_profiles
+            .iter()
+            .filter(|profile| profile.fixture_profile_id == fixture_id)
+            .map(|profile| profile.id.clone())
+            .collect();
+
+        for profile in self
+            .job_profiles
+            .iter()
+            .filter(|profile| dependent_ids.contains(&profile.id))
+        {
+            impact
+                .dependent_job_profiles
+                .push(format!("Job profile: {}", profile.name));
+        }
+
+        if self
+            .selected_job_profile_id
+            .as_ref()
+            .map(|id| dependent_ids.contains(id))
+            .unwrap_or(false)
+        {
+            impact.deleted_live_jobs.push("Active job session".to_string());
+        }
+
+        impact
+    }
+
+    pub fn impact_delete_job_profile(&self, job_profile_id: &str) -> CascadeDeleteImpact {
+        let mut impact = CascadeDeleteImpact::default();
+        if let Some(profile) = self
+            .job_profiles
+            .iter()
+            .find(|profile| profile.id == job_profile_id)
+        {
+            impact
+                .primary_profiles
+                .push(format!("Job profile: {}", profile.name));
+        }
+        if self
+            .selected_job_profile_id
+            .as_deref()
+            .map(|id| id == job_profile_id)
+            .unwrap_or(false)
+        {
+            impact.deleted_live_jobs.push("Active job session".to_string());
+        }
+        impact
+    }
+
+    pub fn delete_cnc_profile_with_cascade(&mut self, cnc_id: &str) -> CascadeDeleteImpact {
+        let impact = self.impact_delete_cnc_profile(cnc_id);
+
+        self.machines.retain(|machine| machine.id != cnc_id);
+        self.machine_mru.retain(|id| id != cnc_id);
+
+        self.job_profiles
+            .retain(|profile| profile.cnc_profile_id != cnc_id);
+
+        if self
+            .selected_job_profile_id
+            .as_ref()
+            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .unwrap_or(false)
+        {
+            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+        }
 
         let next_selected = self
             .machine_mru
             .iter()
-            .find(|id| self.machines.iter().any(|m| &m.id == *id))
+            .find(|id| self.machines.iter().any(|machine| &machine.id == *id))
             .cloned()
-            .or_else(|| self.machines.first().map(|m| m.id.clone()));
+            .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
 
         self.select_machine_profile_by_id(next_selected);
 
         if self.machines.is_empty() {
             self.show_first_launch = true;
-            self.selected_screen = Screen::Setup;
+            self.selected_screen = Screen::CncProfiles;
         }
+
+        impact
+    }
+
+    pub fn delete_fixture_profile_with_cascade(&mut self, fixture_id: &str) -> CascadeDeleteImpact {
+        let impact = self.impact_delete_fixture_profile(fixture_id);
+
+        self.fixtures.retain(|fixture| fixture.id != fixture_id);
+        self.job_profiles
+            .retain(|profile| profile.fixture_profile_id != fixture_id);
+
+        if self
+            .selected_job_profile_id
+            .as_ref()
+            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .unwrap_or(false)
+        {
+            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+        }
+
+        if self
+            .selected_fixture_id
+            .as_ref()
+            .map(|id| !self.fixtures.iter().any(|fixture| &fixture.id == id))
+            .unwrap_or(false)
+        {
+            self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
+        }
+
+        impact
+    }
+
+    pub fn delete_job_profile_with_cascade(&mut self, job_profile_id: &str) -> CascadeDeleteImpact {
+        let impact = self.impact_delete_job_profile(job_profile_id);
+        self.job_profiles.retain(|profile| profile.id != job_profile_id);
+        if self
+            .selected_job_profile_id
+            .as_ref()
+            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .unwrap_or(false)
+        {
+            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+        }
+        impact
     }
 
     #[allow(dead_code)]
@@ -967,9 +1273,13 @@ impl UiState {
             name: String::new(),
             kind: "End Mill".to_string(),
             diameter: Length::from_mm(0.6),
+            catalog_diameter: None,
             point_angle: Angle::from_degrees(180.0),
+            catalog_point_angle: None,
             feed_rate: None,
+            catalog_feed_rate: None,
             spindle_speed: None,
+            catalog_spindle_speed: None,
             status: ToolStatus::InStock,
             preference: ToolPreference::Neutral,
             source_catalog: "Manual".to_string(),
@@ -1121,9 +1431,13 @@ impl UiState {
                         name: String::new(),
                         kind: tool.kind.clone(),
                         diameter: tool.diameter,
+                        catalog_diameter: Some(tool.diameter),
                         point_angle: tool.point_angle,
+                        catalog_point_angle: Some(tool.point_angle),
                         feed_rate: tool.feed_rate,
+                        catalog_feed_rate: tool.feed_rate,
                         spindle_speed: tool.spindle_speed,
+                        catalog_spindle_speed: tool.spindle_speed,
                         status: ToolStatus::InStock,
                         preference: ToolPreference::Neutral,
                         source_catalog: format!("{} / {}", catalog.name, section.name),
@@ -1240,9 +1554,25 @@ fn load_persisted_unit_system() -> UnitSystem {
         .and_then(|units| units.get("system"))
         .and_then(|system| system.as_str())
     {
+        Some("mil") => UnitSystem::Mil,
         Some("imperial") => UnitSystem::Imperial,
         _ => UnitSystem::Metric,
     }
+}
+
+fn load_persisted_theme() -> Theme {
+    let Some(state) = persistence_state() else {
+        return Theme::Dark;
+    };
+
+    let theme_mode = state
+        .global_settings
+        .get("theme")
+        .and_then(|theme| theme.get("mode"))
+        .and_then(|mode| mode.as_str())
+        .unwrap_or("dark");
+
+    Theme::from_str(theme_mode)
 }
 
 pub fn sample_gcode() -> String {

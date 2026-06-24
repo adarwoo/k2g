@@ -3,8 +3,26 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use serde::Serialize;
 use std::fs;
 
-use crate::units::{FeedRate, Length, UserUnitDisplay};
 use super::super::model::*;
+use crate::ui::unit_service;
+use crate::units::{FeedRate, Length};
+
+fn format_numeric_input(mut value: f64, step: f64, digits: usize) -> String {
+    if step > 0.0 {
+        value = (value / step).round() * step;
+    }
+    if value.abs() < step / 2.0 {
+        value = 0.0;
+    }
+    let mut out = format!("{value:.digits$}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
+}
 
 #[component]
 pub fn CncScreen(state: Signal<UiState>) -> Element {
@@ -14,21 +32,50 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
     let Some(machine) = snapshot.selected_machine().cloned() else {
         return rsx! {
             div { class: "screen single centered",
-                p { "No CNC profile selected. Select one from the top bar, or add one in Setup." }
+                p { "No CNC profile selected. Add or select one in CNC profiles." }
             }
         };
     };
 
     let selected_id = machine.id.clone();
+    let delete_selected_id = selected_id.clone();
 
-    let user_unit_sys = snapshot.unit_system.user_unit_system();
-    let length_unit = snapshot.unit_system.length_unit_label();
-    let length_step = snapshot.unit_system.length_step();
-    let feed_unit = snapshot.unit_system.feed_unit_label();
-    let feed_step = snapshot.unit_system.feed_step();
-    let fixture_x_val = Length::from_mm(machine.fixture_plate_max_x as f64).user_value(user_unit_sys);
-    let fixture_y_val = Length::from_mm(machine.fixture_plate_max_y as f64).user_value(user_unit_sys);
-    let feed_val = FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64).user_value(user_unit_sys);
+    let length_unit = unit_service::length_unit_label(snapshot.unit_system);
+    let length_step = unit_service::length_input_step(snapshot.unit_system);
+    let feed_unit = unit_service::feed_unit_label(snapshot.unit_system);
+    let feed_step = unit_service::feed_input_step(snapshot.unit_system);
+    let fixture_x_val = unit_service::display_length_value_from_mm(
+        machine.fixture_plate_max_x as f64,
+        snapshot.unit_system,
+    );
+    let fixture_y_val = unit_service::display_length_value_from_mm(
+        machine.fixture_plate_max_y as f64,
+        snapshot.unit_system,
+    );
+    let feed_val = unit_service::display_feed_value_from_mm_per_min(
+        machine.max_feed_rate_mm_per_min as f64,
+        snapshot.unit_system,
+    );
+    let (length_step_val, length_digits) = match snapshot.unit_system {
+        UnitSystem::Metric => (0.001_f64, 3),
+        UnitSystem::Imperial => (0.00001_f64, 5),
+        UnitSystem::Mil => (0.1_f64, 1),
+    };
+    let (feed_step_val, feed_digits) = match snapshot.unit_system {
+        UnitSystem::Metric => (0.001_f64, 3),
+        UnitSystem::Imperial | UnitSystem::Mil => (0.00001_f64, 5),
+    };
+    let fixture_x_input = format_numeric_input(fixture_x_val, length_step_val, length_digits);
+    let fixture_y_input = format_numeric_input(fixture_y_val, length_step_val, length_digits);
+    let feed_input = format_numeric_input(feed_val, feed_step_val, feed_digits);
+    let fixture_x_display =
+        unit_service::format_length_display(Length::from_mm(machine.fixture_plate_max_x as f64), snapshot.unit_system);
+    let fixture_y_display =
+        unit_service::format_length_display(Length::from_mm(machine.fixture_plate_max_y as f64), snapshot.unit_system);
+    let feed_display = unit_service::format_feed_display(
+        FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64),
+        snapshot.unit_system,
+    );
     let default_machine = MachineProfile::default();
     let header_rows = rows_for_template(&default_machine.gcode_header, 6, 18);
     let footer_rows = rows_for_template(&default_machine.gcode_footer, 2, 8);
@@ -54,15 +101,21 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         button {
                             class: "btn btn-danger",
                             onclick: move |_| {
+                                let cnc_id = delete_selected_id.clone();
+                                let impact = state.read().impact_delete_cnc_profile(&cnc_id);
+                                let description = format_impact_warning(
+                                    "Delete CNC profile and dependent assets?",
+                                    &impact,
+                                );
                                 let confirmed = MessageDialog::new()
                                     .set_level(MessageLevel::Warning)
                                     .set_title("Delete CNC profile")
-                                    .set_description("Delete the selected CNC profile?")
+                                    .set_description(&description)
                                     .set_buttons(MessageButtons::YesNo)
                                     .show();
                                 if confirmed == rfd::MessageDialogResult::Yes {
-                                    state.with_mut(|s| s.remove_selected_machine());
-                                    status_message.set("CNC profile removed".to_string());
+                                    let impact = state.with_mut(|s| s.delete_cnc_profile_with_cascade(&cnc_id));
+                                    status_message.set(format_impact_summary("Deleted CNC profile", &impact));
                                 }
                             },
                             "Delete profile"
@@ -178,7 +231,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 r#type: "number",
                                 min: "0",
                                 step: "{length_step}",
-                                value: "{fixture_x_val}",
+                                value: "{fixture_x_input}",
                                 oninput: {
                                     let selected_id = selected_id.clone();
                                     move |evt| {
@@ -187,17 +240,16 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                             .with_mut(|s| {
                                                 if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
                                                 {
-                                                    t.fixture_plate_max_x = (if s.unit_system == UnitSystem::Imperial
-                                                    {
-                                                        val * 25.4
-                                                    } else {
-                                                        val
-                                                    }) as u32;
+                                                    t.fixture_plate_max_x = unit_service::mm_from_display_length(
+                                                        val,
+                                                        s.unit_system,
+                                                    ) as u32;
                                                 }
                                             });
                                     }
                                 },
                             }
+                            p { class: "diag-status", "{fixture_x_display}" }
                         }
 
                         div { class: "field section-subfield",
@@ -206,7 +258,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 r#type: "number",
                                 min: "0",
                                 step: "{length_step}",
-                                value: "{fixture_y_val}",
+                                value: "{fixture_y_input}",
                                 oninput: {
                                     let selected_id = selected_id.clone();
                                     move |evt| {
@@ -215,17 +267,16 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                             .with_mut(|s| {
                                                 if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
                                                 {
-                                                    t.fixture_plate_max_y = (if s.unit_system == UnitSystem::Imperial
-                                                    {
-                                                        val * 25.4
-                                                    } else {
-                                                        val
-                                                    }) as u32;
+                                                    t.fixture_plate_max_y = unit_service::mm_from_display_length(
+                                                        val,
+                                                        s.unit_system,
+                                                    ) as u32;
                                                 }
                                             });
                                     }
                                 },
                             }
+                            p { class: "diag-status", "{fixture_y_display}" }
                         }
 
                         div { class: "field section-subfield",
@@ -234,7 +285,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 r#type: "number",
                                 min: "0",
                                 step: "{feed_step}",
-                                value: "{feed_val}",
+                                value: "{feed_input}",
                                 oninput: {
                                     let selected_id = selected_id.clone();
                                     move |evt| {
@@ -243,18 +294,16 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                             .with_mut(|s| {
                                                 if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
                                                 {
-                                                    t.max_feed_rate_mm_per_min = (if s.unit_system
-                                                        == UnitSystem::Imperial
-                                                    {
-                                                        val * 25.4
-                                                    } else {
-                                                        val
-                                                    }) as u32;
+                                                    t.max_feed_rate_mm_per_min = unit_service::mm_per_min_from_display_feed(
+                                                        val,
+                                                        s.unit_system,
+                                                    ) as u32;
                                                 }
                                             });
                                     }
                                 },
                             }
+                            p { class: "diag-status", "{feed_display}" }
                         }
                     }
 
@@ -688,8 +737,8 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
             section { class: "panel fixed",
                 h3 { "CNC profile summary" }
                 p { "ID: {machine.id}" }
-                p { "Fixture size: {fixture_x_val} × {fixture_y_val} {length_unit}" }
-                p { "Maximum feed rate: {feed_val} {feed_unit}" }
+                p { "Fixture size: {fixture_x_display} x {fixture_y_display}" }
+                p { "Maximum feed rate: {feed_display}" }
                 p { "Spindle: {machine.spindle_min_rpm} – {machine.spindle_max_rpm} rpm" }
                 p { "ATC slots: {machine.atc_slot_count}" }
                 p { "Origin: {machine.origin_x0} / {machine.origin_y0}" }
@@ -703,6 +752,30 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
             }
         }
     }
+}
+
+fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
+    let mut lines = vec![prefix.to_string()];
+    for item in impact.primary_profiles.iter() {
+        lines.push(format!("- {}", item));
+    }
+    for item in impact.dependent_job_profiles.iter() {
+        lines.push(format!("- {}", item));
+    }
+    for item in impact.deleted_live_jobs.iter() {
+        lines.push(format!("- {}", item));
+    }
+    lines.join("\n")
+}
+
+fn format_impact_summary(prefix: &str, impact: &CascadeDeleteImpact) -> String {
+    format!(
+        "{}: {} primary, {} dependent job profile(s), {} live job(s)",
+        prefix,
+        impact.primary_profiles.len(),
+        impact.dependent_job_profiles.len(),
+        impact.deleted_live_jobs.len()
+    )
 }
 
 fn slug_file_name(input: &str) -> String {

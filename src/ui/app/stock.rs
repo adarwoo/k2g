@@ -2,9 +2,9 @@ use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
 use crate::units::{
-    Angle, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, UserUnitDisplay,
-    UserUnitSystem,
+    Angle, FeedRate, Length, RotationalSpeed,
 };
+use crate::ui::unit_service;
 
 use super::super::model::*;
 
@@ -83,7 +83,7 @@ impl StockTypeFilter {
 pub fn StockScreen(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let has_atc = snapshot.selected_machine_has_atc();
-    let user_unit_system = snapshot.unit_system.user_unit_system();
+    let unit_system = snapshot.unit_system;
     let stock_length_unit_label = snapshot.unit_system.length_unit_label();
     let stock_feed_unit_label = snapshot.unit_system.feed_unit_label();
 
@@ -172,7 +172,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
     let detail_diameter_display = if *detail_diameter_is_editing.read() {
         detail_diameter_draft.read().clone()
     } else {
-        format_length_field_display(&detail_diameter_mm.read(), user_unit_system)
+        format_length_field_display(&detail_diameter_mm.read(), unit_system)
     };
     let detail_point_angle_display = if *detail_point_angle_is_editing.read() {
         detail_point_angle_draft.read().clone()
@@ -182,13 +182,53 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
     let detail_feed_rate_display = if *detail_feed_rate_is_editing.read() {
         detail_feed_rate_draft.read().clone()
     } else {
-        format_feed_rate_field_display(&detail_feed_rate_mm_per_min.read(), user_unit_system)
+        format_feed_rate_field_display(&detail_feed_rate_mm_per_min.read(), unit_system)
     };
     let detail_spindle_speed_display = if *detail_spindle_speed_is_editing.read() {
         detail_spindle_speed_draft.read().clone()
     } else {
         detail_spindle_speed_rpm.read().clone()
     };
+
+    let detail_diameter_original_display = active_tool.as_ref().and_then(|tool| {
+        tool.catalog_diameter
+            .map(|value| format_length_field_display(&value.to_string(), unit_system))
+    });
+    let detail_diameter_is_modified = active_tool
+        .as_ref()
+        .and_then(|tool| {
+            tool.catalog_diameter
+                .map(|original| (tool.diameter.as_mm() - original.as_mm()).abs() > 1e-9)
+        })
+        .unwrap_or(false);
+
+    let detail_point_angle_original_display = active_tool
+        .as_ref()
+        .and_then(|tool| tool.catalog_point_angle.map(|value| format_decimal(value.as_degrees())));
+    let detail_point_angle_is_modified = active_tool
+        .as_ref()
+        .and_then(|tool| {
+            tool.catalog_point_angle
+                .map(|original| (tool.point_angle.as_degrees() - original.as_degrees()).abs() > 1e-9)
+        })
+        .unwrap_or(false);
+
+    let detail_feed_rate_original_display = active_tool.as_ref().and_then(|tool| {
+        tool.catalog_feed_rate
+            .map(|value| format_feed_rate_field_display(&value.to_string(), unit_system))
+    });
+    let detail_feed_rate_is_modified = active_tool
+        .as_ref()
+        .map(|tool| option_feed_rate_changed(tool.feed_rate, tool.catalog_feed_rate))
+        .unwrap_or(false);
+
+    let detail_spindle_speed_original_display = active_tool
+        .as_ref()
+        .and_then(|tool| tool.catalog_spindle_speed.map(|value| format_decimal(value.as_rpm())));
+    let detail_spindle_speed_is_modified = active_tool
+        .as_ref()
+        .map(|tool| option_spindle_speed_changed(tool.spindle_speed, tool.catalog_spindle_speed))
+        .unwrap_or(false);
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -328,7 +368,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             "{catalog_tool_type(tool)}"
                                                         }
                                                         span { class: "catalog-tool-diameter",
-                                                            "{catalog_tool_diameter(tool, user_unit_system)}"
+                                                            "{catalog_tool_diameter(tool, unit_system)}"
                                                         }
                                                     }
                                                 }
@@ -536,228 +576,311 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 div { class: "stock-detail-label",
                                     "Diameter ({stock_length_unit_label})"
                                 }
-                                if *detail_diameter_is_editing.read() {
-                                    input {
-                                        class: "stock-detail-input",
-                                        value: detail_diameter_display,
-                                        autofocus: true,
-                                        onmounted: move |evt| async move {
-                                            let _ = evt.set_focus(true).await;
-                                        },
-                                        onfocusin: move |_| detail_pending_focus_field.set(None),
-                                        oninput: move |evt| {
-                                            let value = evt.value();
-                                            detail_diameter_draft.set(value);
-                                        },
-                                        onkeydown: move |evt| {
-                                            let key = evt.key().to_string().to_ascii_lowercase();
-                                            if key == "enter" || key == "numpadenter" {
-                                                let value = detail_diameter_draft.read().trim().to_string();
-                                                if value.is_empty() {
-                                                    detail_field_popup_message
-                                                        .set(Some("Diameter must be a valid length".to_string()));
-                                                    return;
-                                                }
-
-                                                let normalized_input = if length_input_has_explicit_unit(&value) {
-                                                    value
-                                                } else {
-                                                    format!("{}{}", value, default_length_unit_suffix(user_unit_system))
-                                                };
-
-                                                match parse_length_for_display_input(&normalized_input, user_unit_system) {
-                                                    Ok(length) if length.as_mm() > 0.0 => {
-                                                        detail_diameter_mm.set(length.to_string());
-                                                        detail_diameter_draft.set(length.to_string());
-                                                        detail_diameter_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.diameter = length;
-                                                                    }
-                                                                });
-                                                        }
-                                                    }
-                                                    Ok(_) => {
-                                                        detail_field_popup_message
-                                                            .set(Some("Diameter must be greater than zero".to_string()));
-                                                    }
-                                                    Err(_) => {
+                                div { class: "stock-detail-field-value",
+                                    if *detail_diameter_is_editing.read() {
+                                        input {
+                                            class: "stock-detail-input",
+                                            value: detail_diameter_display,
+                                            autofocus: true,
+                                            onmounted: move |evt| async move {
+                                                let _ = evt.set_focus(true).await;
+                                            },
+                                            onfocusin: move |_| detail_pending_focus_field.set(None),
+                                            oninput: move |evt| {
+                                                let value = evt.value();
+                                                detail_diameter_draft.set(value);
+                                            },
+                                            onkeydown: move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let value = detail_diameter_draft.read().trim().to_string();
+                                                    if value.is_empty() {
                                                         detail_field_popup_message
                                                             .set(Some("Diameter must be a valid length".to_string()));
+                                                        return;
                                                     }
-                                                }
-                                            } else if key == "escape" || key == "esc" {
-                                                evt.stop_propagation();
-                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                detail_diameter_is_editing.set(false);
-                                                detail_pending_focus_field.set(None);
-                                                detail_field_popup_message.set(None);
-                                            }
-                                        },
-                                        onfocusout: move |_| {
-                                            detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                            detail_diameter_is_editing.set(false);
-                                            if let Some(next) = *detail_pending_focus_field.read() {
-                                                if next != StockDetailField::Diameter {
-                                                    match next {
-                                                        StockDetailField::PointAngle => {
-                                                            detail_point_angle_is_editing.set(true);
-                                                            detail_point_angle_draft
-                                                                .set(detail_point_angle_degrees.read().clone());
+
+                                                    let normalized_input = if length_input_has_explicit_unit(&value) {
+                                                        value
+                                                    } else {
+                                                        format!("{}{}", value, default_length_unit_suffix(unit_system))
+                                                    };
+
+                                                    match parse_length_for_display_input(&normalized_input, unit_system) {
+                                                        Ok(length) if length.as_mm() > 0.0 => {
+                                                            detail_diameter_mm.set(length.to_string());
+                                                            detail_diameter_draft.set(length.to_string());
+                                                            detail_diameter_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.diameter = length;
+                                                                        }
+                                                                    });
+                                                            }
                                                         }
-                                                        StockDetailField::FeedRate => {
-                                                            detail_feed_rate_is_editing.set(true);
-                                                            detail_feed_rate_draft
-                                                                .set(detail_feed_rate_mm_per_min.read().clone());
+                                                        Ok(_) => {
+                                                            detail_field_popup_message
+                                                                .set(Some("Diameter must be greater than zero".to_string()));
                                                         }
-                                                        StockDetailField::SpindleSpeed => {
-                                                            detail_spindle_speed_is_editing.set(true);
-                                                            detail_spindle_speed_draft
-                                                                .set(detail_spindle_speed_rpm.read().clone());
+                                                        Err(_) => {
+                                                            detail_field_popup_message
+                                                                .set(Some("Diameter must be a valid length".to_string()));
                                                         }
-                                                        StockDetailField::Diameter => {}
                                                     }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    detail_diameter_draft.set(detail_diameter_mm.read().clone());
+                                                    detail_diameter_is_editing.set(false);
+                                                    detail_pending_focus_field.set(None);
                                                     detail_field_popup_message.set(None);
                                                 }
-                                            }
-                                            detail_pending_focus_field.set(None);
-                                        },
+                                            },
+                                            onfocusout: move |_| {
+                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
+                                                detail_diameter_is_editing.set(false);
+                                                if let Some(next) = *detail_pending_focus_field.read() {
+                                                    if next != StockDetailField::Diameter {
+                                                        match next {
+                                                            StockDetailField::PointAngle => {
+                                                                detail_point_angle_is_editing.set(true);
+                                                                detail_point_angle_draft
+                                                                    .set(detail_point_angle_degrees.read().clone());
+                                                            }
+                                                            StockDetailField::FeedRate => {
+                                                                detail_feed_rate_is_editing.set(true);
+                                                                detail_feed_rate_draft
+                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                            }
+                                                            StockDetailField::SpindleSpeed => {
+                                                                detail_spindle_speed_is_editing.set(true);
+                                                                detail_spindle_speed_draft
+                                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                            }
+                                                            StockDetailField::Diameter => {}
+                                                        }
+                                                        detail_field_popup_message.set(None);
+                                                    }
+                                                }
+                                                detail_pending_focus_field.set(None);
+                                            },
+                                        }
+                                    } else {
+                                        button {
+                                            r#type: "button",
+                                            class: "stock-detail-input stock-detail-trigger",
+                                            onmousedown: move |_| {
+                                                detail_pending_focus_field.set(Some(StockDetailField::Diameter));
+                                                detail_diameter_is_editing.set(true);
+                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            onclick: move |_| {
+                                                detail_pending_focus_field.set(None);
+                                                detail_diameter_is_editing.set(true);
+                                                detail_diameter_draft.set(detail_diameter_mm.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            "{detail_diameter_display}"
+                                        }
                                     }
-                                } else {
-                                    button {
-                                        r#type: "button",
-                                        class: "stock-detail-input stock-detail-trigger",
-                                        onmousedown: move |_| {
-                                            detail_pending_focus_field.set(Some(StockDetailField::Diameter));
-                                            detail_diameter_is_editing.set(true);
-                                            detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        onclick: move |_| {
-                                            detail_pending_focus_field.set(None);
-                                            detail_diameter_is_editing.set(true);
-                                            detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        "{detail_diameter_display}"
+
+                                    if detail_diameter_is_modified {
+                                        if let Some(original_value) = detail_diameter_original_display.clone() {
+                                            div { class: "stock-detail-original-group",
+                                                span { class: "stock-detail-original-value",
+                                                    "{original_value}"
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-revert-btn",
+                                                    title: "Revert to catalog value",
+                                                    onclick: {
+                                                        let tool_id = tool.id.clone();
+                                                        let original_diameter = tool.catalog_diameter;
+                                                        move |_| {
+                                                            if let Some(original_diameter) = original_diameter {
+                                                                detail_diameter_mm.set(original_diameter.to_string());
+                                                                detail_diameter_draft.set(original_diameter.to_string());
+                                                                detail_diameter_is_editing.set(false);
+                                                                detail_pending_focus_field.set(None);
+                                                                detail_field_popup_message.set(None);
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.diameter = original_diameter;
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                    },
+                                                    "↺"
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                             div { class: "stock-detail-row",
                                 div { class: "stock-detail-label", "Tip Geometry (deg)" }
-                                if *detail_point_angle_is_editing.read() {
-                                    input {
-                                        class: "stock-detail-input",
-                                        value: detail_point_angle_display,
-                                        autofocus: true,
-                                        onmounted: move |evt| async move {
-                                            let _ = evt.set_focus(true).await;
-                                        },
-                                        onfocusin: move |_| detail_pending_focus_field.set(None),
-                                        oninput: move |evt| detail_point_angle_draft.set(evt.value()),
-                                        onkeydown: move |evt| {
-                                            let key = evt.key().to_string().to_ascii_lowercase();
-                                            if key == "enter" || key == "numpadenter" {
-                                                let draft_value = detail_point_angle_draft.read().clone();
-                                                match parse_required_f64(&draft_value, "Tip geometry") {
-                                                    Ok(value) if value > 0.0 && value <= 180.0 => {
-                                                        let normalized = format_decimal(value);
-                                                        detail_point_angle_degrees.set(normalized.clone());
-                                                        detail_point_angle_draft.set(normalized);
-                                                        detail_point_angle_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.point_angle = Angle::from_degrees(value);
-                                                                    }
-                                                                });
+                                div { class: "stock-detail-field-value",
+                                    if *detail_point_angle_is_editing.read() {
+                                        input {
+                                            class: "stock-detail-input",
+                                            value: detail_point_angle_display,
+                                            autofocus: true,
+                                            onmounted: move |evt| async move {
+                                                let _ = evt.set_focus(true).await;
+                                            },
+                                            onfocusin: move |_| detail_pending_focus_field.set(None),
+                                            oninput: move |evt| detail_point_angle_draft.set(evt.value()),
+                                            onkeydown: move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let draft_value = detail_point_angle_draft.read().clone();
+                                                    match parse_required_f64(&draft_value, "Tip geometry") {
+                                                        Ok(value) if value > 0.0 && value <= 180.0 => {
+                                                            let normalized = format_decimal(value);
+                                                            detail_point_angle_degrees.set(normalized.clone());
+                                                            detail_point_angle_draft.set(normalized);
+                                                            detail_point_angle_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.point_angle = Angle::from_degrees(value);
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                        Ok(_) => {
+                                                            detail_field_popup_message
+                                                                .set(
+                                                                    Some(
+                                                                        "Tip geometry must be greater than 0 and at most 180 degrees"
+                                                                            .to_string(),
+                                                                    ),
+                                                                );
+                                                        }
+                                                        Err(message) => {
+                                                            detail_field_popup_message.set(Some(message));
                                                         }
                                                     }
-                                                    Ok(_) => {
-                                                        detail_field_popup_message
-                                                            .set(
-                                                                Some(
-                                                                    "Tip geometry must be greater than 0 and at most 180 degrees"
-                                                                        .to_string(),
-                                                                ),
-                                                            );
-                                                    }
-                                                    Err(message) => {
-                                                        detail_field_popup_message.set(Some(message));
-                                                    }
-                                                }
-                                            } else if key == "escape" || key == "esc" {
-                                                evt.stop_propagation();
-                                                detail_point_angle_draft.set(detail_point_angle_degrees.read().clone());
-                                                detail_point_angle_is_editing.set(false);
-                                                detail_pending_focus_field.set(None);
-                                                detail_field_popup_message.set(None);
-                                            }
-                                        },
-                                        onfocusout: move |_| {
-                                            detail_point_angle_draft
-                                                .set(detail_point_angle_degrees.read().clone());
-                                            detail_point_angle_is_editing.set(false);
-                                            if let Some(next) = *detail_pending_focus_field.read() {
-                                                if next != StockDetailField::PointAngle {
-                                                    match next {
-                                                        StockDetailField::Diameter => {
-                                                            detail_diameter_is_editing.set(true);
-                                                            detail_diameter_draft
-                                                                .set(detail_diameter_mm.read().clone());
-                                                        }
-                                                        StockDetailField::FeedRate => {
-                                                            detail_feed_rate_is_editing.set(true);
-                                                            detail_feed_rate_draft
-                                                                .set(detail_feed_rate_mm_per_min.read().clone());
-                                                        }
-                                                        StockDetailField::SpindleSpeed => {
-                                                            detail_spindle_speed_is_editing.set(true);
-                                                            detail_spindle_speed_draft
-                                                                .set(detail_spindle_speed_rpm.read().clone());
-                                                        }
-                                                        StockDetailField::PointAngle => {}
-                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    detail_point_angle_draft.set(detail_point_angle_degrees.read().clone());
+                                                    detail_point_angle_is_editing.set(false);
+                                                    detail_pending_focus_field.set(None);
                                                     detail_field_popup_message.set(None);
                                                 }
+                                            },
+                                            onfocusout: move |_| {
+                                                detail_point_angle_draft
+                                                    .set(detail_point_angle_degrees.read().clone());
+                                                detail_point_angle_is_editing.set(false);
+                                                if let Some(next) = *detail_pending_focus_field.read() {
+                                                    if next != StockDetailField::PointAngle {
+                                                        match next {
+                                                            StockDetailField::Diameter => {
+                                                                detail_diameter_is_editing.set(true);
+                                                                detail_diameter_draft
+                                                                    .set(detail_diameter_mm.read().clone());
+                                                            }
+                                                            StockDetailField::FeedRate => {
+                                                                detail_feed_rate_is_editing.set(true);
+                                                                detail_feed_rate_draft
+                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                            }
+                                                            StockDetailField::SpindleSpeed => {
+                                                                detail_spindle_speed_is_editing.set(true);
+                                                                detail_spindle_speed_draft
+                                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                            }
+                                                            StockDetailField::PointAngle => {}
+                                                        }
+                                                        detail_field_popup_message.set(None);
+                                                    }
+                                                }
+                                                detail_pending_focus_field.set(None);
+                                            },
+                                        }
+                                    } else {
+                                        button {
+                                            r#type: "button",
+                                            class: "stock-detail-input stock-detail-trigger",
+                                            onmousedown: move |_| {
+                                                detail_pending_focus_field.set(Some(StockDetailField::PointAngle));
+                                                detail_point_angle_is_editing.set(true);
+                                                detail_point_angle_draft
+                                                    .set(detail_point_angle_degrees.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            onclick: move |_| {
+                                                detail_pending_focus_field.set(None);
+                                                detail_point_angle_is_editing.set(true);
+                                                detail_point_angle_draft
+                                                    .set(detail_point_angle_degrees.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            "{detail_point_angle_display}"
+                                        }
+
+                                        if detail_point_angle_is_modified {
+                                            if let Some(original_value) = detail_point_angle_original_display.clone() {
+                                                div { class: "stock-detail-original-group",
+                                                    span { class: "stock-detail-original-value",
+                                                        "{original_value}"
+                                                    }
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "stock-detail-revert-btn",
+                                                        title: "Revert to catalog value",
+                                                        onclick: {
+                                                            let tool_id = tool.id.clone();
+                                                            let original_point_angle = tool.catalog_point_angle;
+                                                            move |_| {
+                                                                if let Some(original_point_angle) = original_point_angle {
+                                                                    let normalized = format_decimal(original_point_angle.as_degrees());
+                                                                    detail_point_angle_degrees.set(normalized.clone());
+                                                                    detail_point_angle_draft.set(normalized);
+                                                                    detail_point_angle_is_editing.set(false);
+                                                                    detail_pending_focus_field.set(None);
+                                                                    detail_field_popup_message.set(None);
+                                                                    state
+                                                                        .with_mut(|ui_state| {
+                                                                            if let Some(target) = ui_state
+                                                                                .tools
+                                                                                .iter_mut()
+                                                                                .find(|entry| entry.id == tool_id)
+                                                                            {
+                                                                                target.point_angle = original_point_angle;
+                                                                            }
+                                                                        });
+                                                                }
+                                                            }
+                                                        },
+                                                        "↺"
+                                                    }
+                                                }
                                             }
-                                            detail_pending_focus_field.set(None);
-                                        },
-                                    }
-                                } else {
-                                    button {
-                                        r#type: "button",
-                                        class: "stock-detail-input stock-detail-trigger",
-                                        onmousedown: move |_| {
-                                            detail_pending_focus_field.set(Some(StockDetailField::PointAngle));
-                                            detail_point_angle_is_editing.set(true);
-                                            detail_point_angle_draft
-                                                .set(detail_point_angle_degrees.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        onclick: move |_| {
-                                            detail_pending_focus_field.set(None);
-                                            detail_point_angle_is_editing.set(true);
-                                            detail_point_angle_draft
-                                                .set(detail_point_angle_degrees.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        "{detail_point_angle_display}"
+                                        }
                                     }
                                 }
                             }
@@ -765,72 +888,23 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 div { class: "stock-detail-label",
                                     "Feed rate ({stock_feed_unit_label})"
                                 }
-                                if *detail_feed_rate_is_editing.read() {
-                                    input {
-                                        class: "stock-detail-input",
-                                        value: detail_feed_rate_display,
-                                        placeholder: "Optional",
-                                        autofocus: true,
-                                        onmounted: move |evt| async move {
-                                            let _ = evt.set_focus(true).await;
-                                        },
-                                        onfocusin: move |_| detail_pending_focus_field.set(None),
-                                        oninput: move |evt| detail_feed_rate_draft.set(evt.value()),
-                                        onkeydown: move |evt| {
-                                            let key = evt.key().to_string().to_ascii_lowercase();
-                                            if key == "enter" || key == "numpadenter" {
-                                                let value = detail_feed_rate_draft.read().trim().to_string();
-                                                if value.is_empty() {
-                                                    detail_feed_rate_mm_per_min.set(String::new());
-                                                    detail_feed_rate_draft.set(String::new());
-                                                    detail_feed_rate_is_editing.set(false);
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_field_popup_message.set(None);
-                                                    if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                        state
-                                                            .with_mut(|ui_state| {
-                                                                if let Some(target) = ui_state
-                                                                    .tools
-                                                                    .iter_mut()
-                                                                    .find(|entry| entry.id == tool_id)
-                                                                {
-                                                                    target.feed_rate = None;
-                                                                }
-                                                            });
-                                                    }
-                                                    return;
-                                                }
-                                                let normalized_input = if feed_rate_input_has_explicit_unit(&value) {
-                                                    value
-                                                } else {
-                                                    format!("{}{}", value, default_feed_unit_suffix(user_unit_system))
-                                                };
-                                                match parse_optional_feed_rate(
-                                                    &normalized_input,
-                                                    user_unit_system,
-                                                    "Feed rate",
-                                                ) {
-                                                    Ok(Some(feed_rate)) => {
-                                                        let normalized = feed_rate.to_string();
-                                                        detail_feed_rate_mm_per_min.set(normalized.clone());
-                                                        detail_feed_rate_draft.set(normalized);
-                                                        detail_feed_rate_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.feed_rate = Some(feed_rate);
-                                                                    }
-                                                                });
-                                                        }
-                                                    }
-                                                    Ok(None) => {
+                                div { class: "stock-detail-field-value",
+                                    if *detail_feed_rate_is_editing.read() {
+                                        input {
+                                            class: "stock-detail-input",
+                                            value: detail_feed_rate_display,
+                                            placeholder: "Optional",
+                                            autofocus: true,
+                                            onmounted: move |evt| async move {
+                                                let _ = evt.set_focus(true).await;
+                                            },
+                                            onfocusin: move |_| detail_pending_focus_field.set(None),
+                                            oninput: move |evt| detail_feed_rate_draft.set(evt.value()),
+                                            onkeydown: move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let value = detail_feed_rate_draft.read().trim().to_string();
+                                                    if value.is_empty() {
                                                         detail_feed_rate_mm_per_min.set(String::new());
                                                         detail_feed_rate_draft.set(String::new());
                                                         detail_feed_rate_is_editing.set(false);
@@ -848,198 +922,327 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                     }
                                                                 });
                                                         }
+                                                        return;
                                                     }
-                                                    Err(message) => {
-                                                        detail_field_popup_message.set(Some(message));
+                                                    let normalized_input = if feed_rate_input_has_explicit_unit(&value) {
+                                                        value
+                                                    } else {
+                                                        format!("{}{}", value, default_feed_unit_suffix(unit_system))
+                                                    };
+                                                    match parse_optional_feed_rate(&normalized_input, unit_system, "Feed rate") {
+                                                        Ok(Some(feed_rate)) => {
+                                                            let normalized = feed_rate.to_string();
+                                                            detail_feed_rate_mm_per_min.set(normalized.clone());
+                                                            detail_feed_rate_draft.set(normalized);
+                                                            detail_feed_rate_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.feed_rate = Some(feed_rate);
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            detail_feed_rate_mm_per_min.set(String::new());
+                                                            detail_feed_rate_draft.set(String::new());
+                                                            detail_feed_rate_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.feed_rate = None;
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                        Err(message) => {
+                                                            detail_field_popup_message.set(Some(message));
+                                                        }
                                                     }
-                                                }
-                                            } else if key == "escape" || key == "esc" {
-                                                evt.stop_propagation();
-                                                detail_feed_rate_draft.set(detail_feed_rate_mm_per_min.read().clone());
-                                                detail_feed_rate_is_editing.set(false);
-                                                detail_pending_focus_field.set(None);
-                                                detail_field_popup_message.set(None);
-                                            }
-                                        },
-                                        onfocusout: move |_| {
-                                            detail_feed_rate_draft
-                                                .set(detail_feed_rate_mm_per_min.read().clone());
-                                            detail_feed_rate_is_editing.set(false);
-                                            if let Some(next) = *detail_pending_focus_field.read() {
-                                                if next != StockDetailField::FeedRate {
-                                                    match next {
-                                                        StockDetailField::Diameter => {
-                                                            detail_diameter_is_editing.set(true);
-                                                            detail_diameter_draft
-                                                                .set(detail_diameter_mm.read().clone());
-                                                        }
-                                                        StockDetailField::PointAngle => {
-                                                            detail_point_angle_is_editing.set(true);
-                                                            detail_point_angle_draft
-                                                                .set(detail_point_angle_degrees.read().clone());
-                                                        }
-                                                        StockDetailField::SpindleSpeed => {
-                                                            detail_spindle_speed_is_editing.set(true);
-                                                            detail_spindle_speed_draft
-                                                                .set(detail_spindle_speed_rpm.read().clone());
-                                                        }
-                                                        StockDetailField::FeedRate => {}
-                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    detail_feed_rate_draft.set(detail_feed_rate_mm_per_min.read().clone());
+                                                    detail_feed_rate_is_editing.set(false);
+                                                    detail_pending_focus_field.set(None);
                                                     detail_field_popup_message.set(None);
                                                 }
+                                            },
+                                            onfocusout: move |_| {
+                                                detail_feed_rate_draft
+                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                detail_feed_rate_is_editing.set(false);
+                                                if let Some(next) = *detail_pending_focus_field.read() {
+                                                    if next != StockDetailField::FeedRate {
+                                                        match next {
+                                                            StockDetailField::Diameter => {
+                                                                detail_diameter_is_editing.set(true);
+                                                                detail_diameter_draft
+                                                                    .set(detail_diameter_mm.read().clone());
+                                                            }
+                                                            StockDetailField::PointAngle => {
+                                                                detail_point_angle_is_editing.set(true);
+                                                                detail_point_angle_draft
+                                                                    .set(detail_point_angle_degrees.read().clone());
+                                                            }
+                                                            StockDetailField::SpindleSpeed => {
+                                                                detail_spindle_speed_is_editing.set(true);
+                                                                detail_spindle_speed_draft
+                                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                            }
+                                                            StockDetailField::FeedRate => {}
+                                                        }
+                                                        detail_field_popup_message.set(None);
+                                                    }
+                                                }
+                                                detail_pending_focus_field.set(None);
+                                            },
+                                        }
+                                    } else {
+                                        button {
+                                            r#type: "button",
+                                            class: "stock-detail-input stock-detail-trigger",
+                                            onmousedown: move |_| {
+                                                detail_pending_focus_field.set(Some(StockDetailField::FeedRate));
+                                                detail_feed_rate_is_editing.set(true);
+                                                detail_feed_rate_draft
+                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            onclick: move |_| {
+                                                detail_pending_focus_field.set(None);
+                                                detail_feed_rate_is_editing.set(true);
+                                                detail_feed_rate_draft
+                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            if detail_feed_rate_display.is_empty() {
+                                                "Optional"
+                                            } else {
+                                                "{detail_feed_rate_display}"
                                             }
-                                            detail_pending_focus_field.set(None);
-                                        },
-                                    }
-                                } else {
-                                    button {
-                                        r#type: "button",
-                                        class: "stock-detail-input stock-detail-trigger",
-                                        onmousedown: move |_| {
-                                            detail_pending_focus_field.set(Some(StockDetailField::FeedRate));
-                                            detail_feed_rate_is_editing.set(true);
-                                            detail_feed_rate_draft
-                                                .set(detail_feed_rate_mm_per_min.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        onclick: move |_| {
-                                            detail_pending_focus_field.set(None);
-                                            detail_feed_rate_is_editing.set(true);
-                                            detail_feed_rate_draft
-                                                .set(detail_feed_rate_mm_per_min.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        if detail_feed_rate_display.is_empty() {
-                                            "Optional"
-                                        } else {
-                                            "{detail_feed_rate_display}"
+                                        }
+
+                                        if detail_feed_rate_is_modified {
+                                            if let Some(original_value) = detail_feed_rate_original_display.clone() {
+                                                div { class: "stock-detail-original-group",
+                                                    span { class: "stock-detail-original-value",
+                                                        "{original_value}"
+                                                    }
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "stock-detail-revert-btn",
+                                                        title: "Revert to catalog value",
+                                                        onclick: {
+                                                            let tool_id = tool.id.clone();
+                                                            let original_feed_rate = tool.catalog_feed_rate;
+                                                            move |_| {
+                                                                if let Some(original_feed_rate) = original_feed_rate {
+                                                                    let normalized = original_feed_rate.to_string();
+                                                                    detail_feed_rate_mm_per_min.set(normalized.clone());
+                                                                    detail_feed_rate_draft.set(normalized);
+                                                                    detail_feed_rate_is_editing.set(false);
+                                                                    detail_pending_focus_field.set(None);
+                                                                    detail_field_popup_message.set(None);
+                                                                    state
+                                                                        .with_mut(|ui_state| {
+                                                                            if let Some(target) = ui_state
+                                                                                .tools
+                                                                                .iter_mut()
+                                                                                .find(|entry| entry.id == tool_id)
+                                                                            {
+                                                                                target.feed_rate = Some(original_feed_rate);
+                                                                            }
+                                                                        });
+                                                                }
+                                                            }
+                                                        },
+                                                        "↺"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                             div { class: "stock-detail-row",
                                 div { class: "stock-detail-label", "Spindle speed (RPM)" }
-                                if *detail_spindle_speed_is_editing.read() {
-                                    input {
-                                        class: "stock-detail-input",
-                                        value: detail_spindle_speed_display,
-                                        placeholder: "Optional",
-                                        autofocus: true,
-                                        onmounted: move |evt| async move {
-                                            let _ = evt.set_focus(true).await;
-                                        },
-                                        onfocusin: move |_| detail_pending_focus_field.set(None),
-                                        oninput: move |evt| detail_spindle_speed_draft.set(evt.value()),
-                                        onkeydown: move |evt| {
-                                            let key = evt.key().to_string().to_ascii_lowercase();
-                                            if key == "enter" || key == "numpadenter" {
-                                                let draft_value = detail_spindle_speed_draft.read().clone();
-                                                match parse_optional_f64(&draft_value, "Spindle speed") {
-                                                    Ok(Some(value)) => {
-                                                        let normalized = format_decimal(value);
-                                                        detail_spindle_speed_rpm.set(normalized.clone());
-                                                        detail_spindle_speed_draft.set(normalized);
-                                                        detail_spindle_speed_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.spindle_speed = Some(
-                                                                            RotationalSpeed::from_rpm(value),
-                                                                        );
-                                                                    }
-                                                                });
+                                div { class: "stock-detail-field-value",
+                                    if *detail_spindle_speed_is_editing.read() {
+                                        input {
+                                            class: "stock-detail-input",
+                                            value: detail_spindle_speed_display,
+                                            placeholder: "Optional",
+                                            autofocus: true,
+                                            onmounted: move |evt| async move {
+                                                let _ = evt.set_focus(true).await;
+                                            },
+                                            onfocusin: move |_| detail_pending_focus_field.set(None),
+                                            oninput: move |evt| detail_spindle_speed_draft.set(evt.value()),
+                                            onkeydown: move |evt| {
+                                                let key = evt.key().to_string().to_ascii_lowercase();
+                                                if key == "enter" || key == "numpadenter" {
+                                                    let draft_value = detail_spindle_speed_draft.read().clone();
+                                                    match parse_optional_f64(&draft_value, "Spindle speed") {
+                                                        Ok(Some(value)) => {
+                                                            let normalized = format_decimal(value);
+                                                            detail_spindle_speed_rpm.set(normalized.clone());
+                                                            detail_spindle_speed_draft.set(normalized);
+                                                            detail_spindle_speed_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.spindle_speed = Some(
+                                                                                RotationalSpeed::from_rpm(value),
+                                                                            );
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            detail_spindle_speed_rpm.set(String::new());
+                                                            detail_spindle_speed_draft.set(String::new());
+                                                            detail_spindle_speed_is_editing.set(false);
+                                                            detail_pending_focus_field.set(None);
+                                                            detail_field_popup_message.set(None);
+                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
+                                                                state
+                                                                    .with_mut(|ui_state| {
+                                                                        if let Some(target) = ui_state
+                                                                            .tools
+                                                                            .iter_mut()
+                                                                            .find(|entry| entry.id == tool_id)
+                                                                        {
+                                                                            target.spindle_speed = None;
+                                                                        }
+                                                                    });
+                                                            }
+                                                        }
+                                                        Err(message) => {
+                                                            detail_field_popup_message.set(Some(message));
                                                         }
                                                     }
-                                                    Ok(None) => {
-                                                        detail_spindle_speed_rpm.set(String::new());
-                                                        detail_spindle_speed_draft.set(String::new());
-                                                        detail_spindle_speed_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.spindle_speed = None;
-                                                                    }
-                                                                });
-                                                        }
-                                                    }
-                                                    Err(message) => {
-                                                        detail_field_popup_message.set(Some(message));
-                                                    }
-                                                }
-                                            } else if key == "escape" || key == "esc" {
-                                                evt.stop_propagation();
-                                                detail_spindle_speed_draft.set(detail_spindle_speed_rpm.read().clone());
-                                                detail_spindle_speed_is_editing.set(false);
-                                                detail_pending_focus_field.set(None);
-                                                detail_field_popup_message.set(None);
-                                            }
-                                        },
-                                        onfocusout: move |_| {
-                                            detail_spindle_speed_draft
-                                                .set(detail_spindle_speed_rpm.read().clone());
-                                            detail_spindle_speed_is_editing.set(false);
-                                            if let Some(next) = *detail_pending_focus_field.read() {
-                                                if next != StockDetailField::SpindleSpeed {
-                                                    match next {
-                                                        StockDetailField::Diameter => {
-                                                            detail_diameter_is_editing.set(true);
-                                                            detail_diameter_draft
-                                                                .set(detail_diameter_mm.read().clone());
-                                                        }
-                                                        StockDetailField::PointAngle => {
-                                                            detail_point_angle_is_editing.set(true);
-                                                            detail_point_angle_draft
-                                                                .set(detail_point_angle_degrees.read().clone());
-                                                        }
-                                                        StockDetailField::FeedRate => {
-                                                            detail_feed_rate_is_editing.set(true);
-                                                            detail_feed_rate_draft
-                                                                .set(detail_feed_rate_mm_per_min.read().clone());
-                                                        }
-                                                        StockDetailField::SpindleSpeed => {}
-                                                    }
+                                                } else if key == "escape" || key == "esc" {
+                                                    evt.stop_propagation();
+                                                    detail_spindle_speed_draft.set(detail_spindle_speed_rpm.read().clone());
+                                                    detail_spindle_speed_is_editing.set(false);
+                                                    detail_pending_focus_field.set(None);
                                                     detail_field_popup_message.set(None);
                                                 }
+                                            },
+                                            onfocusout: move |_| {
+                                                detail_spindle_speed_draft
+                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                detail_spindle_speed_is_editing.set(false);
+                                                if let Some(next) = *detail_pending_focus_field.read() {
+                                                    if next != StockDetailField::SpindleSpeed {
+                                                        match next {
+                                                            StockDetailField::Diameter => {
+                                                                detail_diameter_is_editing.set(true);
+                                                                detail_diameter_draft
+                                                                    .set(detail_diameter_mm.read().clone());
+                                                            }
+                                                            StockDetailField::PointAngle => {
+                                                                detail_point_angle_is_editing.set(true);
+                                                                detail_point_angle_draft
+                                                                    .set(detail_point_angle_degrees.read().clone());
+                                                            }
+                                                            StockDetailField::FeedRate => {
+                                                                detail_feed_rate_is_editing.set(true);
+                                                                detail_feed_rate_draft
+                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
+                                                            }
+                                                            StockDetailField::SpindleSpeed => {}
+                                                        }
+                                                        detail_field_popup_message.set(None);
+                                                    }
+                                                }
+                                                detail_pending_focus_field.set(None);
+                                            },
+                                        }
+                                    } else {
+                                        button {
+                                            r#type: "button",
+                                            class: "stock-detail-input stock-detail-trigger",
+                                            onmousedown: move |_| {
+                                                detail_pending_focus_field.set(Some(StockDetailField::SpindleSpeed));
+                                                detail_spindle_speed_is_editing.set(true);
+                                                detail_spindle_speed_draft
+                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            onclick: move |_| {
+                                                detail_pending_focus_field.set(None);
+                                                detail_spindle_speed_is_editing.set(true);
+                                                detail_spindle_speed_draft
+                                                    .set(detail_spindle_speed_rpm.read().clone());
+                                                detail_field_popup_message.set(None);
+                                            },
+                                            if detail_spindle_speed_display.is_empty() {
+                                                "Optional"
+                                            } else {
+                                                "{detail_spindle_speed_display}"
                                             }
-                                            detail_pending_focus_field.set(None);
-                                        },
-                                    }
-                                } else {
-                                    button {
-                                        r#type: "button",
-                                        class: "stock-detail-input stock-detail-trigger",
-                                        onmousedown: move |_| {
-                                            detail_pending_focus_field.set(Some(StockDetailField::SpindleSpeed));
-                                            detail_spindle_speed_is_editing.set(true);
-                                            detail_spindle_speed_draft
-                                                .set(detail_spindle_speed_rpm.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        onclick: move |_| {
-                                            detail_pending_focus_field.set(None);
-                                            detail_spindle_speed_is_editing.set(true);
-                                            detail_spindle_speed_draft
-                                                .set(detail_spindle_speed_rpm.read().clone());
-                                            detail_field_popup_message.set(None);
-                                        },
-                                        if detail_spindle_speed_display.is_empty() {
-                                            "Optional"
-                                        } else {
-                                            "{detail_spindle_speed_display}"
+                                        }
+
+                                        if detail_spindle_speed_is_modified {
+                                            if let Some(original_value) = detail_spindle_speed_original_display.clone() {
+                                                div { class: "stock-detail-original-group",
+                                                    span { class: "stock-detail-original-value",
+                                                        "{original_value}"
+                                                    }
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "stock-detail-revert-btn",
+                                                        title: "Revert to catalog value",
+                                                        onclick: {
+                                                            let tool_id = tool.id.clone();
+                                                            let original_spindle_speed = tool.catalog_spindle_speed;
+                                                            move |_| {
+                                                                if let Some(original_spindle_speed) = original_spindle_speed {
+                                                                    let normalized = format_decimal(original_spindle_speed.as_rpm());
+                                                                    detail_spindle_speed_rpm.set(normalized.clone());
+                                                                    detail_spindle_speed_draft.set(normalized);
+                                                                    detail_spindle_speed_is_editing.set(false);
+                                                                    detail_pending_focus_field.set(None);
+                                                                    detail_field_popup_message.set(None);
+                                                                    state
+                                                                        .with_mut(|ui_state| {
+                                                                            if let Some(target) = ui_state
+                                                                                .tools
+                                                                                .iter_mut()
+                                                                                .find(|entry| entry.id == tool_id)
+                                                                            {
+                                                                                target.spindle_speed = Some(original_spindle_speed);
+                                                                            }
+                                                                        });
+                                                                }
+                                                            }
+                                                        },
+                                                        "↺"
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1233,7 +1436,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                         "{stock_tool_type_label(&tool.kind)}"
                                                     }
                                                 }
-                                                td { "{tool_diameter(tool, user_unit_system)}" }
+                                                td { "{tool_diameter(tool, unit_system)}" }
                                                 td { class: "stock-name-cell", "{tool.display_name()}" }
                                                 td { "{tool.source_catalog}" }
                                                 td {
@@ -1361,21 +1564,6 @@ fn parse_required_f64(value: &str, label: &str) -> Result<f64, String> {
     value.trim().parse::<f64>().map_err(|_| format!("{} must be a number", label))
 }
 
-fn parse_required_length(value: &str, user_unit_system: UserUnitSystem, label: &str) -> Result<Length, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err(format!("{} must be a number", label));
-    }
-
-    let default_unit = match user_unit_system {
-        UserUnitSystem::Metric => LengthUnit::Mm,
-        UserUnitSystem::Imperial => LengthUnit::Inch,
-    };
-
-    Length::from_string(trimmed, Some(default_unit))
-        .map_err(|_| format!("{} must be a valid length", label))
-}
-
 fn parse_optional_f64(value: &str, label: &str) -> Result<Option<f64>, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1387,7 +1575,7 @@ fn parse_optional_f64(value: &str, label: &str) -> Result<Option<f64>, String> {
 
 fn parse_optional_feed_rate(
     value: &str,
-    user_unit_system: UserUnitSystem,
+    unit_system: UnitSystem,
     label: &str,
 ) -> Result<Option<FeedRate>, String> {
     let trimmed = value.trim();
@@ -1395,12 +1583,7 @@ fn parse_optional_feed_rate(
         return Ok(None);
     }
 
-    let default_unit = match user_unit_system {
-        UserUnitSystem::Metric => FeedRateUnit::MmPerMin,
-        UserUnitSystem::Imperial => FeedRateUnit::Ipm,
-    };
-
-    FeedRate::from_string(trimmed, Some(default_unit))
+    unit_service::parse_feed_with_preference(trimmed, unit_system)
         .map(Some)
         .map_err(|_| format!("{} must be a valid feed rate", label))
 }
@@ -1424,83 +1607,75 @@ fn feed_rate_input_has_explicit_unit(value: &str) -> bool {
     trimmed.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '/')
 }
 
-fn parse_length_for_display_input(value: &str, user_unit_system: UserUnitSystem) -> Result<Length, String> {
-    parse_required_length(value, user_unit_system, "Diameter")
+fn parse_length_for_display_input(value: &str, unit_system: UnitSystem) -> Result<Length, String> {
+    unit_service::parse_length_with_preference(value, unit_system)
+        .map_err(|_| "Diameter must be a valid length".to_string())
 }
 
-fn default_length_unit_suffix(user_unit_system: UserUnitSystem) -> &'static str {
-    match user_unit_system {
-        UserUnitSystem::Metric => "mm",
-        UserUnitSystem::Imperial => "in",
+fn default_length_unit_suffix(unit_system: UnitSystem) -> &'static str {
+    unit_service::default_length_suffix(unit_system)
+}
+
+fn default_feed_unit_suffix(unit_system: UnitSystem) -> &'static str {
+    unit_service::default_feed_suffix(unit_system)
+}
+
+fn option_feed_rate_changed(current: Option<FeedRate>, original: Option<FeedRate>) -> bool {
+    match original {
+        Some(original) => match current {
+            Some(current) => (current.as_mm_per_min() - original.as_mm_per_min()).abs() > 1e-9,
+            None => true,
+        },
+        None => false,
     }
 }
 
-fn default_feed_unit_suffix(user_unit_system: UserUnitSystem) -> &'static str {
-    match user_unit_system {
-        UserUnitSystem::Metric => "mm/min",
-        UserUnitSystem::Imperial => "ipm",
+fn option_spindle_speed_changed(current: Option<RotationalSpeed>, original: Option<RotationalSpeed>) -> bool {
+    match original {
+        Some(original) => match current {
+            Some(current) => (current.as_rpm() - original.as_rpm()).abs() > 1e-9,
+            None => true,
+        },
+        None => false,
     }
 }
 
-fn format_length_for_user(length: Length, user_unit_system: UserUnitSystem) -> String {
-    match user_unit_system {
-        UserUnitSystem::Metric => format_decimal(length.as_mm()) + "mm",
-        UserUnitSystem::Imperial => format_decimal(length.as_inch()) + "\"",
-    }
+fn format_length_for_user(length: Length, unit_system: UnitSystem) -> String {
+    unit_service::format_length_display(length, unit_system)
 }
 
-fn format_length_field_display(raw_value: &str, user_unit_system: UserUnitSystem) -> String {
+fn format_length_field_display(raw_value: &str, unit_system: UnitSystem) -> String {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let Ok(length) = parse_length_for_display_input(trimmed, user_unit_system) else {
+    let Ok(length) = parse_length_for_display_input(trimmed, unit_system) else {
         return trimmed.to_string();
     };
 
-    let native = length.to_string();
-    let selected = format_length_for_user(length, user_unit_system);
-    if length_unit_matches_system(length.unit(), user_unit_system) {
-        native
-    } else {
-        format!("{native} [{selected}]")
-    }
+    format_length_for_user(length, unit_system)
 }
 
-fn length_unit_matches_system(unit: LengthUnit, user_unit_system: UserUnitSystem) -> bool {
-    match user_unit_system {
-        UserUnitSystem::Metric => {
-            matches!(unit, LengthUnit::Nm | LengthUnit::Um | LengthUnit::Mm | LengthUnit::Cm)
-        }
-        UserUnitSystem::Imperial => matches!(unit, LengthUnit::Mil | LengthUnit::Thou | LengthUnit::In | LengthUnit::Inch),
-    }
+fn format_feed_rate_for_user(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
+    unit_service::format_feed_display(feed_rate, unit_system)
 }
 
-fn format_feed_rate_for_user(feed_rate: FeedRate, user_unit_system: UserUnitSystem) -> String {
-    match user_unit_system {
-        UserUnitSystem::Metric => format_decimal(feed_rate.as_mm_per_min()) + "mm/min",
-        UserUnitSystem::Imperial => format_decimal(feed_rate.as_in_per_min()) + "ipm",
-    }
-}
-
-fn format_feed_rate_field_display(raw_value: &str, user_unit_system: UserUnitSystem) -> String {
+fn format_feed_rate_field_display(raw_value: &str, unit_system: UnitSystem) -> String {
     let trimmed = raw_value.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    let Ok(Some(feed_rate)) = parse_optional_feed_rate(trimmed, user_unit_system, "Feed rate") else {
+    let Ok(Some(feed_rate)) = parse_optional_feed_rate(
+        trimmed,
+        unit_system,
+        "Feed rate",
+    ) else {
         return trimmed.to_string();
     };
 
-    let native = feed_rate.to_string();
-    let selected = format_feed_rate_for_user(feed_rate, user_unit_system);
-    if native.eq_ignore_ascii_case(&selected) {
-        native
-    } else {
-        format!("{native} [{selected}]")
-    }
+    format_feed_rate_for_user(feed_rate, unit_system)
 }
 
 fn format_decimal(value: f64) -> String {
@@ -1578,13 +1753,8 @@ fn stock_tool_type_rank(kind: &str) -> u8 {
     }
 }
 
-fn tool_diameter(tool: &Tool, user_unit_system: UserUnitSystem) -> String {
-    let display = tool.diameter.unit_display(user_unit_system);
-    if let Some(native) = display.native {
-        format!("{} [{}]", display.user, native)
-    } else {
-        display.user
-    }
+fn tool_diameter(tool: &Tool, unit_system: UnitSystem) -> String {
+    unit_service::format_length_display(tool.diameter, unit_system)
 }
 
 fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
@@ -1604,11 +1774,6 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
     }
 }
 
-fn catalog_tool_diameter(tool: &CatalogStockTool, user_unit_system: UserUnitSystem) -> String {
-    let display = tool.diameter.unit_display(user_unit_system);
-    if let Some(native) = display.native {
-        format!("{} [{}]", display.user, native)
-    } else {
-        display.user
-    }
+fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> String {
+    unit_service::format_length_display(tool.diameter, unit_system)
 }

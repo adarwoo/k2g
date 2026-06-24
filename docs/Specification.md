@@ -22,17 +22,12 @@ K2G is a portable desktop application and KiCad plugin that generates CNC GCode 
 
 Primary navigation areas:
 
-- Setup
-- Stock management
-- Catalog (opened as overlay from Stock)
 - Job
-
-Setup contains persistent configuration assets:
-
-- Global settings
 - CNC profiles
 - Fixture profiles
 - Job profiles
+- Stock management
+- Catalog (opened as overlay from Stock)
 
 Job is the live machining workspace for a selected board.
 Within Job, the user can switch between:
@@ -51,16 +46,16 @@ The product should support rapid switching between:
 
 The UI should follow a slicer-style workstation layout (PrusaSlicer/Bambu-like structure, not branding):
 
-- Top bar: board/job context, active profile summary, setup entry, global status
-  - Includes a persistent unit system quick-toggle (Metric/Imperial)
+- Top bar: board/job context, active profile summary, defaults cog, global status
+  - Defaults cog opens global defaults with only Theme and Display Units
+  - Includes a persistent unit system quick-toggle (mm/in/mil)
 - Main body:
-  - Left: setup or job navigation depending on active area
+  - Left: primary navigation and section navigation for the active area
   - Center: board/machining viewport or program editor
   - Right: context settings, diagnostics, and editable parameters
 - Utility area (bottom or side): generation status and action feedback
 
-When the user opens K2G from KiCad, the default landing area is Job, not Setup.
-Setup remains reachable without leaving the current board context.
+When the user opens K2G from KiCad, the default landing area is Job.
 
 ## 5. Global Interaction Rules
 
@@ -71,38 +66,48 @@ Setup remains reachable without leaving the current board context.
   - The newly requested cycle becomes the active cycle and is the only cycle allowed to commit output.
 - Errors and warnings are summarized in a persistent banner across screens.
 - Clicking the summary opens detailed diagnostics.
+
+### 5.1 Global Measurement Editing Contract
+
 - Unit preferences apply globally, with automatic conversion display where needed.
+- A global units service must be used for parse, conversion, and display formatting across screens.
+- Length values are persisted with their original explicit unit expression (for example `mm`, `in`, `mil`, including inch fractions).
+- Feed-rate values are persisted with explicit units and must always include a feed-rate unit.
+- Values whose domain has one canonical unit (for example angle in degrees or spindle speed in rpm) may omit unit suffixes.
+- Frontend formatting always shows preferred user units first; if persisted unit/expression differs, append the original value in brackets.
+- When preference is inch and source value is an inch fraction, show decimal inch first and original fraction in brackets.
+- Display precision is global: `mm` at 0.001, `in` at 0.00001, `mil` at 0.1.
+- Display-unit mapping is global: `mm -> mm/min`, `in -> in/min`, `mil -> in/min`.
+- For any user-entered measurement that accepts units, the current user preference unit is assumed when no unit suffix is provided.
+- In non-editing context, editable measurements are shown in the preference unit system; if native/original unit differs, the native/original value is appended in brackets.
+- On entering edit mode, the field value is converted to a raw numeric value in the currently selected unit system (no bracketed companion value while editing).
+- While editing, users may enter decimal or fractional values and may optionally override with an explicit unit suffix.
+- Enter validates and commits the edited value as the new reference value and exits edit mode.
+- If Enter validation fails, an inline error is shown and focus must remain in the same field.
+- Escape always cancels the edit, restores the previous valid value, and exits edit mode.
 - If generated program text has user edits and regeneration would overwrite them, a confirmation prompt is required.
 
-## 6. Setup and Machine Management
+## 6. Profiles and Defaults Management
 
-Setup is opened from a wheel icon or dedicated navigation entry.
-Setup manages persistent assets that outlive any individual PCB/job.
-On first launch, the product enters a guided readiness flow that can open Setup editors inline or as overlays.
+There is no dedicated Setup area.
+Persistent assets are managed directly from primary navigation entries (CNC profiles, fixture profiles, job profiles).
+Global defaults are managed from the top-bar cog.
 
-### 6.1 General Settings
+### 6.1 Default Settings (Cog)
 
-Note, the general settings is about
+The default settings panel is opened from the top-bar cog icon only.
 
 - Theme:
   - Light
   - Dark
- 
+
 - Display Units:
-  - Metric: All units are also shown in metric mm rounded to the nearest 0.001mm
-  - In: All units are also shown in decimal inch (") rounded to the nearest 0.00001"
-  - mil: All units are also shown in decimal mil (mil) rounded to the nearest 0.1mil
+  - mm: All length values are shown in decimal mm rounded to the nearest 0.001, and feed-rates in mm/min
+  - in: All length values are shown in decimal inch rounded to the nearest 0.00001, and feed-rates in in/min
+  - mil: All length values are shown in decimal mil rounded to the nearest 0.1, and feed-rates in in/min
 
-General settings are global to the application, not specific to a CNC, fixture, board, or job.
-Unit preferences are controlled from the top bar quick-toggle and are persisted globally.
-Same for theme.
-
-Schema-backed persisted global settings also include:
-
-- Selected CNC profile ID
-- Selected fixture profile ID
-- Selected job profile ID
-- Advanced machining defaults used by generation (resolution, spindle/feed practical limits, Z safety/retract and drilling allowances)
+No other settings belong in this panel.
+Profile selections and machining behavior defaults are defined by profiles and by the active job, not by global defaults.
 
 ### 6.2 CNC Profile Management
 
@@ -117,7 +122,8 @@ Users can:
 - Edit a profile
 
 Stock profiles are read-only.
-Profiles that are currently in-use by any job cannot be deleted; the user must switch the job to a different CNC profile before deletion is allowed.
+Deleting a CNC profile is allowed, including when referenced.
+Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
 
 ### 6.3 Fixture Profile Management
 
@@ -130,10 +136,13 @@ Users can:
 - Delete a created profile
 - Edit a profile
 
-Profiles that are currently in-use by any job cannot be deleted; the user must switch the job to a different fixture profile before deletion is allowed.
+Deleting a fixture profile is allowed, including when referenced.
+Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
 
 Fixture profiles describe how the PCB is physically held and aligned on the machine.
-They are persistent setup assets and are not tied to a single board.
+They are persistent configuration assets and are not tied to a single board.
+Fixture profiles may influence generated output, but they do so through CNC profile abstractions.
+For example, a fixture requests a work offset intent from the CNC profile; it does not directly emit machine-specific GCode.
 
 Fixture fields include at minimum:
 
@@ -326,7 +335,7 @@ Compatibility and fallback requirements:
 ### 6.7 Job Profile Management
 
 Job profiles define machining defaults and constraints for a family of jobs.
-Each job profile is built on top of exactly one CNC profile and one fixture profile.
+Each job profile predefines all relevant job attributes, including CNC profile and fixture profile selection.
 
 Users can:
 
@@ -337,28 +346,43 @@ Users can:
 - Delete a created profile
 - Edit a profile
 
-Profiles that are currently selected in any open job cannot be deleted; the user must switch to a different job profile before deletion is allowed.
+Deleting a job profile is allowed, including when selected by live jobs.
+Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
 
 Each job profile includes:
 
-- Referenced CNC profile
-- Referenced fixture profile
+- Selected CNC profile
+- Selected fixture profile
 - Default enabled operations
 - Default machining strategies
 - Default tool selection parameters
 - Default routing/tab settings
-- Override policy for runtime job editing
+- Feature selection (which machining features/operations are part of the profile)
 
 Job profiles are persisted as YAML and validated by `job_profile.schema.yaml`.
 
-Override policy defines which values the live job may change and within what bounds.
-Examples include:
+Jobs are instantiated from an existing job profile.
+When a job is created from a profile, profile values become the initial effective job values.
+The live job may override any profile-defined attribute except CNC profile and fixture profile.
 
-- Allowed operation toggles
-- Min/max tab count
-- Allowed board rotation range
-- Allowed tool matching tolerance range
-- Whether routing fallback may be enabled/disabled at runtime
+### 6.8 Profile Deletion and Cascade Rules
+
+Because dependencies are hierarchical (Job -> Job profile -> CNC profile + fixture profile), deleting a profile may delete additional assets.
+
+Cascading deletion is allowed for CNC profiles, fixture profiles, and job profiles.
+Before final confirmation, the UI must show a warning dialog that lists every asset that will be deleted.
+
+The warning list must include, as applicable:
+
+- The explicitly selected profile(s)
+- Dependent job profiles that reference a deleted CNC or fixture profile
+- Live/open jobs instantiated from any job profile that will be deleted
+
+Confirmation requirements:
+
+- The warning dialog must show total impacted asset counts by type and an explicit itemized list
+- Delete action is disabled until user explicitly confirms
+- Cancel leaves all assets unchanged
 
 ## 7. Stock and Catalog
 
@@ -427,6 +451,14 @@ Field editing and validation behavior:
 - When Enter validation fails, focus remains in the current field and an inline popup message explains the validation error
 - Validation popup clears when the field is reverted with Escape or successfully committed with Enter
 - Stock detail field changes are applied immediately on commit or selection change; no separate Save Changes action exists
+- For measurement fields specifically:
+  - In non-editing context, show preference-unit value first, with native/original in brackets when different
+  - On entering edit mode, render only the raw numeric value in the active preference unit system
+  - Accept decimal and fractional numeric input, with optional explicit unit suffix
+  - Do not transfer focus to other controls while a measurement field is in invalid edit state; only Enter (valid commit) or Escape (revert) completes the sequence
+- For catalog-derived editable fields, if the current value differs from the catalog baseline, show the original catalog value in orange to the right of the user value and show a revert icon
+- Clicking the revert icon immediately restores the catalog baseline value for that field
+- This override affordance (orange original value + revert icon) is a shared UI pattern and should be used consistently in other override surfaces, including Job settings
 
 ### 7.1.1 Stock Field Validity Rules
 
@@ -444,7 +476,7 @@ Stock detail field validity requirements:
   - Empty value is valid and clears feed rate
   - Non-empty value must parse as a valid feed-rate expression
   - Accepts decimal and fraction forms with optional unit suffix
-  - If unit suffix is omitted during editing, current global unit mode feed unit is applied before validation
+  - If unit suffix is omitted during editing, current global unit mode feed unit is applied before validation (`mm/min` for `mm`, `in/min` for `in`/`mil`)
   - Non-empty value must be non-negative
 - Tip geometry:
   - Required
@@ -478,7 +510,7 @@ Catalog add UX requirements:
 - The primary add action imports all selected tools into stock in one operation
 - Selecting one catalog tool opens a full detail view for that tool
 - In the detail view, an Add button imports that single tool directly to stock
-- Stock tool detail entry fields for diameter and feed rate follow the global unit toggle (Metric/Imperial) for both display and input parsing
+- Stock tool detail entry fields for diameter and feed rate follow the global unit toggle (mm/in/mil) for both display and input parsing
 - Diameter values entered with an explicit unit suffix (for example `3/4in`) are treated as unit-bound values and are not auto-converted in-place when the global unit toggle changes
 
 ### 7.2 Catalog Overlay
@@ -489,7 +521,7 @@ The catalog is opened from stock add flow as an overlay.
 - Tool detail includes:
   - Manufacturer and SKU
   - Name and description
-  - Diameter with unit expression support (metric/imperial, fraction/float)
+  - Diameter with unit expression support (mm/in/mil, fraction/float)
   - Recommended RPM
   - Recommended Z feed
   - Recommended horizontal feed (routers)
@@ -517,7 +549,7 @@ It combines:
 - One board
 - One selected job profile
 - The CNC and fixture profiles referenced by that job profile
-- Runtime overrides allowed by the job profile
+- Runtime overrides of profile-defined values (except CNC and fixture)
 - Generated machining outputs and diagnostics
 
 The job is the heart of the product and is the default focus when launched from a PCB.
@@ -528,8 +560,9 @@ The job is the heart of the product and is the default focus when launched from 
 - Exactly one active job exists at a time in the application context.
 - The board and the active job profile are the primary context objects for that job.
 - CNC and fixture are normally inherited from the selected job profile.
-- Changing CNC or fixture directly is treated as editing or replacing the active job profile, not as an ad hoc job mutation.
-- Runtime overrides are allowed only for values explicitly permitted by the active job profile.
+- CNC and fixture cannot be overridden on the live job.
+- Changing CNC or fixture requires selecting or editing a job profile.
+- All other profile-defined attributes may be overridden on the live job.
 - Overrides affect the current job instance and do not silently mutate the saved profile.
 - The active job references one selected job profile and carries all runtime overrides as effective values.
 - The active job exposes property access APIs used by RHAI evaluation and generation.
@@ -537,14 +570,14 @@ The job is the heart of the product and is the default focus when launched from 
 ### 8.2 Core Job Controls
 
 - Selected board / PCB source
-- Selected job profile with quick link to setup
+- Selected job profile with quick link to profile editor
   - Last used job profile is selected automatically on open
   - On startup, generation proceeds immediately with the reused profile.
   - A profile is never treated as inherently incompatible at selection time.
   - Feasibility is determined dynamically by generation.
   - If constraints are violated (for example board size limits, missing tools, fixture constraints), generation raises detailed errors in diagnostics.
-- Derived CNC profile with quick link to setup
-- Derived fixture profile with quick link to setup
+- Derived CNC profile with quick link to CNC profile editor
+- Derived fixture profile with quick link to fixture profile editor
 - Production operations (multi-select):
   - Drill locating pins
   - Drill PTH
@@ -563,14 +596,14 @@ The job is the heart of the product and is the default focus when launched from 
     - 90
     - Free entry -180.0 to +180.0
 
-Note: The board rotation configuration is validated and constrained by the active job profile override policy.
+Note: The board rotation default is defined by the active job profile and may be overridden in the live job.
 
 ### 8.3 Override UX Rules
 
 - The UI clearly distinguishes profile defaults from live job overrides.
 - When a value is overridden, it is shown in orange with a small revert icon beside it.
 - Reverting restores the profile default for that field.
-- Values outside the profile's allowed override range cannot be entered.
+- CNC profile and fixture profile are not overridable at the live job level.
 - If the user wants to change the saved default rather than the current job, the UI should offer an explicit Edit Profile action.
 
 ### 8.4 Job Workspace Composition
@@ -591,7 +624,7 @@ The live job workspace should keep the board and machining result at the center 
   - Routing/tab settings
   - Diagnostics and warnings
 
-Setup editing from the job should use overlays, drawers, or focused subpages that preserve the current board context whenever possible.
+Profile editing from the job should use overlays, drawers, or focused subpages that preserve the current board context whenever possible.
 The user should never feel they have left the machining task just to adjust a profile.
 
 ### 8.5 ATC Strategy (when ATC is available)
@@ -779,9 +812,9 @@ Startup flow:
 
 Startup routing rules:
 
-- If setup readiness is satisfied, enter Job directly.
-- If setup readiness is incomplete, still enter Job when launched from a PCB, but show blocking readiness tasks and direct links to the missing setup editors.
-- The system should avoid forcing the user into a disconnected setup-first experience when a board is already open.
+- Enter Job directly.
+- If required profiles are missing, show blocking readiness tasks with direct links to create or select CNC, fixture, and job profiles.
+- The system should avoid forcing a disconnected admin-first experience when a board is already open.
 
 Refresh behavior:
 
@@ -797,7 +830,7 @@ Failure behavior:
 
 ## 14. First-Run and Installation Flow
 
-Fresh install minimum setup:
+Fresh install minimum profile readiness:
 
 1. CNC profile selection or creation (stock profile acceptable)
 2. Add stock tools from catalog (required)
@@ -809,10 +842,10 @@ At minimum, valid generation requires one usable CNC profile, one fixture profil
 First-run UX rules:
 
 - The first meaningful destination is still the Job workspace when a board is present.
-- Missing setup assets are presented as a readiness checklist, not as an abstract admin task.
-- The first job is expected to be iterative: users may bounce between the live job and setup editors while tuning CNC, fixture, and job profile definitions.
-- The product should preserve board context while the user edits setup assets for the first time.
-- When no board is present, the product may start in Setup/readiness mode.
+- Missing required profiles are presented as a readiness checklist, not as an abstract admin task.
+- The first job is expected to be iterative: users may bounce between the live job and profile editors while tuning CNC, fixture, and job profile definitions.
+- The product should preserve board context while the user edits profiles for the first time.
+- When no board is present, the product may start in profile/readiness mode.
 
 ## 15. Regeneration State Model
 
@@ -836,7 +869,7 @@ For UI generation/design workflows, deliverables should include:
 - Information architecture map
 - High-level wireframes for major screens
 - Reusable component inventory with state variants
-- Interaction flows for first-run, setup asset creation, live job editing, review, and export/send
+- Interaction flows for first-run, profile creation, live job editing, review, and export/send
 - Error-state and empty-state variants
 - Responsive behavior definition
 
