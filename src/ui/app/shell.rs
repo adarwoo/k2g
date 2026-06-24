@@ -287,10 +287,101 @@ pub fn NavigationRail(state: Signal<UiState>) -> Element {
                     key: "{screen.key()}",
                     class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
                     onclick: move |_| state.with_mut(|s| s.select_screen(screen)),
-                    span { class: "rail-button-text", "{screen.label()}" }
+                    span { class: "rail-button-content",
+                        span { class: "rail-button-icon", {rail_icon(screen)} }
+                        span { class: "rail-button-text", "{screen.label()}" }
+                    }
                 }
             }
         }
+    }
+}
+
+fn rail_icon(screen: Screen) -> Element {
+    match screen {
+        Screen::Job => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                path { d: "M4 6h16v12H4z" }
+                path { d: "M4 10h16" }
+                circle { cx: "8", cy: "8", r: "1" }
+                circle { cx: "12", cy: "8", r: "1" }
+                circle { cx: "16", cy: "8", r: "1" }
+            }
+        },
+        Screen::CncProfiles => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                path { d: "M12 4l5 3v6l-5 3-5-3V7z" }
+                path { d: "M12 16v4" }
+                path { d: "M9.5 20h5" }
+            }
+        },
+        Screen::FixtureProfiles => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                rect {
+                    x: "4",
+                    y: "5",
+                    width: "16",
+                    height: "14",
+                    rx: "2",
+                }
+                path { d: "M8 5v14" }
+                path { d: "M16 5v14" }
+            }
+        },
+        Screen::JobProfiles => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                rect {
+                    x: "5",
+                    y: "4",
+                    width: "10",
+                    height: "13",
+                    rx: "1.8",
+                }
+                path { d: "M8 8h4" }
+                path { d: "M8 11h4" }
+                path { d: "M15 9l4 4-4 4" }
+            }
+        },
+        Screen::Stock => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                rect {
+                    x: "4",
+                    y: "7",
+                    width: "16",
+                    height: "10",
+                    rx: "2",
+                }
+                path { d: "M8 7V5" }
+                path { d: "M16 7V5" }
+                path { d: "M8 12h8" }
+            }
+        },
+        Screen::Catalog => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                path { d: "M6 5h12v14H6z" }
+                path { d: "M9 8h6" }
+                path { d: "M9 11h6" }
+                path { d: "M9 14h4" }
+            }
+        },
     }
 }
 

@@ -266,8 +266,37 @@ body {
     background: transparent;
     color: var(--text-subtle);
     padding: 12px 8px;
+    text-align: left;
     cursor: pointer;
     transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+
+.rail-button-content {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rail-button-icon {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+    flex: 0 0 auto;
+}
+
+.rail-icon-svg {
+    width: 15px;
+    height: 15px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 .rail-button:hover {
@@ -279,6 +308,11 @@ body {
     background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
     border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
     color: var(--accent);
+}
+
+.rail-button.active .rail-button-icon {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
 .rail-button-text {

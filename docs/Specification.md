@@ -228,37 +228,26 @@ Profiles behavior:
 - Application ships with predefined profiles.
 - New machine profiles can be cloned from existing profiles.
 
-All RHAI sections can be dynamically edited.
-- When the user presses enter, the expression is validated.
-- Any errors are shown, and the focus remains. Only ESC reverts to the previous expression.
-- Custom attributes are automatically added to the scope of all functions.
+All RHAI sections can be dynamically edited by clicking |>. (They are read-only otherwise).
+This displays a dialog listing all the variable passed to the function with default values.
+Click on the variable adds it at the cursor position in the edit field.
+The result value is show automatically, just like parsing errors.
+The resulting output is tested to be valid GCode.
 
-Units of variables:
-- The renderer context knows the rendered units to use.
-- At the start of the rendering, the render units is undefined.
-- Attempting to render a value will trigger an error
-  - Error: Attempted to render value 'x' before units were defined.
-  - Hint: Call {ctx.set_metric} or {ctx.set_imperial} in initialise.
-- The RHAI function set_unit() must be called once.
-- The built-in primitives set_metric and set_imperial are defined to issue the GCode to the CNC and set the context rendering units.
-
-```
-set_metric: |
-    G21
-    {ctx.set_units("mm", "mm_min")}
-
-set_imperial: |
-    G20
-    {ctx.set_units("inch", "ipm")}
-```
+Each function comes with a pre-defined list of variables. Custom attributes are automatically added to the scope of all functions.
 
 Examples:
-```
-  initialise: code: |
-    (Created by kicad2gcode from '{filename}' - {timestamp})
+machine:
+  program_units:
+    length: "mm"
+    feedrate: "mm/min"
+
+primitives:
+  initialise: |
+    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     (Reset all back to safe defaults)
     G17 G54 G40 G49 G80 G90
-    {set_metric}
+    G21
     G10 P0
     G0 Z{z_safe}
   move_slow: "G0 X{x} Y{y}"
@@ -279,7 +268,7 @@ Examples:
     S{rpm}
   conclude: |
     (end of file)
-```
+
 RHAI parser and expression model:
 
 - The application includes a RHAI expression parser/evaluator used by CNC program snippets and expression-backed profile fields.
@@ -296,40 +285,21 @@ Primitive templates as CNC configuration attributes (schema-required):
 
 Required primitive attributes:
 
-- `set_metric()` -> maps to primitive `set_metric`
-- `set_imperial()` -> maps to primitive `set_imperial`
-- `initialise()` -> maps to primitive `initialise`
-- `move_slow(x, y, z, feed_rate)` -> maps to primitive `move_slow`
-- `move_fast(x, y, z)` -> maps to primitive `move_fast`
-- `start_spindle()` -> maps to primitive `start_spindle`
-- `stop_spindle()` -> maps to primitive `stop_spindle`
-- `drill(x, y, z_bottom, z_retract, z_feedrate)` -> maps to primitive `drill`
-- `peck_drill(x, y, z_bottom, z_retract, peck, z_feedrate)` -> maps to primitive `peck_drill`
-- `cut_arc(x, y, i, j, xy_feedrate, arc_cmd) ` -> maps to primitive `cut_arc`
-- `cut_bezier` -> maps to primitive `cut_bezier`
-- `change_tool_manual(slot)` -> maps to primitive `change_tool`
-- `change_tool_atc(slot)` -> maps to primitive `change_tool`
-- `conclude` -> maps to primitive `conclude`
+- `primitives.initialise` -> maps to primitive `initialise`
+- `primitives.move_slow` -> maps to primitive `move_slow(x, y)`
+- `primitives.start_spindle` -> maps to primitive `start_spindle`
+- `primitives.stop_spindle` -> maps to primitive `stop_spindle`
+- `primitives.drill` -> maps to primitive `drill`
+- `primitives.peck_drill` -> maps to primitive `peck_drill`
+- `primitives.cut_arc` -> maps to primitive `cut_arc`
+- `primitives.cut_bezier` -> maps to primitive `cut_bezier`
+- `primitives.change_tool` -> maps to primitive `change_tool`
+- `primitives.conclude` -> maps to primitive `conclude`
 
 Optional primitive attributes:
 
 - `primitives.pause` -> optional pause/message insertion point
 - `primitives.banner` -> optional comment/banner insertion point
-
-Context variables
-
-The application context object is passed to the RHAI parser to open-up the possible.
-It is passed as "ctx".
-
-The context object contains as a minimum:
-
-- ctx.set_units(length, feed) -> Set the context units
-- ctx.filename -> Object with {.ext, .basename, .path} or full name of the PCB file currently being processed
-- ctx.now -> Date and time now in ISO format
-- ctx.units -> array with length and feed strings
-- ctx.tool -> currently selected tool number or -1
-- ctx.tool.diameter -> diameter of the currently selected tool
-- ctx.job -> Job object with .name, .cnc cnc object with .name
 
 Compatibility and fallback requirements:
 
@@ -481,7 +451,7 @@ Stock detail field validity requirements:
   - Empty value is valid and clears feed rate
   - Non-empty value must parse as a valid feed-rate expression
   - Accepts decimal and fraction forms with optional unit suffix
-  - If unit suffix is omitted during editing, current global unit mode feed unit is applied before validation (`mm/min` for `mm`, `in/min` for `in`/`mil`)
+  - If unit suffix is omitted during editing, current global unit mode feed unit is applied before validation
   - Non-empty value must be non-negative
 - Tip geometry:
   - Required
@@ -543,8 +513,6 @@ The catalog is opened from stock add flow as an overlay.
 
 When a tool from a catalog is highlighted, the detail view is shown.
 The detail view includes an Add button to import that tool directly to stock.
-
-
 
 ## 8. Job Workspace
 
