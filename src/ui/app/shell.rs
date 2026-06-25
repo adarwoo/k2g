@@ -1,4 +1,8 @@
 use dioxus::prelude::*;
+use std::sync::OnceLock;
+
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use serde_json::{json, Value};
 
 use super::super::model::*;
@@ -15,7 +19,10 @@ pub fn AppTopBar(
     warning_count: usize,
 ) -> Element {
     let snapshot = state.read().clone();
-    let mut show_defaults = use_signal(|| false);
+
+    let has_board = snapshot.board.is_some();
+    let has_machine = snapshot.selected_machine().is_some();
+    let has_job_profile = snapshot.selected_job_profile().is_some();
 
     let machine_name = snapshot
         .selected_machine()
@@ -45,7 +52,11 @@ pub fn AppTopBar(
     rsx! {
         header { class: "shell-topbar",
             div { class: "brand-block",
-                div { class: "brand-mark", "K" }
+                img {
+                    class: "brand-mark-image",
+                    src: app_icon_data_url(),
+                    alt: "K2G",
+                }
                 div { class: "brand-copy",
                     div { class: "brand-title", "K2G" }
                     div { class: "brand-subtitle", "KiCad to GCode" }
@@ -54,11 +65,26 @@ pub fn AppTopBar(
 
             div { class: "topbar-board",
                 span { class: "topbar-label", "Board" }
-                span { class: "topbar-value mono", "{board_name}" }
+                span { class: if has_board { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{board_name}"
+                }
+            }
+
+            div { class: "topbar-board",
+                span { class: "topbar-label", "CNC" }
+                span { class: if has_machine { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{machine_name}"
+                }
+            }
+
+            div { class: "topbar-board",
+                span { class: "topbar-label", "Job Profile" }
+                span { class: if has_job_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{job_profile_name}"
+                }
             }
 
             div { class: "topbar-chip-row",
-                SummaryChip { label: "CNC", value: machine_name }
                 div { class: "unit-toggle",
                     button {
                         class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
@@ -85,7 +111,6 @@ pub fn AppTopBar(
                         "mil"
                     }
                 }
-                SummaryChip { label: "Profile", value: job_profile_name }
                 SummaryChip { label: "Job", value: ops_label }
             }
 
@@ -121,76 +146,21 @@ pub fn AppTopBar(
                         "Theme: Light"
                     }
                 }
-
-                button {
-                    class: "icon-button",
-                    onclick: move |_| show_defaults.set(true),
-                    "Defaults"
-                }
-            }
-
-            if *show_defaults.read() {
-                div { class: "wizard-overlay",
-                    div { class: "wizard-dialog",
-                        h3 { "Default settings" }
-                        p { "Theme and units are global defaults and are persisted." }
-
-                        div { class: "field",
-                            label { "Theme" }
-                            select {
-                                value: snapshot.theme.as_str(),
-                                onchange: move |evt| {
-                                    let selected = Theme::from_str(&evt.value());
-                                    state.with_mut(|s| s.theme = selected);
-                                    persist_theme(selected);
-                                },
-                                option { value: "dark", "Dark" }
-                                option { value: "light", "Light" }
-                            }
-                        }
-
-                        div { class: "field",
-                            label { "Display units" }
-                            div { class: "unit-toggle",
-                                button {
-                                    class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
-                                    onclick: move |_| {
-                                        state.with_mut(|s| s.unit_system = UnitSystem::Metric);
-                                        persist_unit_system(UnitSystem::Metric);
-                                    },
-                                    "mm"
-                                }
-                                button {
-                                    class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
-                                    onclick: move |_| {
-                                        state.with_mut(|s| s.unit_system = UnitSystem::Imperial);
-                                        persist_unit_system(UnitSystem::Imperial);
-                                    },
-                                    "in"
-                                }
-                                button {
-                                    class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
-                                    onclick: move |_| {
-                                        state.with_mut(|s| s.unit_system = UnitSystem::Mil);
-                                        persist_unit_system(UnitSystem::Mil);
-                                    },
-                                    "mil"
-                                }
-                            }
-                        }
-
-                        div { class: "wizard-actions",
-                            button {
-                                class: "btn btn-primary",
-                                onclick: move |_| show_defaults.set(false),
-                                "Close"
-                            }
-                        }
-                    }
-                }
             }
         }
     }
+}
+
+fn app_icon_data_url() -> &'static str {
+    static ICON_DATA_URL: OnceLock<String> = OnceLock::new();
+
+    ICON_DATA_URL.get_or_init(|| {
+        let icon_bytes = include_bytes!("../../../resources/icons/icon.png");
+        format!(
+            "data:image/png;base64,{}",
+            BASE64_STANDARD.encode(icon_bytes)
+        )
+    })
 }
 
 #[component]

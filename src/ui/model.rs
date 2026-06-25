@@ -31,11 +31,11 @@ impl Screen {
     pub fn label(self) -> &'static str {
         match self {
             Self::Job => "Job",
-            Self::CncProfiles => "CNC",
-            Self::FixtureProfiles => "Fixture",
+            Self::CncProfiles => "CNC Profiles",
+            Self::FixtureProfiles => "Fixtures",
             Self::JobProfiles => "Job Profiles",
-            Self::Stock => "Stock",
-            Self::Catalog => "Catalog",
+            Self::Stock => "Stock tools",
+            Self::Catalog => "Catalogs",
         }
     }
 

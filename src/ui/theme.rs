@@ -100,16 +100,13 @@ body {
     min-width: max-content;
 }
 
-.brand-mark {
+.brand-mark-image {
     width: 28px;
     height: 28px;
     border-radius: 8px;
-    display: grid;
-    place-items: center;
-    background: var(--accent);
-    color: #0c0e12;
-    font-weight: 800;
-    font-size: 14px;
+    object-fit: cover;
+    display: block;
+    border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
 }
 
 .brand-copy {
@@ -154,6 +151,10 @@ body {
 .topbar-value {
     font-size: 12px;
     color: var(--text);
+}
+
+.topbar-value-missing {
+    color: var(--err);
 }
 
 .mono {
