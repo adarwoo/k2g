@@ -153,6 +153,7 @@ pub enum GenerationState {
 pub struct MachineProfile {
     pub id: String,
     pub name: String,
+    pub built_in: bool,
     /// Fixture plate X travel, stored in mm.
     pub fixture_plate_max_x: u32,
     /// Fixture plate Y travel, stored in mm.
@@ -189,6 +190,7 @@ impl Default for MachineProfile {
         Self {
             id: String::new(),
             name: String::new(),
+            built_in: false,
             fixture_plate_max_x: 300,
             fixture_plate_max_y: 200,
             max_feed_rate_mm_per_min: 2000,
@@ -1014,6 +1016,7 @@ impl UiState {
         let clone = MachineProfile {
             id: String::new(),
             name,
+            built_in: false,
             ..current
         };
 

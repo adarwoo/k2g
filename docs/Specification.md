@@ -114,17 +114,35 @@ Profile selections and machining behavior defaults are defined by profiles and b
 
 ### 6.2 CNC Profile Management
 
+The CNC Profiles page is split into two vertical regions:
+
+- Top region: action bar and the visible list of available CNC profiles
+- Bottom region: editor for the currently selected CNC profile
+
+Top region actions are:
+
+- Add from built-in
+- Import
+- Export
+- Duplicate
+
 Users can:
 
-- Select a CNC profile
-- Create a new profile
+- Select a CNC profile from the visible profile list
+- Create a new added profile
   - Import a profile
-  - Clone an existing profile
+  - Duplicate an existing profile
   - Start from a built-in template
+- Export the selected profile
 - Delete a created profile
-- Edit a profile
 
-Stock profiles are read-only.
+Profile origin and editability rules:
+
+- Built-in (stock) profiles are read-only
+- Added profiles are editable
+- Only added profiles can be edited in the bottom editor region
+- When a built-in profile is selected, the bottom region shows it in read-only mode
+
 Deleting a CNC profile is allowed, including when referenced.
 Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
 
@@ -189,6 +207,11 @@ General fields include:
   - Y0: Front, Back, Left, Right
 - XY scaling percent
 - Program line numbering toggle and increment value
+
+### 6.5.1 CNC Field Editability by Profile Origin
+
+- For added profiles, fields in section 6.5 are editable.
+- For built-in (stock) profiles, fields in section 6.5 are read-only.
 
 ### 6.6 CNC Program Section and Customization
 

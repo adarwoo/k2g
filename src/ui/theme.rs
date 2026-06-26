@@ -858,6 +858,46 @@ body {
     color: var(--text-subtle);
 }
 
+.cnc-manager-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cnc-manager-grid {
+    display: grid;
+    grid-template-columns: minmax(280px, 340px) minmax(420px, 1fr);
+    gap: 12px;
+}
+
+.cnc-profile-list-panel,
+.cnc-profile-details-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.cnc-profile-list-panel .profile-list {
+    max-height: 360px;
+    overflow: auto;
+}
+
+.profile-list-item.built-in {
+    border-color: color-mix(in srgb, var(--border) 86%, var(--text-subtle));
+}
+
+.profile-list-item.editable {
+    border-color: color-mix(in srgb, var(--accent) 20%, var(--border));
+}
+
+.profile-list-item.built-in.active {
+    background: color-mix(in srgb, var(--bg-elev) 88%, var(--accent));
+}
+
+.profile-list-item.editable.active {
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
+}
+
 .stock-shell {
     padding: 18px;
     gap: 16px;
@@ -1402,6 +1442,41 @@ th {
     grid-template-columns: repeat(2, minmax(220px, 1fr));
     gap: 10px;
     overflow: auto;
+}
+
+.edit-grid .field.section-subfield:not(.section-block) {
+    display: grid;
+    grid-template-columns: minmax(150px, 220px) minmax(220px, 1fr);
+    gap: 12px;
+    align-items: center;
+}
+
+.edit-grid .field.section-subfield:not(.section-block) > label {
+    margin: 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-subtle);
+    font-weight: 700;
+}
+
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field {
+    min-width: 0;
+    margin-left: 0;
+    margin-top: 0;
+}
+
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field > input,
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field > select,
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field > textarea,
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field > .stock-detail-input,
+.edit-grid .field.section-subfield:not(.section-block) > .sub-field > .diag-status {
+    width: 100%;
+}
+
+.edit-grid.read-only {
+    pointer-events: none;
+    opacity: 0.58;
 }
 
 .full-width {

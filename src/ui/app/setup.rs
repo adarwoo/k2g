@@ -176,6 +176,7 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
     Some(MachineProfile {
         id: format!("import-{}", slug(&id_stem)),
         name: display_name,
+        built_in: false,
         fixture_plate_max_x: x,
         fixture_plate_max_y: y,
         max_feed_rate_mm_per_min,
@@ -220,6 +221,7 @@ pub(super) fn cnc_profile_library() -> Vec<LibraryProfile> {
             machine: MachineProfile {
                 id: "library-masso-g3-compact".to_string(),
                 name: "Masso G3 Compact".to_string(),
+                built_in: true,
                 fixture_plate_max_x: 300,
                 fixture_plate_max_y: 200,
                 max_feed_rate_mm_per_min: 2000,
@@ -235,6 +237,7 @@ pub(super) fn cnc_profile_library() -> Vec<LibraryProfile> {
             machine: MachineProfile {
                 id: "library-masso-g3-manual".to_string(),
                 name: "Masso G3 Manual Tool Change".to_string(),
+                built_in: true,
                 fixture_plate_max_x: 250,
                 fixture_plate_max_y: 180,
                 max_feed_rate_mm_per_min: 2000,
@@ -250,6 +253,7 @@ pub(super) fn cnc_profile_library() -> Vec<LibraryProfile> {
             machine: MachineProfile {
                 id: "library-router-gantry-pro".to_string(),
                 name: "Router Gantry Pro".to_string(),
+                built_in: true,
                 fixture_plate_max_x: 500,
                 fixture_plate_max_y: 350,
                 max_feed_rate_mm_per_min: 3000,

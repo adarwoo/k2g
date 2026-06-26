@@ -297,7 +297,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 selected_catalog_tool_keys.set(BTreeSet::new());
                                 show_catalog_picker.set(true);
                             },
-                            "Add Tools From Catalog"
+                            "Add tools from catalog"
                         }
                     }
                 } else {
@@ -320,7 +320,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                     div { class: "catalog-picker-dialog",
                         div { class: "panel-header",
                             div {
-                                h3 { "Add Tools From Catalog" }
+                                h3 { "Add tools from catalog" }
                                 p { "Select one or more tools from available catalogs." }
                             }
                         }
@@ -432,7 +432,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
             if *show_delete_confirm.read() {
                 div { class: "wizard-overlay",
                     div { class: "wizard-dialog",
-                        h3 { "Delete Tools" }
+                        h3 { "Delete tools" }
                         p {
                             "Delete {selected_stock_count} selected tool(s)? This also clears any rack assignment and job tool references."
                         }
@@ -495,7 +495,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                     div { class: "panel stock-detail-panel",
                         div { class: "panel-header",
                             div {
-                                h3 { "Tool Detail" }
+                                h3 { "Tool detail" }
                                 p { "Edit the tool properties, add a custom name, or clone the tool." }
                             }
                             div { class: "actions",
@@ -565,7 +565,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 div { class: "stock-detail-readonly", "{detail_composite_name.read()}" }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Custom Name" }
+                                div { class: "stock-detail-label", "Custom name" }
                                 input {
                                     class: "stock-detail-input",
                                     value: detail_custom_name.read().clone(),
@@ -768,7 +768,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Tip Geometry" }
+                                div { class: "stock-detail-label", "Tip geometry" }
                                 div { class: "stock-detail-field-value",
                                     if *detail_point_angle_is_editing.read() {
                                         input {
@@ -1335,7 +1335,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Source Catalog" }
+                                div { class: "stock-detail-label", "Source catalog" }
                                 div { class: "stock-detail-readonly", "{detail_source_catalog.read()}" }
                             }
                             div { class: "stock-detail-row",
@@ -1347,7 +1347,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                 div { class: "stock-detail-readonly", "{detail_sku.read()}" }
                             }
                             div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Tool Id" }
+                                div { class: "stock-detail-label", "Tool ID" }
                                 div { class: "stock-detail-readonly", "{tool.id}" }
                             }
                         }
