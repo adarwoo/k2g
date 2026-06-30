@@ -10,7 +10,6 @@ use super::persistence_state;
 #[derive(Clone, PartialEq)]
 pub struct UiLaunchData {
     pub env_vars: Vec<(String, String)>,
-    pub env_summary: String,
     pub cli_args: Vec<String>,
     pub kicad_status: String,
     pub board_snapshot: Option<BoardSnapshot>,

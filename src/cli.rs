@@ -3,40 +3,8 @@ use std::fs::File;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser, Clone)]
-#[command(name = "k2g", about = "Generate CNC operations from a KiCad PCB")]
+#[command(name = "k2g", about = "CAM software for KiCAD PCB production")]
 pub struct CliArgs {
-    #[arg(
-        short = 'p',
-        long = "pth",
-        default_value_t = false,
-        help = "Drill and route all requiring plating."
-    )]
-    pub pth: bool,
-
-    #[arg(
-        short = 'n',
-        long = "npth",
-        default_value_t = false,
-        help = "Final drills and route and non-plated features"
-    )]
-    pub npth: bool,
-
-    #[arg(
-        short = 'l',
-        long = "outline",
-        default_value_t = false,
-        help = "Route the PCB outiline"
-    )]
-    pub outline: bool,
-
-    #[arg(
-        short = 'a',
-        long = "all",
-        default_value_t = false,
-        help = "Do all operations"
-    )]
-    pub all: bool,
-
     #[arg(
         short = 'o',
         long = "output",
@@ -63,36 +31,6 @@ impl CliArgs {
                 .unwrap_or("job");
             format!("{stem}.nc")
         })
-    }
-
-    pub fn operations_label(&self) -> String {
-        if self.all {
-            return "all".to_string();
-        }
-
-        let mut ops = Vec::new();
-        if self.pth {
-            ops.push("pth");
-        }
-        if self.npth {
-            ops.push("npth");
-        }
-        if self.outline {
-            ops.push("outline");
-        }
-
-        if ops.is_empty() {
-            "none".to_string()
-        } else {
-            ops.join(",")
-        }
-    }
-
-    pub fn output_label(&self) -> String {
-        match &self.output {
-            Some(path) => path.display().to_string(),
-            None => "stdout".to_string(),
-        }
     }
 }
 

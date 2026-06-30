@@ -40,7 +40,6 @@ pub fn SetupScreen(state: Signal<UiState>, boot: UiLaunchData) -> Element {
                         GeneralSettingsPanel {
                             state,
                             kicad_status: boot.kicad_status.clone(),
-                            env_summary: boot.env_summary.clone(),
                             board_snapshot_summary: board_snapshot_summary.clone(),
                         }
                     },

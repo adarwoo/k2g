@@ -379,7 +379,6 @@ pub fn StatusBar(state: Signal<UiState>, boot: UiLaunchData) -> Element {
             }
             span { class: "status-meta", "{board_label}" }
             span { class: "status-meta", "{generation_label}" }
-            span { class: "status-summary", "{boot.env_summary}" }
         }
     }
 }

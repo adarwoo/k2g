@@ -58,7 +58,6 @@ pub fn SetupSidebar(active_tab: Signal<SetupTab>) -> Element {
 pub fn GeneralSettingsPanel(
     state: Signal<UiState>,
     kicad_status: String,
-    env_summary: String,
     board_snapshot_summary: Option<String>,
 ) -> Element {
     let snapshot = state.read().clone();
@@ -93,7 +92,6 @@ pub fn GeneralSettingsPanel(
                 article { class: "setup-card",
                     h3 { "Runtime diagnostics" }
                     p { class: "diag-status", "{kicad_status}" }
-                    p { class: "diag-status", "{env_summary}" }
                     if let Some(summary) = board_snapshot_summary.as_ref() {
                         p { class: "diag-status", "{summary}" }
                     } else {

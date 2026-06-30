@@ -63,10 +63,8 @@ fn main() {
         Err(e) => (format!("Not connected: {e}"), None),
     };
 
-    let summary = format_summary(&args, vars.len());
     ui::launch(UiLaunchData {
         env_vars: vars,
-        env_summary: summary,
         cli_args,
         kicad_status,
         board_snapshot,
@@ -80,17 +78,3 @@ fn collect_env_vars() -> Vec<(String, String)> {
     vars
 }
 
-fn format_summary(args: &CliArgs, count: usize) -> String {
-    let input_label = args
-        .filename
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "(none)".to_string());
-
-    format!(
-        "ops={}, input={}, output={}, env={count}",
-        args.operations_label(),
-        input_label,
-        args.output_label(),
-    )
-}
