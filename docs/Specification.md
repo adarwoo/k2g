@@ -22,16 +22,17 @@ K2G is a portable desktop application and KiCad plugin that generates CNC GCode 
 
 Primary navigation areas:
 
-- Job
-- Job profiles
+- Project
+----------------
+- Process profiles
 - CNC profiles
 - Fixture profiles
 - Toolset profiles
 - Stock management
 - Catalog (opened as overlay from Stock)
 
-Job is the live machining workspace for a selected board.
-Within Job, the user can switch between:
+The project is the machining workspace for a selected board.
+Within a project, the user can switch between:
 
 - Board View
 - Program View
@@ -47,16 +48,25 @@ The product should support rapid switching between:
 
 The UI should follow a slicer-style workstation layout (PrusaSlicer/Bambu-like structure, not branding):
 
-- Top bar: board/job context, active profile summary, defaults cog, global status
-  - Defaults cog opens global defaults with only Theme and Display Units
+- Top bar: board/project context, active profile summary, defaults cog, global status
   - Includes a persistent unit system quick-toggle (mm/in/mil)
+  - Allow toggling theme (dark/light)
+  - PCB Name or Project Name
+  - Process Profile
+  - CNC Profile
+  - Fixture Profile
+  - Toolset Profile
+
 - Main body:
   - Left: primary navigation and section navigation for the active area
   - Center: board/machining viewport or program editor
   - Right: context settings, diagnostics, and editable parameters
-- Utility area (bottom or side): generation status and action feedback
+- Utility area (bottom or side):
+  - generation status
+  - action feedback
 
-When the user opens K2G from KiCad, the default landing area is the Job if a job exist
+When the user opens K2G from KiCad, the default landing area is the project view.
+Note: The project view starts with selecting the Process profile. If no profile exist, an Error is diplayed, prompting the user to create a process profile.
 
 ## 5. Global Interaction Rules
 
@@ -75,8 +85,8 @@ When the user opens K2G from KiCad, the default landing area is the Job if a job
 - Length values are persisted with their original explicit unit expression (for example `mm`, `in`, `mil`, including inch fractions).
 - Feed-rate values are persisted with explicit units and must always include a feed-rate unit.
 - Angle values are displayed with the `°` symbol.
-- Rotational-speed values are displayed with the `rpm` label and may omit a suffix only when the surrounding label already states the unit.
-- Frontend formatting always shows preferred user units first; if persisted unit/expression differs, append the original value in brackets.
+- Rotational-speed values are displayed with the `rpm` label
+- Frontend formatting always shows preferred user units first; if persisted unit/expression differs, append the original value and unit in brackets.
 - When preference is inch and source value is an inch fraction, show decimal inch first and original fraction in brackets.
 - Display precision is global: `mm` at 0.001, `in` at 0.00001, `mil` at 0.1.
 - Display-unit mapping is global: `mm -> mm/min`, `in -> in/min`, `mil -> in/min`.
@@ -91,15 +101,15 @@ When the user opens K2G from KiCad, the default landing area is the Job if a job
 - Escape always cancels the edit, restores the previous valid value, and exits edit mode.
 - If generated program text has user edits and regeneration would overwrite them, a confirmation prompt is required.
 
-## 6. Profiles and Defaults Management
+## 6. Profiles and settings Management
 
 There is no dedicated Setup area.
-Persistent assets are managed directly from primary navigation entries (CNC profiles, fixture profiles, job profiles).
-Global defaults are managed from the top-bar cog.
+Persistent assets are managed directly from primary navigation entries (process profiles, CNC profiles, fixture profiles, toolset profiles).
+Global defaults are managed from the top-bar cog icon.
 
-### 6.1 Default Settings (Cog)
+### 6.1 Default Settings
 
-The default settings panel is opened from the top-bar cog icon only.
+The default settings are accessed from the top bar directly. They are:
 
 - Theme:
   - Light
@@ -111,7 +121,49 @@ The default settings panel is opened from the top-bar cog icon only.
   - mil: All length values are shown in decimal mil rounded to the nearest 0.1, and feed-rates in in/min
 
 No other settings belong in this panel.
-Profile selections and machining behavior defaults are defined by profiles and by the active job, not by global defaults.
+Profile selections and machining behavior defaults are defined by profiles and by the active project, not by global defaults.
+
+#### 6.1.1 Profiles reference modes
+
+Profiles may reference other profiles through a constrained-selection model.
+
+A profile reference shall use one of the following modes:
+
+Fixed
+- Exactly one profile is assigned.
+- The user may not select another profile.
+
+List
+- A list of allowed profiles is defined.
+- One profile is marked as default.
+- The user may select any profile from the list.
+
+Any
+- Any compatible profile may be selected.
+- One profile is marked as default.
+
+New
+- A new profile instance is created for the current project.
+
+This mechanism allows higher-level profiles to constrain lower-level profile selection while preventing users from exceeding the intended operational scope.
+
+For List and Any modes:
+- A default profile is mandatory.
+- The default must belong to the allowed set.
+- Exception: a New default is permitted.
+
+#### 6.1.2 Profile Identity and References
+
+- All persistent profiles shall possess a globally unique immutable identifier.
+- Profile identifiers shall be 256-bit UUIDs.
+- The UUID is the canonical identity of a profile and shall remain unchanged for the lifetime of that profile.
+- Profile names are user-facing labels only and are not used for reference resolution.
+- All profile-to-profile references and all project-to-profile references shall be performed using UUIDs.
+- Changing a profile name shall not impact references.
+- Duplicating a profile shall generate a new UUID.
+- Importing a profile whose UUID already exists shall require conflict resolution.
+- Profile deletion removes the profile from persistent storage but does not invalidate saved projects.
+- Deleting a profile shall never modify already-saved projects.
 
 ### 6.2 CNC Profile Management
 
@@ -227,7 +279,7 @@ CNC profiles include operation-specific and generic program snippets.
 Sanity check behavior:
 
 - A configured sanity check function returns a string.
-- Non-empty output blocks job generation and is shown as an error.
+- Non-empty output blocks project generation and is shown as an error.
 
 Custom attributes:
 
@@ -297,7 +349,7 @@ RHAI parser and expression model:
 
 - The application includes a RHAI expression parser/evaluator used by CNC program snippets and expression-backed profile fields.
 - CNC program fragments that are represented as expressions must be stored and evaluated as RHAI expressions.
-- Expression evaluation is done against the active job context and must be deterministic for identical job inputs.
+- Expression evaluation is done against the active project context and must be deterministic for identical project inputs.
 - Parse and evaluation failures are surfaced as diagnostics with source location and expression name.
 - Expression editing UX must provide parse feedback before apply/save.
 
@@ -329,53 +381,75 @@ Compatibility and fallback requirements:
 
 - If a required primitive attribute is missing, schema validation fails for that CNC profile.
 - `primitives.cut_bezier` may resolve to a native bezier command or an arc-approximation sequence; fallback behavior must be deterministic.
-- Primitive templates may reference custom attributes and active job properties through the RHAI scope.
+- Primitive templates may reference custom attributes and active project properties through the RHAI scope.
 
-### 6.7 Job Profile Management
+### 6.7 Process Profile Management
 
-Job profiles define machining defaults and constraints for a family of jobs.
-Each job profile predefines all relevant job attributes, including CNC profile and fixture profile selection.
+Project profiles define machining defaults and constraints for a family of machining operations on given machining hardware.
+Each process profile predefines all relevant machining defaults and constraints, including CNC profile selection and constraints for fixture and toolset selectio
 
 Users can:
 
-- Select a job profile
-- Create a new job profile
+- Select a process profile
+- Create a new process profile
   - Clone an existing profile
   - Start from a template when available
 - Delete a created profile
 - Edit a profile
 
-Deleting a job profile is allowed, including when selected by live jobs.
+Deleting a process profile is allowed - even if selected by the current project.
 Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
+If the project is using the process profile, the project page goes back to having to select a process profile, and the generation is reset.
 
-Each job profile includes:
+Each process profile includes:
 
-- Selected CNC profile
-- Selected fixture profile
+- Fixed CNC profile
+- Fixture profile reference
+  - Fixed, List, Any
+- Toolset profile reference
+  - Fixed, List, Any or Auto
+
 - Default enabled operations
 - Default machining strategies
 - Default tool selection parameters
 - Default routing/tab settings
 - Feature selection (which machining features/operations are part of the profile)
 
-Job profiles are persisted as YAML and validated by `job_profile.schema.yaml`.
+Process profiles are persisted as YAML and validated by `process_profile.schema.yaml`.
 
-Jobs are instantiated from an existing job profile.
-When a job is created from a profile, profile values become the initial effective job values.
-The live job may override any profile-defined attribute except CNC profile and fixture profile.
+The project requires the user to select a process profile.
+As soon as the project selects a process profile, the profile values become the initial effective project values.
+The project may override any overridable profile-defined attributes.
+
+#### 6.7.1 CNC Profile selection
+
+CNC profile references are always Fixed.
+
+Process profiles shall not support List, Any or New CNC profile references.
+
+Rationale:
+- Generated output depends directly on CNC profile behavior.
+- CNC profiles may define machine limits.
+- CNC profiles may define coordinate conventions.
+- CNC profiles may define GCode dialects and machine-specific primitives.
+- CNC profiles may define machine-specific RHAI customization logic.
+
+Allowing runtime CNC profile substitution is considered unsafe because a user may unintentionally generate or execute output intended for a different machine.
+
+To support multiple CNC types, separate process profiles should be created.
 
 ### 6.8 Profile Deletion and Cascade Rules
 
-Because dependencies are hierarchical (Job -> Job profile -> CNC profile + fixture profile), deleting a profile may delete additional assets.
+Because dependencies are hierarchical (Project-> Process profile -> CNC profile + fixture profile), deleting a profile may delete additional assets.
 
-Cascading deletion is allowed for CNC profiles, fixture profiles, and job profiles.
+Cascading deletion is allowed for CNC profiles, fixture profiles, and process profiles.
 Before final confirmation, the UI must show a warning dialog that lists every asset that will be deleted.
 
 The warning list must include, as applicable:
 
 - The explicitly selected profile(s)
-- Dependent job profiles that reference a deleted CNC or fixture profile
-- Live/open jobs instantiated from any job profile that will be deleted
+- Dependent process profiles that reference a deleted CNC or fixture profile
+- Live/open project instantiated from any process profile that will be deleted
 
 Confirmation requirements:
 
@@ -457,7 +531,7 @@ Field editing and validation behavior:
   - Do not transfer focus to other controls while a measurement field is in invalid edit state; only Enter (valid commit) or Escape (revert) completes the sequence
 - For catalog-derived editable fields, if the current value differs from the catalog baseline, show the original catalog value in orange to the right of the user value and show a revert icon
 - Clicking the revert icon immediately restores the catalog baseline value for that field
-- This override affordance (orange original value + revert icon) is a shared UI pattern and should be used consistently in other override surfaces, including Job settings
+- This override affordance (orange original value + revert icon) is a shared UI pattern and should be used consistently in other override surfaces, including project settings
 
 ### 7.1.1 Stock Field Validity Rules
 
@@ -538,37 +612,148 @@ The catalog is opened from stock add flow as an overlay.
 When a tool from a catalog is highlighted, the detail view is shown.
 The detail view includes an Add button to import that tool directly to stock.
 
-## 8. Job Workspace
+## 8. Project Workspace
 
-The job is the live execution context for machining one selected board.
+The project is the live execution context for machining one selected board.
 It combines:
 
 - One board
-- One selected job profile
-- The CNC and fixture profiles referenced by that job profile
+- One selected process profile
+- The CNC and fixture profiles referenced by that process profile
 - Runtime overrides of profile-defined values (except CNC and fixture)
 - Generated machining outputs and diagnostics
 
-The job is the heart of the product and is the default focus when launched from a PCB.
+The project is the heart of the product and is the default focus when launched from a PCB.
 
-### 8.1 Job Context and Runtime Model
+### 8.1 Project Context and Runtime Model
 
-- A job is created when the user selects or opens a board.
-- Exactly one active job exists at a time in the application context.
-- The board and the active job profile are the primary context objects for that job.
-- CNC and fixture are normally inherited from the selected job profile.
-- CNC and fixture cannot be overridden on the live job.
-- Changing CNC or fixture requires selecting or editing a job profile.
-- All other profile-defined attributes may be overridden on the live job.
-- Overrides affect the current job instance and do not silently mutate the saved profile.
-- The active job references one selected job profile and carries all runtime overrides as effective values.
-- The active job exposes property access APIs used by RHAI evaluation and generation.
+- A project is created when the user selects or opens a board.
+- Exactly one active project exists at a time in the application context.
+- The board and the active process profile are the primary context objects for that project.
+- CNC and fixture are normally inherited from the selected process profile.
+- CNC and fixture cannot be overridden on the live project.
+- Changing CNC or fixture requires selecting or editing a process profile.
+- All other profile-defined attributes may be overridden on the live project.
+- Overrides affect the current project instance and do not silently mutate the saved profile.
+- The active project references one selected process profile and carries all runtime overrides as effective values.
+- The active project exposes property access APIs used by RHAI evaluation and generation.
 
-### 8.2 Core Job Controls
+#### 8.1.1 Saved Projects
+
+Projects may be saved and reopened independently of KiCad.
+
+A saved project contains:
+- PCB snapshot data
+- Selected process profile
+- Resolved profile selections
+- Runtime overrides
+- Generation settings
+- Generated outputs
+- Diagnostics metadata
+
+The PCB snapshot shall contain sufficient information to allow regeneration without a live KiCad connection.
+When opening a project, the connection to KiCad is turned off to prevent confusion.
+
+Profile references point to reconstructed temporary profiles.
+
+#### 8.1.2 Project Packaging
+
+A saved project is a self-contained container.
+
+When a project is saved, all referenced profiles shall be embedded in the project file.
+
+This includes:
+- Process profile
+- CNC profile
+- Fixture profile
+- Toolset profile
+- Any additional profile types introduced in future versions
+
+Embedded profiles are stored together with:
+- Their UUID
+- Their complete configuration
+- Their version metadata
+
+Rationale:
+  A project shall remain reproducible even when the external profile database changes.
+
+Saving a project captures the exact profile definitions used when the project was saved.
+
+#### 8.1.3 Profile Resolution During Project Load
+
+When opening a project, profile references shall be resolved using UUIDs.
+
+Resolution shall follow the following order:
+
+1. Search the profile database for a profile with the same UUID.
+2. If found, and if the version metadata matches the database then use the database profile.
+3. When the version is different:
+   - Warn the user that the profile has been changed
+   - Ask the user to resolve the situation by:
+      - Apply current profile
+      - Update current profile from the project profile
+      - Use a temporary profile
+   
+3. If not found, create a temporary profile from the embedded definition.
+
+#### 8.1.4 Temporary Profile Behavior
+
+When a referenced profile cannot be found in the profile database, the system shall automatically create a temporary profile using the embedded project copy.
+If the temporary profile UUID already exists in the profiles database, the a new UUID is assigned, the project reference is updated.
+
+- Temporary profiles exist only for the lifetime of the opened project.
+- Temporary profiles shall behave identically to normal profiles from the perspective of generation and editing.
+- Temporary profiles shall be visually identified.
+
+Recommended indicators include:
+- "Temporary"
+- "Embedded"
+- Missing-profile warning badge
+
+The user shall always be informed that the profile does not currently exist in the profile database.
+
+#### 8.1.5 Temporary Profile Promotion
+
+Temporary profiles may be promoted to persistent profiles.
+
+Promotion is performed from the corresponding profile management page.
+
+Promotion creates:
+- A new persistent profile
+- Using the UUID from the temporary profile
+
+#### 8.1.6 Project Close Behavior
+
+Temporary profiles are not persisted in the profile database automatically.
+
+When a project is saved, all temporary profiles remain embedded within the project together with their current modifications.
+
+When the project is closed:
+
+- Temporary profiles are removed from the active profile registry.
+- Temporary profiles are not written to the profile database.
+- Promoted profiles remain in the profile database.
+
+Closing a project shall never automatically create persistent profiles.
+
+#### 8.1.7 Visual indication
+
+When a temporary profile is active within a project, the top bar shall display a visual warning indicator.
+
+This indicator remains visible until the profile is promoted or the project is closed.
+
+#### 8.1.8 Temporary profiles during project save
+
+Temporary profiles participate in Project save operations exactly like persistent profiles.
+
+The distinction between temporary and persistent profiles only affects profile database storage
+
+
+### 8.2 Core Project Controls
 
 - Selected board / PCB source
-- Selected job profile with quick link to profile editor
-  - Last used job profile is selected automatically on open
+- Selected process profile with quick link to profile editor
+  - Last used process profile is selected automatically on open
   - On startup, generation proceeds immediately with the reused profile.
   - A profile is never treated as inherently incompatible at selection time.
   - Feasibility is determined dynamically by generation.
@@ -586,42 +771,41 @@ The job is the heart of the product and is the default focus when launched from 
 - Board rotation:
   - Auto
     - Generation determines the best fit rotation automatically.
-    - The resolved rotation value from the most recent successful generation is written back to the job state and shown in the UI.
+    - The resolved rotation value from the most recent successful generation is written back to the project state and shown in the UI.
     - If the board cannot fit within machine constraints for any rotation, generation raises an explicit fit error.
   - Manual:
     - 0
     - 90
     - Free entry -180.0 to +180.0
 
-Note: The board rotation default is defined by the active job profile and may be overridden in the live job.
+Note: The board rotation default is defined by the active process profile and may be overridden in the live project.
 
 ### 8.3 Override UX Rules
 
-- The UI clearly distinguishes profile defaults from live job overrides.
+- The UI clearly distinguishes profile defaults from live project overrides.
 - When a value is overridden, it is shown in orange with a small revert icon beside it.
 - Reverting restores the profile default for that field.
-- CNC profile and fixture profile are not overridable at the live job level.
-- If the user wants to change the saved default rather than the current job, the UI should offer an explicit Edit Profile action.
+- CNC profile and fixture profile are not overridable at the live project level.
+- If the user wants to change the saved default rather than the current project, the UI should offer an explicit Edit Profile action.
 
-### 8.4 Job Workspace Composition
+### 8.4 Project Workspace Composition
 
-The live job workspace should keep the board and machining result at the center at all times.
+The live project workspace should keep the board and machining result at the center at all times.
 
-- Left area: job navigation and section switching
+- Left area: project navigation and section switching
   - Board
   - Program
   - Split
   - Rack when relevant
 - Center area: board viewport or GCode editor
-- Right area: live job controls grouped by meaning
-  - Job context
+- Right area: live project controls grouped by meaning
   - Operations
   - Placement/orientation
   - Tooling strategy
   - Routing/tab settings
   - Diagnostics and warnings
 
-Profile editing from the job should use overlays, drawers, or focused subpages that preserve the current board context whenever possible.
+Profile editing from the project should use overlays, drawers, or focused subpages that preserve the current board context whenever possible.
 The user should never feel they have left the machining task just to adjust a profile.
 
 ### 8.5 ATC Strategy (when ATC is available)
@@ -672,12 +856,12 @@ Algorithm definition (normative):
        - $o$ is oversize allowance
      - Router candidates are included only when `Allow routing holes` is enabled and geometry/process allows routing for that hole kind.
      - Pilot-hole candidates are evaluated only for holes assigned to routing due lack of suitable drill candidates.
-   - Add all tools already required by non-hole routing operations (board contour, internal cutouts, tabs, V-groove) to a mandatory routing set $R_{job}$.
-   - Effective candidate set for assignment is $C'_h = C_h \cup (C_h \cap R_{job})$; this ensures routers already needed by contouring are always considered for hole fallback.
+   - Add all tools already required by non-hole routing operations (board contour, internal cutouts, tabs, V-groove) to a mandatory routing set $R_{project}$.
+   - Effective candidate set for assignment is $C'_h = C_h \cup (C_h \cap R_{project})$; this ensures routers already needed by contouring are always considered for hole fallback.
 
 3. Initialize the working tool universe.
    - Start from union of all feasible tools plus required routers:
-     - $U_0 = R_{job} \cup \bigcup_h C'_h$
+     - $U_0 = R_{project} \cup \bigcup_h C'_h$
    - If any hole has $C'_h = \varnothing$, raise an immediate generation error with actionable diagnostics (hole id/type/size and closest stock tools).
 
 4. Compute preferred per-hole assignment (before rack shrinking).
@@ -685,7 +869,7 @@ Algorithm definition (normative):
      - Primary strategy weight: drilling preferred over routing when `Drill-then-route` is enabled.
      - Size fit: absolute normalized diameter error.
      - Stock preference property: Preferred > Neutral > Not preferred.
-     - Stability tie-breaker: prefer tools already in $R_{job}$ to reduce tool changes.
+     - Stability tie-breaker: prefer tools already in $R_{project}$ to reduce tool changes.
      - Tie-break rule: when candidates are still tied, smaller diameter tools win.
      - Final tie-break rule: if still tied, keep first candidate by stable ordering.
      - Numeric precision rule: all diameter/fit comparisons are evaluated at 1 um precision.
@@ -700,7 +884,7 @@ Algorithm definition (normative):
 5. Shrink to rack capacity iteratively (ATC mode).
    - Let rack capacity be $K$ and current set be $U$.
    - If $|U| \le K$, finish.
-   - Otherwise, repeatedly remove one non-mandatory tool $t \in U \setminus R_{job}$ with minimum global regret:
+   - Otherwise, repeatedly remove one non-mandatory tool $t \in U \setminus R_{project}$ with minimum global regret:
      - Regret of removing $t$ is the weighted loss after reassigning all holes currently using $t$ to their next-best candidate in $U \setminus \{t\}$.
      - Infeasible reassignments add a prohibitive penalty (effectively infinite regret).
      - Additional penalty applies when removal forces drill -> route transitions.
@@ -767,8 +951,6 @@ Program view exposes generated GCode with controlled editing and export workflow
 
 ## 11. Toolset Specification
 
-The toolset
-
 ### 11.1 Goals
 
 The toolset defines:
@@ -807,7 +989,7 @@ A toolset profile:
 - may forbid use of specific slots
 - may exceed physical CNC capacity
 
-Toolset profiles are reusable across jobs.
+Toolset profiles are reusable across processes.
 
 ### 11.3 Toolset Slot Model
 
@@ -840,7 +1022,7 @@ The slot is intentionally left available.
 Purpose:
 
 - placeholder for any additional required tools as generated dynamically from the program generator
-- allows flexible job-specific expansion
+- allows flexible project-specific expansion
 
 Example:
 
@@ -921,7 +1103,7 @@ Behavior:
 Use case:
 
 - small ATC systems
-- larger jobs than rack capacity
+- larger processing than rack capacity
 - semi-attended machining
 
 #### Policy: Allow Manual Changes
@@ -942,97 +1124,17 @@ Use case:
 - limited ATC capacity
 - low-cost PCB routers
 
-### 11.6 Rack Profiles in Job Profiles
+### 11.6 Toolset Profiles in Process Profiles
 
-A job profile defines how rack profiles are selected or constrained.
+A process profile constrains the project into selecting a tooling profile using the global process referencing strategy.
+However, the ad'hoc profile 'Auto' is added.
 
-The job profile may reference:
+#### Auto semantic
 
-- one rack
-- multiple racks
-- unrestricted racks
-- dynamically generated racks
-
-### 11.7 Rack Selection Modes
-
-#### Mode: Single Rack
-
-The job is constrained to one predefined rack.
-
-Behavior:
-
-- user cannot choose another rack
-- generation uses only that rack
-
-The rack may still contain all spare slots, which behaves similarly to a dynamically generated rack.
-
-Example:
-
-```text
-Standard Metric Medium
-```
-
-#### Mode: Rack List
-
-The job provides:
-
-- a list of allowed racks
-- one default rack
-
-The user may choose:
-
-- any rack from the list
-- optionally New
-
-Constraints:
-
-- default must belong to the list
-- unless default is New
-
-Example:
-
-```text
-[Standard Metric Medium, PCB Prototype Rack, New]
-```
-
-#### Mode: New
-
-Behavior:
-
-- a fresh rack is generated for every job
-- no predefined rack required
-
-Purpose:
-
-- one-off jobs
-- exploratory work
-- nonstandard tooling
-
-Example:
-
-```text
-[New]
-```
-
-#### Mode: Any
-
-Behavior:
-
-- user may choose any rack profile or New
-- a default selection is required
-
-Purpose:
-
-- unrestricted operator workflow
-
-### 11.8 Rack Resolution Semantics
-
-#### New Rack
-
-A New rack means:
+A project with a toolset set as 'Auto' means:
 
 - no predefined tooling assumptions
-- generator creates optimal tool allocation for the current job
+- generator creates optimal tool allocation for the current project
 
 This may include:
 
@@ -1042,7 +1144,7 @@ This may include:
 
 ### 11.9 UI Requirements
 
-#### Rack Profile Editor
+#### Toolset Profile Editor
 
 Must support:
 
@@ -1135,10 +1237,10 @@ Action feedback behavior:
 Startup flow:
 
 - Detect KiCad connection context
-- If launched from KiCad PCB context, board is preselected and locked into the current job
+- If launched from KiCad PCB context, board is preselected and locked into the current project
 - Otherwise, show selectable list of active KiCad PCB instances
 - PCB list should refresh when dropdown is opened
-- After selection, import PCB data and open or refresh the live job workspace
+- After selection, import PCB data and open or refresh the project's data
    - PCB data shall includde
       - Boards layers to determine effective thickness
       - Copper thickness, used to compensate for undersize of PTH holes
@@ -1150,8 +1252,8 @@ Startup flow:
 
 Startup routing rules:
 
-- Enter Job directly.
-- If required profiles are missing, show blocking readiness tasks with direct links to create or select CNC, fixture, and job profiles.
+- Start with the project view
+- If required profiles are missing, show blocking readiness tasks with direct links to create or select CNC, fixture, and process profiles.
 - The system should avoid forcing a disconnected admin-first experience when a board is already open.
 
 Refresh behavior:
@@ -1160,7 +1262,7 @@ Refresh behavior:
 
 Failure behavior:
 
-- If KiCad disconnect occurs after all required board/job input data has already been cached in the app, generation and UI state continue without interruption.
+- If KiCad disconnect occurs after all required board/project input data has already been cached in the app, generation and UI state continue without interruption.
 - If KiCad disconnect occurs before required input data is fully cached, the acquisition is treated as a connection failure:
   - Incomplete data is discarded.
   - Current acquisition attempt is aborted.
@@ -1173,15 +1275,15 @@ Fresh install minimum profile readiness:
 1. CNC profile selection or creation (stock profile acceptable)
 2. Add stock tools from catalog (required)
 3. Fixture profile selection or creation
-4. Job profile selection or creation
+4. Process profile selection or creation
 
-At minimum, valid generation requires one usable CNC profile, one fixture profile, one job profile, and sufficient stock tools for the requested operations.
+At minimum, valid generation requires one usable CNC profile, one fixture profile, one process profile, and sufficient stock tools for the requested operations.
 
 First-run UX rules:
 
-- The first meaningful destination is still the Job workspace when a board is present.
+- The first meaningful destination is still the project workspace when a board is present.
 - Missing required profiles are presented as a readiness checklist, not as an abstract admin task.
-- The first job is expected to be iterative: users may bounce between the live job and profile editors while tuning CNC, fixture, and job profile definitions.
+- The first project is expected to be iterative: users may bounce between project and profile editors while tuning CNC, fixture, and process profile definitions.
 - The product should preserve board context while the user edits profiles for the first time.
 - When no board is present, the product may start in profile/readiness mode.
 
@@ -1196,7 +1298,7 @@ The UI should clearly represent generation states:
 
 Generation performance expectation:
 
-- Typical regeneration latency target is 1 to 2 seconds for normal board/job edits.
+- Typical regeneration latency target is 1 to 2 seconds for normal board/project edits.
 
 Generation output should refresh atomically per completed cycle.
 
@@ -1207,7 +1309,7 @@ For UI generation/design workflows, deliverables should include:
 - Information architecture map
 - High-level wireframes for major screens
 - Reusable component inventory with state variants
-- Interaction flows for first-run, profile creation, live job editing, review, and export/send
+- Interaction flows for first-run, profile creation, live project editing, review, and export/send
 - Error-state and empty-state variants
 - Responsive behavior definition
 
