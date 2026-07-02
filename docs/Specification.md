@@ -23,9 +23,10 @@ K2G is a portable desktop application and KiCad plugin that generates CNC GCode 
 Primary navigation areas:
 
 - Job
+- Job profiles
 - CNC profiles
 - Fixture profiles
-- Job profiles
+- Toolset profiles
 - Stock management
 - Catalog (opened as overlay from Stock)
 
@@ -35,7 +36,7 @@ Within Job, the user can switch between:
 - Board View
 - Program View
 - Split View
-- Rack panel (only when ATC is enabled by the active job/CNC configuration)
+- Tooling plan
 
 The product should support rapid switching between:
 
@@ -55,7 +56,7 @@ The UI should follow a slicer-style workstation layout (PrusaSlicer/Bambu-like s
   - Right: context settings, diagnostics, and editable parameters
 - Utility area (bottom or side): generation status and action feedback
 
-When the user opens K2G from KiCad, the default landing area is Job.
+When the user opens K2G from KiCad, the default landing area is the Job if a job exist
 
 ## 5. Global Interaction Rules
 
@@ -184,8 +185,8 @@ Clicking + opens a wizard/modal that:
 - Shows built-in templates (for example Generic, Genmitsu3040, Masso)
 - Shows existing profiles available for cloning
 - Requires a unique profile name
-  - Clone default: Copy of <profile name>
-  - Template default: My <template profile name>
+  - Clone default: Copy of "profile name"
+  - Template default: My "template profile name"
 - Disables New until validation passes
 - Displays inline naming conflict errors
 
@@ -625,13 +626,8 @@ The user should never feel they have left the machining task just to adjust a pr
 
 ### 8.5 ATC Strategy (when ATC is available)
 
-Rack generation mode (user-selectable):
-
-- Manual tool change: no rack is generated; operator changes tools by hand
-- Overwrite rack: a new rack is computed from scratch for this job
-
-For the first iteration, only Overwrite rack is implemented.
-An error is generated if there are not enough slots for the job.
+ATC strategy and rack/tooling constraints are defined by the rack system in section 11.
+Generation must apply the selected rack policy and surface warnings/errors accordingly.
 
 ### 8.6 Routing Controls (when routing enabled)
 
@@ -666,6 +662,7 @@ Algorithm definition (normative):
    - For each hole, normalize to an effective target diameter:
      - Circular: nominal drill diameter.
      - Slot/oval: minor axis for drill suitability, full geometry retained for routing fallback.
+   - Account for the plating thickness for PTH
 
 2. Build candidate tool sets per hole.
    - For each hole $h$ with target diameter $d_h$, build candidate set $C_h$ from in-stock and available tools:
@@ -768,15 +765,352 @@ Program view exposes generated GCode with controlled editing and export workflow
   - Eject media (when applicable)
   - Send over network to CNC
 
-## 11. Rack Configuration
+## 11. Toolset Specification
 
-Visible only when selected CNC supports ATC.
+The toolset
 
-- Rack slot grid/list
-- Per-slot controls:
-  - Assign stock tool
-  - Disable slot
-- Job impact panel showing required rack changes
+### 11.1 Goals
+
+The toolset defines:
+
+- preferred tooling
+- allowed tooling
+- ATC tooling strategies
+- reusable tool sets
+- machining-time tooling behavior
+
+The system must support:
+
+- automatic tool changers (ATC)
+- manual CNCs
+- hybrid/manual reload workflows
+
+The toolset profile acts as:
+
+- a tooling template
+- a toolset preload definition
+- a generation constraint system
+
+### 11.2 Core Concepts
+
+#### Toolset Profile
+
+A toolset profile defines:
+
+- A list of tool assignments for tools slots T1..Tx
+- generation constraints and tooling policies
+
+A toolset profile:
+
+- may contain fixed tools
+- may contain empty/spare slots
+- may forbid use of specific slots
+- may exceed physical CNC capacity
+
+Toolset profiles are reusable across jobs.
+
+### 11.3 Toolset Slot Model
+
+Each toolset slot corresponds to T1..Tx.
+
+Each slot may contain one of:
+
+#### Fixed Tool
+
+A specific tool is permanently assigned.
+
+Example:
+
+```text
+T1 -> 0.8mm carbide drill
+T2 -> 30deg V-bit
+```
+
+Purpose:
+
+- pre-defined in the CNC
+- stable ATC setup
+- avoid reloading
+- production consistency
+
+#### Spare
+
+The slot is intentionally left available.
+
+Purpose:
+
+- placeholder for any additional required tools as generated dynamically from the program generator
+- allows flexible job-specific expansion
+
+Example:
+
+```text
+T5 -> Spare
+```
+
+#### Do Not Use
+
+The slot is disabled and must never be allocated.
+
+Purpose:
+
+- broken holder
+- reserved position
+- inaccessible slot
+- intentionally skipped tools
+
+Example:
+
+```text
+T7 -> Do Not Use
+```
+
+### 11.4 Toolset Size Behavior
+
+Toolset profiles are not limited in size.
+
+Example:
+
+- profile defines 20 slots
+- machine physically has 12 ATC slots
+
+Behavior:
+
+- profile remains valid
+- warning is generated if strict mode (see policies) is ON
+- generation may still proceed depending on policy
+
+This allows:
+
+- portability between machines
+- future expansion
+- logical rack supersets
+
+### 11.5 Generation Policies
+
+The toolset profile defines tooling behavior during GCode generation.
+
+#### Policy: Single Rack Only
+
+Behavior:
+
+- generator must use only tools available in the rack
+- no manual intervention allowed
+- no reload allowed
+
+If additional tools are required:
+
+- generation fails with error
+
+Use case:
+
+- unattended machining
+- production runs
+- industrial ATC workflows
+
+#### Policy: Allow Reload
+
+Behavior:
+
+- generator initially uses rack contents
+- when rack capacity is exceeded:
+- machining pauses
+- user reloads rack
+- machining resumes
+
+Use case:
+
+- small ATC systems
+- larger jobs than rack capacity
+- semi-attended machining
+
+#### Policy: Allow Manual Changes
+
+Behavior:
+
+- rack tools are used first
+- when exhausted:
+- last ATC tool is returned to rack
+- user manually inserts next requested tool
+- machining resumes
+
+This effectively transitions ATC to manual operation.
+
+Use case:
+
+- hybrid machines
+- limited ATC capacity
+- low-cost PCB routers
+
+### 11.6 Rack Profiles in Job Profiles
+
+A job profile defines how rack profiles are selected or constrained.
+
+The job profile may reference:
+
+- one rack
+- multiple racks
+- unrestricted racks
+- dynamically generated racks
+
+### 11.7 Rack Selection Modes
+
+#### Mode: Single Rack
+
+The job is constrained to one predefined rack.
+
+Behavior:
+
+- user cannot choose another rack
+- generation uses only that rack
+
+The rack may still contain all spare slots, which behaves similarly to a dynamically generated rack.
+
+Example:
+
+```text
+Standard Metric Medium
+```
+
+#### Mode: Rack List
+
+The job provides:
+
+- a list of allowed racks
+- one default rack
+
+The user may choose:
+
+- any rack from the list
+- optionally New
+
+Constraints:
+
+- default must belong to the list
+- unless default is New
+
+Example:
+
+```text
+[Standard Metric Medium, PCB Prototype Rack, New]
+```
+
+#### Mode: New
+
+Behavior:
+
+- a fresh rack is generated for every job
+- no predefined rack required
+
+Purpose:
+
+- one-off jobs
+- exploratory work
+- nonstandard tooling
+
+Example:
+
+```text
+[New]
+```
+
+#### Mode: Any
+
+Behavior:
+
+- user may choose any rack profile or New
+- a default selection is required
+
+Purpose:
+
+- unrestricted operator workflow
+
+### 11.8 Rack Resolution Semantics
+
+#### New Rack
+
+A New rack means:
+
+- no predefined tooling assumptions
+- generator creates optimal tool allocation for the current job
+
+This may include:
+
+- ordering optimization
+- slot minimization
+- operation grouping
+
+### 11.9 UI Requirements
+
+#### Rack Profile Editor
+
+Must support:
+
+- arbitrary slot counts
+- drag/drop or editable rows
+- visual slot states
+
+Each slot displays:
+
+- slot index
+- assigned tool
+- slot mode
+
+Recommended visual states:
+
+- Fixed tool: tool icon
+- Spare: dashed or empty state
+- Do Not Use: disabled or red state
+
+### 11.10 Validation Rules
+
+#### Validation: Physical Rack Size
+
+If:
+
+```text
+rack profile slots > machine ATC capacity
+```
+
+Generate:
+
+- warning
+- not hard failure
+
+#### Validation: Generation Feasibility
+
+If policy is:
+
+```text
+Single Rack Only
+```
+
+and required tooling exceeds available tooling:
+
+Generate:
+
+- hard error
+
+#### Validation: Default toolset
+
+For List and Any:
+
+- default toolset must exist
+- default toolset must belong to allowed set
+- unless default is New
+
+### 11.11 Conceptual Model
+
+A Toolset Profile defines:
+
+preferred tooling
+allowed tooling
+tool assignment order
+operator workflow constraints
+optimization constraints
+tool-change strategy
+
+The ATC is a capability of the CNCk, not of the toolset.
 
 ## 12. Error and Action UX
 
@@ -805,6 +1139,14 @@ Startup flow:
 - Otherwise, show selectable list of active KiCad PCB instances
 - PCB list should refresh when dropdown is opened
 - After selection, import PCB data and open or refresh the live job workspace
+   - PCB data shall includde
+      - Boards layers to determine effective thickness
+      - Copper thickness, used to compensate for undersize of PTH holes
+      - All 'Edge' layers
+      - All holes, drills and vias - oblong and round, NPTH and PTH
+         - Only through holes are manage.
+         - Generate an error if burried vias are detected.
+      - Locating holes meta information
 
 Startup routing rules:
 

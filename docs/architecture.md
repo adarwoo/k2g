@@ -217,6 +217,7 @@ Context owns:
 - `job` — the single active job and generation state (managed by Generator)
 - `cnc` — active CNC profile resolved from the job profile
 - `fixture` — active fixture profile resolved from the job profile
+- `rack` - active tools rack configuration
 - `renderer` — render adapter
 - `render_counter` — monotonic counter driving reactive refresh in Dioxus
 

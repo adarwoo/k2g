@@ -23,10 +23,11 @@ Configuration and state are persisted in the user's config directory:
 - **Schema:** `stock.schema.yaml`
 - **Contents:** List of tools in stock with metadata (id, name, kind, diameter, availability, preference, ATC expected flag, operation counters, manufacturer, SKU/source SKU), with tool families including drill/router/endmill/engraver/v-bit and type-specific attributes (z/table feed, point angle, tip diameter, flute length, min depth, max hits, internal addition precedence)
 
-### Rack configuration
-- **File:** `rack.yaml`
+### Rack profiles
+- **Directory:** `rack_profiles/`
+- **Files:** `{profile_name}.yaml` for each rack profile
 - **Schema:** `rack.schema.yaml`
-- **Contents:** Rack selection, slot capacity, per-slot tool assignment (`tool_id`) and slot enable/disable state
+- **Contents:** Reusable rack profiles with slot layout (`index` -> `T1..Tx`), slot mode (`fixed`/`spare`/`do_not_use`), optional fixed `tool_id` assignments, and generation policy (`single_rack_only`, `allow_rack_reload`, `allow_manual_changes`)
 
 ### CNC profiles
 - **Directory:** `cnc_profiles/`
