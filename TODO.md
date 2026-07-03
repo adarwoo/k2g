@@ -15,7 +15,7 @@ The context (or ctx) is a singleton instance, accessible to the UI and rhai-pars
     - A domain can be cleaned (generator)
  - Status and information
     - Use a dictonnary to hold system status (use code constants for keys)
- - Tools mapping: 
+ - Tools mapping:
 
 ## Startup
  - We need to get all persisted data loaded up
@@ -66,7 +66,7 @@ It is intended to provide all relevant information about the session.
     - For List and Any, a default value is required. The default value must belong to the list unless it is new.
     - Example : Rack profiles:
       - [Standard sizes metric medium; New] : Single rack. The user can only overwrite from standard or new
-      - [New] : A new rack 
+      - [New] : A new rack
 
  Example: A user creates s
 
@@ -94,7 +94,7 @@ The last process profile is automatically selected.
 The project detail is shown with machining detail.
 The user can review the machining, code and rack, and send the GCode to the CNC (if the CNC allows it)
 
-Question: Should locating pins (not fixture holes), which would be 
+Question: Should locating pins (not fixture holes), which would be
 
 2 - Collect plating wall thickness and allow override
 
@@ -106,3 +106,23 @@ The datum from KiCAD must include registration holes for PTH PCBs
 This must come from the KiCAD data as the films will include fiducials.
 A plugin could also create the films, and then add registration holes...
 
+# Project
+
+Once a project is finalized, it can be saved. Saving it preserves all the data and remove
+the need for KiCAD connection to re-access the same GCode etc.
+Note: The GCode is also saved and reloaded.
+Once loaded, no generation takes place because the entire generated data was loaded.
+This is to guarantee the data is the same.
+As soon as the user start making changes to the project, the data is regenerated, and
+the project can be saved again.
+
+## Open project
+It is possible to open a project which loads a project file complete with all profiles data.
+
+## Saving project
+It is possible to save the project data. Once save, the project name in place of the KiCAD pcb name
+
+# Command line interface
+
+Adding a <filename> to the cli which is a saved project.
+When opening a project file, the top bar shows the file.
