@@ -27,7 +27,7 @@ const SCHEMAS: &[(&str, &str)] = &[
         "cnc_profile_schema",
         include_str!("../../resources/schemas/cnc_profile.schema.yaml"),
     ),
-    ("rack_schema", include_str!("../../resources/schemas/rack.schema.yaml")),
+    ("process_profile_schema", include_str!("../../resources/schemas/process_profile.schema.yaml")),
     ("stock_schema", include_str!("../../resources/schemas/stock.schema.yaml")),
 ];
 

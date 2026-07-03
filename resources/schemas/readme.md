@@ -42,8 +42,9 @@ Configuration and state are persisted in the user's config directory:
 - **Schema:** `fixture_profile.schema.yaml`
 - **Contents:** Fixture definition (holding method, work origin/reference, locating pins, keep-out zones, occupancy, optional probing/alignment)
 
-### Job profiles
-- **Directory:** `job_profiles/`
+### Process profiles
+- **Directory:** `process_profiles/`
 - **Files:** `{profile_name}.yaml` for each profile
-- **Schema:** `job_profile.schema.yaml`
+- **Schema:** `process_profile.schema.yaml`
 - **Contents:** References to CNC/fixture profiles, default operations/strategies/tool settings, routing/tab defaults, and override policy bounds
+

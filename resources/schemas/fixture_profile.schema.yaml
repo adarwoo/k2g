@@ -14,6 +14,13 @@ properties:
   board_holding_method:
     type: string
     description: Supported board holding method.
+  backboard_thickness:
+    description: |
+      Thickness of the back/martyr/exit-board.
+      WARNING: Make sure this value is always accurate, otherwise, you run the
+      risk of drilling into the machining bed.
+    unit: length
+    default: 2.5mm
   work_origin_reference:
     type: object
     description: Work origin/reference definition.
@@ -62,7 +69,30 @@ properties:
           type: [number, string]
         height:
           type: [number, string]
-      required: [x, y, width, height]
+        z_safe_height:
+          description: |
+            Z distance to retract to between machining operations. This distance should
+            be well clear of fixtures on the machining table to avoid collisions.
+            WARNING: The Z0 correspond to the machining bed. So it can be set from machine
+            coordinates and does not need adjusting.
+          unit: length
+          anyOf:
+            - type: number
+            - *length_string
+          default: 20mm
+        z_drill_retract_height:
+          description: |
+            Known as R value, the distance to retract to between drilling operations
+            that is the distance from the top of the machining bed upwards.
+            If you have a pressure place, this distance should allow the plate
+            to spring back to neutral position and to allow for hovering over
+            any fixtures on the table
+          unit: length
+          anyOf:
+            - type: number
+            - *length_string
+          default: 10mm
+      required: [x, y, width, height, z_safe_height, z_drill_retract_height]
       additionalProperties: false
   occupancy:
     type: object

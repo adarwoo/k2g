@@ -1094,28 +1094,28 @@ body {
     background: color-mix(in srgb, var(--err) 14%, var(--bg-elev));
 }
 
-.job-layout {
+.project-layout {
     height: 100%;
     display: grid;
     grid-template-columns: 1fr 340px;
     gap: 12px;
 }
 
-.job-main {
+.project-main {
     display: flex;
     flex-direction: column;
     gap: 10px;
     min-height: 0;
 }
 
-.job-view-tabs {
+.project-view-tabs {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
 }
 
-.job-view-tab {
+.project-view-tab {
     border: 1px solid var(--border);
     background: var(--bg-elev);
     color: var(--text);
@@ -1126,7 +1126,7 @@ body {
     cursor: pointer;
 }
 
-.job-view-tab.active {
+.project-view-tab.active {
     border-color: color-mix(in srgb, var(--accent) 65%, var(--border));
     background: color-mix(in srgb, var(--accent) 20%, transparent);
     color: var(--text);
@@ -1199,7 +1199,7 @@ p {
     font-weight: 700;
 }
 
-.job-layout .panel.fixed .field > label {
+.project-layout .panel.fixed .field > label {
     text-transform: none;
     letter-spacing: 0;
 }
@@ -2059,7 +2059,7 @@ summary {
         grid-template-columns: 1fr;
     }
 
-    .job-layout {
+    .project-layout {
         grid-template-columns: 1fr;
     }
 
@@ -2102,3 +2102,4 @@ summary {
     }
 }
 "#;
+

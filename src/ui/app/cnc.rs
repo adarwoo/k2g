@@ -1430,10 +1430,10 @@ fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     for item in impact.primary_profiles.iter() {
         lines.push(format!("- {}", item));
     }
-    for item in impact.dependent_job_profiles.iter() {
+    for item in impact.dependent_process_profiles.iter() {
         lines.push(format!("- {}", item));
     }
-    for item in impact.deleted_live_jobs.iter() {
+    for item in impact.deleted_live_projects.iter() {
         lines.push(format!("- {}", item));
     }
     lines.join("\n")
@@ -1441,11 +1441,11 @@ fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
 
 fn format_impact_summary(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     format!(
-        "{}: {} primary, {} dependent job profile(s), {} live job(s)",
+        "{}: {} primary, {} dependent process profile(s), {} live project(s)",
         prefix,
         impact.primary_profiles.len(),
-        impact.dependent_job_profiles.len(),
-        impact.deleted_live_jobs.len()
+        impact.dependent_process_profiles.len(),
+        impact.deleted_live_projects.len()
     )
 }
 
@@ -1591,3 +1591,5 @@ fn rows_for_template(text: &str, min_rows: usize, max_rows: usize) -> usize {
     let lines = text.lines().count().max(1);
     lines.clamp(min_rows, max_rows)
 }
+
+

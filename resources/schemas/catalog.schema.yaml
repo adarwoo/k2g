@@ -152,7 +152,7 @@ definitions:
 
       referenced:
         type: boolean
-        description: "Optional flag indicating the catalog entry is currently referenced by stock/jobs"
+        description: "Optional flag indicating the catalog entry is currently referenced by stock/projects"
         default: false
 
     allOf:
@@ -180,3 +180,4 @@ definitions:
               const: vbit
         then:
           required: [spindle_rpm, z_feed, table_feed, tip_diameter]
+

@@ -105,22 +105,20 @@ properties:
             minimum: 1
             default: 10
         required: [enabled, increment]
-      program_units:
-        description: Units used while rendering the generated CNC program.
-        type: object
-        properties:
-          length:
-            description: Program length unit.
-            type: string
-            enum: [mm, in]
-            default: mm
-          feedrate:
-            description: Program feedrate unit.
-            type: string
-            enum: [mm/min, in/min, ipm]
-            default: mm/min
-        required: [length, feedrate]
-    required: [fixture_plate, max_feed_rate, spindle_rpm_min, spindle_rpm_max, spindle_start_delay_s, spindle_stop_delay_s, atc_slot_count, origin, scaling, line_numbering, program_units]
+      resolution:
+        description: |
+          Specify the best achievable resolution on the CNC
+          All numbers will be rounded to this resolution going forward.
+          The value defaults to um
+        unit: length(um)
+      anyOf:
+        - type: number
+        - &length_string
+          type: "string"
+          pattern: "^(?:\\d+(?:\\.\\d+)?|\\d+\\/\\d+)(?:nm|um|mm|cm|in|inch|mil|thou)$"
+      default: 1um
+
+    required: [fixture_plate, max_feed_rate, spindle_rpm_min, spindle_rpm_max, spindle_start_delay_s, spindle_stop_delay_s, atc_slot_count, origin, scaling, line_numbering, resolution]
 
   primitives:
     description: Primitive templates evaluated through RHAI for CNC-specific GCode emission.

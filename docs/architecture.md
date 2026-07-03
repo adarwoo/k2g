@@ -151,17 +151,17 @@ When an new generation starts, the UI is updated. Generated items are grayed to 
 
 ### Program algorithm structure
 
-Generation produces output per job type in this order:
+Generation produces output per project type in this order:
 
-1. Drilling jobs — all hole operations (PTH, NPTH, locating, pilot)
-2. Contouring jobs — routing, scoring, tabs, V-groove
+1. Drilling projects — all hole operations (PTH, NPTH, locating, pilot)
+2. Contouring projects — routing, scoring, tabs, V-groove
 3. Engraving — planned, not yet implemented
 
-Within each job type, operation ordering uses a Travelling Salesman Problem (TSP) sort to minimise tool travel distance. An existing Rust TSP library is used.
+Within each project type, operation ordering uses a Travelling Salesman Problem (TSP) sort to minimise tool travel distance. An existing Rust TSP library is used.
 
 ### GCode primitives
 
-All job types produce an ordered list of primitives. These are resolved to GCode by the CNC RHAI expressions in the final pass, decoupling the algorithm from machine-specific dialect.
+All project types produce an ordered list of primitives. These are resolved to GCode by the CNC RHAI expressions in the final pass, decoupling the algorithm from machine-specific dialect.
 
 Primitive set:
 
@@ -176,8 +176,8 @@ Primitive set:
 - `change_tool`
 - `conclude`
 
-### Job profile
-The job profile is split into 3 parts so frontend and backend concerns remain isolated.
+### Process profile
+The process profile is split into 3 parts so frontend and backend concerns remain isolated.
 
 1. JobProfileDefinition (persisted profile)
 - Declarative object stored as YAML.
@@ -185,7 +185,7 @@ The job profile is split into 3 parts so frontend and backend concerns remain is
 - Includes an input schema describing editable attributes, types, defaults, ranges, enums, and validation rules.
 - Includes a processor kind identifier used by the backend factory (for example: drilling, contouring, scoring).
 
-2. JobInstance (runtime configured job)
+2. JobInstance (runtime configured project)
 - Created from JobProfileDefinition plus user overrides from the UI.
 - Fully resolved immutable input for generation.
 - Versioned with generation ID so stale compute results can be discarded safely.
@@ -197,9 +197,9 @@ The job profile is split into 3 parts so frontend and backend concerns remain is
 - May provide preview geometry data, but never UI widgets or frontend state.
 
 Frontend behavior:
-- The UI does not embed job algorithms.
+- The UI does not embed project algorithms.
 - The UI renders forms from the input schema and edits overrides only.
-- Pan/zoom/rotate and other viewport behavior remain frontend view state and are not part of the job profile.
+- Pan/zoom/rotate and other viewport behavior remain frontend view state and are not part of the process profile.
 
 Testing boundaries:
 - Unit-test JobProcessor with fixed JobInstance inputs and expected GCode/operations.
@@ -214,9 +214,9 @@ Context owns:
 - `configurations` — config pipeline results and active profiles
 - `catalog` — tool catalog
 - `pcb` — current board snapshot and stitched model
-- `job` — the single active job and generation state (managed by Generator)
-- `cnc` — active CNC profile resolved from the job profile
-- `fixture` — active fixture profile resolved from the job profile
+- `project` — the single active project and generation state (managed by Generator)
+- `cnc` — active CNC profile resolved from the process profile
+- `fixture` — active fixture profile resolved from the process profile
 - `rack` - active tools rack configuration
 - `renderer` — render adapter
 - `render_counter` — monotonic counter driving reactive refresh in Dioxus
@@ -225,8 +225,8 @@ Context responsibilities:
 - Receive mutations from the UI and delegate to the appropriate subsystem.
 - Increment the generation/render counter on relevant mutations to trigger reactive refresh.
 - Expose read-only query methods consumed by Dioxus signal mappings.
-- Expose `parse_exp(expression)` to evaluate a RHAI expression using the active job property resolver.
-- Route expression property/function resolution through the active job effective values (profile defaults plus runtime overrides).
+- Expose `parse_exp(expression)` to evaluate a RHAI expression using the active project property resolver.
+- Route expression property/function resolution through the active project effective values (profile defaults plus runtime overrides).
 - Hold no business logic itself; all logic lives in the owned subsystems.
 
 Testing boundary:
@@ -235,12 +235,12 @@ Testing boundary:
 
 ### RHAI parser
 
-Context and job access for expressions:
+Context and project access for expressions:
 
 - The application context must expose `parse_exp(expression)` which evaluates a RHAI expression and returns a typed result or structured error.
-- The evaluator used by `parse_exp` resolves variables/functions through the active job object.
-- The job object must provide property accessors for effective values (profile default or active override).
-- Effective job values are the source of truth for expression evaluation; profile files are never mutated by runtime evaluation.
+- The evaluator used by `parse_exp` resolves variables/functions through the active project object.
+- The project object must provide property accessors for effective values (profile default or active override).
+- Effective project values are the source of truth for expression evaluation; profile files are never mutated by runtime evaluation.
 
 ### Viewers
 Viewers are library that takes a pcb object and render the object in SVG for display.
@@ -256,10 +256,10 @@ Dioxus subscribes to changes to the context.
 
 ## Condition for render
 The PCB view includes all items of interest (in memory).
-The render will show elements of interest in a different color based on the active jobs configured.
+The render will show elements of interest in a different color based on the active projects configured.
 
 The context must expose at minimum:
-- `get_active_jobs()` — returns the list of active job instances for the current board.
+- `get_active_projects()` — returns the list of active project instances for the current board.
 - `get_generation_state()` — returns the current generation state (Idle, Generating, Failed).
 - `get_diagnostics_summary()` — returns the current error/warning list for the persistent banner.
 
@@ -286,14 +286,14 @@ Testing:
 Pure function: `Board + JobInstance → PrimitivePlan`.
 
 - No side effects, no I/O, no machine dialect awareness.
-- Produces an ordered list of GCode primitives grouped by job type (drilling, contouring).
-- TSP sort applied within each job type to minimise tool travel.
+- Produces an ordered list of GCode primitives grouped by project type (drilling, contouring).
+- TSP sort applied within each project type to minimise tool travel.
 
 Testing:
 - Unit-test drilling plan for a known board fixture.
 - Unit-test contouring plan with tabs, V-groove, mouse-bite holes.
 - Verify TSP ordering reduces total travel distance vs. naive order.
-- Verify auto-rotation resolves correct angle and writes it back to job state.
+- Verify auto-rotation resolves correct angle and writes it back to project state.
 - Verify board-too-large raises a fit error for any rotation.
 
 ### Coder
@@ -323,7 +323,7 @@ Testing:
 - Verify rack shrink selects minimum-regret removal at each step.
 - Verify pilot-hole warning when shrink removes pilot drill but routing coverage holds.
 - Verify infeasible hole (empty candidate set) raises immediate error with diagnostics.
-- Verify mandatory routing tools ($R_{job}$) are never removed by shrink.
+- Verify mandatory routing tools ($R_{project}$) are never removed by shrink.
 
 ### BoardGeometry
 
@@ -374,22 +374,24 @@ Testing:
 
 ### RenderAdapter
 
-Pure function: `RenderRequest (board + active jobs + viewport params) → SvgScene`.
+Pure function: `RenderRequest (board + active projects + viewport params) → SvgScene`.
 
 - No Context access; receives only the data it needs via the request struct.
-- Color coding per job type is determined here, not in the UI layer.
+- Color coding per project type is determined here, not in the UI layer.
 
 Testing:
-- Snapshot SVG output for known board + job fixtures.
-- Verify each job type produces correct color coding.
+- Snapshot SVG output for known board + project fixtures.
+- Verify each project type produces correct color coding.
 - Verify empty board produces valid empty SVG, not an error.
 
 ### AppQueryModel
 
 Read-only projection layer consumed by Dioxus signals.
 
-Methods include: `get_active_jobs()`, `get_generation_state()`, `get_diagnostics_summary()`.
+Methods include: `get_active_projects()`, `get_generation_state()`, `get_diagnostics_summary()`.
 
 Testing:
 - Verify query results reflect Context state after known mutations.
 - Verify Dioxus subscription triggers on render-counter increment.
+
+

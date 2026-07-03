@@ -1,0 +1,99 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: Toolset profile schema
+type: object
+description: |
+  Reusable toolset profile definition.
+  A toolset profile describes logical slot layout T1..Tx, assignment mode per slot,
+  and generation policy constraints.
+
+properties:
+  id:
+    type: string
+    minLength: 1
+    pattern: "^[a-zA-Z0-9_-]+$"
+    description: Unique toolset profile ID.
+
+  name:
+    type: string
+    minLength: 1
+    description: User-facing toolset profile name.
+
+  description:
+    type: string
+    description: Optional profile description.
+
+  generation_policy:
+    type: string
+    enum:
+      - fixed_toolset
+      - allow_reload
+      - allow_hybrid
+    default: fixed_toolset
+    description: |
+      Tooling behavior during generation.
+      - fixed_toolset: generation fails if required tools exceed available toolset tools.
+      - allow_reload:  generation may pause for toolset reload(s).
+      - allow_hybrid:  generation may transition from ATC to manual changes.
+
+  slots:
+    type: array
+    minItems: 1
+    description: Ordered logical toolset slots, each mapped to T1..Tx by index.
+    items:
+      type: object
+      properties:
+        index:
+          type: integer
+          minimum: 1
+          description: Slot index, maps to T{index}.
+        mode:
+          type: string
+          enum:
+            - fixed
+            - spare
+            - do_not_use
+          description: Slot assignment mode.
+          default: spare
+        tool_id:
+          type: string
+          minLength: 1
+          description: Stock tool ID required when mode is fixed.
+        note:
+          type: string
+          description: Optional operator note for this slot.
+      required:
+        - index
+      allOf:
+        - if:
+            properties:
+              mode:
+                const: fixed
+          then:
+            required:
+              - tool_id
+        - if:
+            properties:
+              mode:
+                enum:
+                  - spare
+                  - do_not_use
+          then:
+            not:
+              required:
+                - tool_id
+      additionalProperties: false
+
+  tags:
+    type: array
+    description: Optional labels used for filtering and quick selection.
+    items:
+      type: string
+      minLength: 1
+    uniqueItems: true
+
+required:
+  - id
+  - name
+  - generation_policy
+  - slots
+additionalProperties: false

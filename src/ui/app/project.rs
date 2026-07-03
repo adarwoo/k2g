@@ -80,20 +80,20 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
     let mut board_is_panning = use_signal(|| false);
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let has_atc = snapshot.selected_machine_has_atc();
-    let board_thickness_is_probe = snapshot.job_config.board_thickness_mode == BoardThicknessMode::Probe;
+    let board_thickness_is_probe = snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe;
     let board_thickness_is_automatic =
-        snapshot.job_config.board_thickness_mode == BoardThicknessMode::Automatic;
+        snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic;
     let board_thickness_is_entered = matches!(
-        snapshot.job_config.board_thickness_mode,
+        snapshot.project_config.board_thickness_mode,
         BoardThicknessMode::Automatic | BoardThicknessMode::Preset | BoardThicknessMode::UserDefined
     );
     let board_thickness_uses_touch_probe = if board_thickness_is_probe {
         true
     } else {
-        snapshot.job_config.z0_determination_mode == Z0DeterminationMode::TouchProbe
+        snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe
     };
     let board_thickness_uses_atc_probe = board_thickness_uses_touch_probe
-        && snapshot.job_config.touch_probe_source == TouchProbeSource::AtcSlot;
+        && snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot;
     let board_thickness_step = unit_service::length_input_step(snapshot.unit_system);
     let board_thickness_auto_mm = snapshot
         .board
@@ -103,16 +103,16 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
     let board_thickness_actual_label = board_thickness_auto_mm.map(|thickness_mm| {
         unit_service::format_length_display(Length::from_mm(thickness_mm as f64), snapshot.unit_system)
     });
-    let board_thickness_value_mm = match snapshot.job_config.board_thickness_mode {
+    let board_thickness_value_mm = match snapshot.project_config.board_thickness_mode {
         BoardThicknessMode::Automatic => board_thickness_auto_mm,
-        BoardThicknessMode::Preset => Some(snapshot.job_config.board_thickness_preset_mm),
-        BoardThicknessMode::UserDefined => Some(snapshot.job_config.board_thickness_user_value),
+        BoardThicknessMode::Preset => Some(snapshot.project_config.board_thickness_preset_mm),
+        BoardThicknessMode::UserDefined => Some(snapshot.project_config.board_thickness_user_value),
         BoardThicknessMode::Probe => None,
     };
     let board_thickness_stats_value = board_thickness_value_mm.map(|thickness_mm| {
         unit_service::format_length_display(Length::from_mm(thickness_mm as f64), snapshot.unit_system)
     });
-    let board_thickness_stats_label = match snapshot.job_config.board_thickness_mode {
+    let board_thickness_stats_label = match snapshot.project_config.board_thickness_mode {
         BoardThicknessMode::Automatic => board_thickness_stats_value
             .as_ref()
             .map(|v| format!("Board thickness: Auto from KiCad ({v})"))
@@ -129,26 +129,26 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
     };
     let atc_slot_count = snapshot.selected_machine().map(|m| m.atc_slot_count).unwrap_or(0);
     let milling_outline_enabled = snapshot
-        .job_config
+        .project_config
         .selected_operations
         .contains(&ProductionOperation::MillBoard);
     let tab_width_display = unit_service::format_length_input_value_from_mm(
-        snapshot.job_config.tab_width_mm as f64,
+        snapshot.project_config.tab_width_mm as f64,
         snapshot.unit_system,
     );
     let tab_width_is_overridden =
-        (snapshot.job_config.tab_width_mm - snapshot.job_config.tab_width_baseline_mm).abs() > 1e-6;
+        (snapshot.project_config.tab_width_mm - snapshot.project_config.tab_width_baseline_mm).abs() > 1e-6;
     let tab_width_step = unit_service::length_input_step(snapshot.unit_system);
     let tab_width_display_label = unit_service::format_length_display(
-        Length::from_mm(snapshot.job_config.tab_width_mm as f64),
+        Length::from_mm(snapshot.project_config.tab_width_mm as f64),
         snapshot.unit_system,
     );
     let mouse_bite_pitch_display_label = unit_service::format_length_display(
-        Length::from_mm(snapshot.job_config.mouse_bite_pitch_mm as f64),
+        Length::from_mm(snapshot.project_config.mouse_bite_pitch_mm as f64),
         snapshot.unit_system,
     );
     let board_thickness_user_display_label = unit_service::format_length_display(
-        Length::from_mm(snapshot.job_config.board_thickness_user_value as f64),
+        Length::from_mm(snapshot.project_config.board_thickness_user_value as f64),
         snapshot.unit_system,
     );
     let tab_width_hint = match snapshot.unit_system {
@@ -157,7 +157,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         UnitSystem::Mil => "95mil",
     };
     let mouse_bite_pitch_display = unit_service::format_length_input_value_from_mm(
-        snapshot.job_config.mouse_bite_pitch_mm as f64,
+        snapshot.project_config.mouse_bite_pitch_mm as f64,
         snapshot.unit_system,
     );
     let mouse_bite_pitch_min = match snapshot.unit_system {
@@ -182,7 +182,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         })
         .collect();
     let selected_router_diameter_mm = snapshot
-        .job_config
+        .project_config
         .outline_router_tool_id
         .as_ref()
         .and_then(|id| {
@@ -352,24 +352,24 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         views.push(JobCenterView::Rack);
     }
 
-    let active_view = if snapshot.selected_job_view == JobCenterView::Rack && !has_atc {
+    let active_view = if snapshot.selected_project_view == JobCenterView::Rack && !has_atc {
         JobCenterView::Board
     } else {
-        snapshot.selected_job_view
+        snapshot.selected_project_view
     };
 
     rsx! {
         div { class: "screen single",
-            div { class: "job-layout",
-                section { class: "panel grow job-main",
-                    div { class: "job-view-tabs",
+            div { class: "project-layout",
+                section { class: "panel grow project-main",
+                    div { class: "project-view-tabs",
                         for view in views.iter() {
                             button {
                                 key: "{view.key()}",
-                                class: if *view == active_view { "job-view-tab active" } else { "job-view-tab" },
+                                class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
                                 onclick: {
                                     let target = *view;
-                                    move |_| state.with_mut(|s| s.selected_job_view = target)
+                                    move |_| state.with_mut(|s| s.selected_project_view = target)
                                 },
                                 "{view.label()}"
                             }
@@ -671,7 +671,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 div { class: "machining-summary",
                                     div { class: "impact-item",
                                         div { class: "impact-name", "Operations" }
-                                        div { class: "impact-state", "{snapshot.job_config.selected_operations.len()} selected" }
+                                        div { class: "impact-state", "{snapshot.project_config.selected_operations.len()} selected" }
                                     }
                                     div { class: "impact-item",
                                         div { class: "impact-name", "Tools in rack" }
@@ -735,14 +735,14 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                 }
 
                 section { class: "panel fixed",
-                    h3 { "Job configuration" }
+                    h3 { "Project configuration" }
 
                     div { class: "field",
                         label { "Operations" }
                         for op in ProductionOperation::all().iter() {
                             button {
                                 key: "{op.label()}",
-                                class: if snapshot.job_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
+                                class: if snapshot.project_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
                                 onclick: {
                                     let operation = *op;
                                     move |_| state.with_mut(|s| s.toggle_operation(operation))
@@ -755,12 +755,12 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                     div { class: "field",
                         label { "Side to machine" }
                         select {
-                            value: snapshot.job_config.side.as_str(),
+                            value: snapshot.project_config.side.as_str(),
                             onchange: move |evt| {
                                 let v = evt.value();
                                 state
                                     .with_mut(|s| {
-                                        s.job_config.side = if v == "bottom" { Side::Bottom } else { Side::Top };
+                                        s.project_config.side = if v == "bottom" { Side::Bottom } else { Side::Top };
                                     });
                             },
                             option { value: "top", "Top (Component side)" }
@@ -777,10 +777,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "cut_depth_strategy",
                                         value: "automatic",
-                                        checked: snapshot.job_config.cut_depth_strategy == CutDepthStrategy::Automatic,
+                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::Automatic,
                                         onchange: move |_| {
                                             state
-                                                .with_mut(|s| s.job_config.cut_depth_strategy = CutDepthStrategy::Automatic);
+                                                .with_mut(|s| s.project_config.cut_depth_strategy = CutDepthStrategy::Automatic);
                                         },
                                     }
                                     span { "Automatic (recommended)" }
@@ -792,11 +792,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "cut_depth_strategy",
                                         value: "single_pass",
-                                        checked: snapshot.job_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
+                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
+                                                    s.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
                                                 });
                                         },
                                     }
@@ -809,24 +809,24 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "cut_depth_strategy",
                                         value: "multi_pass",
-                                        checked: snapshot.job_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
+                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
                                         onchange: move |_| {
                                             state
-                                                .with_mut(|s| s.job_config.cut_depth_strategy = CutDepthStrategy::MultiPass);
+                                                .with_mut(|s| s.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass);
                                         },
                                     }
                                     span { "Multi-pass" }
                                 }
-                                if snapshot.job_config.cut_depth_strategy == CutDepthStrategy::MultiPass {
+                                if snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass {
                                     div { class: "sub-field",
                                         span { "Max depth per pass: " }
                                         input {
                                             r#type: "number",
                                             step: "0.1",
-                                            value: "{snapshot.job_config.multi_pass_max_depth_mm}",
+                                            value: "{snapshot.project_config.multi_pass_max_depth_mm}",
                                             oninput: move |evt| {
                                                 let value = evt.value().parse::<f32>().unwrap_or(1.0);
-                                                state.with_mut(|s| s.job_config.multi_pass_max_depth_mm = value);
+                                                state.with_mut(|s| s.project_config.multi_pass_max_depth_mm = value);
                                             },
                                         }
                                         span { " mm" }
@@ -845,7 +845,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                 select {
                                     value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         .outline_router_tool_id
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         .clone()
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         .unwrap_or_default(),
@@ -853,18 +853,18 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         let value = evt.value();
                                         state
                                             .with_mut(|s| {
-                                                s.job_config.outline_router_tool_id = if value.trim().is_empty() {
+                                                s.project_config.outline_router_tool_id = if value.trim().is_empty() {
                                                     None
                                                 } else {
                                                     Some(value.clone())
                                                 };
                                                 let router_d = s
-                                                    .job_config
+                                                    .project_config
                                                     .outline_router_tool_id
                                                     .as_ref()
                                                     .and_then(|id| s.tools.iter().find(|t| &t.id == id))
                                                     .map(|t| t.diameter.as_mm());
-                                                if let Some(drill_id) = s.job_config.mouse_bite_drill_tool_id.clone() {
+                                                if let Some(drill_id) = s.project_config.mouse_bite_drill_tool_id.clone() {
                                                     let valid = s
                                                         .tools
                                                         .iter()
@@ -878,7 +878,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                         })
                                                         .unwrap_or(false);
                                                     if !valid {
-                                                        s.job_config.mouse_bite_drill_tool_id = None;
+                                                        s.project_config.mouse_bite_drill_tool_id = None;
                                                     }
                                                 }
                                             });
@@ -898,15 +898,15 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                     r#type: "number",
                                     min: "0",
                                     step: "1",
-                                    value: "{snapshot.job_config.tab_count}",
+                                    value: "{snapshot.project_config.tab_count}",
                                     oninput: move |evt| {
                                         let value = evt.value().parse::<u8>().unwrap_or(0);
-                                        state.with_mut(|s| s.job_config.tab_count = value);
+                                        state.with_mut(|s| s.project_config.tab_count = value);
                                     },
                                 }
                             }
 
-                            if snapshot.job_config.tab_count > 0 {
+                            if snapshot.project_config.tab_count > 0 {
                                 div { class: "field section-subfield",
                                     label { "Width of tabs" }
                                     p { class: "diag-status", "Recommended default: {tab_width_hint}" }
@@ -920,7 +920,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.tab_width_mm = unit_service::mm_from_display_length(
+                                                        s.project_config.tab_width_mm = unit_service::mm_from_display_length(
                                                             value as f64,
                                                             s.unit_system,
                                                         ) as f32;
@@ -930,7 +930,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         if tab_width_is_overridden {
                                             div { class: "stock-detail-original-group",
                                                 span { class: "stock-detail-original-value",
-                                                    "{unit_service::format_length_display(Length::from_mm(snapshot.job_config.tab_width_baseline_mm as f64), snapshot.unit_system)}"
+                                                    "{unit_service::format_length_display(Length::from_mm(snapshot.project_config.tab_width_baseline_mm as f64), snapshot.unit_system)}"
                                                 }
                                                 button {
                                                     r#type: "button",
@@ -939,7 +939,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     onclick: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.job_config.tab_width_mm = s.job_config.tab_width_baseline_mm;
+                                                                s.project_config.tab_width_mm = s.project_config.tab_width_baseline_mm;
                                                             });
                                                     },
                                                     "↺"
@@ -955,17 +955,17 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                     label { class: "checkbox-line",
                                         input {
                                             r#type: "checkbox",
-                                            checked: snapshot.job_config.mouse_bites_enabled,
+                                            checked: snapshot.project_config.mouse_bites_enabled,
                                             oninput: move |evt| {
                                                 let enabled = evt.checked();
-                                                state.with_mut(|s| s.job_config.mouse_bites_enabled = enabled);
+                                                state.with_mut(|s| s.project_config.mouse_bites_enabled = enabled);
                                             },
                                         }
                                         span { "Enable mouse bites" }
                                     }
                                 }
 
-                                if snapshot.job_config.mouse_bites_enabled {
+                                if snapshot.project_config.mouse_bites_enabled {
                                     div { class: "field section-subfield",
                                         label { "Center-to-center" }
                                         div { class: "sub-field",
@@ -979,7 +979,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                     let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
+                                                            s.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
                                                                 value as f64,
                                                                 s.unit_system,
                                                             ) as f32;
@@ -996,9 +996,9 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             "Only drill bits 0.5-1.5mm, and not larger than selected router diameter"
                                         }
                                         select {
-                                            disabled: snapshot.job_config.outline_router_tool_id.is_none(),
+                                            disabled: snapshot.project_config.outline_router_tool_id.is_none(),
                                             value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .job_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .project_config
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 .mouse_bite_drill_tool_id
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 .clone()
                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 .unwrap_or_default(),
@@ -1006,7 +1006,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 let value = evt.value();
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.mouse_bite_drill_tool_id = if value.trim().is_empty() {
+                                                        s.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty() {
                                                             None
                                                         } else {
                                                             Some(value)
@@ -1042,11 +1042,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_thickness_mode",
                                         value: "automatic",
-                                        checked: snapshot.job_config.board_thickness_mode == BoardThicknessMode::Automatic,
+                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_thickness_mode = BoardThicknessMode::Automatic;
+                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
                                                 });
                                         },
                                     }
@@ -1068,22 +1068,22 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_thickness_mode",
                                         value: "preset",
-                                        checked: snapshot.job_config.board_thickness_mode == BoardThicknessMode::Preset,
+                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Preset,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_thickness_mode = BoardThicknessMode::Preset;
+                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Preset;
                                                 });
                                         },
                                     }
                                     span { "Preset values" }
                                 }
                                 select {
-                                    disabled: snapshot.job_config.board_thickness_mode != BoardThicknessMode::Preset,
-                                    value: "{snapshot.job_config.board_thickness_preset_mm}",
+                                    disabled: snapshot.project_config.board_thickness_mode != BoardThicknessMode::Preset,
+                                    value: "{snapshot.project_config.board_thickness_preset_mm}",
                                     onchange: move |evt| {
                                         let value = evt.value().parse::<f32>().unwrap_or(1.6);
-                                        state.with_mut(|s| s.job_config.board_thickness_preset_mm = value);
+                                        state.with_mut(|s| s.project_config.board_thickness_preset_mm = value);
                                     },
                                     option { value: "0.8", "0.8 mm" }
                                     option { value: "1.0", "1.0 mm" }
@@ -1099,27 +1099,27 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_thickness_mode",
                                         value: "user_defined",
-                                        checked: snapshot.job_config.board_thickness_mode == BoardThicknessMode::UserDefined,
+                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_thickness_mode = BoardThicknessMode::UserDefined;
+                                                    s.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
                                                 });
                                         },
                                     }
                                     span { "User-defined value" }
                                 }
-                                if snapshot.job_config.board_thickness_mode == BoardThicknessMode::UserDefined {
+                                if snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined {
                                     div { class: "sub-field",
                                         input {
                                             r#type: "number",
                                             step: "{board_thickness_step}",
-                                            value: "{unit_service::format_length_input_value_from_mm(snapshot.job_config.board_thickness_user_value as f64, snapshot.unit_system)}",
+                                            value: "{unit_service::format_length_input_value_from_mm(snapshot.project_config.board_thickness_user_value as f64, snapshot.unit_system)}",
                                             oninput: move |evt| {
                                                 let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.board_thickness_user_value = unit_service::mm_from_display_length(
+                                                        s.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
                                                             value as f64,
                                                             s.unit_system,
                                                         ) as f32;
@@ -1136,11 +1136,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_thickness_mode",
                                         value: "probe",
-                                        checked: snapshot.job_config.board_thickness_mode == BoardThicknessMode::Probe,
+                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_thickness_mode = BoardThicknessMode::Probe;
+                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Probe;
                                                 });
                                         },
                                     }
@@ -1158,11 +1158,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             r#type: "radio",
                                             name: "z0_determination_mode",
                                             value: "manual_adjust_z0",
-                                            checked: snapshot.job_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
+                                            checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
+                                                        s.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
                                                     });
                                             },
                                         }
@@ -1173,11 +1173,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             r#type: "radio",
                                             name: "z0_determination_mode",
                                             value: "touch_probe",
-                                            checked: snapshot.job_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
+                                            checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
+                                                        s.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
                                                     });
                                             },
                                         }
@@ -1196,11 +1196,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                             r#type: "radio",
                                             name: "touch_probe_source",
                                             value: "manual_installation",
-                                            checked: snapshot.job_config.touch_probe_source == TouchProbeSource::ManualInstallation,
+                                            checked: snapshot.project_config.touch_probe_source == TouchProbeSource::ManualInstallation,
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.job_config.touch_probe_source = TouchProbeSource::ManualInstallation;
+                                                        s.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
                                                     });
                                             },
                                         }
@@ -1212,11 +1212,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 r#type: "radio",
                                                 name: "touch_probe_source",
                                                 value: "atc_slot",
-                                                checked: snapshot.job_config.touch_probe_source == TouchProbeSource::AtcSlot,
+                                                checked: snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot,
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.touch_probe_source = TouchProbeSource::AtcSlot;
+                                                            s.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
                                                         });
                                                 },
                                             }
@@ -1231,10 +1231,10 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 min: "0",
                                                 max: "{atc_slot_count}",
                                                 step: "1",
-                                                value: "{snapshot.job_config.touch_probe_atc_slot}",
+                                                value: "{snapshot.project_config.touch_probe_atc_slot}",
                                                 oninput: move |evt| {
                                                     let value = evt.value().parse::<u8>().unwrap_or(0).min(atc_slot_count);
-                                                    state.with_mut(|s| s.job_config.touch_probe_atc_slot = value);
+                                                    state.with_mut(|s| s.project_config.touch_probe_atc_slot = value);
                                                 },
                                             }
                                             span { " / 0-{atc_slot_count}" }
@@ -1254,11 +1254,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_orientation",
                                         value: "automatic",
-                                        checked: snapshot.job_config.board_orientation == BoardOrientation::Automatic,
+                                        checked: snapshot.project_config.board_orientation == BoardOrientation::Automatic,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_orientation = BoardOrientation::Automatic;
+                                                    s.project_config.board_orientation = BoardOrientation::Automatic;
                                                 });
                                         },
                                     }
@@ -1271,11 +1271,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         r#type: "radio",
                                         name: "board_orientation",
                                         value: "no_rotation",
-                                        checked: snapshot.job_config.board_orientation == BoardOrientation::NoRotation,
+                                        checked: snapshot.project_config.board_orientation == BoardOrientation::NoRotation,
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_orientation = BoardOrientation::NoRotation;
+                                                    s.project_config.board_orientation = BoardOrientation::NoRotation;
                                                 });
                                         },
                                     }
@@ -1289,7 +1289,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         name: "board_orientation",
                                         value: "rotate_group",
                                         checked: matches!(
-                                            snapshot.job_config.board_orientation,
+                                            snapshot.project_config.board_orientation,
                                             BoardOrientation::Rotate90
                                             | BoardOrientation::Rotate180
                                             | BoardOrientation::Rotate270
@@ -1298,14 +1298,14 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                         onchange: move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.job_config.board_orientation = BoardOrientation::Rotate90;
+                                                    s.project_config.board_orientation = BoardOrientation::Rotate90;
                                                 });
                                         },
                                     }
                                     span { "Rotate" }
                                 }
                                 if matches!(
-                                    snapshot.job_config.board_orientation,
+                                    snapshot.project_config.board_orientation,
                                     BoardOrientation::Rotate90
                                     | BoardOrientation::Rotate180
                                     | BoardOrientation::Rotate270
@@ -1318,11 +1318,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 r#type: "radio",
                                                 name: "board_rotation_angle",
                                                 value: "90",
-                                                checked: snapshot.job_config.board_orientation == BoardOrientation::Rotate90,
+                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate90,
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.board_orientation = BoardOrientation::Rotate90;
+                                                            s.project_config.board_orientation = BoardOrientation::Rotate90;
                                                         });
                                                 },
                                             }
@@ -1333,11 +1333,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 r#type: "radio",
                                                 name: "board_rotation_angle",
                                                 value: "180",
-                                                checked: snapshot.job_config.board_orientation == BoardOrientation::Rotate180,
+                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate180,
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.board_orientation = BoardOrientation::Rotate180;
+                                                            s.project_config.board_orientation = BoardOrientation::Rotate180;
                                                         });
                                                 },
                                             }
@@ -1348,11 +1348,11 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 r#type: "radio",
                                                 name: "board_rotation_angle",
                                                 value: "270",
-                                                checked: snapshot.job_config.board_orientation == BoardOrientation::Rotate270,
+                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate270,
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.board_orientation = BoardOrientation::Rotate270;
+                                                            s.project_config.board_orientation = BoardOrientation::Rotate270;
                                                         });
                                                 },
                                             }
@@ -1363,27 +1363,27 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                                 r#type: "radio",
                                                 name: "board_rotation_angle",
                                                 value: "custom",
-                                                checked: snapshot.job_config.board_orientation == BoardOrientation::RotateCustom,
+                                                checked: snapshot.project_config.board_orientation == BoardOrientation::RotateCustom,
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.job_config.board_orientation = BoardOrientation::RotateCustom;
+                                                            s.project_config.board_orientation = BoardOrientation::RotateCustom;
                                                         });
                                                 },
                                             }
                                             span { "Custom" }
                                         }
-                                        if snapshot.job_config.board_orientation == BoardOrientation::RotateCustom {
+                                        if snapshot.project_config.board_orientation == BoardOrientation::RotateCustom {
                                             div { class: "custom-angle-input",
                                                 input {
                                                     r#type: "number",
                                                     min: "0",
                                                     max: "360",
                                                     step: "0.1",
-                                                    value: "{snapshot.job_config.board_orientation_custom_degrees}",
+                                                    value: "{snapshot.project_config.board_orientation_custom_degrees}",
                                                     oninput: move |evt| {
                                                         let value = evt.value().parse::<f32>().unwrap_or(0.0).clamp(0.0, 360.0);
-                                                        state.with_mut(|s| s.job_config.board_orientation_custom_degrees = value);
+                                                        state.with_mut(|s| s.project_config.board_orientation_custom_degrees = value);
                                                     },
                                                 }
                                                 span { "Custom angle" }
@@ -1399,12 +1399,12 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                         div { class: "field",
                             label { "Automatic tool change" }
                             select {
-                                value: snapshot.job_config.atc_strategy.as_str(),
+                                value: snapshot.project_config.atc_strategy.as_str(),
                                 onchange: move |evt| {
                                     let v = evt.value();
                                     state
                                         .with_mut(|s| {
-                                            s.job_config.atc_strategy = if v == "overwrite" {
+                                            s.project_config.atc_strategy = if v == "overwrite" {
                                                 AtcRackStrategy::Overwrite
                                             } else if v == "reuse" {
                                                 AtcRackStrategy::Reuse
@@ -1424,3 +1424,4 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
         }
     }
 }
+

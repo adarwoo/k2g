@@ -434,7 +434,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                     div { class: "wizard-dialog",
                         h3 { "Delete tools" }
                         p {
-                            "Delete {selected_stock_count} selected tool(s)? This also clears any rack assignment and job tool references."
+                            "Delete {selected_stock_count} selected tool(s)? This also clears any rack assignment and project tool references."
                         }
                         div { class: "wizard-actions",
                             button {
@@ -1815,3 +1815,4 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
 fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> String {
     unit_service::format_length_display(tool.diameter, unit_system)
 }
+

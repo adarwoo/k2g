@@ -22,25 +22,25 @@ pub fn AppTopBar(
 
     let has_board = snapshot.board.is_some();
     let has_machine = snapshot.selected_machine().is_some();
-    let has_job_profile = snapshot.selected_job_profile().is_some();
+    let has_process_profile = snapshot.selected_process_profile().is_some();
 
     let machine_name = snapshot
         .selected_machine()
         .map(|machine| machine.name.clone())
         .unwrap_or_else(|| "No CNC profile".to_string());
-    let job_profile_name = snapshot
-        .selected_job_profile()
+    let process_profile_name = snapshot
+        .selected_process_profile()
         .map(|profile| profile.name.clone())
-        .unwrap_or_else(|| "No job profile".to_string());
+        .unwrap_or_else(|| "No process profile".to_string());
     let board_name = snapshot
         .board
         .as_ref()
         .map(|board| format!("Loaded board · {} holes", board.holes.len()))
         .unwrap_or_else(|| "No board loaded".to_string());
-    let ops_label = if snapshot.job_config.selected_operations.is_empty() {
+    let ops_label = if snapshot.project_config.selected_operations.is_empty() {
         "No ops".to_string()
     } else {
-        format!("{} ops", snapshot.job_config.selected_operations.len())
+        format!("{} ops", snapshot.project_config.selected_operations.len())
     };
     let status_label = match snapshot.generation_state {
         GenerationState::Generating => "Generating".to_string(),
@@ -78,9 +78,9 @@ pub fn AppTopBar(
             }
 
             div { class: "topbar-board",
-                span { class: "topbar-label", "Job Profile" }
-                span { class: if has_job_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
-                    "{job_profile_name}"
+                span { class: "topbar-label", "Process Profile" }
+                span { class: if has_process_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{process_profile_name}"
                 }
             }
 
@@ -111,7 +111,7 @@ pub fn AppTopBar(
                         "mil"
                     }
                 }
-                SummaryChip { label: "Job", value: ops_label }
+                SummaryChip { label: "Project", value: ops_label }
             }
 
             div { class: "shell-spacer" }
@@ -242,10 +242,10 @@ pub fn DiagnosticsBanner(
 pub fn NavigationRail(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let nav_items = [
-        Screen::Job,
+        Screen::Project,
         Screen::CncProfiles,
         Screen::FixtureProfiles,
-        Screen::JobProfiles,
+        Screen::ProcessProfiles,
         Screen::Stock,
         Screen::Catalog,
     ];
@@ -269,7 +269,7 @@ pub fn NavigationRail(state: Signal<UiState>) -> Element {
 
 fn rail_icon(screen: Screen) -> Element {
     match screen {
-        Screen::Job => rsx! {
+        Screen::Project => rsx! {
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
@@ -307,7 +307,7 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M16 5v14" }
             }
         },
-        Screen::JobProfiles => rsx! {
+        Screen::ProcessProfiles => rsx! {
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
@@ -463,3 +463,4 @@ fn persist_theme(theme: Theme) {
 
     let _ = save_global_settings(&app_dirs, &global_settings);
 }
+

@@ -18,10 +18,10 @@ pub struct UiLaunchData {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Job,
+    Project,
     CncProfiles,
     FixtureProfiles,
-    JobProfiles,
+    ProcessProfiles,
     Stock,
     Catalog,
 }
@@ -29,10 +29,10 @@ pub enum Screen {
 impl Screen {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Job => "Job",
+            Self::Project => "Project",
             Self::CncProfiles => "CNC Profiles",
             Self::FixtureProfiles => "Fixtures",
-            Self::JobProfiles => "Job Profiles",
+            Self::ProcessProfiles => "Process Profiles",
             Self::Stock => "Stock tools",
             Self::Catalog => "Catalogs",
         }
@@ -40,10 +40,10 @@ impl Screen {
 
     pub fn key(self) -> &'static str {
         match self {
-            Self::Job => "job",
+            Self::Project => "project",
             Self::CncProfiles => "cnc-profiles",
             Self::FixtureProfiles => "fixture-profiles",
-            Self::JobProfiles => "job-profiles",
+            Self::ProcessProfiles => "process-profiles",
             Self::Stock => "stock",
             Self::Catalog => "catalog",
         }
@@ -247,8 +247,8 @@ pub struct JobProfile {
 #[derive(Clone, Default)]
 pub struct CascadeDeleteImpact {
     pub primary_profiles: Vec<String>,
-    pub dependent_job_profiles: Vec<String>,
-    pub deleted_live_jobs: Vec<String>,
+    pub dependent_process_profiles: Vec<String>,
+    pub deleted_live_projects: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -699,22 +699,22 @@ pub struct BoardLayers {
 #[derive(Clone)]
 pub struct UiState {
     pub selected_screen: Screen,
-    pub selected_job_view: JobCenterView,
+    pub selected_project_view: JobCenterView,
     pub unit_system: UnitSystem,
     pub theme: Theme,
     pub machines: Vec<MachineProfile>,
     pub selected_machine_id: Option<String>,
     pub fixtures: Vec<FixtureProfile>,
     pub selected_fixture_id: Option<String>,
-    pub job_profiles: Vec<JobProfile>,
-    pub selected_job_profile_id: Option<String>,
+    pub process_profiles: Vec<JobProfile>,
+    pub selected_process_profile_id: Option<String>,
     pub machine_mru: Vec<String>,
     pub focus_profile_name_editor: bool,
     pub catalogs: Vec<CatalogStockCatalog>,
     pub tools: Vec<Tool>,
     pub errors: Vec<AppError>,
     pub generation_state: GenerationState,
-    pub job_config: JobConfig,
+    pub project_config: JobConfig,
     pub gcode: String,
     pub save_filename: String,
     pub gcode_modified: bool,
@@ -788,8 +788,8 @@ impl UiState {
         ];
 
         let mut state = Self {
-            selected_screen: Screen::Job,
-            selected_job_view: JobCenterView::Board,
+            selected_screen: Screen::Project,
+            selected_project_view: JobCenterView::Board,
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -801,15 +801,15 @@ impl UiState {
                 backing_board: "MDF spoilboard".to_string(),
             }],
             selected_fixture_id: Some("fixture-default".to_string()),
-            job_profiles: vec![],
-            selected_job_profile_id: None,
+            process_profiles: vec![],
+            selected_process_profile_id: None,
             machine_mru: vec![],
             focus_profile_name_editor: false,
             catalogs: built_in_catalogs(),
             tools,
             errors: vec![],
             generation_state: GenerationState::Idle,
-            job_config: JobConfig {
+            project_config: JobConfig {
                 selected_operations: vec![ProductionOperation::DrillPth],
                 side: Side::Top,
                 rotation_mode: RotationMode::Auto,
@@ -866,10 +866,10 @@ impl UiState {
             .and_then(|id| self.fixtures.iter().find(|fixture| &fixture.id == id))
     }
 
-    pub fn selected_job_profile(&self) -> Option<&JobProfile> {
-        self.selected_job_profile_id
+    pub fn selected_process_profile(&self) -> Option<&JobProfile> {
+        self.selected_process_profile_id
             .as_ref()
-            .and_then(|id| self.job_profiles.iter().find(|profile| &profile.id == id))
+            .and_then(|id| self.process_profiles.iter().find(|profile| &profile.id == id))
     }
 
     pub fn selected_machine_has_atc(&self) -> bool {
@@ -956,20 +956,20 @@ impl UiState {
         self.show_first_launch = false;
         self.select_machine_profile_by_id(Some(selected));
 
-        if self.job_profiles.is_empty() {
+        if self.process_profiles.is_empty() {
             let fixture_id = self
                 .selected_fixture_id
                 .clone()
                 .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
             if let Some(fixture_id) = fixture_id {
-                let job_profile = JobProfile {
-                    id: "job-profile-default".to_string(),
-                    name: "Default job profile".to_string(),
+                let process_profile = JobProfile {
+                    id: "project-profile-default".to_string(),
+                    name: "Default process profile".to_string(),
                     cnc_profile_id: profile.id.clone(),
                     fixture_profile_id: fixture_id,
                 };
-                self.selected_job_profile_id = Some(job_profile.id.clone());
-                self.job_profiles.push(job_profile);
+                self.selected_process_profile_id = Some(process_profile.id.clone());
+                self.process_profiles.push(process_profile);
             }
         }
     }
@@ -1051,7 +1051,7 @@ impl UiState {
         self.selected_fixture_id = Some(fixture_id);
     }
 
-    pub fn add_job_profile(&mut self, name: &str) {
+    pub fn add_process_profile(&mut self, name: &str) {
         let Some(cnc_id) = self
             .selected_machine_id
             .clone()
@@ -1068,7 +1068,7 @@ impl UiState {
         };
 
         let base = if name.trim().is_empty() {
-            "Job profile"
+            "Process profile"
         } else {
             name.trim()
         };
@@ -1079,20 +1079,20 @@ impl UiState {
             } else {
                 format!("{} ({})", base, idx)
             };
-            if !self.job_profiles.iter().any(|profile| profile.name == candidate) {
+            if !self.process_profiles.iter().any(|profile| profile.name == candidate) {
                 break candidate;
             }
             idx += 1;
         };
 
-        let id = format!("job-profile-{}", slug(&unique_name));
-        self.job_profiles.push(JobProfile {
+        let id = format!("project-profile-{}", slug(&unique_name));
+        self.process_profiles.push(JobProfile {
             id: id.clone(),
             name: unique_name,
             cnc_profile_id: cnc_id,
             fixture_profile_id: fixture_id,
         });
-        self.selected_job_profile_id = Some(id);
+        self.selected_process_profile_id = Some(id);
     }
 
     pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {
@@ -1102,29 +1102,29 @@ impl UiState {
         }
 
         let dependent_ids: BTreeSet<String> = self
-            .job_profiles
+            .process_profiles
             .iter()
             .filter(|profile| profile.cnc_profile_id == cnc_id)
             .map(|profile| profile.id.clone())
             .collect();
 
         for profile in self
-            .job_profiles
+            .process_profiles
             .iter()
             .filter(|profile| dependent_ids.contains(&profile.id))
         {
             impact
-                .dependent_job_profiles
-                .push(format!("Job profile: {}", profile.name));
+                .dependent_process_profiles
+                .push(format!("Process profile: {}", profile.name));
         }
 
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_ref()
             .map(|id| dependent_ids.contains(id))
             .unwrap_or(false)
         {
-            impact.deleted_live_jobs.push("Active job session".to_string());
+            impact.deleted_live_projects.push("Active project session".to_string());
         }
 
         impact
@@ -1139,52 +1139,52 @@ impl UiState {
         }
 
         let dependent_ids: BTreeSet<String> = self
-            .job_profiles
+            .process_profiles
             .iter()
             .filter(|profile| profile.fixture_profile_id == fixture_id)
             .map(|profile| profile.id.clone())
             .collect();
 
         for profile in self
-            .job_profiles
+            .process_profiles
             .iter()
             .filter(|profile| dependent_ids.contains(&profile.id))
         {
             impact
-                .dependent_job_profiles
-                .push(format!("Job profile: {}", profile.name));
+                .dependent_process_profiles
+                .push(format!("Process profile: {}", profile.name));
         }
 
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_ref()
             .map(|id| dependent_ids.contains(id))
             .unwrap_or(false)
         {
-            impact.deleted_live_jobs.push("Active job session".to_string());
+            impact.deleted_live_projects.push("Active project session".to_string());
         }
 
         impact
     }
 
-    pub fn impact_delete_job_profile(&self, job_profile_id: &str) -> CascadeDeleteImpact {
+    pub fn impact_delete_process_profile(&self, process_profile_id: &str) -> CascadeDeleteImpact {
         let mut impact = CascadeDeleteImpact::default();
         if let Some(profile) = self
-            .job_profiles
+            .process_profiles
             .iter()
-            .find(|profile| profile.id == job_profile_id)
+            .find(|profile| profile.id == process_profile_id)
         {
             impact
                 .primary_profiles
-                .push(format!("Job profile: {}", profile.name));
+                .push(format!("Process profile: {}", profile.name));
         }
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_deref()
-            .map(|id| id == job_profile_id)
+            .map(|id| id == process_profile_id)
             .unwrap_or(false)
         {
-            impact.deleted_live_jobs.push("Active job session".to_string());
+            impact.deleted_live_projects.push("Active project session".to_string());
         }
         impact
     }
@@ -1195,16 +1195,16 @@ impl UiState {
         self.machines.retain(|machine| machine.id != cnc_id);
         self.machine_mru.retain(|id| id != cnc_id);
 
-        self.job_profiles
+        self.process_profiles
             .retain(|profile| profile.cnc_profile_id != cnc_id);
 
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_ref()
-            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
             .unwrap_or(false)
         {
-            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
         }
 
         let next_selected = self
@@ -1228,16 +1228,16 @@ impl UiState {
         let impact = self.impact_delete_fixture_profile(fixture_id);
 
         self.fixtures.retain(|fixture| fixture.id != fixture_id);
-        self.job_profiles
+        self.process_profiles
             .retain(|profile| profile.fixture_profile_id != fixture_id);
 
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_ref()
-            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
             .unwrap_or(false)
         {
-            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
         }
 
         if self
@@ -1252,16 +1252,16 @@ impl UiState {
         impact
     }
 
-    pub fn delete_job_profile_with_cascade(&mut self, job_profile_id: &str) -> CascadeDeleteImpact {
-        let impact = self.impact_delete_job_profile(job_profile_id);
-        self.job_profiles.retain(|profile| profile.id != job_profile_id);
+    pub fn delete_process_profile_with_cascade(&mut self, process_profile_id: &str) -> CascadeDeleteImpact {
+        let impact = self.impact_delete_process_profile(process_profile_id);
+        self.process_profiles.retain(|profile| profile.id != process_profile_id);
         if self
-            .selected_job_profile_id
+            .selected_process_profile_id
             .as_ref()
-            .map(|id| !self.job_profiles.iter().any(|profile| &profile.id == id))
+            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
             .unwrap_or(false)
         {
-            self.selected_job_profile_id = self.job_profiles.first().map(|profile| profile.id.clone());
+            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
         }
         impact
     }
@@ -1488,23 +1488,23 @@ impl UiState {
         }
 
         if self
-            .job_config
+            .project_config
             .outline_router_tool_id
             .as_deref()
             .map(|tool_id| to_remove.contains(tool_id))
             .unwrap_or(false)
         {
-            self.job_config.outline_router_tool_id = None;
+            self.project_config.outline_router_tool_id = None;
         }
 
         if self
-            .job_config
+            .project_config
             .mouse_bite_drill_tool_id
             .as_deref()
             .map(|tool_id| to_remove.contains(tool_id))
             .unwrap_or(false)
         {
-            self.job_config.mouse_bite_drill_tool_id = None;
+            self.project_config.mouse_bite_drill_tool_id = None;
         }
 
         before.saturating_sub(self.tools.len())
@@ -1516,21 +1516,21 @@ impl UiState {
 
     pub fn toggle_operation(&mut self, op: ProductionOperation) {
         if let Some(index) = self
-            .job_config
+            .project_config
             .selected_operations
             .iter()
             .position(|x| *x == op)
         {
-            self.job_config.selected_operations.remove(index);
+            self.project_config.selected_operations.remove(index);
         } else {
-            self.job_config.selected_operations.push(op);
+            self.project_config.selected_operations.push(op);
         }
         self.gcode_modified = false;
     }
 
     #[allow(dead_code)]
     pub fn set_rotation_angle(&mut self, angle: i32) {
-        self.job_config.rotation_angle = angle;
+        self.project_config.rotation_angle = angle;
         self.gcode_modified = false;
     }
 
@@ -1666,3 +1666,5 @@ fn built_in_catalogs() -> Vec<CatalogStockCatalog> {
     }
     out
 }
+
+

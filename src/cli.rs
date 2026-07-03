@@ -28,7 +28,7 @@ impl CliArgs {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .filter(|s| !s.is_empty())
-                .unwrap_or("job");
+                .unwrap_or("project");
             format!("{stem}.nc")
         })
     }
@@ -50,3 +50,4 @@ fn validate_input_file(value: &str) -> Result<PathBuf, String> {
 
     Ok(path)
 }
+

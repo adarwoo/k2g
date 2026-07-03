@@ -10,18 +10,18 @@ use kicad_ipc_rs::DocumentType;
 mod cnc;
 mod catalog;
 mod fixture;
-mod job;
+mod project;
 mod setup;
 mod setup_sections;
-mod job_profiles;
+mod process_profiles;
 mod shell;
 mod stock;
 
 use cnc::CncScreen;
 use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
-use job::JobScreen;
-use job_profiles::JobProfilesScreen;
+use project::JobScreen;
+use process_profiles::ProcessProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, NavigationRail, StatusBar};
 use stock::StockScreen;
 
@@ -113,7 +113,7 @@ pub fn AppRoot() -> Element {
                 main { class: "shell-content",
                     div { class: "screen-host",
                         match snapshot.selected_screen {
-                            Screen::Job => rsx! {
+                            Screen::Project => rsx! {
                                 JobScreen { state }
                             },
                             Screen::CncProfiles => rsx! {
@@ -122,8 +122,8 @@ pub fn AppRoot() -> Element {
                             Screen::FixtureProfiles => rsx! {
                                 FixtureProfilesScreen { state }
                             },
-                            Screen::JobProfiles => rsx! {
-                                JobProfilesScreen { state }
+                            Screen::ProcessProfiles => rsx! {
+                                ProcessProfilesScreen { state }
                             },
                             Screen::Stock => rsx! {
                                 StockScreen { state }
@@ -140,3 +140,5 @@ pub fn AppRoot() -> Element {
         }
     }
 }
+
+

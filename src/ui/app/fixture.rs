@@ -56,7 +56,7 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                 }
 
                 p {
-                    "Fixture profiles define coordinate context and backing-board assumptions. They are selectable assets and can be referenced by job profiles."
+                    "Fixture profiles define coordinate context and backing-board assumptions. They are selectable assets and can be referenced by process profiles."
                 }
 
                 if !status_message.read().is_empty() {
@@ -101,10 +101,10 @@ fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     for item in impact.primary_profiles.iter() {
         lines.push(format!("- {}", item));
     }
-    for item in impact.dependent_job_profiles.iter() {
+    for item in impact.dependent_process_profiles.iter() {
         lines.push(format!("- {}", item));
     }
-    for item in impact.deleted_live_jobs.iter() {
+    for item in impact.deleted_live_projects.iter() {
         lines.push(format!("- {}", item));
     }
     lines.join("\n")
@@ -112,10 +112,12 @@ fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
 
 fn format_impact_summary(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     format!(
-        "{}: {} primary, {} dependent job profile(s), {} live job(s)",
+        "{}: {} primary, {} dependent process profile(s), {} live project(s)",
         prefix,
         impact.primary_profiles.len(),
-        impact.dependent_job_profiles.len(),
-        impact.deleted_live_jobs.len()
+        impact.dependent_process_profiles.len(),
+        impact.deleted_live_projects.len()
     )
 }
+
+

@@ -1,16 +1,16 @@
 $schema: "http://json-schema.org/draft-07/schema#"
 type: object
-description: Job profile persisted configuration.
+description: Process profile persisted configuration.
 
 properties:
   id:
     type: string
     minLength: 1
-    description: Unique job profile ID.
+    description: Unique process profile ID.
   name:
     type: string
     minLength: 1
-    description: Job profile name.
+    description: Process profile name.
   cnc_profile_id:
     type: string
     minLength: 1
@@ -105,6 +105,13 @@ properties:
         type: boolean
     required: [allowed_operation_toggles]
     additionalProperties: true
+  pcb_exit_clearance_depth_min:
+    description: Minimum depth beyond the bottom of the PCB from the tip of the bit. This must be compatible with the fixture profile's backboard thickness.
+    unit: length
+    anyOf:
+      - type: number
+      - *length_string
+    default: 0.7mm
 
-required: [id, name, cnc_profile_id, fixture_profile_id, default_enabled_operations, default_machining_strategies, default_tool_selection, default_routing_tab, override_policy]
+required: [id, name, cnc_profile_id, fixture_profile_id, default_enabled_operations, default_machining_strategies, default_tool_selection, default_routing_tab, override_policy, pcb_exit_clearance_depth_min]
 additionalProperties: false

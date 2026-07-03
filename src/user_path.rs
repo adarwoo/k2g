@@ -17,7 +17,7 @@ pub struct AppDirs {
     pub root: PathBuf,
     /// Tool catalogs — user-editable YAML files, validated on load.
     pub catalogs: PathBuf,
-    /// Session state (last-used filenames, recent job settings, etc.).
+    /// Session state (last-used filenames, recent project settings, etc.).
     pub last_session: PathBuf,
     /// JSON Schema reference copies — written once, not intended for editing.
     pub schemas: PathBuf,
@@ -122,3 +122,4 @@ fn platform_data_dir() -> Option<PathBuf> {
                 .map(|v| PathBuf::from(v).join(".config").join("k2g"))
         })
 }
+
