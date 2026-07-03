@@ -48,3 +48,8 @@ Configuration and state are persisted in the user's config directory:
 - **Schema:** `process_profile.schema.yaml`
 - **Contents:** References to CNC/fixture profiles, default operations/strategies/tool settings, routing/tab defaults, and override policy bounds
 
+### Project
+- **File:** `project.yaml`
+- **Schema:** `project.schema.yaml`
+- **Contents:** Active project state with UUID-based references to selected process/CNC/fixture/toolset profiles, enabled operations, tooling strategy, routing settings, board orientation, and board-thickness behavior
+

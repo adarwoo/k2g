@@ -16,20 +16,31 @@ use crate::user_path::{ensure_app_dirs, UserPathError};
 // Embedded resource files (compiled into the binary)
 // ---------------------------------------------------------------------------
 
+macro_rules! embedded_schema {
+    ($name:literal, $path:literal) => {
+        ($name, include_str!($path))
+    };
+}
+
+macro_rules! embedded_schemas {
+    ($($name:literal => $path:literal),+ $(,)?) => {
+        &[
+            $(embedded_schema!($name, $path),)+
+        ]
+    };
+}
+
 // --- Schemas (always overwritten on startup) ---
-const SCHEMAS: &[(&str, &str)] = &[
-    ("catalog_schema", include_str!("../../resources/schemas/catalog.schema.yaml")),
-    (
-        "global.setting_schema",
-        include_str!("../../resources/schemas/global_settings.schema.yaml"),
-    ),
-    (
-        "cnc_profile_schema",
-        include_str!("../../resources/schemas/cnc_profile.schema.yaml"),
-    ),
-    ("process_profile_schema", include_str!("../../resources/schemas/process_profile.schema.yaml")),
-    ("stock_schema", include_str!("../../resources/schemas/stock.schema.yaml")),
-];
+const SCHEMAS: &[(&str, &str)] = embedded_schemas!(
+    "catalog_schema" => "../../resources/schemas/catalog.schema.yaml",
+    "global.setting_schema" => "../../resources/schemas/global_settings.schema.yaml",
+    "cnc_profile_schema" => "../../resources/schemas/cnc_profile.schema.yaml",
+    "fixture_profile_schema" => "../../resources/schemas/fixture_profile.schema.yaml",
+    "process_profile_schema" => "../../resources/schemas/process_profile.schema.yaml",
+    "toolset_profile_schema" => "../../resources/schemas/toolset_profile.schema.yaml",
+    "project_schema" => "../../resources/schemas/project.schema.yaml",
+    "stock_schema" => "../../resources/schemas/stock.schema.yaml",
+);
 
 // --- Catalogs (written only on first run; user edits are preserved) ---
 const CATALOGS: &[(&str, &str)] = &[
