@@ -8,6 +8,9 @@ use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
 pub enum ToolType {
     Drillbit,
     Routerbit,
+    Engraver,
+    Vbit,
+    Endmill,
 }
 
 /// Linear units supported by catalog dimensions.
@@ -49,6 +52,10 @@ pub enum FeedUnit {
 ///   - `table_feed`  preserved as a native `FeedRate`, router bits only
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEntry {
+    /// Stable catalog tool ID (UUIDv7).
+    #[serde(default)]
+    pub id: String,
+
     #[serde(rename = "type")]
     pub tool_type: ToolType,
 
@@ -58,8 +65,9 @@ pub struct ToolEntry {
     /// Flute length in native units.
     pub flute_length: Option<Length>,
 
-    /// Tool identifier (SKU or vendor/name string).
-    pub sku_name: String,
+    /// Manufacturer SKU or part number.
+    #[serde(default, alias = "sku_name")]
+    pub sku: Option<String>,
 
     /// Tool point angle in degrees.
     ///

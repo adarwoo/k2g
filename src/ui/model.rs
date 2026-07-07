@@ -412,13 +412,17 @@ pub fn load_stock_catalog_index() -> Vec<CatalogStockCatalog> {
                 let kind = match tool.tool_type {
                     ToolType::Drillbit => "Drill",
                     ToolType::Routerbit => "Router",
+                    ToolType::Engraver => "Engraver",
+                    ToolType::Vbit => "V-bit",
+                    ToolType::Endmill => "Endmill",
                 }
                 .to_string();
 
-                let display_name = if tool.sku_name.trim().is_empty() {
+                let sku_name = tool.sku.clone().unwrap_or_default();
+                let display_name = if sku_name.trim().is_empty() {
                     format!("{} {}", kind, tool.diameter.unit_display(UserUnitSystem::Metric).user)
                 } else {
-                    tool.sku_name.clone()
+                    sku_name.clone()
                 };
 
                 tools.push(CatalogStockTool {
@@ -431,7 +435,7 @@ pub fn load_stock_catalog_index() -> Vec<CatalogStockCatalog> {
                     point_angle: tool.point_angle,
                     feed_rate,
                     spindle_speed: tool.spindle_rpm,
-                    sku: Some(tool.sku_name.clone()),
+                    sku: tool.sku.clone(),
                 });
             }
 
@@ -1612,13 +1616,17 @@ fn catalog_to_stock_catalog(
             let kind = match tool.tool_type {
                 ToolType::Drillbit => "Drill",
                 ToolType::Routerbit => "Router",
+                ToolType::Engraver => "Engraver",
+                ToolType::Vbit => "V-bit",
+                ToolType::Endmill => "Endmill",
             }
             .to_string();
 
-            let display_tool_name = if tool.sku_name.trim().is_empty() {
+            let sku_name = tool.sku.clone().unwrap_or_default();
+            let display_tool_name = if sku_name.trim().is_empty() {
                 format!("{} {}", kind, tool.diameter.unit_display(UserUnitSystem::Metric).user)
             } else {
-                tool.sku_name.clone()
+                sku_name.clone()
             };
 
             tools.push(CatalogStockTool {
@@ -1631,7 +1639,7 @@ fn catalog_to_stock_catalog(
                 point_angle: tool.point_angle,
                 feed_rate,
                 spindle_speed: tool.spindle_rpm,
-                sku: Some(tool.sku_name.clone()),
+                sku: tool.sku.clone(),
             });
         }
 

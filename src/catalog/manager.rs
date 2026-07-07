@@ -22,7 +22,7 @@ use super::init::normalize_catalog_fields;
 use super::types::{Catalog, ToolEntry, ToolType};
 
 /// The catalog JSON Schema embedded at compile time.
-const CATALOG_SCHEMA: &str = include_str!("../../resources/schemas/catalog.schema.yaml");
+const CATALOG_SCHEMA: &str = include_str!("../../resources/schemas/catalog.yaml");
 
 // ---------------------------------------------------------------------------
 // Error type

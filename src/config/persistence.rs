@@ -21,8 +21,8 @@ pub struct PersistenceState {
     pub stock: Value,
     /// All CNC profiles indexed by ID
     pub cnc_profiles: BTreeMap<String, Value>,
-    /// ID of currently selected CNC profile (from global settings)
-    pub selected_cnc_profile_id: Option<String>,
+    /// ID of currently selected process profile (from global settings)
+    pub selected_process_profile_id: Option<String>,
 }
 
 /// Load all persisted configuration files at application startup
@@ -36,8 +36,9 @@ pub fn load_all_configs(
     let global_mgr =
         YamlConfigManager::new("global.setting", schema_dir, &app_dirs.configs)?;
     let global_settings = global_mgr.get_content().clone();
-    let selected_cnc_profile_id = global_settings
-        .get("selected_cnc_profile_id")
+    let selected_process_profile_id = global_settings
+        .get("selected_process_profile_id")
+        .or_else(|| global_settings.get("selected_cnc_profile_id"))
         .and_then(Value::as_str)
         .map(|s| s.to_string());
 
@@ -52,7 +53,7 @@ pub fn load_all_configs(
         global_settings,
         stock,
         cnc_profiles,
-        selected_cnc_profile_id,
+        selected_process_profile_id,
     })
 }
 
