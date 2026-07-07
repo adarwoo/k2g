@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "GCode generator"
 
+[workspace]
+members = ["xtask",]
+
 [dependencies]
 kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,3 +23,4 @@ image = "0.24"
 base64 = "0.22"
 rfd = "0.15"
 clipper2-rust = "1.0"
+

@@ -1,0 +1,418 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "fixture.yaml"
+
+title: Fixture Profile
+description: >
+  Fixture profile persisted configuration.
+  This schema references shared UUID and unit definitions from files located
+  in the same directory:
+    - id.yaml
+    - units.yaml
+
+type: object
+
+properties:
+
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
+  # ---------------------------------------------------------------------------
+  # id
+  # ---------------------------------------------------------------------------
+  # Stable unique fixture profile identifier.
+  #
+  # Uses the shared UUIDv7 validator from id.yaml.
+  #
+  # Valid example:
+  #   id: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  id:
+    description: Unique fixture profile ID.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  # ---------------------------------------------------------------------------
+  # name
+  # ---------------------------------------------------------------------------
+  # Human-readable fixture profile name.
+  #
+  # Valid examples:
+  #   name: "Default vacuum fixture"
+  #   name: "Prototype clamp plate A"
+  #
+  name:
+    type: string
+    minLength: 1
+    description: Fixture profile name.
+
+  # ---------------------------------------------------------------------------
+  # backboard_thickness
+  # ---------------------------------------------------------------------------
+  # Thickness of the back board, martyr board, or exit board.
+  #
+  # Uses the shared length validator from units.yaml.
+  #
+  # Valid examples:
+  #   backboard_thickness: "2.5 mm"
+  #   backboard_thickness: "2.5mm"
+  #   backboard_thickness: "0.125 in"
+  #   backboard_thickness: "1/8""
+  #
+  # WARNING:
+  #   Keep this value accurate. If it is wrong, drilling operations may cut into
+  #   the machining bed.
+  #
+  backboard_thickness:
+    description: >
+      Thickness of the back/martyr/exit-board. WARNING: Make sure this value is
+      always accurate, otherwise there is a risk of drilling into the machining
+      bed.
+    default: "2.5mm"
+    $ref: "units.yaml#/$defs/size"
+
+
+  # ---------------------------------------------------------------------------
+  # board_holding_method
+  # ---------------------------------------------------------------------------
+  # Method used to hold the board during machining.
+  #
+  # This is intentionally left as a free string for now, so the application can
+  # evolve supported methods without changing the schema every time.
+  #
+  # Valid examples:
+  #   board_holding_method: "vacuum"
+  #   board_holding_method: "clamps"
+  #   board_holding_method: "tape"
+  #
+  board_holding_method:
+    type: string
+    minLength: 1
+    description: Supported board holding method.
+
+  # ---------------------------------------------------------------------------
+  # work_origin_reference
+  # ---------------------------------------------------------------------------
+  # Defines how the fixture establishes the CAM work origin.
+  #
+  work_origin_reference:
+    type: object
+    description: Work origin/reference definition.
+    properties:
+
+      # X origin side.
+      #
+      # Valid examples:
+      #   x0: Left
+      #   x0: Right
+      #   x0: Front
+      #   x0: Back
+      #
+      x0:
+        type: string
+        enum: [Left, Right, Front, Back]
+        description: Reference side used for the X origin.
+
+      # Y origin side.
+      #
+      # Valid examples:
+      #   y0: Front
+      #   y0: Back
+      #   y0: Left
+      #   y0: Right
+      #
+      y0:
+        type: string
+        enum: [Front, Back, Left, Right]
+        description: Reference side used for the Y origin.
+
+      # Z origin reference.
+      #
+      # Intentionally free-form for now because fixture Z reference conventions
+      # may be application-specific.
+      #
+      # Valid examples:
+      #   z0_reference: "machine_bed"
+      #   z0_reference: "spoilboard_top"
+      #   z0_reference: "board_top"
+      #
+      z0_reference:
+        type: string
+        description: Reference used for the Z origin.
+
+    required: [x0, y0]
+    additionalProperties: false
+
+  # ---------------------------------------------------------------------------
+  # locating_pins
+  # ---------------------------------------------------------------------------
+  # Locating pin strategy and geometry.
+  #
+  locating_pins:
+    type: object
+    description: Locating pin strategy and geometry.
+    properties:
+
+      # Locating pin strategy.
+      #
+      # Valid examples:
+      #   strategy: "none"
+      #   strategy: "two_pins"
+      #   strategy: "three_pins"
+      #
+      strategy:
+        type: string
+        description: Locating pin strategy.
+
+      # Locating pin diameter.
+      #
+      # Valid examples:
+      #   pin_diameter: "3 mm"
+      #   pin_diameter: "1/8""
+      #
+      pin_diameter:
+        description: Diameter of locating pins.
+        $ref: "units.yaml#/$defs/size"
+
+      # Locating pin positions in the fixture coordinate system.
+      #
+      pin_positions:
+        type: array
+        description: Locating pin positions.
+        items:
+          type: object
+          properties:
+
+            # X coordinate of the locating pin.
+            #
+            # Valid examples:
+            #   x: "10 mm"
+            #   x: "0.5 in"
+            #
+            x:
+              description: X coordinate of the locating pin.
+              $ref: "units.yaml#/$defs/size"
+
+            # Y coordinate of the locating pin.
+            #
+            # Valid examples:
+            #   y: "20 mm"
+            #   y: "1 in"
+            #
+            y:
+              description: Y coordinate of the locating pin.
+              $ref: "units.yaml#/$defs/size"
+
+          required: [x, y]
+          additionalProperties: false
+
+    additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # keep_out_zones
+  # ---------------------------------------------------------------------------
+  # Keep-out or clamp zones where machining motion must be avoided or where
+  # additional Z clearance is required.
+  #
+  keep_out_zones:
+    type: array
+    description: Keep-out or clamp zones.
+    items:
+      type: object
+      properties:
+
+        # X coordinate of the keep-out zone origin.
+        #
+        # Valid examples:
+        #   x: "0 mm"
+        #   x: "1.25 in"
+        #
+        x:
+          description: X coordinate of the keep-out zone origin.
+          $ref: "units.yaml#/$defs/size"
+
+        # Y coordinate of the keep-out zone origin.
+        #
+        # Valid examples:
+        #   y: "0 mm"
+        #   y: "2 in"
+        #
+        y:
+          description: Y coordinate of the keep-out zone origin.
+          $ref: "units.yaml#/$defs/size"
+
+        # Width of the keep-out zone.
+        #
+        # Valid examples:
+        #   width: "50 mm"
+        #   width: "2 in"
+        #
+        width:
+          description: Width of the keep-out zone.
+          $ref: "units.yaml#/$defs/size"
+
+        # Height of the keep-out zone.
+        #
+        # Valid examples:
+        #   height: "25 mm"
+        #   height: "1 in"
+        #
+        height:
+          description: Height of the keep-out zone.
+          $ref: "units.yaml#/$defs/size"
+
+        # Safe Z retract height for transitions between machining operations.
+        #
+        # Valid examples:
+        #   z_safe_height: "20 mm"
+        #   z_safe_height: "0.75 in"
+        #
+        # WARNING:
+        #   Z0 corresponds to the machining bed. This value can be set from
+        #   machine coordinates and does not need board-thickness adjustment.
+        #
+        z_safe_height:
+          description: >
+            Z distance to retract to between machining operations. This distance
+            should be well clear of fixtures on the machining table to avoid
+            collisions. WARNING: Z0 corresponds to the machining bed, so it can
+            be set from machine coordinates and does not need adjusting.
+          default: "20mm"
+          $ref: "units.yaml#/$defs/size"
+
+        # Drill retract height, also known as the drilling R value.
+        #
+        # Valid examples:
+        #   z_drill_retract_height: "10 mm"
+        #   z_drill_retract_height: "0.5 in"
+        #
+        # This is measured upward from the machining bed.
+        #
+        z_drill_retract_height:
+          description: >
+            Known as R value, the distance to retract to between drilling
+            operations, measured from the top of the machining bed upwards. If a
+            pressure plate is used, this distance should allow the plate to
+            spring back to neutral position and allow hovering over any fixtures
+            on the table.
+          default: "10mm"
+          $ref: "units.yaml#/$defs/size"
+
+      required: [x, y, width, height, z_safe_height, z_drill_retract_height]
+      additionalProperties: false
+
+  # ---------------------------------------------------------------------------
+  # occupancy
+  # ---------------------------------------------------------------------------
+  # Describes the fixture occupancy impact on the usable board size range.
+  #
+  occupancy:
+    type: object
+    description: Fixture occupancy impact on board size range.
+    properties:
+
+      # Maximum usable board size along X.
+      #
+      # Valid examples:
+      #   max_board_x: "300 mm"
+      #   max_board_x: "12 in"
+      #
+      max_board_x:
+        description: Maximum usable board size along X.
+        $ref: "units.yaml#/$defs/size"
+
+      # Maximum usable board size along Y.
+      #
+      # Valid examples:
+      #   max_board_y: "200 mm"
+      #   max_board_y: "8 in"
+      #
+      max_board_y:
+        description: Maximum usable board size along Y.
+        $ref: "units.yaml#/$defs/size"
+
+      # Optional blocked regions.
+      #
+      # Kept generic for now because blocked-region modelling may evolve.
+      #
+      blocked_regions:
+        type: array
+        description: Generic blocked regions occupied by the fixture.
+        items:
+          type: object
+
+    additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # probing_alignment
+  # ---------------------------------------------------------------------------
+  # Optional probing/alignment parameters.
+  #
+  probing_alignment:
+    type: object
+    description: Optional probing/alignment parameters.
+    properties:
+
+      # Enables or disables probing alignment.
+      #
+      # Valid examples:
+      #   enabled: true
+      #   enabled: false
+      #
+      enabled:
+        type: boolean
+        default: false
+        description: Enable probing alignment.
+
+      # List of probing points in the fixture coordinate system.
+      #
+      probe_points:
+        type: array
+        description: Probing points used for alignment.
+        items:
+          type: object
+          properties:
+
+            # X coordinate of the probe point.
+            #
+            # Valid examples:
+            #   x: "10 mm"
+            #   x: "0.5 in"
+            #
+            x:
+              description: X coordinate of the probe point.
+              $ref: "units.yaml#/$defs/size"
+
+            # Y coordinate of the probe point.
+            #
+            # Valid examples:
+            #   y: "20 mm"
+            #   y: "1 in"
+            #
+            y:
+              description: Y coordinate of the probe point.
+              $ref: "units.yaml#/$defs/size"
+
+          required: [x, y]
+          additionalProperties: false
+
+    additionalProperties: true
+
+bed_clearance:
+  description: >
+    Minimum clearance to the machining bed from the tip of any tool to prevent damage to the machine bed
+  default: "0.5 mm"
+  $ref: "units.yaml#/$defs/size"
+
+required:
+  - id
+  - name
+  - board_holding_method
+  - work_origin_reference
+  - locating_pins
+  - keep_out_zones
+  - occupancy
+  - machining_plate_clearance
+
+additionalProperties: false

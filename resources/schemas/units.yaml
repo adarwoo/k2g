@@ -1,0 +1,175 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "units.yaml"
+
+title: CNC Unit Definitions
+description: >
+  Shared CNC unit definitions. These definitions are kept separate so all
+  schemas validate dimensions, feeds, speeds, angles, and percentages in the
+  same way.
+
+$defs:
+
+  # ---------------------------------------------------------------------------
+  # size
+  # ---------------------------------------------------------------------------
+  # Linear dimension such as diameter, depth, offset, width, height, thickness,
+  # or clearance.
+  #
+  # Accepted units:
+  #   - mm
+  #   - um
+  #   - "
+  #   - in
+  #   - inch
+  #   - mil
+  #   - thou
+  #
+  # Fractions are only accepted for inch-based units.
+  #
+  # Valid examples:
+  #   "10 mm"
+  #   "10mm"
+  #   "250 um"
+  #   "0.125 in"
+  #   "1/8\""
+  #   "1 1/2 in"
+  #   "10 thou"
+  #
+  size:
+    type: string
+    pattern: '^\s*(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
+
+  # ---------------------------------------------------------------------------
+  # feed
+  # ---------------------------------------------------------------------------
+  # Feed rate expressed as distance per minute.
+  #
+  # Valid examples:
+  #   "1200 mm/min"
+  #   "1200mm/min"
+  #   "50 in/min"
+  #   "50 inch/min"
+  #   "50 ipm"
+  #
+  feed:
+    type: string
+    pattern: '^\s*\d+(?:\.\d+)?\s*(?:mm/min|mm\/min|in/min|in\/min|inch/min|inch\/min|ipm)\s*$'
+
+  # ---------------------------------------------------------------------------
+  # feed_rev
+  # ---------------------------------------------------------------------------
+  # Feed per spindle revolution.
+  #
+  # Valid examples:
+  #   "0.15 mm/rev"
+  #   "0.008 in/rev"
+  #   "0.008 ipr"
+  #
+  feed_rev:
+    type: string
+    pattern: '^\s*\d+(?:\.\d+)?\s*(?:mm/rev|mm\/rev|in/rev|in\/rev|inch/rev|inch\/rev|ipr)\s*$'
+
+  # ---------------------------------------------------------------------------
+  # feed_tooth
+  # ---------------------------------------------------------------------------
+  # Feed per cutter tooth / chip load.
+  #
+  # Valid examples:
+  #   "0.05 mm/tooth"
+  #   "0.002 in/tooth"
+  #   "0.002 ipt"
+  #
+  feed_tooth:
+    type: string
+    pattern: '^\s*\d+(?:\.\d+)?\s*(?:mm/tooth|mm\/tooth|in/tooth|in\/tooth|inch/tooth|inch\/tooth|ipt)\s*$'
+
+  # ---------------------------------------------------------------------------
+  # rpm
+  # ---------------------------------------------------------------------------
+  # Spindle rotational speed. Unit is optional; bare numbers are interpreted as
+  # rpm by the application.
+  #
+  # Valid examples:
+  #   12000
+  #   "12000"
+  #   "12000 rpm"
+  #   "12000rpm"
+  #
+  rpm:
+    anyOf:
+      - type: number
+        minimum: 0
+      - type: string
+        pattern: '^\s*\d+(?:\.\d+)?\s*(?:rpm)?\s*$'
+
+  # ---------------------------------------------------------------------------
+  # angle
+  # ---------------------------------------------------------------------------
+  # Angle. Unit is optional; bare numbers are interpreted as degrees by the
+  # application.
+  #
+  # Valid examples:
+  #   90
+  #   -45
+  #   "118"
+  #   "118°"
+  #   "118 deg"
+  #   "-90 deg"
+  #
+  angle:
+    anyOf:
+      - type: number
+      - type: string
+        pattern: '^\s*[+-]?\d+(?:\.\d+)?\s*(?:deg|°)?\s*$'
+
+  # ---------------------------------------------------------------------------
+  # percent
+  # ---------------------------------------------------------------------------
+  # Percentage. Unit is optional; bare numbers are interpreted as percent by the
+  # application.
+  #
+  # Valid examples:
+  #   5
+  #   12.5
+  #   "5"
+  #   "5%"
+  #   "12.5 %"
+  #
+  percent:
+    anyOf:
+      - type: number
+        minimum: 0
+      - type: string
+        pattern: '^\s*\d+(?:\.\d+)?\s*%?\s*$'
+
+  # Percentage constrained to 0..100 for fields such as depth ratios.
+  percent_0_100:
+    anyOf:
+      - type: number
+        minimum: 0
+        maximum: 100
+      - type: string
+        pattern: '^\s*(?:100(?:\.0+)?|\d{1,2}(?:\.\d+)?)\s*%?\s*$'
+
+  # Percentage constrained to 50..100 for V-groove depth settings.
+  percent_50_100:
+    anyOf:
+      - type: number
+        minimum: 50
+        maximum: 100
+      - type: string
+        pattern: '^\s*(?:100(?:\.0+)?|(?:[5-9]\d)(?:\.\d+)?)\s*%?\s*$'
+
+  # ---------------------------------------------------------------------------
+  # speed
+  # ---------------------------------------------------------------------------
+  # Surface/cutting speed.
+  #
+  # Valid examples:
+  #   "250 m/min"
+  #   "800 sfm"
+  #   "800 ft/min"
+  #
+  speed:
+    type: string
+    pattern: '^\s*\d+(?:\.\d+)?\s*(?:m/min|m\/min|sfm|ft/min|ft\/min)\s*$'

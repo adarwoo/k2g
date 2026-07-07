@@ -11,6 +11,12 @@ description: |
        - Example: 4um, 12.4mm 23/64in, 100in/min, 24000rpm, 12deg
 
 properties:
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
   units:
     description: Global preferred unit system and display units.
     type: string

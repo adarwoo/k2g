@@ -1,3 +1,5 @@
+/// Command Line parser
+/// Allow openin
 use clap::Parser;
 use std::fs::File;
 use std::path::PathBuf;

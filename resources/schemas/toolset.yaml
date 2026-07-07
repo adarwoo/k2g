@@ -1,0 +1,272 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "toolset.yaml"
+
+title: Toolset Profile
+description: >
+  Reusable toolset profile definition. A toolset profile describes how tools are
+  managed for a project: logical slot layout T1..Tx, assignment mode per slot,
+  and generation policy constraints.
+
+  This schema references shared UUID definitions from a file located in the
+  same directory:
+    - id.yaml
+
+type: object
+
+properties:
+
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
+  # ---------------------------------------------------------------------------
+  # id
+  # ---------------------------------------------------------------------------
+  # Stable unique toolset profile identifier.
+  #
+  # Uses the shared UUIDv7 validator from id.yaml.
+  #
+  # Valid example:
+  #   id: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  id:
+    description: Unique toolset profile ID.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  # ---------------------------------------------------------------------------
+  # name
+  # ---------------------------------------------------------------------------
+  # Human-readable toolset profile name.
+  #
+  # Valid examples:
+  #   name: "Default 8-slot ATC toolset"
+  #   name: "Prototype milling + drilling tools"
+  #
+  name:
+    type: string
+    minLength: 1
+    description: User-facing toolset profile name.
+
+  # ---------------------------------------------------------------------------
+  # description
+  # ---------------------------------------------------------------------------
+  # Optional free-text profile description for operators or project metadata.
+  #
+  # Valid examples:
+  #   description: "Default toolset for FR4 drilling and outline routing."
+  #   description: "Uses large router in T1 and spare drills in T2..T6."
+  #
+  description:
+    type: string
+    description: Optional profile description.
+
+  # ---------------------------------------------------------------------------
+  # generation_policy
+  # ---------------------------------------------------------------------------
+  # Defines how strict the generator must be when required project tools do not
+  # fit directly into the available toolset slots.
+  #
+  # Valid values:
+  #   fixed_toolset
+  #     Generation fails if the required tools exceed available usable slots.
+  #     This is the safest mode for unattended or repeatable jobs.
+  #
+  #   allow_reload
+  #     Generation may insert operator pauses for one or more toolset reloads.
+  #     Use this when the machine has fewer physical slots than required tools.
+  #
+  #   allow_hybrid
+  #     Generation may transition from automatic tool changes to manual tool
+  #     changes, for example when ATC slots are exhausted or a tool is not in the
+  #     changer.
+  #
+  # Valid examples:
+  #   generation_policy: fixed_toolset
+  #   generation_policy: allow_reload
+  #   generation_policy: allow_hybrid
+  #
+  generation_policy:
+    type: string
+    enum:
+      - fixed_toolset
+      - allow_reload
+      - allow_hybrid
+    default: fixed_toolset
+    description: Tooling behavior during generation.
+
+  # ---------------------------------------------------------------------------
+  # slots
+  # ---------------------------------------------------------------------------
+  # Ordered logical toolset slots.
+  #
+  # Each slot maps to a GCode tool number using its index:
+  #   index: 1  -> T1
+  #   index: 2  -> T2
+  #   index: n  -> Tn
+  #
+  # Slot modes:
+  #   fixed
+  #     The slot is reserved for a specific stock/project tool. tool_id is
+  #     required.
+  #
+  #   spare
+  #     The slot is available for automatic assignment during generation.
+  #     tool_id must not be present.
+  #
+  #   do_not_use
+  #     The slot exists physically/logically but must not be used by generation.
+  #     tool_id must not be present.
+  #
+  # Valid examples:
+  #   slots:
+  #     - index: 1
+  #       mode: fixed
+  #       tool_id: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #       note: "Main 2 mm router"
+  #     - index: 2
+  #       mode: spare
+  #     - index: 3
+  #       mode: do_not_use
+  #       note: "Damaged pocket"
+  #
+  slots:
+    type: array
+    minItems: 1
+    description: Ordered logical toolset slots, each mapped to T1..Tx by index.
+    items:
+      type: object
+      properties:
+
+        # Slot index mapped to the emitted GCode tool number.
+        #
+        # Valid examples:
+        #   index: 1   # maps to T1
+        #   index: 12  # maps to T12
+        #
+        index:
+          type: integer
+          minimum: 1
+          description: Slot index, maps to T{index}.
+
+        # Slot assignment mode.
+        #
+        # Valid values:
+        #   fixed
+        #   spare
+        #   do_not_use
+        #
+        # Behavior:
+        #   - fixed requires tool_id
+        #   - spare forbids tool_id
+        #   - do_not_use forbids tool_id
+        #
+        mode:
+          type: string
+          enum:
+            - fixed
+            - spare
+            - do_not_use
+          description: Slot assignment mode.
+          default: spare
+
+        # Tool identifier assigned to a fixed slot.
+        #
+        # Required when:
+        #   mode: fixed
+        #
+        # Forbidden when:
+        #   mode: spare
+        #   mode: do_not_use
+        #
+        # Uses the shared UUIDv7 validator from id.yaml.
+        #
+        # Valid example:
+        #   tool_id: "0194fd2c-5f2e-7a9d-9a76-3b2b9fbc3f11"
+        #
+        tool_id:
+          description: Stock/project tool ID required when mode is fixed.
+          $ref: "id.yaml#/$defs/uuid_v7"
+
+        # Optional operator note for this slot.
+        #
+        # Valid examples:
+        #   note: "Keep short tool here for clearance."
+        #   note: "Pocket damaged, do not use."
+        #   note: "Reserved for 0.8 mm drill."
+        #
+        note:
+          type: string
+          description: Optional operator note for this slot.
+
+      required:
+        - index
+
+      allOf:
+
+        # If the slot is fixed, a concrete tool_id must be provided.
+        - if:
+            properties:
+              mode:
+                const: fixed
+            required:
+              - mode
+          then:
+            required:
+              - tool_id
+
+        # If the slot is spare, tool_id must not be present.
+        - if:
+            properties:
+              mode:
+                const: spare
+            required:
+              - mode
+          then:
+            not:
+              required:
+                - tool_id
+
+        # If the slot is marked do_not_use, tool_id must not be present.
+        - if:
+            properties:
+              mode:
+                const: do_not_use
+            required:
+              - mode
+          then:
+            not:
+              required:
+                - tool_id
+
+      additionalProperties: false
+
+  # ---------------------------------------------------------------------------
+  # tags
+  # ---------------------------------------------------------------------------
+  # Optional labels used for filtering and quick selection in the application.
+  #
+  # Tags are unique strings.
+  #
+  # Valid examples:
+  #   tags:
+  #     - atc
+  #     - masso-g3
+  #     - pcb-routing
+  #
+  tags:
+    type: array
+    description: Optional labels used for filtering and quick selection.
+    items:
+      type: string
+      minLength: 1
+    uniqueItems: true
+
+required:
+  - id
+  - name
+  - generation_policy
+  - slots
+
+additionalProperties: false

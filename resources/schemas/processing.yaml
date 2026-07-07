@@ -1,0 +1,390 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "processing.yaml"
+
+title: Processing
+description: >
+  Processing persisted configuration. A processing file defines what needs to be
+  processed for a project and how default generation choices are applied.
+
+  It binds together application-managed CNC, fixture, and toolset definitions.
+  Each binding defines a default UUIDv7 and the set of allowed override choices.
+  The choice set can be one UUIDv7, many UUIDv7 values, or the special value
+  "any".
+
+  Unit-bearing or unit-implied fields use shared definitions from units.yaml.
+  Field names therefore avoid embedding units such as _deg or _percent; the unit
+  convention is managed by the schema definition and application parser.
+
+  PCB plating thickness is intentionally not configured here; it is taken from
+  PCB/project data before tool matching rules are applied.
+
+  This schema references shared definitions from files located in the same
+  directory:
+    - id.yaml
+    - units.yaml
+
+type: object
+
+$defs:
+
+  # ---------------------------------------------------------------------------
+  # binding
+  # ---------------------------------------------------------------------------
+  # Binds processing to a selectable application-managed object such as CNC,
+  # fixture, or toolset.
+  #
+  # Fields:
+  #   default
+  #     UUIDv7 of the object used by default.
+  #
+  #   choices
+  #     Either:
+  #       - a non-empty array of UUIDv7 IDs, or
+  #       - the string "any".
+  #
+  # Meaning:
+  #   - one UUIDv7 in choices locks the processing file to one selectable object.
+  #   - many UUIDv7 values allow override only among that bounded set.
+  #   - choices: any allows override to any object of the appropriate kind.
+  #
+  # Semantic validation recommended by the application:
+  #   - if choices is an array, default should be present in choices.
+  #   - choices must reference the expected object kind.
+  #   - choices: any still uses default as the initial selected object.
+  #
+  # Valid examples:
+  #   default: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #   choices:
+  #     - "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  #   default: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #   choices: any
+  #
+  binding:
+    type: object
+    properties:
+      default:
+        description: Default selected object ID.
+        $ref: "id.yaml#/$defs/uuid_v7"
+      choices:
+        description: Allowed override choices, or any object of the expected type.
+        anyOf:
+          - type: string
+            const: any
+          - type: array
+            minItems: 1
+            uniqueItems: true
+            items:
+              $ref: "id.yaml#/$defs/uuid_v7"
+    required: [default, choices]
+    additionalProperties: false
+
+  # ---------------------------------------------------------------------------
+  # allowance
+  # ---------------------------------------------------------------------------
+  # Combined relative + absolute cap rule for tool matching.
+  #
+  # Interpretation:
+  #   allowed_difference = min(required_diameter * relative, max)
+  #
+  # Valid examples:
+  #   relative: "8%"
+  #   max: "0.20 mm"
+  #
+  allowance:
+    type: object
+    properties:
+      relative:
+        description: Relative allowance as a percentage of required diameter.
+        $ref: "units.yaml#/$defs/percent"
+      max:
+        description: Absolute cap for the allowance.
+        $ref: "units.yaml#/$defs/size"
+    required: [relative, max]
+    additionalProperties: false
+
+properties:
+
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
+  # ---------------------------------------------------------------------------
+  # id
+  # ---------------------------------------------------------------------------
+  # Stable unique processing identifier.
+  #
+  id:
+    description: Unique processing ID.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  # ---------------------------------------------------------------------------
+  # name
+  # ---------------------------------------------------------------------------
+  # Human-readable processing name.
+  #
+  name:
+    type: string
+    minLength: 1
+    description: Processing name.
+
+  # ---------------------------------------------------------------------------
+  # cnc
+  # ---------------------------------------------------------------------------
+  # Bound CNC selection.
+  #
+  # Valid examples:
+  #   cnc:
+  #     default: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #     choices: any
+  #
+  #   cnc:
+  #     default: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #     choices:
+  #       - "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  cnc:
+    description: Bound CNC selection.
+    $ref: "#/$defs/binding"
+
+  # ---------------------------------------------------------------------------
+  # fixture
+  # ---------------------------------------------------------------------------
+  # Bound fixture selection.
+  #
+  fixture:
+    description: Bound fixture selection.
+    $ref: "#/$defs/binding"
+
+  # ---------------------------------------------------------------------------
+  # toolset
+  # ---------------------------------------------------------------------------
+  # Bound toolset selection.
+  #
+  toolset:
+    description: Bound toolset selection.
+    $ref: "#/$defs/binding"
+
+  # ---------------------------------------------------------------------------
+  # operations
+  # ---------------------------------------------------------------------------
+  # Default operation set enabled when a new project or job uses this processing.
+  #
+  # Valid values:
+  #   drill_locating_pins
+  #   drill_pth
+  #   drill_npth
+  #   route_board
+  #   mill_board
+  #
+  operations:
+    type: array
+    description: Operations enabled by default for this processing.
+    items:
+      type: string
+      enum: [drill_locating_pins, drill_pth, drill_npth, route_board, mill_board]
+    uniqueItems: true
+
+  # ---------------------------------------------------------------------------
+  # strategies
+  # ---------------------------------------------------------------------------
+  # Default machining strategy parameters.
+  #
+  # This object is intentionally extensible because strategy names and
+  # controller-specific options may evolve.
+  #
+  strategies:
+    type: object
+    description: Default machining strategies.
+    additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # holes
+  # ---------------------------------------------------------------------------
+  # Default hole processing and tool selection parameters.
+  #
+  holes:
+    type: object
+    description: Default hole processing and tool selection parameters.
+    properties:
+
+      # Oversize tool matching allowance.
+      #
+      # Interpretation:
+      #   allowed_oversize = min(required_diameter * relative, max)
+      #
+      oversize:
+        description: Maximum allowed oversize tool match.
+        $ref: "#/$defs/allowance"
+
+      # Undersize tool matching allowance.
+      #
+      # Interpretation:
+      #   allowed_undersize = min(required_diameter * relative, max)
+      #
+      undersize:
+        description: Maximum allowed undersize tool match.
+        $ref: "#/$defs/allowance"
+
+      # Whether routing may be used as a fallback for holes that cannot be
+      # matched to a drill.
+      #
+      route_fallback:
+        type: boolean
+        description: Allow routing holes when no suitable drill tool is available.
+
+      # Whether drilling should be attempted before routing fallback.
+      #
+      drill_first:
+        type: boolean
+        description: Prefer drilling before routing fallback.
+
+      # Whether a pilot hole operation may be generated before routing/milling.
+      #
+      pilot:
+        type: boolean
+        description: Allow pilot hole generation.
+
+      # Oblong/slot hole processing strategy.
+      #
+      # Valid values:
+      #   route
+      #     Route the complete oblong hole/slot.
+      #
+      #   drill_ends_then_route
+      #     Drill both rounded ends first, then route the connecting slot.
+      #
+      #   drill_chain
+      #     Approximate the oblong hole with overlapping drilled holes only.
+      #
+      #   drill_chain_then_route
+      #     Pre-drill a chain of holes, then route to clean the geometry.
+      #
+      oblong:
+        type: string
+        enum: [route, drill_ends_then_route, drill_chain, drill_chain_then_route]
+        default: drill_ends_then_route
+        description: Oblong or slot hole processing strategy.
+
+    additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # edge
+  # ---------------------------------------------------------------------------
+  # Board outline cutting settings.
+  #
+  # This defines how the board outline is cut and how the board is retained
+  # during/after cutting.
+  #
+  edge:
+    type: object
+    description: Board outline cutting settings.
+    properties:
+
+      # Board outline cutting strategy.
+      #
+      cut:
+        type: string
+        enum: [none, route, mill, vgroove, score]
+        default: route
+        description: Board outline cutting strategy.
+
+      # Board retention method during/after outline cutting.
+      #
+      retention:
+        type: string
+        enum: [none, tabs, mouse_bites, tabs_with_mouse_bites]
+        default: tabs
+        description: Board retention method for outline cutting.
+
+      # Number of tabs around the board outline.
+      #
+      tabs:
+        type: integer
+        minimum: 0
+        description: Number of outline retention tabs. 0 disables tabs.
+
+      # Width of each outline retention tab.
+      #
+      tab_width:
+        description: Width of each outline retention tab.
+        $ref: "units.yaml#/$defs/size"
+
+      # Number of mouse-bite holes per tab or retention area.
+      #
+      bite_holes:
+        type: integer
+        minimum: 1
+        description: Number of mouse-bite holes per tab or retention area.
+
+      # V-groove depth as a percentage of board thickness.
+      #
+      vgroove_depth:
+        description: V-groove depth as a percentage of board thickness.
+        $ref: "units.yaml#/$defs/percent_50_100"
+
+    additionalProperties: true
+
+  # ---------------------------------------------------------------------------
+  # finishing
+  # ---------------------------------------------------------------------------
+  # Optional finishing pass settings for routing-style operations.
+  #
+  finishing:
+    type: object
+    description: Optional finishing pass settings for routing-style operations.
+    properties:
+
+      # If greater than zero, leave this radial clearance for a finishing pass.
+      #
+      # Uses the shared size validator from units.yaml.
+      #
+      clearance:
+        description: If greater than zero, perform a finishing pass using this clearance.
+        default: "0.1mm"
+        $ref: "units.yaml#/$defs/size"
+
+      # Finishing pass cutting direction.
+      #
+      direction:
+        type: string
+        enum: [conventional, climb]
+        default: climb
+        description: Finishing pass cutting direction.
+
+      # Operation families to which the finishing pass applies.
+      #
+      # Valid values:
+      #   all
+      #   holes
+      #   oblong
+      #   slots
+      #   edge
+      #
+      applies_to:
+        type: array
+        items:
+          type: string
+          enum: [all, holes, oblong, slots, edge]
+        uniqueItems: true
+        default: [all]
+        description: Operation families to which the finishing pass applies.
+
+    additionalProperties: false
+
+required:
+  - id
+  - name
+  - cnc
+  - fixture
+  - toolset
+  - operations
+  - strategies
+  - holes
+  - edge
+  - finishing
+  - exit_clearance
+
+additionalProperties: false
