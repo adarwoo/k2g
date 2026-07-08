@@ -9,7 +9,6 @@ members = [
     ".",
     "xtask",
 ]
-resolver = 2
 
 [dependencies]
 kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
