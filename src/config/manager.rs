@@ -29,7 +29,7 @@ impl YamlConfigManager {
         schema_dir: &Path,
         config_dir: &Path,
     ) -> Result<Self, ConfigError> {
-        let schema_path = schema_dir.join(format!("{}_schema{}", section_name, SCHEMA_SUFFIX));
+        let schema_path = Self::resolve_schema_path(schema_dir, section_name);
         let config_path = config_dir.join(format!("{}{}", section_name, SCHEMA_SUFFIX));
 
         // --- Load & compile schema ---
@@ -46,6 +46,33 @@ impl YamlConfigManager {
 
         manager.load_content();
         Ok(manager)
+    }
+
+    fn resolve_schema_path(schema_dir: &Path, section_name: &str) -> PathBuf {
+        let mapped = match section_name {
+            "global.setting" | "global_settings" => "settings",
+            "cnc_profile" => "cnc",
+            "fixture_profile" => "fixture",
+            "process_profile" => "processing",
+            "toolset_profile" => "toolset",
+            _ => section_name,
+        };
+
+        let candidates = [
+            format!("{}{}", mapped, SCHEMA_SUFFIX),
+            format!("{}_schema{}", mapped, SCHEMA_SUFFIX),
+            format!("{}{}", section_name, SCHEMA_SUFFIX),
+            format!("{}_schema{}", section_name, SCHEMA_SUFFIX),
+        ];
+
+        for candidate in candidates {
+            let path = schema_dir.join(candidate);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        schema_dir.join(format!("{}{}", mapped, SCHEMA_SUFFIX))
     }
 
     /// Load and parse a YAML schema file into a serde_json::Value

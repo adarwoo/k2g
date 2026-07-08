@@ -1,0 +1,168 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "catalog.yaml"
+
+title: Tool Catalog
+description: >
+  Read-only tool catalog schema. A catalog is intended to be created and
+  maintained outside the CAM tool by a tool manufacturer, distributor, retailer,
+  or external catalog-generation process.
+
+  Each catalog tool has a UUIDv7 `id`. Stock items and persisted projects can
+  retain that UUIDv7 as a source reference. If the catalog or item is later
+  missing, stock/project data may still carry a full tool snapshot and remain
+  operational.
+
+  Dimensions and machining parameters are stored as unit-bearing values
+  validated through units.yaml. There are no section-level default units: every
+  dimensional or machining parameter carries its own unit.
+
+  This schema references shared definitions from files located in the same
+  directory:
+    - id.yaml
+    - units.yaml
+
+type: object
+
+required: [name, sections]
+additionalProperties: true
+
+properties:
+
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
+  # Catalog/vendor name.
+  name:
+    type: string
+    minLength: 1
+    description: Vendor, manufacturer, retailer, or catalog name.
+
+  # Optional catalog description.
+  description:
+    type: string
+    description: Optional free-text catalog description.
+
+  # Tool sections, usually product series, family, category, or material group.
+  sections:
+    type: array
+    minItems: 1
+    description: Tool sections, one per product series, family, or category.
+    items:
+      $ref: "#/$defs/section"
+
+$defs:
+
+  # ---------------------------------------------------------------------------
+  # section
+  # ---------------------------------------------------------------------------
+  # A catalog section groups related tools.
+  #
+  section:
+    type: object
+    required: [name, tools]
+    additionalProperties: true
+    properties:
+      name:
+        type: string
+        minLength: 1
+        description: Section name.
+      description:
+        type: string
+        description: Optional section description.
+      tools:
+        type: array
+        description: List of tools in this section. May be empty.
+        items:
+          $ref: "#/$defs/tool"
+
+  # ---------------------------------------------------------------------------
+  # tool
+  # ---------------------------------------------------------------------------
+  # A single catalog tool entry.
+  #
+  # The required UUIDv7 id is the stable catalog item reference used by stock
+  # and project files.
+  #
+  tool:
+    type: object
+    required: [id, type, diameter, point_angle, z_min_depth]
+    additionalProperties: true
+    properties:
+
+      # Stable catalog tool item ID.
+      id:
+        description: Stable UUIDv7 catalog tool item ID.
+        $ref: "id.yaml#/$defs/uuid_v7"
+
+      # Manufacturer SKU or part number.
+      sku:
+        anyOf:
+          - type: string
+            minLength: 1
+          - type: "null"
+        description: Manufacturer SKU or part number.
+
+      # Tool type discriminator.
+      type:
+        type: string
+        enum: [drillbit, routerbit, engraver, vbit, endmill]
+        description: Tool type discriminator.
+
+      # Geometry.
+      diameter:
+        description: Nominal tool diameter.
+        $ref: "units.yaml#/$defs/size"
+      flute_length:
+        description: Flute length.
+        $ref: "units.yaml#/$defs/size"
+      point_angle:
+        description: Tool point angle.
+        $ref: "units.yaml#/$defs/angle"
+      z_min_depth:
+        description: Minimum recommended/useful depth.
+        $ref: "units.yaml#/$defs/size"
+      tip_diameter:
+        description: Tip diameter, important for engravers and V-bits.
+        $ref: "units.yaml#/$defs/size"
+
+      # Recommended machining parameters.
+      spindle_rpm:
+        description: Recommended spindle speed.
+        $ref: "units.yaml#/$defs/rpm"
+      z_feed:
+        description: Recommended Z/plunge feed rate.
+        $ref: "units.yaml#/$defs/feed"
+      table_feed:
+        description: Recommended XY/table feed rate.
+        $ref: "units.yaml#/$defs/feed"
+
+      # Free-text catalog notes.
+      notes:
+        type: string
+        description: Free-text note such as substrate, coating, or caveat.
+
+    allOf:
+      - if:
+          properties:
+            type:
+              const: drillbit
+          required: [type]
+        then:
+          required: [spindle_rpm, z_feed]
+      - if:
+          properties:
+            type:
+              enum: [routerbit, endmill]
+          required: [type]
+        then:
+          required: [spindle_rpm, z_feed, table_feed]
+      - if:
+          properties:
+            type:
+              enum: [engraver, vbit]
+          required: [type]
+        then:
+          required: [spindle_rpm, z_feed, table_feed, tip_diameter]

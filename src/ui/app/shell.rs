@@ -27,11 +27,11 @@ pub fn AppTopBar(
     let machine_name = snapshot
         .selected_machine()
         .map(|machine| machine.name.clone())
-        .unwrap_or_else(|| "No CNC profile".to_string());
+        .unwrap_or_else(|| "No CNC selected".to_string());
     let process_profile_name = snapshot
         .selected_process_profile()
         .map(|profile| profile.name.clone())
-        .unwrap_or_else(|| "No process profile".to_string());
+        .unwrap_or_else(|| "No processing selected".to_string());
     let board_name = snapshot
         .board
         .as_ref()
@@ -78,7 +78,7 @@ pub fn AppTopBar(
             }
 
             div { class: "topbar-board",
-                span { class: "topbar-label", "Process Profile" }
+                span { class: "topbar-label", "Processing" }
                 span { class: if has_process_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
                     "{process_profile_name}"
                 }
@@ -242,25 +242,31 @@ pub fn DiagnosticsBanner(
 pub fn NavigationRail(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let nav_items = [
-        Screen::Project,
-        Screen::CncProfiles,
-        Screen::FixtureProfiles,
-        Screen::ProcessProfiles,
-        Screen::Stock,
-        Screen::Catalog,
+        Some(Screen::Project),
+        None,
+        Some(Screen::ProcessProfiles),
+        Some(Screen::CncProfiles),
+        Some(Screen::FixtureProfiles),
+        None,
+        Some(Screen::Stock),
+        Some(Screen::Catalog),
     ];
 
     rsx! {
         aside { class: "shell-rail",
-            for screen in nav_items {
-                button {
-                    key: "{screen.key()}",
-                    class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
-                    onclick: move |_| state.with_mut(|s| s.select_screen(screen)),
-                    span { class: "rail-button-content",
-                        span { class: "rail-button-icon", {rail_icon(screen)} }
-                        span { class: "rail-button-text", "{screen.label()}" }
+            for (idx , item) in nav_items.iter().enumerate() {
+                if let Some(screen) = *item {
+                    button {
+                        key: "{screen.key()}",
+                        class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
+                        onclick: move |_| state.with_mut(|s| s.select_screen(screen)),
+                        span { class: "rail-button-content",
+                            span { class: "rail-button-icon", {rail_icon(screen)} }
+                            span { class: "rail-button-text", "{screen.label()}" }
+                        }
                     }
+                } else {
+                    div { key: "sep-{idx}", class: "rail-separator" }
                 }
             }
         }

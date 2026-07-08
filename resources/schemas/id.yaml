@@ -1,0 +1,89 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "id.yaml"
+
+title: UUIDv7 Identifier Definitions
+description: >
+  Shared definitions for UUID version 7 identifiers used by CAM schemas.
+  UUIDv7 values are stored as strings in canonical UUID text form.
+
+$defs:
+
+  # ---------------------------------------------------------------------------
+  # uuid_v7
+  # ---------------------------------------------------------------------------
+  # UUID version 7 identifier.
+  #
+  # Expected format:
+  #   xxxxxxxx-xxxx-7xxx-yxxx-xxxxxxxxxxxx
+  #
+  # Where:
+  #   - x is a hexadecimal digit: 0-9, a-f, A-F
+  #   - the first digit of the third group must be 7, meaning UUID version 7
+  #   - y must be one of 8, 9, a, b, A, or B, meaning RFC 4122/RFC 9562 variant
+  #
+  # Valid examples:
+  #   "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #   "0194fd2c-5f2e-7a9d-9a76-3b2b9fbc3f11"
+  #   "0194FD2C-5F2E-7A9D-9A76-3B2B9FBC3F11"
+  #
+  # Rejected examples:
+  #   "0194fd2c-5f2e-4a9d-9a76-3b2b9fbc3f11"  # UUIDv4, not UUIDv7
+  #   "0194fd2c-5f2e-7a9d-7a76-3b2b9fbc3f11"  # invalid variant
+  #   "0194fd2c5f2e7a9d9a763b2b9fbc3f11"      # missing hyphens
+  #   "not-a-uuid"
+  #
+  # Notes:
+  #   - This validates the textual structure, version nibble, and variant bits.
+  #   - It does not validate timestamp monotonicity or generation quality.
+  #   - JSON Schema's built-in format: uuid validates UUID shape in general,
+  #     but not specifically UUID version 7, so the regex is required.
+  #
+  uuid_v7:
+    type: string
+    format: uuid
+    pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+
+  # ---------------------------------------------------------------------------
+  # uuid_v7_or_null
+  # ---------------------------------------------------------------------------
+  # Optional UUIDv7 identifier.
+  #
+  # Use this for fields that may be explicitly null, for example:
+  #   - parent_id
+  #   - previous_operation_id
+  #   - optional tool reference
+  #
+  # Valid examples:
+  #   null
+  #   "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  uuid_v7_or_null:
+    anyOf:
+      - type: "null"
+      - $ref: "#/$defs/uuid_v7"
+
+  # ---------------------------------------------------------------------------
+  # id_obj
+  # ---------------------------------------------------------------------------
+  # Small reusable object containing a required UUIDv7 id field.
+  #
+  # Use with allOf when a schema object must have an id:
+  #
+  #   allOf:
+  #     - $ref: "id.yaml#/$defs/id_obj"
+  #     - type: object
+  #       properties:
+  #         name:
+  #           type: string
+  #
+  # Valid example:
+  #   id: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  id_obj:
+    type: object
+    properties:
+      id:
+        description: Stable UUIDv7 identifier.
+        $ref: "#/$defs/uuid_v7"
+    required:
+      - id

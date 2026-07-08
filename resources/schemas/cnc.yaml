@@ -1,0 +1,561 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "cnc.yaml"
+
+title: CNC Profile
+description: >
+  CNC profile persisted configuration. This file controls the emitted GCode
+  templates various CNC profiles. Templates are evaluated through the
+  application's RHAI expression path. Template text may include placeholders in
+  braces, for example {x}, {y}, {z_safe}.
+
+  This schema references shared UUID and unit definitions from files located in
+  the same directory:
+    - id.yaml
+    - units.yaml
+
+type: object
+
+properties:
+
+  # Version of this schema
+  schema_version:
+    type: integer
+    const: 1
+    description: Schema/data format version for this file.
+
+  # ---------------------------------------------------------------------------
+  # id
+  # ---------------------------------------------------------------------------
+  # Stable unique CNC profile identifier.
+  #
+  # Uses the shared UUIDv7 validator from id.yaml.
+  #
+  # Valid example:
+  #   id: "01890fdb-4daf-7a37-8f6a-9dc397e5b4ef"
+  #
+  id:
+    description: Unique CNC profile ID.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  # ---------------------------------------------------------------------------
+  # machine
+  # ---------------------------------------------------------------------------
+  # Physical machine configuration.
+  #
+  machine:
+    description: Physical machine configuration.
+    type: object
+    properties:
+
+      # -----------------------------------------------------------------------
+      # fixture_plate
+      # -----------------------------------------------------------------------
+      # Maximum usable fixture plate size.
+      #
+      fixture_plate:
+        description: Maximum usable fixture plate size.
+        type: object
+        properties:
+
+          # Maximum usable X travel / fixture plate width.
+          #
+          # Valid examples:
+          #   x: "300 mm"
+          #   x: "300mm"
+          #   x: "11.81 in"
+          #   x: "11 3/4\""
+          #
+          x:
+            description: Maximum X axis travel.
+            default: "300mm"
+            $ref: "units.yaml#/$defs/size"
+
+          # Maximum usable Y travel / fixture plate height.
+          #
+          # Valid examples:
+          #   y: "200 mm"
+          #   y: "200mm"
+          #   y: "7.87 in"
+          #
+          y:
+            description: Maximum Y axis travel.
+            default: "200mm"
+            $ref: "units.yaml#/$defs/size"
+
+        required: [x, y]
+        additionalProperties: false
+
+      # -----------------------------------------------------------------------
+      # max_feed_rate
+      # -----------------------------------------------------------------------
+      # Maximum configured feed rate.
+      #
+      # Uses the shared feed validator from units.yaml.
+      #
+      # Valid examples:
+      #   max_feed_rate: "2000 mm/min"
+      #   max_feed_rate: "2000mm/min"
+      #   max_feed_rate: "78.74 in/min"
+      #   max_feed_rate: "78.74 ipm"
+      #
+      max_feed_rate:
+        description: Maximum feed rate.
+        default: "2000mm/min"
+        $ref: "units.yaml#/$defs/feed"
+
+      # -----------------------------------------------------------------------
+      # spindle_rpm_min
+      # -----------------------------------------------------------------------
+      # Minimum spindle speed. Unit is optional and defaults to RPM in the
+      # application.
+      #
+      # Valid examples:
+      #   spindle_rpm_min: 1000
+      #   spindle_rpm_min: "1000"
+      #   spindle_rpm_min: "1000 rpm"
+      #   spindle_rpm_min: "1000rpm"
+      #
+      spindle_rpm_min:
+        description: Minimum spindle speed. Bare numbers are interpreted as rpm.
+        default: "10000rpm"
+        $ref: "units.yaml#/$defs/rpm"
+
+      # -----------------------------------------------------------------------
+      # spindle_rpm_max
+      # -----------------------------------------------------------------------
+      # Maximum spindle speed. Unit is optional and defaults to RPM in the
+      # application.
+      #
+      # Valid examples:
+      #   spindle_rpm_max: 24000
+      #   spindle_rpm_max: "24000"
+      #   spindle_rpm_max: "24000 rpm"
+      #   spindle_rpm_max: "24000rpm"
+      #
+      spindle_rpm_max:
+        description: Maximum spindle speed. Bare numbers are interpreted as rpm.
+        default: "24000rpm"
+        $ref: "units.yaml#/$defs/rpm"
+
+      # -----------------------------------------------------------------------
+      # atc_slot_count
+      # -----------------------------------------------------------------------
+      # Number of automatic tool changer slots.
+      #
+      # 0 means ATC is disabled and manual tool change is used.
+      #
+      # Valid examples:
+      #   atc_slot_count: 0
+      #   atc_slot_count: 12
+      #
+      atc_slot_count:
+        description: Number of ATC slots. 0 means ATC is disabled.
+        type: integer
+        minimum: 0
+        default: 0
+
+      # -----------------------------------------------------------------------
+      # origin
+      # -----------------------------------------------------------------------
+      # Machine coordinate origin orientation.
+      #
+      origin:
+        description: Machine coordinate origin orientation.
+        type: object
+        properties:
+
+          # X axis zero orientation.
+          #
+          # Valid examples:
+          #   x0: left
+          #   x0: right
+          #   x0: front
+          #   x0: back
+          #
+          x0:
+            description: X axis zero orientation.
+            type: string
+            enum: [left, right, front, back]
+            default: Left
+
+          # Y axis zero orientation.
+          #
+          # Valid examples:
+          #   y0: front
+          #   y0: back
+          #   y0: left
+          #   y0: right
+          #
+          y0:
+            description: Y axis zero orientation.
+            type: string
+            enum: [front, back, left, right]
+            default: Front
+
+        required: [x0, y0]
+        additionalProperties: false
+
+      # -----------------------------------------------------------------------
+      # scaling
+      # -----------------------------------------------------------------------
+      # Axis scaling factors.
+      #
+      # 1.0 means no scaling.
+      #
+      scaling:
+        description: >
+          Axis scaling multipliers. A value of 1.0 means no scaling. 
+          Values are applied as output = input * scaling.
+
+        type: object
+        properties:
+
+          # X axis scaling multiplier.
+          #
+          # Valid examples:
+          #   x: 1.0
+          #   x: 0.9995
+          #
+          x:
+            description: X axis scaling multiplier.
+            type: number
+            default: 1.0
+
+          # Y axis scaling multiplier.
+          #
+          # Valid examples:
+          #   y: 1.0
+          #   y: 1.0002
+          #
+          y:
+            description: Y axis scaling multiplier.
+            type: number
+            default: 1.0
+
+        required: [x, y]
+        additionalProperties: false
+
+      # -----------------------------------------------------------------------
+      # line_numbering_increment
+      # -----------------------------------------------------------------------
+      # Program line numbering increment.
+      #
+      # 0 disables line numbering.
+      #
+      # Valid examples:
+      #   line_numbering: 0
+      #   line_numbering: 10
+      #
+      line_numbering_increment:
+        description: Program line numbering increment. 0 means none.
+        type: integer
+        minimum: 0
+        default: 10
+
+      # -----------------------------------------------------------------------
+      # resolution
+      # -----------------------------------------------------------------------
+      # Best achievable numerical resolution on the CNC.
+      #
+      # All emitted coordinates can be rounded to this resolution going forward.
+      # Uses the shared size validator from units.yaml; typical values are in um.
+      #
+      # Valid examples:
+      #   resolution: "1 um"
+      #   resolution: "1um"
+      #   resolution: "0.001 mm"
+      #   resolution: "0.0001 in"
+      #   resolution: "0.1 thou"
+      #
+      resolution:
+        description: >
+          Best achievable resolution on the CNC. All coordinates can be rounded
+          to this resolution going forward.
+        default: "1um"
+        $ref: "units.yaml#/$defs/size"
+
+    required:
+      - fixture_plate
+      - max_feed_rate
+      - spindle_rpm_min
+      - spindle_rpm_max
+      - spindle_start_delay_s
+      - spindle_stop_delay_s
+      - atc_slot_count
+      - origin
+      - scaling
+      - line_numbering_increment
+      - resolution
+
+    additionalProperties: false
+
+# ---------------------------------------------------------------------------
+  # primitives
+  # ---------------------------------------------------------------------------
+  # Primitive templates evaluated through RHAI for CNC-specific GCode emission.
+  #
+  # Unit rendering model:
+  #   - Coordinate, distance, feed, and spindle values are rendered by the
+  #     application according to the currently active output unit system.
+  #   - The active output unit can be changed from a RHAI expression by calling
+  #     use_metric() or use_imperial().
+  #   - Calling use_metric() should emit the controller command for metric mode,
+  #     typically G21.
+  #   - Calling use_imperial() should emit the controller command for imperial
+  #     mode, typically G20.
+  #   - After the unit switch, subsequent rendered values are formatted in that
+  #     selected unit system until switched again.
+  #
+  # Template expression model:
+  #   - Text inside braces is evaluated through the application's RHAI path.
+  #   - Simple placeholders can be variable names, for example {x}, {y}, {rpm}.
+  #   - Placeholders may also be full RHAI expressions, for example:
+  #       {x * 0.001}
+  #       {rpm.clamp(1000, 24000)}
+  #       {if slot > 0 { slot } else { 1 }}
+  #   - The available variables and helper functions are defined by the
+  #     application for each primitive.
+  #
+  # Complex RHAI examples:
+  #
+  #   Example: scale a coordinate before rendering:
+  #
+  #     G1 X{x * 0.001} Y{y * 0.001} F{xy_feedrate}
+  #
+  #   Example: clamp spindle speed:
+  #
+  #     S{rpm.clamp(1000, 24000)}
+  #
+  #   Example: conditional coolant command:
+  #
+  #     {if coolant { "M08" } else { "" }}
+  #
+  #   Example: expand several passes from an array. The exact syntax depends on
+  #   how the application exposes output accumulation to RHAI, but the intent is
+  #   that an expression can build multi-line GCode:
+  #
+  #     {let out = "";
+  #      for z in passes {
+  #        out += `G1 Z${z} F${z_feedrate}\n`;
+  #        out += `G1 X${x} Y${y} F${xy_feedrate}\n`;
+  #      }
+  #      out}
+  #
+  # Notes:
+  #   - These templates are strings; this schema validates their presence and
+  #     type, not whether each RHAI expression is semantically valid.
+  #   - The application should perform template compilation/evaluation checks
+  #     separately when loading or editing the CNC profile.
+  #
+  primitives:
+    description: Primitive templates evaluated through RHAI for CNC-specific GCode emission.
+    type: object
+    properties:
+
+      # Switch output rendering to metric units.
+      #
+      # Default emits G21.
+      #
+      use_metric:
+        description: Special function which switches value rendering to metric.
+        type: string
+        default: |
+          G21
+
+      # Switch output rendering to imperial units.
+      #
+      # Default emits G20.
+      #
+      use_imperial:
+        description: Special function which switches value rendering to imperial.
+        type: string
+        default: |
+          G20
+
+      # Program initialization block.
+      #
+      # Expected placeholders include:
+      #   {pcb_filename}
+      #   {timestamp}
+      #   {use_mm}
+      #   {z_safe}
+      #
+      initialise:
+        description: Program initialization block.
+        type: string
+        default: |
+          (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+          (Reset all back to safe defaults)
+          G17 G54 G40 G49 G80 G90
+          {use_metric}
+          G10 P0
+          (Establish the Z-Safe)
+          G0 Z{z_safe}
+
+      # Rapid positioning move primitive.
+      #
+      # Expected placeholders include:
+      #   {x}
+      #   {y}
+      #   {z}
+      #
+      rapid_move:
+        description: Positioning move primitive. Takes x, y, and z.
+        type: string
+        default: G0 X{x} Y{y} Z{z}
+
+      # Linear cutting move primitive.
+      #
+      # Expected placeholders include:
+      #   {x}
+      #   {y}
+      #   {z}
+      #   {s}
+      #
+      linear_cut:
+        description: Linear cutting primitive. Takes x, y, z, and s.
+        type: string
+        default: G1 X{x} Y{y} Z{z} S{s}
+
+      # Start spindle primitive.
+      #
+      # Expected placeholders include:
+      #   {rpm}
+      #
+      start_spindle:
+        description: Start spindle primitive.
+        type: string
+        default: |
+          S{rpm}
+          M03
+
+      # Stop spindle primitive.
+      #
+      stop_spindle:
+        description: Stop spindle primitive.
+        type: string
+        default: M05
+
+      # Drill cycle primitive.
+      #
+      # Expected placeholders include:
+      #   {x}
+      #   {y}
+      #   {z_bottom}
+      #   {z_retract}
+      #   {z_feedrate}
+      #
+      drill:
+        description: Drill primitive template.
+        type: string
+        default: G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+
+      # Peck drill cycle primitive.
+      #
+      # Expected placeholders include:
+      #   {x}
+      #   {y}
+      #   {z_bottom}
+      #   {z_retract}
+      #   {peck}
+      #   {z_feedrate}
+      #
+      peck_drill:
+        description: Peck drill primitive template.
+        type: string
+        default: G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}
+
+      # Arc cutting primitive.
+      #
+      # Expected placeholders include:
+      #   {arc_cmd}
+      #   {x}
+      #   {y}
+      #   {i}
+      #   {j}
+      #   {xy_feedrate}
+      #
+      cut_arc:
+        description: Arc cutting primitive template.
+        type: string
+        default: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+
+      # Bezier cutting primitive.
+      #
+      # May be native GCode for a controller that supports it, or a placeholder
+      # for expansion into arcs/segments by the application.
+      #
+      cut_bezier:
+        description: Bezier primitive template. May be native or an approximation sequence.
+        type: string
+        default: |
+          ; cut_bezier fallback
+          ; implementation may expand into one or more arc segments
+
+      # Tool change primitive.
+      #
+      # Expected placeholders include:
+      #   {manual_message}
+      #   {slot}
+      #   {rpm}
+      #
+      change_tool:
+        description: Tool change primitive template.
+        type: string
+        default: |
+          M05
+          {manual_message}
+          T{slot} M06
+          S{rpm}
+
+      # Program finalization block.
+      #
+      conclude:
+        description: Program conclude/finalization block.
+        type: string
+        default: |
+          (end of file)
+
+      # Optional pause/message primitive.
+      #
+      # Expected placeholders include:
+      #   {message}
+      #
+      pause:
+        description: Optional pause/message insertion primitive.
+        type: string
+        default: |
+          MSG {message}
+          M01
+
+      # Optional comment/banner primitive.
+      #
+      # Expected placeholders include:
+      #   {text}
+      #
+      banner:
+        description: Optional comment/banner insertion primitive.
+        type: string
+        default: "( {text} )"
+
+    required:
+      - initialise
+      - rapid_move
+      - linear_cut
+      - start_spindle
+      - stop_spindle
+      - drill
+      - peck_drill
+      - cut_arc
+      - cut_bezier
+      - change_tool
+      - conclude
+
+    additionalProperties: false
+
+required:
+  - id
+  - machine
+  - primitives
+
+additionalProperties: false

@@ -325,6 +325,12 @@ body {
     letter-spacing: 0.04em;
 }
 
+.rail-separator {
+    height: 1px;
+    background: color-mix(in srgb, var(--border) 85%, transparent);
+    margin: 2px 4px;
+}
+
 .shell-content {
     flex: 1;
     min-width: 0;

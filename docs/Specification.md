@@ -24,7 +24,7 @@ Primary navigation areas:
 
 - Project
 ----------------
-- Process profiles
+- Processing profiles
 - CNC profiles
 - Fixture profiles
 - Toolset profiles
@@ -155,7 +155,7 @@ For List and Any modes:
 #### 6.1.2 Profile Identity and References
 
 - All persistent profiles shall possess a globally unique immutable identifier.
-- Profile identifiers shall be 256-bit UUIDs.
+- Profile identifiers shall be UUIDv7
 - The UUID is the canonical identity of a profile and shall remain unchanged for the lifetime of that profile.
 - Profile names are user-facing labels only and are not used for reference resolution.
 - All profile-to-profile references and all project-to-profile references shall be performed using UUIDs.
@@ -259,7 +259,7 @@ General fields include:
   - X0: Left, Right, Front, Back
   - Y0: Front, Back, Left, Right
 - XY scaling percent
-- Program line numbering toggle and increment value
+- Program line numbering increment value (or 0 for off)
 
 ### 6.5.1 CNC Field Editability by Profile Origin
 
@@ -830,8 +830,8 @@ If tab count is 0, VGroove options are shown:
 
 ### 8.7 Tool Selection Strategy
 
-- Oversize allowance percent (for hole matching, example default 5%)
-- Undersize allowance percent (for fallback matching, example default 10%)
+- Oversize allowance mutliplier or bounded limit
+- Undersize allowance
 - Allow routing holes toggle
   - When enabled: large holes without a matching drill can be routed
   - Drill-then-route sub-option: drill to nearest smaller size first, then enlarge by routing
@@ -877,6 +877,8 @@ Algorithm definition (normative):
      - If pilot-hole option is enabled, attempt to add a pilot drill pass before routing.
      - Pilot selection rule: choose the largest valid drill bit with diameter strictly greater than the selected router bit diameter.
      - If pilot selection fails, fallback is full routing only (router plunge then elliptical interpolation to cut the hole).
+   - For routing out, check for inner angles
+     - Inner angles of 90degrees calls for drilling the corners using the smallest drill
    - Recommended score form:
      - $S(h,t)=W_s\cdot strategy(h,t)+W_f\cdot fit(h,t)+W_p\cdot pref(t)+W_r\cdot reuse(t)$
      - with $W_s$ dominant so drilling wins unless no valid drill exists.

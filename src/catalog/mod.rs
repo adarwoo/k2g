@@ -3,7 +3,7 @@
 //! Provides types, loading, validation, and first-run initialization for
 //! the tool catalog system.  All catalogs are stored as YAML files in the
 //! user data directory under `catalogs/`.  Each file is validated against
-//! the embedded `catalog_schema.yaml` on load.
+//! the embedded `catalog.yaml` on load.
 //!
 //! # Compound tool IDs
 //! To prevent name clashes when multiple catalog files are loaded, every tool

@@ -7,6 +7,8 @@
 
 use log::{info, warn};
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use crate::units::{Angle, AngleUnit, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, RotationalSpeedUnit};
@@ -16,20 +18,32 @@ use crate::user_path::{ensure_app_dirs, UserPathError};
 // Embedded resource files (compiled into the binary)
 // ---------------------------------------------------------------------------
 
+macro_rules! embedded_schema {
+    ($name:literal, $path:literal) => {
+        ($name, include_str!($path))
+    };
+}
+
+macro_rules! embedded_schemas {
+    ($($name:literal => $path:literal),+ $(,)?) => {
+        &[
+            $(embedded_schema!($name, $path),)+
+        ]
+    };
+}
+
 // --- Schemas (always overwritten on startup) ---
-const SCHEMAS: &[(&str, &str)] = &[
-    ("catalog_schema", include_str!("../../resources/schemas/catalog.schema.yaml")),
-    (
-        "global.setting_schema",
-        include_str!("../../resources/schemas/global_settings.schema.yaml"),
-    ),
-    (
-        "cnc_profile_schema",
-        include_str!("../../resources/schemas/cnc_profile.schema.yaml"),
-    ),
-    ("process_profile_schema", include_str!("../../resources/schemas/process_profile.schema.yaml")),
-    ("stock_schema", include_str!("../../resources/schemas/stock.schema.yaml")),
-];
+const SCHEMAS: &[(&str, &str)] = embedded_schemas!(
+    "catalog" => "../../resources/schemas/catalog.yaml",
+    "settings" => "../../resources/schemas/settings.yaml",
+    "cnc" => "../../resources/schemas/cnc.yaml",
+    "fixture" => "../../resources/schemas/fixture.yaml",
+    "processing" => "../../resources/schemas/processing.yaml",
+    "toolset" => "../../resources/schemas/toolset.yaml",
+    "stock" => "../../resources/schemas/stock.yaml",
+    "id" => "../../resources/schemas/id.yaml",
+    "units" => "../../resources/schemas/units.yaml",
+);
 
 // --- Catalogs (written only on first run; user edits are preserved) ---
 const CATALOGS: &[(&str, &str)] = &[
@@ -153,7 +167,7 @@ pub(crate) fn normalize_catalog_fields(
         return false;
     };
 
-    for section in sections {
+    for (section_idx, section) in sections.iter_mut().enumerate() {
         if inject_missing && !section.get("default_flute_length_unit").is_some() {
             if let Some(obj) = section.as_object_mut() {
                 obj.insert("default_flute_length_unit".to_string(), Value::String("mm".to_string()));
@@ -182,7 +196,7 @@ pub(crate) fn normalize_catalog_fields(
             continue;
         };
 
-        for tool in tools {
+        for (tool_idx, tool) in tools.iter_mut().enumerate() {
             let Some(obj) = tool.as_object_mut() else {
                 continue;
             };
@@ -228,7 +242,19 @@ pub(crate) fn normalize_catalog_fields(
                 }
             }
 
-            if inject_missing && !obj.contains_key("sku_name") {
+            // Accept legacy key name from older catalogs and migrate it to `sku`.
+            if obj.get("sku").is_none() {
+                if let Some(legacy_sku) = obj.get("sku_name").and_then(Value::as_str) {
+                    obj.insert("sku".to_string(), Value::String(legacy_sku.to_string()));
+                    changed = true;
+                }
+            }
+
+            if canonicalize_typed_values && obj.remove("sku_name").is_some() {
+                changed = true;
+            }
+
+            if inject_missing && !obj.contains_key("sku") {
                 let tool_kind = if tool_type == "routerbit" { "R" } else { "D" };
                 let sku = format!(
                     "{}-{}-{}{}",
@@ -237,7 +263,26 @@ pub(crate) fn normalize_catalog_fields(
                     tool_kind,
                     format_diameter_token(diameter_mm)
                 );
-                obj.insert("sku_name".to_string(), Value::String(sku));
+                obj.insert("sku".to_string(), Value::String(sku));
+                changed = true;
+            }
+
+            // New schema requires a stable UUIDv7-like id for each catalog tool.
+            if !obj.contains_key("id") {
+                let sku_for_id = obj
+                    .get("sku")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let id = stable_uuid_v7(&[
+                    stem,
+                    &section_slug,
+                    &tool_type,
+                    &format!("{diameter_mm:.6}"),
+                    sku_for_id,
+                    &section_idx.to_string(),
+                    &tool_idx.to_string(),
+                ]);
+                obj.insert("id".to_string(), Value::String(id));
                 changed = true;
             }
 
@@ -444,6 +489,49 @@ fn slugify(input: &str) -> String {
     } else {
         out
     }
+}
+
+fn stable_uuid_v7(parts: &[&str]) -> String {
+    let mut h1 = DefaultHasher::new();
+    for part in parts {
+        part.hash(&mut h1);
+    }
+    let a = h1.finish();
+
+    let mut h2 = DefaultHasher::new();
+    "k2g-catalog-tool".hash(&mut h2);
+    for part in parts.iter().rev() {
+        part.hash(&mut h2);
+    }
+    let b = h2.finish();
+
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&a.to_be_bytes());
+    bytes[8..].copy_from_slice(&b.to_be_bytes());
+
+    // UUID version 7, RFC variant.
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
 }
 
 fn _parse_rpm_value(value: &Value) -> Option<RotationalSpeed> {
