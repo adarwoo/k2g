@@ -5,7 +5,11 @@ edition = "2021"
 description = "GCode generator"
 
 [workspace]
-members = ["xtask",]
+members = [
+    ".",
+    "xtask",
+]
+resolver = 2
 
 [dependencies]
 kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
@@ -24,3 +28,5 @@ base64 = "0.22"
 rfd = "0.15"
 clipper2-rust = "1.0"
 
+[dev-dependencies]
+tempfile = "3"
