@@ -64,6 +64,12 @@ pub fn AppRoot() -> Element {
         }
     });
 
+    // Persist all mutable configuration domains automatically.
+    use_effect(move || {
+        let snapshot = state.read().clone();
+        snapshot.persist_all();
+    });
+
     let snapshot = state.read().clone();
     let error_count = snapshot.errors.iter().filter(|e| e.is_error).count();
     let warning_count = snapshot.errors.len().saturating_sub(error_count);

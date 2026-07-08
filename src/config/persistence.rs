@@ -21,6 +21,12 @@ pub struct PersistenceState {
     pub stock: Value,
     /// All CNC profiles indexed by ID
     pub cnc_profiles: BTreeMap<String, Value>,
+    /// All fixture profiles indexed by ID
+    pub fixture_profiles: BTreeMap<String, Value>,
+    /// All processing profiles indexed by ID
+    pub processing_profiles: BTreeMap<String, Value>,
+    /// All toolset profiles indexed by ID
+    pub toolset_profiles: BTreeMap<String, Value>,
     /// ID of currently selected process profile (from global settings)
     pub selected_process_profile_id: Option<String>,
 }
@@ -46,13 +52,19 @@ pub fn load_all_configs(
     let stock_mgr = YamlConfigManager::new("stock", schema_dir, &app_dirs.configs)?;
     let stock = stock_mgr.get_content().clone();
 
-    // Load all CNC profiles from cnc_profiles subdirectory
+    // Load all profile domains from their subdirectories.
     let cnc_profiles = load_cnc_profiles(&app_dirs.cnc_profiles, schema_dir)?;
+    let fixture_profiles = load_profiles_from_dir(&app_dirs.fixture_profiles)?;
+    let processing_profiles = load_profiles_from_dir(&app_dirs.processing_profiles)?;
+    let toolset_profiles = load_profiles_from_dir(&app_dirs.toolset_profiles)?;
 
     Ok(PersistenceState {
         global_settings,
         stock,
         cnc_profiles,
+        fixture_profiles,
+        processing_profiles,
+        toolset_profiles,
         selected_process_profile_id,
     })
 }
@@ -96,6 +108,60 @@ fn load_cnc_profiles(
     }
 
     info!("Loaded {} CNC profiles", profiles.len());
+    Ok(profiles)
+}
+
+fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>, ConfigError> {
+    let mut profiles = BTreeMap::new();
+
+    if !profiles_dir.exists() {
+        return Ok(profiles);
+    }
+
+    let entries = match fs::read_dir(profiles_dir) {
+        Ok(e) => e,
+        Err(err) => {
+            warn!("Failed to read profiles directory '{}': {}", profiles_dir.display(), err);
+            return Ok(profiles);
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path.extension().and_then(|s| s.to_str());
+        if ext != Some("yaml") && ext != Some("yml") {
+            continue;
+        }
+
+        let text = match fs::read_to_string(&path) {
+            Ok(v) => v,
+            Err(err) => {
+                warn!("Could not read profile '{}': {}", path.display(), err);
+                continue;
+            }
+        };
+
+        let yaml_value: serde_yaml::Value = match serde_yaml::from_str(&text) {
+            Ok(v) => v,
+            Err(err) => {
+                warn!("Could not parse profile '{}': {}", path.display(), err);
+                continue;
+            }
+        };
+
+        let json_value: Value = match serde_json::to_value(yaml_value) {
+            Ok(v) => v,
+            Err(err) => {
+                warn!("Could not convert profile '{}' to json: {}", path.display(), err);
+                continue;
+            }
+        };
+
+        if let Some(id) = json_value.get("id").and_then(Value::as_str) {
+            profiles.insert(id.to_string(), json_value);
+        }
+    }
+
     Ok(profiles)
 }
 
@@ -169,6 +235,34 @@ pub fn save_cnc_profile(
     Ok(())
 }
 
+pub fn save_cnc_profiles(
+    app_dirs: &AppDirs,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    save_profile_map(&app_dirs.cnc_profiles, profiles)
+}
+
+pub fn save_fixture_profiles(
+    app_dirs: &AppDirs,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    save_profile_map(&app_dirs.fixture_profiles, profiles)
+}
+
+pub fn save_processing_profiles(
+    app_dirs: &AppDirs,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    save_profile_map(&app_dirs.processing_profiles, profiles)
+}
+
+pub fn save_toolset_profiles(
+    app_dirs: &AppDirs,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    save_profile_map(&app_dirs.toolset_profiles, profiles)
+}
+
 /// Generic helper to save a config file as YAML
 #[allow(dead_code)]
 fn save_config_file(
@@ -200,5 +294,42 @@ fn save_config_file(
     })?;
 
     info!("Saved {}: {:?}", file_stem, file_path);
+    Ok(())
+}
+
+fn save_profile_map(
+    dir: &Path,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    fs::create_dir_all(dir).map_err(ConfigError::Io)?;
+
+    // Remove stale yaml files that no longer exist in memory.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            if ext != Some("yaml") && ext != Some("yml") {
+                continue;
+            }
+
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+
+            if !profiles.contains_key(stem) {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+
+    for (id, profile_data) in profiles {
+        let file_path = dir.join(format!("{}.yaml", id));
+        let yaml_value: serde_yaml::Value = serde_json::from_value(profile_data.clone())
+            .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
+        let yaml_str = serde_yaml::to_string(&yaml_value)
+            .map_err(|e| ConfigError::ConfigParse(e.to_string()))?;
+        fs::write(&file_path, yaml_str).map_err(ConfigError::Io)?;
+    }
+
     Ok(())
 }

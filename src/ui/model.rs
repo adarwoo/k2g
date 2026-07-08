@@ -4,7 +4,13 @@ use crate::board::BoardSnapshot;
 use crate::catalog::init::{catalog_dir, parse_catalog_with_backfill};
 use crate::catalog::types::{Catalog, ToolType};
 use crate::catalog::CatalogManager;
+use crate::config::{
+    save_cnc_profiles, save_fixture_profiles, save_global_settings, save_processing_profiles,
+    save_stock, save_toolset_profiles,
+};
 use crate::units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
+use crate::user_path::ensure_app_dirs;
+use serde_json::{json, Value};
 use super::persistence_state;
 
 #[derive(Clone, PartialEq)]
@@ -30,11 +36,11 @@ impl Screen {
     pub fn label(self) -> &'static str {
         match self {
             Self::Project => "Project",
-            Self::CncProfiles => "CNC Profiles",
+            Self::CncProfiles => "CNC",
             Self::FixtureProfiles => "Fixtures",
-            Self::ProcessProfiles => "Process Profiles",
-            Self::Stock => "Stock tools",
-            Self::Catalog => "Catalogs",
+            Self::ProcessProfiles => "Processing",
+            Self::Stock => "Stock",
+            Self::Catalog => "Catalog",
         }
     }
 
@@ -242,6 +248,7 @@ pub struct JobProfile {
     pub name: String,
     pub cnc_profile_id: String,
     pub fixture_profile_id: String,
+    pub default_operations: Vec<ProductionOperation>,
 }
 
 #[derive(Clone, Default)]
@@ -523,20 +530,30 @@ impl AtcRackStrategy {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ProductionOperation {
+    DrillLocatingPins,
     DrillPth,
     DrillNpth,
+    RouteBoard,
     MillBoard,
 }
 
 impl ProductionOperation {
-    pub fn all() -> [Self; 3] {
-        [Self::DrillPth, Self::DrillNpth, Self::MillBoard]
+    pub fn all() -> [Self; 5] {
+        [
+            Self::DrillLocatingPins,
+            Self::DrillPth,
+            Self::DrillNpth,
+            Self::RouteBoard,
+            Self::MillBoard,
+        ]
     }
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::DrillLocatingPins => "Drill Locating Pins",
             Self::DrillPth => "Drill Plated Through Holes (PTH)",
             Self::DrillNpth => "Drill Non-Plated Through Holes (NPTH)",
+            Self::RouteBoard => "Route Board Outline",
             Self::MillBoard => "Mill Board Outline",
         }
     }
@@ -854,8 +871,136 @@ impl UiState {
             board: board_snapshot,
         };
 
-        state.seed_rack_slots(8);
+        state.hydrate_from_persistence();
+        if state.rack_slots.is_empty() {
+            state.seed_rack_slots(8);
+        }
         state
+    }
+
+    pub fn hydrate_from_persistence(&mut self) {
+        let Some(persisted) = persistence_state() else {
+            return;
+        };
+
+        let persisted_machines: Vec<MachineProfile> = persisted
+            .cnc_profiles
+            .values()
+            .filter_map(machine_profile_from_value)
+            .collect();
+        if !persisted_machines.is_empty() {
+            self.machines = persisted_machines;
+            self.machine_mru.clear();
+            self.selected_machine_id = None;
+            self.show_first_launch = false;
+        }
+
+        let persisted_fixtures: Vec<FixtureProfile> = persisted
+            .fixture_profiles
+            .values()
+            .filter_map(fixture_profile_from_value)
+            .collect();
+        if !persisted_fixtures.is_empty() {
+            self.fixtures = persisted_fixtures;
+            self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
+        }
+
+        let persisted_process_profiles: Vec<JobProfile> = persisted
+            .processing_profiles
+            .values()
+            .filter_map(process_profile_from_value)
+            .collect();
+        if !persisted_process_profiles.is_empty() {
+            self.process_profiles = persisted_process_profiles;
+            self.selected_process_profile_id = None;
+        }
+
+        let persisted_tools = tools_from_stock_value(&persisted.stock);
+        if !persisted_tools.is_empty() {
+            self.tools = persisted_tools;
+        }
+
+        if let Some(toolset_slots) = load_toolset_slots(&persisted.toolset_profiles) {
+            self.rack_slots = toolset_slots;
+        }
+
+        let selected_process = persisted
+            .selected_process_profile_id
+            .clone()
+            .filter(|selected| {
+                self.process_profiles
+                    .iter()
+                    .any(|profile| profile.id == *selected)
+            })
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        if selected_process.is_some() {
+            self.select_process_profile_by_id(selected_process);
+        } else {
+            let selected_machine = self
+                .machines
+                .first()
+                .map(|machine| machine.id.clone());
+            self.select_machine_profile_by_id(selected_machine);
+            if self
+                .selected_fixture_id
+                .as_ref()
+                .map(|id| !self.fixtures.iter().any(|fixture| &fixture.id == id))
+                .unwrap_or(true)
+            {
+                self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
+            }
+        }
+
+        if self.machines.is_empty() {
+            self.show_first_launch = true;
+        }
+    }
+
+    pub fn persist_all(&self) {
+        let Ok(app_dirs) = ensure_app_dirs() else {
+            return;
+        };
+
+        let global_settings = json!({
+            "units": {
+                "system": self.unit_system.as_str(),
+                "size_unit": self.unit_system.length_unit_label(),
+                "speed_unit": self.unit_system.feed_unit_label(),
+            },
+            "theme": {
+                "mode": self.theme.as_str(),
+            },
+            "selected_process_profile_id": self.selected_process_profile_id,
+        });
+        let _ = save_global_settings(&app_dirs, &global_settings);
+
+        let cnc_profiles = self
+            .machines
+            .iter()
+            .map(|machine| (machine.id.clone(), machine_profile_to_value(machine)))
+            .collect::<BTreeMap<_, _>>();
+        let _ = save_cnc_profiles(&app_dirs, &cnc_profiles);
+
+        let fixture_profiles = self
+            .fixtures
+            .iter()
+            .map(|fixture| (fixture.id.clone(), fixture_profile_to_value(fixture)))
+            .collect::<BTreeMap<_, _>>();
+        let _ = save_fixture_profiles(&app_dirs, &fixture_profiles);
+
+        let processing_profiles = self
+            .process_profiles
+            .iter()
+            .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
+            .collect::<BTreeMap<_, _>>();
+        let _ = save_processing_profiles(&app_dirs, &processing_profiles);
+
+        let toolset_profiles = build_toolset_profiles(&self.rack_slots);
+        let _ = save_toolset_profiles(&app_dirs, &toolset_profiles);
+
+        let stock = stock_value_from_tools(&self.tools);
+        let _ = save_stock(&app_dirs, &stock);
     }
 
     pub fn selected_machine(&self) -> Option<&MachineProfile> {
@@ -874,6 +1019,169 @@ impl UiState {
         self.selected_process_profile_id
             .as_ref()
             .and_then(|id| self.process_profiles.iter().find(|profile| &profile.id == id))
+    }
+
+    pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
+        self.selected_process_profile_id = id.clone();
+
+        let Some(selected_id) = id else {
+            return;
+        };
+
+        let Some(profile) = self
+            .process_profiles
+            .iter()
+            .find(|profile| profile.id == selected_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        self.select_machine_profile_by_id(Some(profile.cnc_profile_id));
+        self.selected_fixture_id = Some(profile.fixture_profile_id);
+        self.project_config.selected_operations = profile.default_operations;
+        self.gcode_modified = false;
+    }
+
+    fn unique_process_profile_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
+        let trimmed = base_name.trim();
+        let base = if trimmed.is_empty() {
+            "Processing profile".to_string()
+        } else {
+            trimmed.to_string()
+        };
+
+        let mut index = 1usize;
+        loop {
+            let candidate = if index == 1 {
+                base.clone()
+            } else {
+                format!("{} ({})", base, index)
+            };
+
+            let exists = self
+                .process_profiles
+                .iter()
+                .any(|profile| Some(profile.id.as_str()) != exclude_id && profile.name == candidate);
+
+            if !exists {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    pub fn rename_selected_process_profile(&mut self, new_name: &str) -> Result<String, String> {
+        let Some(selected) = self.selected_process_profile_id.clone() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        let unique = self.unique_process_profile_name(new_name, Some(selected.as_str()));
+        if unique != new_name.trim() {
+            return Err(format!("Profile name must be unique. Suggested: {}", unique));
+        }
+
+        if let Some(target) = self.process_profiles.iter_mut().find(|profile| profile.id == selected) {
+            target.name = unique.clone();
+            return Ok(unique);
+        }
+
+        Err("Selected processing profile was not found".to_string())
+    }
+
+    pub fn clone_selected_process_profile(&mut self) -> Result<String, String> {
+        let Some(current) = self.selected_process_profile().cloned() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        let clone_name_seed = format!("{} - copy", current.name.trim());
+        let unique_name = self.unique_process_profile_name(&clone_name_seed, None);
+        let id = format!("project-profile-{}", slug(&unique_name));
+
+        self.process_profiles.push(JobProfile {
+            id: id.clone(),
+            name: unique_name,
+            cnc_profile_id: current.cnc_profile_id,
+            fixture_profile_id: current.fixture_profile_id,
+            default_operations: current.default_operations,
+        });
+
+        self.select_process_profile_by_id(Some(id.clone()));
+        Ok(id)
+    }
+
+    pub fn set_selected_process_profile_cnc(&mut self, cnc_id: &str) -> Result<(), String> {
+        if !self.machines.iter().any(|machine| machine.id == cnc_id) {
+            return Err("Selected CNC profile was not found".to_string());
+        }
+
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        if let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        {
+            profile.cnc_profile_id = cnc_id.to_string();
+            self.select_process_profile_by_id(Some(selected_id));
+            return Ok(());
+        }
+
+        Err("Selected processing profile was not found".to_string())
+    }
+
+    pub fn set_selected_process_profile_fixture(&mut self, fixture_id: &str) -> Result<(), String> {
+        if !self.fixtures.iter().any(|fixture| fixture.id == fixture_id) {
+            return Err("Selected fixture profile was not found".to_string());
+        }
+
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        if let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        {
+            profile.fixture_profile_id = fixture_id.to_string();
+            self.select_process_profile_by_id(Some(selected_id));
+            return Ok(());
+        }
+
+        Err("Selected processing profile was not found".to_string())
+    }
+
+    pub fn toggle_selected_process_profile_operation(
+        &mut self,
+        op: ProductionOperation,
+    ) -> Result<(), String> {
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        if let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        {
+            if let Some(index) = profile
+                .default_operations
+                .iter()
+                .position(|existing| *existing == op)
+            {
+                profile.default_operations.remove(index);
+            } else {
+                profile.default_operations.push(op);
+            }
+
+            self.select_process_profile_by_id(Some(selected_id));
+            return Ok(());
+        }
+
+        Err("Selected processing profile was not found".to_string())
     }
 
     pub fn selected_machine_has_atc(&self) -> bool {
@@ -968,12 +1276,13 @@ impl UiState {
             if let Some(fixture_id) = fixture_id {
                 let process_profile = JobProfile {
                     id: "project-profile-default".to_string(),
-                    name: "Default process profile".to_string(),
+                    name: "Default processing profile".to_string(),
                     cnc_profile_id: profile.id.clone(),
                     fixture_profile_id: fixture_id,
+                    default_operations: vec![ProductionOperation::DrillPth],
                 };
-                self.selected_process_profile_id = Some(process_profile.id.clone());
                 self.process_profiles.push(process_profile);
+                self.select_process_profile_by_id(Some("project-profile-default".to_string()));
             }
         }
     }
@@ -1071,32 +1380,23 @@ impl UiState {
             return;
         };
 
-        let base = if name.trim().is_empty() {
-            "Process profile"
-        } else {
-            name.trim()
-        };
-        let mut idx = 1usize;
-        let unique_name = loop {
-            let candidate = if idx == 1 {
-                base.to_string()
-            } else {
-                format!("{} ({})", base, idx)
-            };
-            if !self.process_profiles.iter().any(|profile| profile.name == candidate) {
-                break candidate;
-            }
-            idx += 1;
-        };
+        let unique_name = self.unique_process_profile_name(name, None);
 
         let id = format!("project-profile-{}", slug(&unique_name));
+        let default_operations = if self.project_config.selected_operations.is_empty() {
+            vec![ProductionOperation::DrillPth]
+        } else {
+            self.project_config.selected_operations.clone()
+        };
+
         self.process_profiles.push(JobProfile {
             id: id.clone(),
             name: unique_name,
             cnc_profile_id: cnc_id,
             fixture_profile_id: fixture_id,
+            default_operations,
         });
-        self.selected_process_profile_id = Some(id);
+        self.select_process_profile_by_id(Some(id));
     }
 
     pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {
@@ -1119,7 +1419,7 @@ impl UiState {
         {
             impact
                 .dependent_process_profiles
-                .push(format!("Process profile: {}", profile.name));
+                .push(format!("Processing profile: {}", profile.name));
         }
 
         if self
@@ -1156,7 +1456,7 @@ impl UiState {
         {
             impact
                 .dependent_process_profiles
-                .push(format!("Process profile: {}", profile.name));
+                .push(format!("Processing profile: {}", profile.name));
         }
 
         if self
@@ -1180,7 +1480,7 @@ impl UiState {
         {
             impact
                 .primary_profiles
-                .push(format!("Process profile: {}", profile.name));
+                .push(format!("Processing profile: {}", profile.name));
         }
         if self
             .selected_process_profile_id
@@ -1202,23 +1502,26 @@ impl UiState {
         self.process_profiles
             .retain(|profile| profile.cnc_profile_id != cnc_id);
 
-        if self
+        let next_processing_id = self
             .selected_process_profile_id
-            .as_ref()
-            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
-            .unwrap_or(false)
-        {
-            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
+            .clone()
+            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        if let Some(processing_id) = next_processing_id {
+            self.select_process_profile_by_id(Some(processing_id));
         }
 
-        let next_selected = self
-            .machine_mru
-            .iter()
-            .find(|id| self.machines.iter().any(|machine| &machine.id == *id))
-            .cloned()
-            .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
+        if self.selected_process_profile_id.is_none() {
+            let next_selected = self
+                .machine_mru
+                .iter()
+                .find(|id| self.machines.iter().any(|machine| &machine.id == *id))
+                .cloned()
+                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
 
-        self.select_machine_profile_by_id(next_selected);
+            self.select_machine_profile_by_id(next_selected);
+        }
 
         if self.machines.is_empty() {
             self.show_first_launch = true;
@@ -1235,14 +1538,13 @@ impl UiState {
         self.process_profiles
             .retain(|profile| profile.fixture_profile_id != fixture_id);
 
-        if self
+        let next_processing_id = self
             .selected_process_profile_id
-            .as_ref()
-            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
-            .unwrap_or(false)
-        {
-            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
-        }
+            .clone()
+            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        self.select_process_profile_by_id(next_processing_id);
 
         if self
             .selected_fixture_id
@@ -1259,14 +1561,13 @@ impl UiState {
     pub fn delete_process_profile_with_cascade(&mut self, process_profile_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_process_profile(process_profile_id);
         self.process_profiles.retain(|profile| profile.id != process_profile_id);
-        if self
+        let next_processing_id = self
             .selected_process_profile_id
-            .as_ref()
-            .map(|id| !self.process_profiles.iter().any(|profile| &profile.id == id))
-            .unwrap_or(false)
-        {
-            self.selected_process_profile_id = self.process_profiles.first().map(|profile| profile.id.clone());
-        }
+            .clone()
+            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        self.select_process_profile_by_id(next_processing_id);
         impact
     }
 
@@ -1546,6 +1847,687 @@ impl UiState {
                 disabled: false,
             });
         }
+    }
+}
+
+fn machine_profile_to_value(machine: &MachineProfile) -> Value {
+    json!({
+        "schema_version": 1,
+        "id": machine.id,
+        "name": machine.name,
+        "machine": {
+            "fixture_plate": {
+                "x": format!("{}mm", machine.fixture_plate_max_x),
+                "y": format!("{}mm", machine.fixture_plate_max_y),
+            },
+            "max_feed_rate": format!("{}mm/min", machine.max_feed_rate_mm_per_min),
+            "spindle_rpm_min": format!("{}rpm", machine.spindle_min_rpm),
+            "spindle_rpm_max": format!("{}rpm", machine.spindle_max_rpm),
+            "atc_slot_count": machine.atc_slot_count,
+            "origin": {
+                "x0": machine.origin_x0.to_lowercase(),
+                "y0": machine.origin_y0.to_lowercase(),
+            },
+            "scaling": {
+                "x": machine.scaling_x,
+                "y": machine.scaling_y,
+            }
+        },
+        "line_numbering": {
+            "enabled": machine.line_numbering_enabled,
+            "increment": machine.line_numbering_increment,
+        },
+        "templates": {
+            "gcode_header": machine.gcode_header,
+            "gcode_footer": machine.gcode_footer,
+            "drill_first_move": machine.drill_first_move,
+            "drill_cycle_mode_last": machine.drill_cycle_mode_last,
+            "drill_cycle_mode_series": machine.drill_cycle_mode_series,
+            "drill_cycle_start": machine.drill_cycle_start,
+            "drill_next_hole": machine.drill_next_hole,
+            "drill_cycle_cancel": machine.drill_cycle_cancel,
+            "route_plunge_and_offset": machine.route_plunge_and_offset,
+            "route_arc_up": machine.route_arc_up,
+            "route_arc_down": machine.route_arc_down,
+            "route_retract": machine.route_retract,
+            "tool_change_manual_prompt": machine.tool_change_manual_prompt,
+            "tool_change_command": machine.tool_change_command,
+        }
+    })
+}
+
+fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let name = value.get("name")?.as_str()?.to_string();
+
+    let fixture_plate_max_x = value
+        .pointer("/machine/fixture_plate/x")
+        .and_then(value_to_length_mm)
+        .map(|mm| mm.round() as u32)
+        .or_else(|| value.get("fixture_plate_max_x").and_then(Value::as_u64).map(|v| v as u32))
+        .unwrap_or(300);
+
+    let fixture_plate_max_y = value
+        .pointer("/machine/fixture_plate/y")
+        .and_then(value_to_length_mm)
+        .map(|mm| mm.round() as u32)
+        .or_else(|| value.get("fixture_plate_max_y").and_then(Value::as_u64).map(|v| v as u32))
+        .unwrap_or(200);
+
+    let max_feed_rate_mm_per_min = value
+        .pointer("/machine/max_feed_rate")
+        .and_then(value_to_feed_mm_per_min)
+        .map(|rate| rate.round() as u32)
+        .or_else(|| value.get("max_feed_rate_mm_per_min").and_then(Value::as_u64).map(|v| v as u32))
+        .unwrap_or(2000);
+
+    let spindle_min_rpm = value
+        .pointer("/machine/spindle_rpm_min")
+        .and_then(value_to_rpm)
+        .map(|rpm| rpm.round() as u32)
+        .or_else(|| value.get("spindle_min_rpm").and_then(Value::as_u64).map(|v| v as u32))
+        .unwrap_or(3000);
+
+    let spindle_max_rpm = value
+        .pointer("/machine/spindle_rpm_max")
+        .and_then(value_to_rpm)
+        .map(|rpm| rpm.round() as u32)
+        .or_else(|| value.get("spindle_max_rpm").and_then(Value::as_u64).map(|v| v as u32))
+        .unwrap_or(24000);
+
+    let atc_slot_count = value
+        .pointer("/machine/atc_slot_count")
+        .and_then(Value::as_u64)
+        .map(|v| v as u8)
+        .or_else(|| value.get("atc_slot_count").and_then(Value::as_u64).map(|v| v as u8))
+        .unwrap_or(0);
+
+    let origin_x0 = value
+        .pointer("/machine/origin/x0")
+        .and_then(Value::as_str)
+        .map(capitalize_ascii)
+        .or_else(|| value.get("origin_x0").and_then(Value::as_str).map(ToString::to_string))
+        .unwrap_or_else(|| "Left".to_string());
+
+    let origin_y0 = value
+        .pointer("/machine/origin/y0")
+        .and_then(Value::as_str)
+        .map(capitalize_ascii)
+        .or_else(|| value.get("origin_y0").and_then(Value::as_str).map(ToString::to_string))
+        .unwrap_or_else(|| "Front".to_string());
+
+    let scaling_x = value
+        .pointer("/machine/scaling/x")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .or_else(|| value.get("scaling_x").and_then(Value::as_f64).map(|v| v as f32))
+        .unwrap_or(100.0);
+
+    let scaling_y = value
+        .pointer("/machine/scaling/y")
+        .and_then(Value::as_f64)
+        .map(|v| v as f32)
+        .or_else(|| value.get("scaling_y").and_then(Value::as_f64).map(|v| v as f32))
+        .unwrap_or(100.0);
+
+    Some(MachineProfile {
+        id,
+        name,
+        built_in: false,
+        fixture_plate_max_x,
+        fixture_plate_max_y,
+        max_feed_rate_mm_per_min,
+        spindle_min_rpm,
+        spindle_max_rpm,
+        atc_slot_count,
+        origin_x0,
+        origin_y0,
+        scaling_x,
+        scaling_y,
+        line_numbering_enabled: value
+            .pointer("/line_numbering/enabled")
+            .and_then(Value::as_bool)
+            .or_else(|| value.get("line_numbering_enabled").and_then(Value::as_bool))
+            .unwrap_or(false),
+        line_numbering_increment: value
+            .pointer("/line_numbering/increment")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .or_else(|| value.get("line_numbering_increment").and_then(Value::as_u64).map(|v| v as u32))
+            .unwrap_or(10),
+        gcode_header: value
+            .pointer("/templates/gcode_header")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("gcode_header").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        gcode_footer: value
+            .pointer("/templates/gcode_footer")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("gcode_footer").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_first_move: value
+            .pointer("/templates/drill_first_move")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_first_move").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_cycle_mode_last: value
+            .pointer("/templates/drill_cycle_mode_last")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_cycle_mode_last").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_cycle_mode_series: value
+            .pointer("/templates/drill_cycle_mode_series")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_cycle_mode_series").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_cycle_start: value
+            .pointer("/templates/drill_cycle_start")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_cycle_start").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_next_hole: value
+            .pointer("/templates/drill_next_hole")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_next_hole").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        drill_cycle_cancel: value
+            .pointer("/templates/drill_cycle_cancel")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("drill_cycle_cancel").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        route_plunge_and_offset: value
+            .pointer("/templates/route_plunge_and_offset")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("route_plunge_and_offset").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        route_arc_up: value
+            .pointer("/templates/route_arc_up")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("route_arc_up").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        route_arc_down: value
+            .pointer("/templates/route_arc_down")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("route_arc_down").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        route_retract: value
+            .pointer("/templates/route_retract")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("route_retract").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        tool_change_manual_prompt: value
+            .pointer("/templates/tool_change_manual_prompt")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("tool_change_manual_prompt").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+        tool_change_command: value
+            .pointer("/templates/tool_change_command")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("tool_change_command").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
+    json!({
+        "schema_version": 1,
+        "id": fixture.id,
+        "name": fixture.name,
+        "board_holding_method": fixture.backing_board,
+        "work_origin_reference": {
+            "x0": "Left",
+            "y0": "Front",
+            "z0_reference": fixture.coordinate_context,
+        },
+        "backboard_thickness": "2.5mm",
+    })
+}
+
+fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
+    Some(FixtureProfile {
+        id: value.get("id")?.as_str()?.to_string(),
+        name: value.get("name")?.as_str()?.to_string(),
+        coordinate_context: value
+            .pointer("/work_origin_reference/z0_reference")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("coordinate_context").and_then(Value::as_str))
+            .unwrap_or("Fixture-defined board origin")
+            .to_string(),
+        backing_board: value
+            .get("board_holding_method")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("backing_board").and_then(Value::as_str))
+            .unwrap_or("MDF spoilboard")
+            .to_string(),
+    })
+}
+
+fn process_profile_to_value(profile: &JobProfile) -> Value {
+    json!({
+        "schema_version": 1,
+        "id": profile.id,
+        "name": profile.name,
+        "cnc": {
+            "default": profile.cnc_profile_id,
+            "choices": [profile.cnc_profile_id],
+        },
+        "fixture": {
+            "default": profile.fixture_profile_id,
+            "choices": [profile.fixture_profile_id],
+        },
+        "toolset": {
+            "default": "toolset-default",
+            "choices": ["toolset-default"],
+        },
+        "operations": profile
+            .default_operations
+            .iter()
+            .map(|op| operation_to_key(*op))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let name = value.get("name")?.as_str()?.to_string();
+
+    let cnc_profile_id = value
+        .pointer("/cnc/default")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("cnc_profile_id").and_then(Value::as_str))?
+        .to_string();
+
+    let fixture_profile_id = value
+        .pointer("/fixture/default")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("fixture_profile_id").and_then(Value::as_str))?
+        .to_string();
+
+    let default_operations = value
+        .get("operations")
+        .and_then(Value::as_array)
+        .map(|ops| {
+            ops.iter()
+                .filter_map(Value::as_str)
+                .filter_map(operation_from_key)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            value
+                .get("default_operations")
+                .and_then(Value::as_array)
+                .map(|ops| {
+                    ops.iter()
+                        .filter_map(Value::as_str)
+                        .filter_map(operation_from_key)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .filter(|ops| !ops.is_empty())
+        .unwrap_or_else(|| vec![ProductionOperation::DrillPth]);
+
+    Some(JobProfile {
+        id,
+        name,
+        cnc_profile_id,
+        fixture_profile_id,
+        default_operations,
+    })
+}
+
+fn stock_value_from_tools(tools: &[Tool]) -> Value {
+    let tool_values = tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            json!({
+                "id": tool.id,
+                "summary": tool.display_name(),
+                "availability": tool_status_to_key(tool.status),
+                "preference": tool_preference_to_key(tool.preference),
+                "order": index,
+                "ref": {
+                    "catalog": tool.source_catalog,
+                    "tool_id": tool.id,
+                    "section": Value::Null,
+                    "sku": tool.sku,
+                },
+                "base": {
+                    "name": tool.composite_name,
+                    "kind": tool_kind_to_key(&tool.kind),
+                    "manufacturer": tool.manufacturer,
+                    "sku": tool.sku,
+                    "diameter": tool.diameter,
+                    "point_angle": tool.point_angle,
+                    "spindle": tool.spindle_speed,
+                    "z_feed": tool.feed_rate,
+                    "table_feed": tool.feed_rate,
+                },
+                "overrides": {
+                    "name": if tool.name.trim().is_empty() { Value::Null } else { Value::String(tool.name.clone()) },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({ "tools": tool_values })
+}
+
+fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
+    let Some(items) = stock.get("tools").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, item)| {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("tool-{}", idx + 1));
+
+            let base = item.get("base").unwrap_or(item);
+            let overrides = item.get("overrides").unwrap_or(&Value::Null);
+
+            let composite_name = base
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("summary").and_then(Value::as_str))
+                .unwrap_or("Tool")
+                .to_string();
+
+            let name = overrides
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("name").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+
+            let kind = base
+                .get("kind")
+                .and_then(Value::as_str)
+                .map(tool_kind_from_key)
+                .unwrap_or_else(|| "End Mill".to_string());
+
+            let diameter = base
+                .get("diameter")
+                .and_then(value_to_length)
+                .or_else(|| item.get("diameter").and_then(value_to_length))
+                .unwrap_or_else(|| Length::from_mm(1.0));
+
+            let point_angle = base
+                .get("point_angle")
+                .and_then(value_to_angle)
+                .or_else(|| item.get("point_angle").and_then(value_to_angle))
+                .unwrap_or_else(|| Angle::from_degrees(180.0));
+
+            let feed_rate = base
+                .get("table_feed")
+                .and_then(value_to_feed)
+                .or_else(|| base.get("z_feed").and_then(value_to_feed))
+                .or_else(|| item.get("feed_rate").and_then(value_to_feed));
+
+            let spindle_speed = base
+                .get("spindle")
+                .and_then(value_to_rpm_speed)
+                .or_else(|| item.get("spindle_speed").and_then(value_to_rpm_speed));
+
+            let source_catalog = item
+                .pointer("/ref/catalog")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("source_catalog").and_then(Value::as_str))
+                .unwrap_or("Manual")
+                .to_string();
+
+            let manufacturer = base
+                .get("manufacturer")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| item.get("manufacturer").and_then(Value::as_str).map(ToString::to_string));
+
+            let sku = base
+                .get("sku")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+                .or_else(|| item.get("sku").and_then(Value::as_str).map(ToString::to_string));
+
+            Some(Tool {
+                id,
+                composite_name,
+                name,
+                kind,
+                diameter,
+                catalog_diameter: Some(diameter),
+                point_angle,
+                catalog_point_angle: Some(point_angle),
+                feed_rate,
+                catalog_feed_rate: feed_rate,
+                spindle_speed,
+                catalog_spindle_speed: spindle_speed,
+                status: item
+                    .get("availability")
+                    .and_then(Value::as_str)
+                    .map(tool_status_from_key)
+                    .unwrap_or(ToolStatus::InStock),
+                preference: item
+                    .get("preference")
+                    .and_then(Value::as_str)
+                    .map(tool_preference_from_key)
+                    .unwrap_or(ToolPreference::Neutral),
+                source_catalog,
+                manufacturer,
+                sku,
+            })
+        })
+        .collect()
+}
+
+fn load_toolset_slots(toolsets: &BTreeMap<String, Value>) -> Option<BTreeMap<u8, RackSlot>> {
+    let first = toolsets.values().next()?;
+    let slots = first.get("slots")?.as_array()?;
+
+    let mut out = BTreeMap::new();
+    for slot in slots {
+        let index = slot.get("index").and_then(Value::as_u64)? as u8;
+        let mode = slot.get("mode").and_then(Value::as_str).unwrap_or("spare");
+        let tool_id = slot
+            .get("tool_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        out.insert(
+            index,
+            RackSlot {
+                tool_id,
+                locked: slot.get("locked").and_then(Value::as_bool).unwrap_or(mode == "fixed"),
+                disabled: slot
+                    .get("disabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(mode == "do_not_use"),
+            },
+        );
+    }
+
+    Some(out)
+}
+
+fn build_toolset_profiles(slots: &BTreeMap<u8, RackSlot>) -> BTreeMap<String, Value> {
+    let slot_values = slots
+        .iter()
+        .map(|(index, slot)| {
+            let mode = if slot.disabled {
+                "do_not_use"
+            } else if slot.tool_id.is_some() {
+                "fixed"
+            } else {
+                "spare"
+            };
+
+            let mut value = json!({
+                "index": index,
+                "mode": mode,
+                "locked": slot.locked,
+                "disabled": slot.disabled,
+            });
+
+            if let Some(tool_id) = &slot.tool_id {
+                value["tool_id"] = Value::String(tool_id.clone());
+            }
+
+            value
+        })
+        .collect::<Vec<_>>();
+
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        "toolset-default".to_string(),
+        json!({
+            "schema_version": 1,
+            "id": "toolset-default",
+            "name": "Default toolset",
+            "generation_policy": "allow_hybrid",
+            "slots": slot_values,
+        }),
+    );
+    profiles
+}
+
+fn capitalize_ascii(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
+}
+
+fn operation_to_key(operation: ProductionOperation) -> &'static str {
+    match operation {
+        ProductionOperation::DrillLocatingPins => "drill_locating_pins",
+        ProductionOperation::DrillPth => "drill_pth",
+        ProductionOperation::DrillNpth => "drill_npth",
+        ProductionOperation::RouteBoard => "route_board",
+        ProductionOperation::MillBoard => "mill_board",
+    }
+}
+
+fn operation_from_key(value: &str) -> Option<ProductionOperation> {
+    match value {
+        "drill_locating_pins" => Some(ProductionOperation::DrillLocatingPins),
+        "drill_pth" => Some(ProductionOperation::DrillPth),
+        "drill_npth" => Some(ProductionOperation::DrillNpth),
+        "route_board" => Some(ProductionOperation::RouteBoard),
+        "mill_board" => Some(ProductionOperation::MillBoard),
+        _ => None,
+    }
+}
+
+fn tool_status_to_key(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::InStock => "in_stock",
+        ToolStatus::OutOfStock => "out_of_stock",
+    }
+}
+
+fn tool_status_from_key(value: &str) -> ToolStatus {
+    match value {
+        "out_of_stock" => ToolStatus::OutOfStock,
+        _ => ToolStatus::InStock,
+    }
+}
+
+fn tool_preference_to_key(preference: ToolPreference) -> &'static str {
+    match preference {
+        ToolPreference::Preferred => "preferred",
+        ToolPreference::Neutral => "neutral",
+        ToolPreference::NotPreferred => "not_preferred",
+    }
+}
+
+fn tool_preference_from_key(value: &str) -> ToolPreference {
+    match value {
+        "preferred" => ToolPreference::Preferred,
+        "not_preferred" => ToolPreference::NotPreferred,
+        _ => ToolPreference::Neutral,
+    }
+}
+
+fn tool_kind_to_key(kind: &str) -> &'static str {
+    match kind.to_ascii_lowercase().as_str() {
+        "drill" | "drillbit" => "drillbit",
+        "router" | "routerbit" => "routerbit",
+        "engraver" => "engraver",
+        "v-bit" | "vbit" => "vbit",
+        _ => "endmill",
+    }
+}
+
+fn tool_kind_from_key(value: &str) -> String {
+    match value {
+        "drillbit" => "Drill".to_string(),
+        "routerbit" => "Router".to_string(),
+        "engraver" => "Engraver".to_string(),
+        "vbit" => "V-Bit".to_string(),
+        "endmill" => "End Mill".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn value_to_length(value: &Value) -> Option<Length> {
+    match value {
+        Value::String(v) => Length::from_string(v, None).ok(),
+        Value::Number(v) => v.as_f64().map(Length::from_mm),
+        _ => None,
+    }
+}
+
+fn value_to_length_mm(value: &Value) -> Option<f64> {
+    value_to_length(value).map(Length::as_mm)
+}
+
+fn value_to_feed(value: &Value) -> Option<FeedRate> {
+    match value {
+        Value::String(v) => FeedRate::from_string(v, None).ok(),
+        Value::Number(v) => v.as_f64().map(FeedRate::from_mm_per_min),
+        _ => None,
+    }
+}
+
+fn value_to_feed_mm_per_min(value: &Value) -> Option<f64> {
+    value_to_feed(value).map(FeedRate::as_mm_per_min)
+}
+
+fn value_to_rpm_speed(value: &Value) -> Option<RotationalSpeed> {
+    match value {
+        Value::String(v) => RotationalSpeed::from_string(v, None).ok(),
+        Value::Number(v) => v.as_f64().map(RotationalSpeed::from_rpm),
+        _ => None,
+    }
+}
+
+fn value_to_rpm(value: &Value) -> Option<f64> {
+    value_to_rpm_speed(value).map(RotationalSpeed::as_rpm)
+}
+
+fn value_to_angle(value: &Value) -> Option<Angle> {
+    match value {
+        Value::String(v) => Angle::from_string(v, None).ok(),
+        Value::Number(v) => v.as_f64().map(Angle::from_degrees),
+        _ => None,
     }
 }
 
