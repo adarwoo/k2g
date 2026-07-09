@@ -165,101 +165,69 @@ For List and Any modes:
 - Profile deletion removes the profile from persistent storage but does not invalidate saved projects.
 - Deleting a profile shall never modify already-saved projects.
 
+#### 6.1.3 Profiles management
+
+All profiles shall share the same UX.
+
+The top part of the profile page is about managing the profile lifecycle, whilst the lower
+part is about editing the profile.
+
+In the upper part:
+
+Users can:
+- Select a profile from the visible profile list
+   - This immediatly shows the profile in the lower part
+- Create a new profile based on:
+   - New
+   - From a template when available
+   - From an existing profile
+   - From an external file...: Selecting this opens a dialog box to select the file.
+- A list is always presented and filled according to what's available
+   - The list shall show different items in a noticable different way
+   - The list shall be smart, so search is possible
+- Export the selected profile as a file
+- Delete the selected profile
+
+Technically:
+- All profiles carry a schema.
+- The schema define some default value which is used when creating a new profile from nothing
+
+####  6.1.4 Referencing profiles from profiles
+
+Some of the profiles references other profiles.
+When this is the case, the same mecanism must be used throughout.
+
+The schema defines how profiles can reference other profiles.
+
+- A reference is made of 2 parts:
+1. The default profile. This can be left empty to force the user to chose from
+2. A list of accepted profiles which allow:
+  - Selecting any exitsting profile from the list
+  - Selecting Any
+  - Selecting Auto in some cases
+
+When the user edit a profile with such a reference, he can:
+  - Select any of the available profile, if the configured profile list has 'Any'
+  - Select from a fixed list
+  - Do nothing if only a single profile was set
+  - Select Auto when allowed - where no profile is selected
+
 ### 6.2 CNC Profile Management
 
-The CNC Profiles page is split into two vertical regions:
+Defines the CNC machine and GCode conversion based on the cnc schema.
 
-- Top region: action bar and the visible list of available CNC profiles
-- Bottom region: editor for the currently selected CNC profile
+#### 6.2.1 GCode primitives
 
-Top region actions are:
-
-- Add from built-in
-- Import
-- Export
-- Duplicate
-
-Users can:
-
-- Select a CNC profile from the visible profile list
-- Create a new added profile
-  - Import a profile
-  - Duplicate an existing profile
-  - Start from a built-in template
-- Export the selected profile
-- Delete a created profile
-
-Profile origin and editability rules:
-
-- Built-in (stock) profiles are read-only
-- Added profiles are editable
-- Only added profiles can be edited in the bottom editor region
-- When a built-in profile is selected, the bottom region shows it in read-only mode
-
-Deleting a CNC profile is allowed, including when referenced.
-Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
+The CNC schema defines a number of GCode primitives. These can be edited like code.
 
 ### 6.3 Fixture Profile Management
-
-Users can:
-
-- Select a fixture profile
-- Create a new fixture profile
-  - Clone an existing profile
-  - Start from a built-in template when available
-- Delete a created profile
-- Edit a profile
-
-Deleting a fixture profile is allowed, including when referenced.
-Deletion performs a cascading delete of dependent assets and must require explicit confirmation.
 
 Fixture profiles describe how the PCB is physically held and aligned on the machine.
 They are persistent configuration assets and are not tied to a single board.
 Fixture profiles may influence generated output, but they do so through CNC profile abstractions.
 For example, a fixture requests a work offset intent from the CNC profile; it does not directly emit machine-specific GCode.
 
-Fixture fields include at minimum:
-
-- Fixture name
-- Supported board holding method
-- Work origin/reference definition
-- Locating pin strategy and geometry
-- Keep-out or clamp zones
-- Fixture occupancy (defines the impact on the board size range)
-- Optional probing/alignment parameters
-
-Fixture profiles are persisted as YAML and validated by `fixture_profile.schema.yaml`.
-
-### 6.4 New Profile Wizard
-
-Clicking + opens a wizard/modal that:
-
-- Shows built-in templates (for example Generic, Genmitsu3040, Masso)
-- Shows existing profiles available for cloning
-- Requires a unique profile name
-  - Clone default: Copy of "profile name"
-  - Template default: My "template profile name"
-- Disables New until validation passes
-- Displays inline naming conflict errors
-
-After creation, profile editing starts immediately.
-
-### 6.5 CNC Profile Fields
-
-General fields include:
-
-- Fixture plate max size X and Y
-- Max feed rate
-- Spindle min and max RPM
-- Spindle start and stop delay
-- Board rotation values and tool point-angle values are displayed with the `°` symbol.
-- Tool spindle speeds are displayed with the `rpm` label.
-- ATC slot count (0 disables ATC)
-- Origin orientation:
-  - X0: Left, Right, Front, Back
-  - Y0: Front, Back, Left, Right
-- XY scaling percent
-- Program line numbering increment value (or 0 for off)
+The fixture profile is based on the fixture schema.
 
 ### 6.5.1 CNC Field Editability by Profile Origin
 
@@ -383,10 +351,13 @@ Compatibility and fallback requirements:
 - `primitives.cut_bezier` may resolve to a native bezier command or an arc-approximation sequence; fallback behavior must be deterministic.
 - Primitive templates may reference custom attributes and active project properties through the RHAI scope.
 
-### 6.7 Process Profile Management
+### 6.7 Processing Profile Management
 
 Project profiles define machining defaults and constraints for a family of machining operations on given machining hardware.
-Each process profile predefines all relevant machining defaults and constraints, including CNC profile selection and constraints for fixture and toolset selectio
+Each process profile predefines all relevant machining defaults and constraints, including CNC profile selection and constraints for fixture and toolset selection
+
+The processing profile all
+
 
 Users can:
 
@@ -693,7 +664,7 @@ Resolution shall follow the following order:
       - Apply current profile
       - Update current profile from the project profile
       - Use a temporary profile
-   
+
 3. If not found, create a temporary profile from the embedded definition.
 
 #### 8.1.4 Temporary Profile Behavior

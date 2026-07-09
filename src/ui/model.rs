@@ -28,6 +28,7 @@ pub enum Screen {
     CncProfiles,
     FixtureProfiles,
     ProcessProfiles,
+    ToolsetProfiles,
     Stock,
     Catalog,
 }
@@ -39,6 +40,7 @@ impl Screen {
             Self::CncProfiles => "CNC",
             Self::FixtureProfiles => "Fixtures",
             Self::ProcessProfiles => "Processing",
+            Self::ToolsetProfiles => "Toolset",
             Self::Stock => "Stock",
             Self::Catalog => "Catalog",
         }
@@ -50,6 +52,7 @@ impl Screen {
             Self::CncProfiles => "cnc-profiles",
             Self::FixtureProfiles => "fixture-profiles",
             Self::ProcessProfiles => "process-profiles",
+            Self::ToolsetProfiles => "toolset-profiles",
             Self::Stock => "stock",
             Self::Catalog => "catalog",
         }
@@ -248,7 +251,50 @@ pub struct JobProfile {
     pub name: String,
     pub cnc_profile_id: String,
     pub fixture_profile_id: String,
+    pub toolset_profile_id: String,
     pub default_operations: Vec<ProductionOperation>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ToolsetGenerationPolicy {
+    FixedToolset,
+    AllowReload,
+    AllowHybrid,
+}
+
+impl ToolsetGenerationPolicy {
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::FixedToolset => "fixed_toolset",
+            Self::AllowReload => "allow_reload",
+            Self::AllowHybrid => "allow_hybrid",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FixedToolset => "Fixed toolset",
+            Self::AllowReload => "Allow reload",
+            Self::AllowHybrid => "Allow hybrid",
+        }
+    }
+
+    pub fn from_key(value: &str) -> Self {
+        match value {
+            "fixed_toolset" => Self::FixedToolset,
+            "allow_reload" => Self::AllowReload,
+            _ => Self::AllowHybrid,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ToolsetProfile {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub generation_policy: ToolsetGenerationPolicy,
+    pub slots: BTreeMap<u8, RackSlot>,
 }
 
 #[derive(Clone, Default)]
@@ -729,6 +775,8 @@ pub struct UiState {
     pub selected_fixture_id: Option<String>,
     pub process_profiles: Vec<JobProfile>,
     pub selected_process_profile_id: Option<String>,
+    pub toolsets: Vec<ToolsetProfile>,
+    pub selected_toolset_id: Option<String>,
     pub machine_mru: Vec<String>,
     pub focus_profile_name_editor: bool,
     pub catalogs: Vec<CatalogStockCatalog>,
@@ -824,6 +872,8 @@ impl UiState {
             selected_fixture_id: Some("fixture-default".to_string()),
             process_profiles: vec![],
             selected_process_profile_id: None,
+            toolsets: vec![],
+            selected_toolset_id: None,
             machine_mru: vec![],
             focus_profile_name_editor: false,
             catalogs: built_in_catalogs(),
@@ -875,6 +925,18 @@ impl UiState {
         if state.rack_slots.is_empty() {
             state.seed_rack_slots(8);
         }
+        if state.toolsets.is_empty() {
+            let default_toolset = state.new_toolset_profile("Default toolset", 8);
+            state.rack_slots = default_toolset.slots.clone();
+            state.selected_toolset_id = Some(default_toolset.id.clone());
+            state.toolsets.push(default_toolset);
+        }
+        if state.selected_toolset_id.is_none() {
+            if let Some(toolset) = state.toolsets.first() {
+                state.selected_toolset_id = Some(toolset.id.clone());
+                state.rack_slots = toolset.slots.clone();
+            }
+        }
         state
     }
 
@@ -920,8 +982,17 @@ impl UiState {
             self.tools = persisted_tools;
         }
 
-        if let Some(toolset_slots) = load_toolset_slots(&persisted.toolset_profiles) {
-            self.rack_slots = toolset_slots;
+        let persisted_toolsets: Vec<ToolsetProfile> = persisted
+            .toolset_profiles
+            .values()
+            .filter_map(toolset_profile_from_value)
+            .collect();
+        if !persisted_toolsets.is_empty() {
+            self.toolsets = persisted_toolsets;
+            self.selected_toolset_id = self.toolsets.first().map(|toolset| toolset.id.clone());
+            if let Some(toolset) = self.selected_toolset() {
+                self.rack_slots = toolset.slots.clone();
+            }
         }
 
         let selected_process = persisted
@@ -942,6 +1013,9 @@ impl UiState {
                 .first()
                 .map(|machine| machine.id.clone());
             self.select_machine_profile_by_id(selected_machine);
+            if let Some(toolset_id) = self.toolsets.first().map(|toolset| toolset.id.clone()) {
+                self.select_toolset_profile_by_id(Some(toolset_id));
+            }
             if self
                 .selected_fixture_id
                 .as_ref()
@@ -996,7 +1070,7 @@ impl UiState {
             .collect::<BTreeMap<_, _>>();
         let _ = save_processing_profiles(&app_dirs, &processing_profiles);
 
-        let toolset_profiles = build_toolset_profiles(&self.rack_slots);
+        let toolset_profiles = build_toolset_profiles(&self.toolsets);
         let _ = save_toolset_profiles(&app_dirs, &toolset_profiles);
 
         let stock = stock_value_from_tools(&self.tools);
@@ -1021,6 +1095,21 @@ impl UiState {
             .and_then(|id| self.process_profiles.iter().find(|profile| &profile.id == id))
     }
 
+    pub fn selected_toolset(&self) -> Option<&ToolsetProfile> {
+        self.selected_toolset_id
+            .as_ref()
+            .and_then(|id| self.toolsets.iter().find(|toolset| &toolset.id == id))
+    }
+
+    pub fn select_toolset_profile_by_id(&mut self, id: Option<String>) {
+        self.selected_toolset_id = id.clone();
+        if let Some(selected_id) = id {
+            if let Some(toolset) = self.toolsets.iter().find(|toolset| toolset.id == selected_id) {
+                self.rack_slots = toolset.slots.clone();
+            }
+        }
+    }
+
     pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
         self.selected_process_profile_id = id.clone();
 
@@ -1039,6 +1128,7 @@ impl UiState {
 
         self.select_machine_profile_by_id(Some(profile.cnc_profile_id));
         self.selected_fixture_id = Some(profile.fixture_profile_id);
+        self.select_toolset_profile_by_id(Some(profile.toolset_profile_id));
         self.project_config.selected_operations = profile.default_operations;
         self.gcode_modified = false;
     }
@@ -1103,6 +1193,7 @@ impl UiState {
             name: unique_name,
             cnc_profile_id: current.cnc_profile_id,
             fixture_profile_id: current.fixture_profile_id,
+            toolset_profile_id: current.toolset_profile_id,
             default_operations: current.default_operations,
         });
 
@@ -1152,6 +1243,325 @@ impl UiState {
         }
 
         Err("Selected processing profile was not found".to_string())
+    }
+
+    pub fn set_selected_process_profile_toolset(&mut self, toolset_id: &str) -> Result<(), String> {
+        if !self.toolsets.iter().any(|toolset| toolset.id == toolset_id) {
+            return Err("Selected toolset profile was not found".to_string());
+        }
+
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        if let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        {
+            profile.toolset_profile_id = toolset_id.to_string();
+            self.select_process_profile_by_id(Some(selected_id));
+            return Ok(());
+        }
+
+        Err("Selected processing profile was not found".to_string())
+    }
+
+    pub fn import_process_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
+        let yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|_| "Processing profile import failed: invalid YAML".to_string())?;
+        let json_value: Value = serde_json::to_value(yaml_value)
+            .map_err(|_| "Processing profile import failed: invalid data".to_string())?;
+        let Some(mut profile) = process_profile_from_value(&json_value) else {
+            return Err("Processing profile import failed: missing required processing fields".to_string());
+        };
+
+        profile.name = self.unique_process_profile_name(&profile.name, None);
+        profile.id = format!("project-profile-{}", slug(&profile.name));
+
+        if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
+            profile.cnc_profile_id = self
+                .selected_machine_id
+                .clone()
+                .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
+                .ok_or_else(|| "Processing profile import failed: no CNC profile is available".to_string())?;
+        }
+
+        if !self.fixtures.iter().any(|fixture| fixture.id == profile.fixture_profile_id) {
+            profile.fixture_profile_id = self
+                .selected_fixture_id
+                .clone()
+                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
+                .ok_or_else(|| "Processing profile import failed: no fixture profile is available".to_string())?;
+        }
+
+        if !self.toolsets.iter().any(|toolset| toolset.id == profile.toolset_profile_id) {
+            profile.toolset_profile_id = self
+                .selected_toolset_id
+                .clone()
+                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
+                .ok_or_else(|| "Processing profile import failed: no toolset profile is available".to_string())?;
+        }
+
+        let selected = profile.id.clone();
+        self.process_profiles.push(profile);
+        self.select_process_profile_by_id(Some(selected.clone()));
+        Ok(selected)
+    }
+
+    pub fn export_selected_process_profile_yaml(&self) -> Result<String, String> {
+        let Some(profile) = self.selected_process_profile() else {
+            return Err("No processing profile selected".to_string());
+        };
+
+        let value = process_profile_to_value(profile);
+        let yaml_value: serde_yaml::Value =
+            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
+        serde_yaml::to_string(&yaml_value)
+            .map_err(|_| "Export failed: unable to write YAML".to_string())
+    }
+
+    fn unique_toolset_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
+        let trimmed = base_name.trim();
+        let base = if trimmed.is_empty() {
+            "Toolset profile".to_string()
+        } else {
+            trimmed.to_string()
+        };
+
+        let mut index = 1usize;
+        loop {
+            let candidate = if index == 1 {
+                base.clone()
+            } else {
+                format!("{} ({})", base, index)
+            };
+
+            let exists = self
+                .toolsets
+                .iter()
+                .any(|profile| Some(profile.id.as_str()) != exclude_id && profile.name == candidate);
+
+            if !exists {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn make_toolset_id(&self, base_name: &str) -> String {
+        let base = slug(base_name);
+        let mut index = 1usize;
+        loop {
+            let candidate = if index == 1 {
+                format!("toolset-{}", base)
+            } else {
+                format!("toolset-{}-{}", base, index)
+            };
+            if !self.toolsets.iter().any(|profile| profile.id == candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn new_toolset_profile(&self, base_name: &str, slot_count: u8) -> ToolsetProfile {
+        let unique_name = self.unique_toolset_name(base_name, None);
+        let mut slots = BTreeMap::new();
+        for slot in 1..=slot_count.max(1) {
+            slots.insert(
+                slot,
+                RackSlot {
+                    tool_id: None,
+                    locked: false,
+                    disabled: false,
+                },
+            );
+        }
+
+        ToolsetProfile {
+            id: self.make_toolset_id(&unique_name),
+            name: unique_name,
+            description: String::new(),
+            generation_policy: ToolsetGenerationPolicy::AllowHybrid,
+            slots,
+        }
+    }
+
+    pub fn add_toolset_profile(&mut self, name: &str) {
+        let slot_count = self
+            .selected_machine()
+            .map(|machine| machine.atc_slot_count)
+            .unwrap_or(8)
+            .max(1);
+        let profile = self.new_toolset_profile(name, slot_count);
+        let selected = profile.id.clone();
+        self.rack_slots = profile.slots.clone();
+        self.toolsets.push(profile);
+        self.select_toolset_profile_by_id(Some(selected));
+    }
+
+    pub fn clone_selected_toolset_profile(&mut self) -> Result<String, String> {
+        let Some(current) = self.selected_toolset().cloned() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        let clone_name_seed = format!("{} - copy", current.name.trim());
+        let unique_name = self.unique_toolset_name(&clone_name_seed, None);
+        let id = self.make_toolset_id(&unique_name);
+
+        self.toolsets.push(ToolsetProfile {
+            id: id.clone(),
+            name: unique_name,
+            description: current.description,
+            generation_policy: current.generation_policy,
+            slots: current.slots,
+        });
+
+        self.select_toolset_profile_by_id(Some(id.clone()));
+        Ok(id)
+    }
+
+    pub fn rename_selected_toolset_profile(&mut self, new_name: &str) -> Result<String, String> {
+        let Some(selected) = self.selected_toolset_id.clone() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        let unique = self.unique_toolset_name(new_name, Some(selected.as_str()));
+        if unique != new_name.trim() {
+            return Err(format!("Profile name must be unique. Suggested: {}", unique));
+        }
+
+        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
+            target.name = unique.clone();
+            return Ok(unique);
+        }
+
+        Err("Selected toolset profile was not found".to_string())
+    }
+
+    pub fn update_selected_toolset_description(&mut self, description: &str) -> Result<(), String> {
+        let Some(selected) = self.selected_toolset_id.clone() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
+            target.description = description.to_string();
+            return Ok(());
+        }
+
+        Err("Selected toolset profile was not found".to_string())
+    }
+
+    pub fn set_selected_toolset_generation_policy(&mut self, policy_key: &str) -> Result<(), String> {
+        let Some(selected) = self.selected_toolset_id.clone() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
+            target.generation_policy = ToolsetGenerationPolicy::from_key(policy_key);
+            return Ok(());
+        }
+
+        Err("Selected toolset profile was not found".to_string())
+    }
+
+    pub fn set_selected_toolset_slot_mode(
+        &mut self,
+        slot_index: u8,
+        mode: &str,
+        tool_id: Option<String>,
+    ) -> Result<(), String> {
+        let Some(selected) = self.selected_toolset_id.clone() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        let Some(profile) = self.toolsets.iter_mut().find(|profile| profile.id == selected) else {
+            return Err("Selected toolset profile was not found".to_string());
+        };
+
+        let slot = profile
+            .slots
+            .entry(slot_index)
+            .or_insert(RackSlot {
+                tool_id: None,
+                locked: false,
+                disabled: false,
+            });
+
+        match mode {
+            "fixed" => {
+                slot.disabled = false;
+                slot.locked = true;
+                slot.tool_id = tool_id;
+            }
+            "do_not_use" => {
+                slot.disabled = true;
+                slot.locked = false;
+                slot.tool_id = None;
+            }
+            _ => {
+                slot.disabled = false;
+                slot.locked = false;
+                slot.tool_id = None;
+            }
+        }
+
+        self.rack_slots = profile.slots.clone();
+        Ok(())
+    }
+
+    pub fn set_selected_toolset_slot_count(&mut self, slot_count: u8) -> Result<(), String> {
+        let Some(selected) = self.selected_toolset_id.clone() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        let target_count = slot_count.max(1);
+        let Some(profile) = self.toolsets.iter_mut().find(|profile| profile.id == selected) else {
+            return Err("Selected toolset profile was not found".to_string());
+        };
+
+        profile.slots.retain(|slot, _| *slot <= target_count);
+        for slot in 1..=target_count {
+            profile.slots.entry(slot).or_insert(RackSlot {
+                tool_id: None,
+                locked: false,
+                disabled: false,
+            });
+        }
+
+        self.rack_slots = profile.slots.clone();
+        Ok(())
+    }
+
+    pub fn import_toolset_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
+        let yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|_| "Toolset profile import failed: invalid YAML".to_string())?;
+        let json_value: Value = serde_json::to_value(yaml_value)
+            .map_err(|_| "Toolset profile import failed: invalid data".to_string())?;
+        let Some(mut imported) = toolset_profile_from_value(&json_value) else {
+            return Err("Toolset profile import failed: missing required toolset fields".to_string());
+        };
+
+        imported.name = self.unique_toolset_name(&imported.name, None);
+        imported.id = self.make_toolset_id(&imported.name);
+        let selected = imported.id.clone();
+        self.rack_slots = imported.slots.clone();
+        self.toolsets.push(imported);
+        self.select_toolset_profile_by_id(Some(selected.clone()));
+        Ok(selected)
+    }
+
+    pub fn export_selected_toolset_yaml(&self) -> Result<String, String> {
+        let Some(profile) = self.selected_toolset() else {
+            return Err("No toolset profile selected".to_string());
+        };
+
+        let value = toolset_profile_to_value(profile);
+        let yaml_value: serde_yaml::Value =
+            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
+        serde_yaml::to_string(&yaml_value)
+            .map_err(|_| "Export failed: unable to write YAML".to_string())
     }
 
     pub fn toggle_selected_process_profile_operation(
@@ -1268,6 +1678,10 @@ impl UiState {
         self.show_first_launch = false;
         self.select_machine_profile_by_id(Some(selected));
 
+        if self.toolsets.is_empty() {
+            self.add_toolset_profile("Default toolset");
+        }
+
         if self.process_profiles.is_empty() {
             let fixture_id = self
                 .selected_fixture_id
@@ -1279,6 +1693,11 @@ impl UiState {
                     name: "Default processing profile".to_string(),
                     cnc_profile_id: profile.id.clone(),
                     fixture_profile_id: fixture_id,
+                    toolset_profile_id: self
+                        .selected_toolset_id
+                        .clone()
+                        .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
+                        .unwrap_or_else(|| "toolset-default".to_string()),
                     default_operations: vec![ProductionOperation::DrillPth],
                 };
                 self.process_profiles.push(process_profile);
@@ -1364,6 +1783,127 @@ impl UiState {
         self.selected_fixture_id = Some(fixture_id);
     }
 
+    fn unique_fixture_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
+        let trimmed = base_name.trim();
+        let base = if trimmed.is_empty() {
+            "Fixture profile".to_string()
+        } else {
+            trimmed.to_string()
+        };
+
+        let mut index = 1usize;
+        loop {
+            let candidate = if index == 1 {
+                base.clone()
+            } else {
+                format!("{} ({})", base, index)
+            };
+
+            let exists = self
+                .fixtures
+                .iter()
+                .any(|fixture| Some(fixture.id.as_str()) != exclude_id && fixture.name == candidate);
+
+            if !exists {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    pub fn clone_selected_fixture_profile(&mut self) -> Result<String, String> {
+        let Some(current) = self.selected_fixture().cloned() else {
+            return Err("No fixture profile selected".to_string());
+        };
+
+        let clone_name_seed = format!("{} - copy", current.name.trim());
+        let unique_name = self.unique_fixture_name(&clone_name_seed, None);
+        let fixture_id = format!("fixture-{}", slug(&unique_name));
+
+        self.fixtures.push(FixtureProfile {
+            id: fixture_id.clone(),
+            name: unique_name,
+            coordinate_context: current.coordinate_context,
+            backing_board: current.backing_board,
+        });
+
+        self.selected_fixture_id = Some(fixture_id.clone());
+        Ok(fixture_id)
+    }
+
+    pub fn rename_selected_fixture_profile(&mut self, new_name: &str) -> Result<String, String> {
+        let Some(selected) = self.selected_fixture_id.clone() else {
+            return Err("No fixture profile selected".to_string());
+        };
+
+        let unique = self.unique_fixture_name(new_name, Some(selected.as_str()));
+        if unique != new_name.trim() {
+            return Err(format!("Profile name must be unique. Suggested: {}", unique));
+        }
+
+        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
+            target.name = unique.clone();
+            return Ok(unique);
+        }
+
+        Err("Selected fixture profile was not found".to_string())
+    }
+
+    pub fn update_selected_fixture_coordinate_context(&mut self, value: &str) -> Result<(), String> {
+        let Some(selected) = self.selected_fixture_id.clone() else {
+            return Err("No fixture profile selected".to_string());
+        };
+
+        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
+            target.coordinate_context = value.to_string();
+            return Ok(());
+        }
+
+        Err("Selected fixture profile was not found".to_string())
+    }
+
+    pub fn update_selected_fixture_backing_board(&mut self, value: &str) -> Result<(), String> {
+        let Some(selected) = self.selected_fixture_id.clone() else {
+            return Err("No fixture profile selected".to_string());
+        };
+
+        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
+            target.backing_board = value.to_string();
+            return Ok(());
+        }
+
+        Err("Selected fixture profile was not found".to_string())
+    }
+
+    pub fn import_fixture_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
+        let yaml_value: serde_yaml::Value =
+            serde_yaml::from_str(yaml).map_err(|_| "Fixture profile import failed: invalid YAML".to_string())?;
+        let json_value: Value = serde_json::to_value(yaml_value)
+            .map_err(|_| "Fixture profile import failed: invalid data".to_string())?;
+        let Some(mut profile) = fixture_profile_from_value(&json_value) else {
+            return Err("Fixture profile import failed: missing required fixture fields".to_string());
+        };
+
+        profile.name = self.unique_fixture_name(&profile.name, None);
+        profile.id = format!("fixture-{}", slug(&profile.name));
+        let selected = profile.id.clone();
+        self.fixtures.push(profile);
+        self.selected_fixture_id = Some(selected.clone());
+        Ok(selected)
+    }
+
+    pub fn export_selected_fixture_yaml(&self) -> Result<String, String> {
+        let Some(profile) = self.selected_fixture() else {
+            return Err("No fixture profile selected".to_string());
+        };
+
+        let value = fixture_profile_to_value(profile);
+        let yaml_value: serde_yaml::Value =
+            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
+        serde_yaml::to_string(&yaml_value)
+            .map_err(|_| "Export failed: unable to write YAML".to_string())
+    }
+
     pub fn add_process_profile(&mut self, name: &str) {
         let Some(cnc_id) = self
             .selected_machine_id
@@ -1376,6 +1916,13 @@ impl UiState {
             .selected_fixture_id
             .clone()
             .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
+        else {
+            return;
+        };
+        let Some(toolset_id) = self
+            .selected_toolset_id
+            .clone()
+            .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
         else {
             return;
         };
@@ -1394,6 +1941,7 @@ impl UiState {
             name: unique_name,
             cnc_profile_id: cnc_id,
             fixture_profile_id: fixture_id,
+            toolset_profile_id: toolset_id,
             default_operations,
         });
         self.select_process_profile_by_id(Some(id));
@@ -1493,6 +2041,43 @@ impl UiState {
         impact
     }
 
+    pub fn impact_delete_toolset_profile(&self, toolset_id: &str) -> CascadeDeleteImpact {
+        let mut impact = CascadeDeleteImpact::default();
+        if let Some(toolset) = self.toolsets.iter().find(|item| item.id == toolset_id) {
+            impact
+                .primary_profiles
+                .push(format!("Toolset profile: {}", toolset.name));
+        }
+
+        let dependent_ids: BTreeSet<String> = self
+            .process_profiles
+            .iter()
+            .filter(|profile| profile.toolset_profile_id == toolset_id)
+            .map(|profile| profile.id.clone())
+            .collect();
+
+        for profile in self
+            .process_profiles
+            .iter()
+            .filter(|profile| dependent_ids.contains(&profile.id))
+        {
+            impact
+                .dependent_process_profiles
+                .push(format!("Processing profile: {}", profile.name));
+        }
+
+        if self
+            .selected_process_profile_id
+            .as_ref()
+            .map(|id| dependent_ids.contains(id))
+            .unwrap_or(false)
+        {
+            impact.deleted_live_projects.push("Active project session".to_string());
+        }
+
+        impact
+    }
+
     pub fn delete_cnc_profile_with_cascade(&mut self, cnc_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_cnc_profile(cnc_id);
 
@@ -1568,6 +2153,35 @@ impl UiState {
             .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
 
         self.select_process_profile_by_id(next_processing_id);
+        impact
+    }
+
+    pub fn delete_toolset_profile_with_cascade(&mut self, toolset_id: &str) -> CascadeDeleteImpact {
+        let impact = self.impact_delete_toolset_profile(toolset_id);
+
+        self.toolsets.retain(|toolset| toolset.id != toolset_id);
+        self.process_profiles
+            .retain(|profile| profile.toolset_profile_id != toolset_id);
+
+        let next_processing_id = self
+            .selected_process_profile_id
+            .clone()
+            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        self.select_process_profile_by_id(next_processing_id);
+
+        if self
+            .selected_toolset_id
+            .as_ref()
+            .map(|id| !self.toolsets.iter().any(|toolset| &toolset.id == id))
+            .unwrap_or(false)
+        {
+            if let Some(next_toolset) = self.toolsets.first().map(|toolset| toolset.id.clone()) {
+                self.select_toolset_profile_by_id(Some(next_toolset));
+            }
+        }
+
         impact
     }
 
@@ -1789,6 +2403,19 @@ impl UiState {
                 .unwrap_or(false)
             {
                 slot.tool_id = None;
+            }
+        }
+
+        for toolset in self.toolsets.iter_mut() {
+            for slot in toolset.slots.values_mut() {
+                if slot
+                    .tool_id
+                    .as_deref()
+                    .map(|tool_id| to_remove.contains(tool_id))
+                    .unwrap_or(false)
+                {
+                    slot.tool_id = None;
+                }
             }
         }
 
@@ -2130,8 +2757,8 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
             "choices": [profile.fixture_profile_id],
         },
         "toolset": {
-            "default": "toolset-default",
-            "choices": ["toolset-default"],
+            "default": profile.toolset_profile_id,
+            "choices": [profile.toolset_profile_id],
         },
         "operations": profile
             .default_operations
@@ -2155,6 +2782,13 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         .pointer("/fixture/default")
         .and_then(Value::as_str)
         .or_else(|| value.get("fixture_profile_id").and_then(Value::as_str))?
+        .to_string();
+
+    let toolset_profile_id = value
+        .pointer("/toolset/default")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("toolset_profile_id").and_then(Value::as_str))
+        .unwrap_or("toolset-default")
         .to_string();
 
     let default_operations = value
@@ -2185,6 +2819,7 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         name,
         cnc_profile_id,
         fixture_profile_id,
+        toolset_profile_id,
         default_operations,
     })
 }
@@ -2338,19 +2973,30 @@ fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
         .collect()
 }
 
-fn load_toolset_slots(toolsets: &BTreeMap<String, Value>) -> Option<BTreeMap<u8, RackSlot>> {
-    let first = toolsets.values().next()?;
-    let slots = first.get("slots")?.as_array()?;
+fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
+    let id = value.get("id")?.as_str()?.to_string();
+    let name = value.get("name")?.as_str()?.to_string();
+    let description = value
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let generation_policy = ToolsetGenerationPolicy::from_key(
+        value
+            .get("generation_policy")
+            .and_then(Value::as_str)
+            .unwrap_or("allow_hybrid"),
+    );
 
-    let mut out = BTreeMap::new();
-    for slot in slots {
+    let mut slots = BTreeMap::new();
+    for slot in value.get("slots")?.as_array()? {
         let index = slot.get("index").and_then(Value::as_u64)? as u8;
         let mode = slot.get("mode").and_then(Value::as_str).unwrap_or("spare");
         let tool_id = slot
             .get("tool_id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
-        out.insert(
+        slots.insert(
             index,
             RackSlot {
                 tool_id,
@@ -2363,16 +3009,34 @@ fn load_toolset_slots(toolsets: &BTreeMap<String, Value>) -> Option<BTreeMap<u8,
         );
     }
 
-    Some(out)
+    if slots.is_empty() {
+        slots.insert(
+            1,
+            RackSlot {
+                tool_id: None,
+                locked: false,
+                disabled: false,
+            },
+        );
+    }
+
+    Some(ToolsetProfile {
+        id,
+        name,
+        description,
+        generation_policy,
+        slots,
+    })
 }
 
-fn build_toolset_profiles(slots: &BTreeMap<u8, RackSlot>) -> BTreeMap<String, Value> {
-    let slot_values = slots
+fn toolset_profile_to_value(profile: &ToolsetProfile) -> Value {
+    let slot_values = profile
+        .slots
         .iter()
         .map(|(index, slot)| {
             let mode = if slot.disabled {
                 "do_not_use"
-            } else if slot.tool_id.is_some() {
+            } else if slot.locked {
                 "fixed"
             } else {
                 "spare"
@@ -2381,8 +3045,6 @@ fn build_toolset_profiles(slots: &BTreeMap<u8, RackSlot>) -> BTreeMap<String, Va
             let mut value = json!({
                 "index": index,
                 "mode": mode,
-                "locked": slot.locked,
-                "disabled": slot.disabled,
             });
 
             if let Some(tool_id) = &slot.tool_id {
@@ -2393,18 +3055,21 @@ fn build_toolset_profiles(slots: &BTreeMap<u8, RackSlot>) -> BTreeMap<String, Va
         })
         .collect::<Vec<_>>();
 
-    let mut profiles = BTreeMap::new();
-    profiles.insert(
-        "toolset-default".to_string(),
-        json!({
-            "schema_version": 1,
-            "id": "toolset-default",
-            "name": "Default toolset",
-            "generation_policy": "allow_hybrid",
-            "slots": slot_values,
-        }),
-    );
-    profiles
+    json!({
+        "schema_version": 1,
+        "id": profile.id,
+        "name": profile.name,
+        "description": profile.description,
+        "generation_policy": profile.generation_policy.as_key(),
+        "slots": slot_values,
+    })
+}
+
+fn build_toolset_profiles(toolsets: &[ToolsetProfile]) -> BTreeMap<String, Value> {
+    toolsets
+        .iter()
+        .map(|profile| (profile.id.clone(), toolset_profile_to_value(profile)))
+        .collect()
 }
 
 fn capitalize_ascii(value: &str) -> String {

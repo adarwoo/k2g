@@ -22,7 +22,9 @@ pub fn AppTopBar(
 
     let has_board = snapshot.board.is_some();
     let has_machine = snapshot.selected_machine().is_some();
+    let has_fixture = snapshot.selected_fixture().is_some();
     let has_process_profile = snapshot.selected_process_profile().is_some();
+    let has_toolset = snapshot.selected_toolset().is_some();
 
     let machine_name = snapshot
         .selected_machine()
@@ -32,6 +34,14 @@ pub fn AppTopBar(
         .selected_process_profile()
         .map(|profile| profile.name.clone())
         .unwrap_or_else(|| "No processing selected".to_string());
+    let fixture_name = snapshot
+        .selected_fixture()
+        .map(|fixture| fixture.name.clone())
+        .unwrap_or_else(|| "No fixture selected".to_string());
+    let toolset_name = snapshot
+        .selected_toolset()
+        .map(|toolset| toolset.name.clone())
+        .unwrap_or_else(|| "No toolset selected".to_string());
     let board_name = snapshot
         .board
         .as_ref()
@@ -81,6 +91,20 @@ pub fn AppTopBar(
                 span { class: "topbar-label", "Processing" }
                 span { class: if has_process_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
                     "{process_profile_name}"
+                }
+            }
+
+            div { class: "topbar-board",
+                span { class: "topbar-label", "Fixture" }
+                span { class: if has_fixture { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{fixture_name}"
+                }
+            }
+
+            div { class: "topbar-board",
+                span { class: "topbar-label", "Toolset" }
+                span { class: if has_toolset { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                    "{toolset_name}"
                 }
             }
 
@@ -247,6 +271,7 @@ pub fn NavigationRail(state: Signal<UiState>) -> Element {
         Some(Screen::ProcessProfiles),
         Some(Screen::CncProfiles),
         Some(Screen::FixtureProfiles),
+        Some(Screen::ToolsetProfiles),
         None,
         Some(Screen::Stock),
         Some(Screen::Catalog),
@@ -345,6 +370,18 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M8 7V5" }
                 path { d: "M16 7V5" }
                 path { d: "M8 12h8" }
+            }
+        },
+        Screen::ToolsetProfiles => rsx! {
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                path { d: "M12 4v4" }
+                path { d: "M12 16v4" }
+                path { d: "M6 12h4" }
+                path { d: "M14 12h4" }
+                circle { cx: "12", cy: "12", r: "3" }
             }
         },
         Screen::Catalog => rsx! {

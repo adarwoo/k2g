@@ -10,12 +10,14 @@ use kicad_ipc_rs::DocumentType;
 mod cnc;
 mod catalog;
 mod fixture;
+mod profiles_common;
 mod project;
 mod setup;
 mod setup_sections;
 mod process_profiles;
 mod shell;
 mod stock;
+mod toolset;
 
 use cnc::CncScreen;
 use catalog::CatalogScreen;
@@ -24,6 +26,7 @@ use project::JobScreen;
 use process_profiles::ProcessProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, NavigationRail, StatusBar};
 use stock::StockScreen;
+use toolset::ToolsetProfilesScreen;
 
 #[component]
 pub fn AppRoot() -> Element {
@@ -130,6 +133,9 @@ pub fn AppRoot() -> Element {
                             },
                             Screen::ProcessProfiles => rsx! {
                                 ProcessProfilesScreen { state }
+                            },
+                            Screen::ToolsetProfiles => rsx! {
+                                ToolsetProfilesScreen { state }
                             },
                             Screen::Stock => rsx! {
                                 StockScreen { state }
