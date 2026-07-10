@@ -174,19 +174,44 @@ part is about editing the profile.
 
 In the upper part:
 
-Users can:
-- Select a profile from the visible profile list
-   - This immediatly shows the profile in the lower part
-- Create a new profile based on:
-   - New
-   - From a template when available
-   - From an existing profile
-   - From an external file...: Selecting this opens a dialog box to select the file.
-- A list is always presented and filled according to what's available
-   - The list shall show different items in a noticable different way
-   - The list shall be smart, so search is possible
-- Export the selected profile as a file
-- Delete the selected profile
+The upper part is conserving space by showing:
+A dropdown list which allows the user to select a profile. This list only contains profiles.
+
+If no profile exist, the list is hidden away.
+
+When at list 1 profile exists, the list is shown.
+The selected profile is shown in the lower part.
+It can be reviewed and edited right away.
+
+Additionally, in the same section of the profile selection, 2 extra buttons are shown:
+  1. A clone button (2 squares overlapping icon)
+  2. A delete button
+
+To the right of the profile selection/clone/delete group, a button offers to 'Add a profile'
+This button is always shown.
+
+#### 6.1.4 Clicking the 'Add' button or cloning a profile
+
+When the user clicks the 'Add' button, our clones a profile, a dialog is shown.
+For all profiles, the dialog asks the user to set the profile name.
+Depending on the profile, an automatic name is suggested, and the edit control is
+automatically selected, as the user is expected to rename the profile.
+When cloning the name is 'Copy of <source profile>'.
+When adding, the name is 'My <profile type>'
+
+For profiles which can be created from a template, the template selection drop-down list is
+shown.
+
+Add the bottom, the user can click <add> button or <cancel>.
+
+The ESC key can also be used to cancel anytime.
+
+#### 6.1.5 Deleting a profile
+
+The user can delete a profile at anytime.
+If the profile is used by other profiles, an error message is added to the error panel, and the other profiles names are shown in the error.
+Otherwise the profile is deleted and removed from the list.
+If the list still contains at least 1 profile, the first profile in the list becomes the profile shown.
 
 Technically:
 - All profiles carry a schema.

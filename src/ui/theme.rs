@@ -425,6 +425,48 @@ body {
     color: var(--text-subtle);
 }
 
+.event-toast-stack {
+    position: fixed;
+    right: 16px;
+    bottom: 40px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: 420px;
+    pointer-events: none;
+}
+
+.event-toast {
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+    background: color-mix(in srgb, var(--bg-elev) 92%, black 8%);
+    color: var(--text);
+    font-size: 12px;
+    box-shadow: var(--shadow);
+    animation: toast-lifetime 4s ease forwards;
+}
+
+@keyframes toast-lifetime {
+    0% {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    10% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    82% {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    100% {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+}
+
 .shell-statusbar {
     min-height: 30px;
     display: flex;

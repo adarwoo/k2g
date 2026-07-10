@@ -5,9 +5,8 @@ use std::fs;
 
 use super::super::model::*;
 use super::profiles_common::{
-    format_impact_summary, format_impact_warning, profile_matches_filter, slug_file_name,
-    ProfileAddDropdown, ADD_ACTION_EXISTING, ADD_ACTION_EXTERNAL, ADD_ACTION_NEW,
-    ADD_ACTION_TEMPLATE,
+    format_impact_warning, slug_file_name, ProfileLifecycleToolbar,
+    ProfileNameDialog,
 };
 use super::setup::{cnc_profile_library, parse_machine_profile_yaml};
 use crate::ui::unit_service;
@@ -17,50 +16,39 @@ use crate::units::{FeedRate, Length};
 pub fn CncScreen(state: Signal<UiState>) -> Element {
     let snapshot = state.read().clone();
     let mut status_message = use_signal(String::new);
-    let mut profile_filter = use_signal(String::new);
-    let mut add_action = use_signal(|| ADD_ACTION_NEW.to_string());
+    let mut show_name_dialog = use_signal(|| false);
+    let mut dialog_is_clone = use_signal(|| false);
+    let mut dialog_name = use_signal(|| "My CNC profile".to_string());
+    let mut dialog_template_key = use_signal(String::new);
     let library_profiles = cnc_profile_library();
+    let template_options = library_profiles
+        .iter()
+        .map(|profile| (profile.key.clone(), profile.name.clone()))
+        .collect::<Vec<_>>();
 
     let selected_machine = snapshot.selected_machine().cloned();
-    let selected_library_machine = snapshot.selected_machine_id.as_ref().and_then(|selected_id| {
-        library_profiles
-            .iter()
-            .find(|profile| profile.machine.id == *selected_id)
-            .map(|profile| profile.machine.clone())
-    });
     let has_selected_machine = selected_machine.is_some();
-    let selected_profile = selected_machine.clone().or(selected_library_machine);
+    let selected_profile = selected_machine.clone();
     let has_selected_profile = selected_profile.is_some();
     let machine = selected_profile.clone().unwrap_or_else(|| MachineProfile {
         name: "None selected".to_string(),
         ..MachineProfile::default()
     });
 
-    let mut profile_rows: Vec<MachineProfile> =
-        library_profiles.iter().map(|profile| profile.machine.clone()).collect();
-    for listed_machine in snapshot.machines.iter() {
-        if listed_machine.built_in {
-            let exists_in_library = library_profiles
-                .iter()
-                .any(|profile| profile.name == listed_machine.name);
-            if !exists_in_library {
-                profile_rows.push(listed_machine.clone());
-            }
-        } else {
-            profile_rows.push(listed_machine.clone());
-        }
-    }
-
-    let profile_filter_value = profile_filter.read().clone();
-    let filtered_profile_rows: Vec<MachineProfile> = profile_rows
-        .into_iter()
-        .filter(|profile| {
-            profile_matches_filter(&profile.name, &profile.id, &profile_filter_value)
-        })
+    let profile_rows: Vec<MachineProfile> = snapshot
+        .machines
+        .iter()
+        .filter(|machine| !machine.built_in)
+        .cloned()
         .collect();
 
+    let machine_options = profile_rows
+        .iter()
+        .map(|profile| (profile.id.clone(), profile.name.clone()))
+        .collect::<Vec<_>>();
+    let template_options_for_add = template_options.clone();
+
     let selected_id = machine.id.clone();
-    let delete_selected_id = selected_id.clone();
     let is_built_in = machine.built_in;
     let editor_read_only = !has_selected_machine || is_built_in;
 
@@ -121,357 +109,230 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         div {
                             h3 { "CNC profile management" }
                             p {
-                                "Built-in profiles are read-only. Customize a built-in profile to create an editable profile."
+                                "CNC profiles are editable user profiles. New profiles are created from templates."
                             }
                         }
-                        ProfileAddDropdown {
-                            selected_action: add_action.read().clone(),
-                            include_template: !library_profiles.is_empty(),
-                            on_action_change: move |value| add_action.set(value),
-                            on_add: {
-                                let profiles = library_profiles.clone();
-                                let selected_profile = selected_profile.clone();
-                                move |_| {
-                                    match add_action.read().as_str() {
-                                        ADD_ACTION_NEW => {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.add_machine_profile(MachineProfile {
-                                                        name: "CNC profile".to_string(),
-                                                        ..MachineProfile::default()
-                                                    })
-                                                });
-                                            status_message.set("CNC profile created".to_string());
-                                        }
-                                        ADD_ACTION_TEMPLATE => {
-                                            if let Some(profile) = profiles.first() {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.add_machine_profile(profile.machine.clone())
-                                                    });
-                                                status_message
-                                                    .set(
-                                                        "Created editable profile from built-in template"
-                                                            .to_string(),
-                                                    );
-                                            } else {
-                                                status_message
-                                                    .set(
-                                                        "No built-in profile template is available".to_string(),
-                                                    );
-                                            }
-                                        }
-                                        ADD_ACTION_EXISTING => {
-                                            if let Some(source) = selected_profile.clone() {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.add_machine_profile(MachineProfile {
-                                                            id: String::new(),
-                                                            name: format!("{} - copy", source.name),
-                                                            built_in: false,
-                                                            ..source
-                                                        })
-                                                    });
-                                                status_message
-                                                    .set(
-                                                        "CNC profile duplicated. Update the name as needed."
-                                                            .to_string(),
-                                                    );
-                                            } else {
-                                                status_message
-                                                    .set(
-                                                        "Select a profile first to create from existing".to_string(),
-                                                    );
-                                            }
-                                        }
-                                        ADD_ACTION_EXTERNAL => {
-                                            let picked = FileDialog::new()
-                                                .set_title("Import CNC profile")
-                                                .add_filter("CNC profile YAML", &["yaml", "yml"])
-                                                .pick_file();
-                                            let Some(path) = picked else {
-                                                status_message.set("Import canceled".to_string());
-                                                return;
-                                            };
-                                            let file_name = path
-                                                .file_name()
-                                                .and_then(|name| name.to_str())
-                                                .unwrap_or_default()
-                                                .to_ascii_lowercase();
-                                            let valid_name = file_name.ends_with(".cnc-profile.yaml")
-                                                || file_name.ends_with(".cnc-profile.yml");
-                                            if !valid_name {
-                                                status_message
-                                                    .set(
-                                                        "CNC profile import failed: file name must end with .cnc-profile.yaml or .cnc-profile.yml"
-                                                            .to_string(),
-                                                    );
-                                                return;
-                                            }
-                                            let text = match fs::read_to_string(&path) {
-                                                Ok(text) => text,
-                                                Err(_) => {
-                                                    status_message
-                                                        .set(
-                                                            "CNC profile import failed: file not readable".to_string(),
-                                                        );
-                                                    return;
-                                                }
-                                            };
-                                            let path_str = path.to_string_lossy().to_string();
-                                            let profile = match parse_machine_profile_yaml(&text, &path_str) {
-                                                Some(profile) => profile,
-                                                None => {
-                                                    status_message
-                                                        .set(
-                                                            "CNC profile import failed: file is missing required machine fields"
-                                                                .to_string(),
-                                                        );
-                                                    return;
-                                                }
-                                            };
-                                            state.with_mut(|s| s.add_machine_profile(profile));
-                                            status_message.set("CNC profile imported and selected".to_string());
-                                        }
-                                        _ => {}
-                                    }
+                        ProfileLifecycleToolbar {
+                            profile_type_label: "CNC".to_string(),
+                            profiles: machine_options,
+                            selected_profile_id: snapshot.selected_machine_id.clone(),
+                            can_export: has_selected_machine,
+                            on_select: move |id| {
+                                state.with_mut(|s| s.select_machine_profile_by_id(Some(id)));
+                            },
+                            on_clone: move |_| {
+                                let Some(selected) = selected_profile.clone() else {
+                                    status_message.set("No CNC profile selected".to_string());
+                                    return;
+                                };
+                                dialog_is_clone.set(true);
+                                dialog_name.set(format!("Copy of {}", selected.name));
+                                show_name_dialog.set(true);
+                            },
+                            on_delete: move |_| {
+                                let Some(cnc_id) = state.read().selected_machine_id.clone() else {
+                                    status_message.set("No CNC profile selected".to_string());
+                                    return;
+                                };
+                                let impact = state.read().impact_delete_cnc_profile(&cnc_id);
+                                if !impact.dependent_process_profiles.is_empty() {
+                                    let description = format_impact_warning(
+                                        "Cannot delete CNC profile because it is referenced by processing profiles:",
+                                        &impact,
+                                    );
+                                    status_message.set(description);
+                                    return;
+                                }
+                                let confirmed = MessageDialog::new()
+                                    .set_level(MessageLevel::Warning)
+                                    .set_title("Delete CNC profile")
+                                    .set_description("Delete CNC profile?")
+                                    .set_buttons(MessageButtons::YesNo)
+                                    .show();
+                                if confirmed == rfd::MessageDialogResult::Yes {
+                                    state
+                                        .with_mut(|s| {
+                                            let _ = s.delete_cnc_profile_with_cascade(&cnc_id);
+                                            s.log_event("CNC profile deleted");
+                                        });
+                                    status_message.set("CNC profile deleted".to_string());
                                 }
                             },
-                        }
-                    }
-
-                    div { class: "cnc-manager-grid",
-                        div { class: "setup-card cnc-profile-list-panel",
-                            h4 { "Profiles" }
-                            input {
-                                class: "stock-filter-input",
-                                value: profile_filter_value,
-                                placeholder: "Search profiles",
-                                oninput: move |evt| profile_filter.set(evt.value()),
-                            }
-
-                            if filtered_profile_rows.is_empty() {
-                                p { class: "diag-status", "No matching profiles found." }
-                            } else {
-                                div { class: "profile-list",
-                                    for listed_machine in filtered_profile_rows.iter() {
-                                        div {
-                                            class: if snapshot.selected_machine_id.as_ref() == Some(&listed_machine.id) { if listed_machine.built_in {
-                                                "profile-list-item active built-in"
-                                            } else {
-                                                "profile-list-item active editable"
-                                            } } else if listed_machine.built_in { "profile-list-item built-in" } else { "profile-list-item editable" },
-                                            onclick: {
-                                                let machine_id = listed_machine.id.clone();
-                                                move |_| {
-                                                    state.with_mut(|s| s.select_machine_profile_by_id(Some(machine_id.clone())))
-                                                }
-                                            },
-                                            div {
-                                                div { class: "profile-list-title",
-                                                    "{listed_machine.name}"
-                                                }
-                                                div { class: "profile-list-meta",
-                                                    if listed_machine.built_in {
-                                                        "Built-in profile"
-                                                    } else {
-                                                        "My profile"
-                                                    }
-                                                    " · ATC {listed_machine.atc_slot_count}"
-                                                }
-                                            }
-                                            span { class: if listed_machine.built_in { "status-chip" } else { "status-chip status-in-stock" },
-                                                if listed_machine.built_in {
-                                                    "Built-in"
-                                                } else {
-                                                    "My profile"
-                                                }
-                                            }
-                                        }
-                                    }
+                            on_export: move |_| {
+                                let Some(current) = state.read().selected_machine().cloned() else {
+                                    status_message.set("No CNC profile selected".to_string());
+                                    return;
+                                };
+                                let default_name = format!(
+                                    "{}.cnc-profile.yaml",
+                                    slug_file_name(&current.name, "cnc-profile"),
+                                );
+                                let picked = FileDialog::new()
+                                    .set_title("Export CNC profile")
+                                    .set_file_name(&default_name)
+                                    .add_filter("CNC profile YAML", &["yaml", "yml"])
+                                    .save_file();
+                                let Some(path) = picked else {
+                                    return;
+                                };
+                                let mut output_path = path;
+                                let file_name = output_path
+                                    .file_name()
+                                    .and_then(|f| f.to_str())
+                                    .unwrap_or_default()
+                                    .to_ascii_lowercase();
+                                if !file_name.ends_with(".cnc-profile.yaml")
+                                    && !file_name.ends_with(".cnc-profile.yml")
+                                {
+                                    let stem = output_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("cnc-profile");
+                                    let new_name = format!("{}.cnc-profile.yaml", stem);
+                                    output_path = output_path.with_file_name(new_name);
                                 }
-                            }
-                        }
+                                let yaml = match machine_profile_to_yaml(&current) {
+                                    Ok(v) => v,
+                                    Err(_) => {
+                                        status_message
+                                            .set("Export failed: unable to serialize profile".to_string());
+                                        return;
+                                    }
+                                };
+                                if fs::write(&output_path, yaml).is_ok() {
+                                    state.with_mut(|s| s.log_event("CNC profile exported"));
+                                    status_message.set("CNC profile exported".to_string());
+                                } else {
+                                    status_message.set("Export failed: unable to write file".to_string());
+                                }
+                            },
+                            on_add: move |_| {
+                                dialog_is_clone.set(false);
+                                dialog_name.set("My CNC profile".to_string());
+                                dialog_template_key
+                                    .set(
+                                        template_options_for_add
+                                            .first()
+                                            .map(|(key, _)| key.clone())
+                                            .unwrap_or_default(),
+                                    );
+                                show_name_dialog.set(true);
+                            },
+                            on_import: move |_| {
+                                let picked = FileDialog::new()
+                                    .set_title("Import CNC profile")
+                                    .add_filter("CNC profile YAML", &["yaml", "yml"])
+                                    .pick_file();
+                                let Some(path) = picked else {
+                                    return;
+                                };
 
-                        div { class: "setup-card cnc-profile-details-panel",
-                            if has_selected_profile {
-                                div { class: "panel-header",
-                                    div {
-                                        h4 { "{machine.name}" }
-                                        p {
-                                            if machine.built_in {
-                                                "Built-in profile • Read-only"
-                                            } else {
-                                                "Editable profile"
-                                            }
-                                        }
-                                    }
-                                    div { class: "actions",
-                                        if machine.built_in {
-                                            button {
-                                                class: "btn btn-primary",
-                                                onclick: {
-                                                    let source_id = machine.id.clone();
-                                                    move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.select_machine_profile_by_id(Some(source_id.clone()));
-                                                                s.clone_selected_machine();
-                                                            });
-                                                        status_message
-                                                            .set("Customized profile created. You can edit it now.".to_string());
-                                                    }
-                                                },
-                                                "Customize profile"
-                                            }
-                                            button {
-                                                class: "btn btn-secondary",
-                                                onclick: {
-                                                    let machine = machine.clone();
-                                                    move |_| {
-                                                        let default_name = format!(
-                                                            "{}.cnc-profile.yaml",
-                                                            slug_file_name(&machine.name, "cnc-profile"),
-                                                        );
-                                                        let picked = FileDialog::new()
-                                                            .set_title("Export CNC profile")
-                                                            .set_file_name(&default_name)
-                                                            .add_filter("CNC profile YAML", &["yaml", "yml"])
-                                                            .save_file();
-                                                        let Some(path) = picked else {
-                                                            return;
-                                                        };
-                                                        let mut output_path = path;
-                                                        let file_name = output_path
-                                                            .file_name()
-                                                            .and_then(|f| f.to_str())
-                                                            .unwrap_or_default()
-                                                            .to_ascii_lowercase();
-                                                        if !file_name.ends_with(".cnc-profile.yaml")
-                                                            && !file_name.ends_with(".cnc-profile.yml")
-                                                        {
-                                                            let stem = output_path
-                                                                .file_stem()
-                                                                .and_then(|s| s.to_str())
-                                                                .unwrap_or("cnc-profile");
-                                                            let new_name = format!("{}.cnc-profile.yaml", stem);
-                                                            output_path = output_path.with_file_name(new_name);
-                                                        }
-                                                        let yaml = match machine_profile_to_yaml(&machine) {
-                                                            Ok(v) => v,
-                                                            Err(_) => {
-                                                                status_message
-                                                                    .set("Export failed: unable to serialize profile".to_string());
-                                                                return;
-                                                            }
-                                                        };
-                                                        if fs::write(&output_path, yaml).is_ok() {
-                                                            status_message.set("CNC profile exported".to_string());
-                                                        } else {
-                                                            status_message.set("Export failed: unable to write file".to_string());
-                                                        }
-                                                    }
-                                                },
-                                                "Export profile"
-                                            }
-                                        } else {
-                                            button {
-                                                class: "btn btn-secondary",
-                                                onclick: move |_| {
-                                                    state.with_mut(|s| s.clone_selected_machine());
-                                                    status_message
-                                                        .set("CNC profile duplicated. Update the name as needed.".to_string());
-                                                },
-                                                "Duplicate"
-                                            }
-                                            button {
-                                                class: "btn btn-secondary",
-                                                onclick: {
-                                                    let machine = machine.clone();
-                                                    move |_| {
-                                                        let default_name = format!(
-                                                            "{}.cnc-profile.yaml",
-                                                            slug_file_name(&machine.name, "cnc-profile"),
-                                                        );
-                                                        let picked = FileDialog::new()
-                                                            .set_title("Export CNC profile")
-                                                            .set_file_name(&default_name)
-                                                            .add_filter("CNC profile YAML", &["yaml", "yml"])
-                                                            .save_file();
-                                                        let Some(path) = picked else {
-                                                            return;
-                                                        };
-                                                        let mut output_path = path;
-                                                        let file_name = output_path
-                                                            .file_name()
-                                                            .and_then(|f| f.to_str())
-                                                            .unwrap_or_default()
-                                                            .to_ascii_lowercase();
-                                                        if !file_name.ends_with(".cnc-profile.yaml")
-                                                            && !file_name.ends_with(".cnc-profile.yml")
-                                                        {
-                                                            let stem = output_path
-                                                                .file_stem()
-                                                                .and_then(|s| s.to_str())
-                                                                .unwrap_or("cnc-profile");
-                                                            let new_name = format!("{}.cnc-profile.yaml", stem);
-                                                            output_path = output_path.with_file_name(new_name);
-                                                        }
-                                                        let yaml = match machine_profile_to_yaml(&machine) {
-                                                            Ok(v) => v,
-                                                            Err(_) => {
-                                                                status_message
-                                                                    .set("Export failed: unable to serialize profile".to_string());
-                                                                return;
-                                                            }
-                                                        };
-                                                        if fs::write(&output_path, yaml).is_ok() {
-                                                            status_message.set("CNC profile exported".to_string());
-                                                        } else {
-                                                            status_message.set("Export failed: unable to write file".to_string());
-                                                        }
-                                                    }
-                                                },
-                                                "Export profile"
-                                            }
-                                            button {
-                                                class: "btn btn-danger",
-                                                onclick: move |_| {
-                                                    let cnc_id = delete_selected_id.clone();
-                                                    let impact = state.read().impact_delete_cnc_profile(&cnc_id);
-                                                    let description = format_impact_warning(
-                                                        "Delete CNC profile and dependent assets?",
-                                                        &impact,
-                                                    );
-                                                    let confirmed = MessageDialog::new()
-                                                        .set_level(MessageLevel::Warning)
-                                                        .set_title("Delete CNC profile")
-                                                        .set_description(&description)
-                                                        .set_buttons(MessageButtons::YesNo)
-                                                        .show();
-                                                    if confirmed == rfd::MessageDialogResult::Yes {
-                                                        let impact = state.with_mut(|s| s.delete_cnc_profile_with_cascade(&cnc_id));
-                                                        status_message.set(format_impact_summary("Deleted CNC profile", &impact));
-                                                    }
-                                                },
-                                                "Delete"
-                                            }
-                                        }
-                                    }
+                                let file_name = path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or_default()
+                                    .to_ascii_lowercase();
+                                let valid_name = file_name.ends_with(".cnc-profile.yaml")
+                                    || file_name.ends_with(".cnc-profile.yml");
+                                if !valid_name {
+                                    status_message
+                                        .set(
+                                            "CNC profile import failed: file name must end with .cnc-profile.yaml or .cnc-profile.yml"
+                                                .to_string(),
+                                        );
+                                    return;
                                 }
 
-                                p { class: "diag-status",
-                                    "Fixture {machine.fixture_plate_max_x} x {machine.fixture_plate_max_y} mm · Feed {feed_display} · Spindle {spindle_min_display} - {spindle_max_display}"
+                                let text = match fs::read_to_string(&path) {
+                                    Ok(text) => text,
+                                    Err(_) => {
+                                        status_message
+                                            .set("CNC profile import failed: file not readable".to_string());
+                                        return;
+                                    }
+                                };
+
+                                let source_path = path.to_string_lossy().to_string();
+                                let Some(mut parsed) = parse_machine_profile_yaml(&text, &source_path)
+                                else {
+                                    status_message
+                                        .set("CNC profile import failed: invalid schema or syntax".to_string());
+                                    return;
+                                };
+                                parsed.id = String::new();
+                                parsed.built_in = false;
+                                if parsed.name.trim().is_empty() {
+                                    parsed.name = "Imported CNC profile".to_string();
                                 }
-                            } else {
-                                h4 { "Profile details" }
-                                p { "Select a profile from the list to view details." }
-                            }
+                                state
+                                    .with_mut(|s| {
+                                        s.add_machine_profile(parsed);
+                                        s.log_event("CNC profile imported");
+                                    });
+                                status_message.set("CNC profile imported and selected".to_string());
+                            },
                         }
                     }
 
                     if !status_message.read().is_empty() {
                         p { class: "diag-status", "{status_message}" }
+                    }
+
+                    if *show_name_dialog.read() {
+                        ProfileNameDialog {
+                            title: if *dialog_is_clone.read() { "Clone CNC profile".to_string() } else { "Add CNC profile".to_string() },
+                            name_label: "Profile name".to_string(),
+                            name_value: dialog_name.read().clone(),
+                            template_options: if *dialog_is_clone.read() { Vec::<(String, String)>::new() } else { template_options.clone() },
+                            selected_template: dialog_template_key.read().clone(),
+                            on_name_change: move |value| dialog_name.set(value),
+                            on_template_change: move |value| dialog_template_key.set(value),
+                            on_cancel: move |_| show_name_dialog.set(false),
+                            on_submit: move |_| {
+                                let name = dialog_name.read().trim().to_string();
+                                if name.is_empty() {
+                                    status_message.set("Profile name is required".to_string());
+                                    return;
+                                }
+                                if *dialog_is_clone.read() {
+                                    state.with_mut(|s| s.clone_selected_machine());
+                                    let result = state.with_mut(|s| s.rename_selected_machine(&name));
+                                    if let Err(message) = result {
+                                        status_message.set(message);
+                                        return;
+                                    }
+                                    state.with_mut(|s| s.log_event("CNC profile cloned"));
+                                    status_message.set("CNC profile cloned".to_string());
+                                } else {
+                                    let selected_template_key = dialog_template_key.read().clone();
+                                    if selected_template_key.trim().is_empty() {
+                                        status_message
+                                            .set(
+                                                "Select a CNC template before creating the profile".to_string(),
+                                            );
+                                        return;
+                                    }
+                                    let Some(template) = library_profiles
+                                        .iter()
+                                        .find(|profile| profile.key == selected_template_key)
+                                        .map(|profile| profile.machine.clone()) else {
+                                        status_message.set("Selected template was not found".to_string());
+                                        return;
+                                    };
+                                    state
+                                        .with_mut(|s| {
+                                            let mut profile = template;
+                                            profile.name = name.clone();
+                                            profile.id = String::new();
+                                            profile.built_in = false;
+                                            s.add_machine_profile(profile);
+                                            s.log_event("CNC profile added");
+                                        });
+                                    status_message.set("CNC profile created".to_string());
+                                }
+                                show_name_dialog.set(false);
+                            },
+                        }
                     }
                 }
 
@@ -488,16 +349,10 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
 
                     if !has_selected_profile {
                         p {
-                            "No CNC profile selected. Add from built-in or import a profile in the top section, then select one from the list."
+                            "No CNC profile selected. Add a profile from a template in the top section."
                         }
                         p { class: "diag-status",
                             "The details editor is read-only until a profile is selected."
-                        }
-                    }
-
-                    if has_selected_profile && is_built_in {
-                        p { class: "diag-status",
-                            "Built-in profiles are read-only. Customize to create an editable version."
                         }
                     }
 

@@ -34,5 +34,31 @@ properties:
     type: [string, "null"]
     default: null
 
-required: [units, theme, resolution, selected_process_profile_id]
+  selected_cnc_profile_id:
+    description: |
+      ID of the currently selected CNC profile.
+    type: [string, "null"]
+    default: null
+
+  selected_fixture_profile_id:
+    description: |
+      ID of the currently selected fixture profile.
+    type: [string, "null"]
+    default: null
+
+  selected_toolset_profile_id:
+    description: |
+      ID of the currently selected toolset profile.
+    type: [string, "null"]
+    default: null
+
+required:
+  [
+    units,
+    theme,
+    selected_process_profile_id,
+    selected_cnc_profile_id,
+    selected_fixture_profile_id,
+    selected_toolset_profile_id,
+  ]
 additionalProperties: false

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::board::BoardSnapshot;
 use crate::catalog::init::{catalog_dir, parse_catalog_with_backfill};
@@ -747,6 +748,13 @@ pub struct AppError {
     pub details: Option<String>,
 }
 
+#[derive(Clone, PartialEq)]
+pub struct AppEvent {
+    pub id: String,
+    pub message: String,
+    pub created_ms: u64,
+}
+
 #[derive(Clone)]
 pub struct RackSlot {
     pub tool_id: Option<String>,
@@ -782,6 +790,7 @@ pub struct UiState {
     pub catalogs: Vec<CatalogStockCatalog>,
     pub tools: Vec<Tool>,
     pub errors: Vec<AppError>,
+    pub events: Vec<AppEvent>,
     pub generation_state: GenerationState,
     pub project_config: JobConfig,
     pub gcode: String,
@@ -879,6 +888,7 @@ impl UiState {
             catalogs: built_in_catalogs(),
             tools,
             errors: vec![],
+            events: vec![],
             generation_state: GenerationState::Idle,
             project_config: JobConfig {
                 selected_operations: vec![ProductionOperation::DrillPth],
@@ -1005,25 +1015,34 @@ impl UiState {
             })
             .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
 
+        let selected_cnc = persisted
+            .selected_cnc_profile_id
+            .clone()
+            .filter(|selected| self.machines.iter().any(|profile| profile.id == *selected));
+        let selected_fixture = persisted
+            .selected_fixture_profile_id
+            .clone()
+            .filter(|selected| self.fixtures.iter().any(|profile| profile.id == *selected));
+        let selected_toolset = persisted
+            .selected_toolset_profile_id
+            .clone()
+            .filter(|selected| self.toolsets.iter().any(|profile| profile.id == *selected));
+
         if selected_process.is_some() {
             self.select_process_profile_by_id(selected_process);
         } else {
-            let selected_machine = self
-                .machines
-                .first()
-                .map(|machine| machine.id.clone());
+            let selected_machine = selected_cnc
+                .clone()
+                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
             self.select_machine_profile_by_id(selected_machine);
-            if let Some(toolset_id) = self.toolsets.first().map(|toolset| toolset.id.clone()) {
+            if let Some(toolset_id) = selected_toolset
+                .clone()
+                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
+            {
                 self.select_toolset_profile_by_id(Some(toolset_id));
             }
-            if self
-                .selected_fixture_id
-                .as_ref()
-                .map(|id| !self.fixtures.iter().any(|fixture| &fixture.id == id))
-                .unwrap_or(true)
-            {
-                self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
-            }
+            self.selected_fixture_id = selected_fixture
+                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
         }
 
         if self.machines.is_empty() {
@@ -1046,6 +1065,9 @@ impl UiState {
                 "mode": self.theme.as_str(),
             },
             "selected_process_profile_id": self.selected_process_profile_id,
+            "selected_cnc_profile_id": self.selected_machine_id,
+            "selected_fixture_profile_id": self.selected_fixture_id,
+            "selected_toolset_profile_id": self.selected_toolset_id,
         });
         let _ = save_global_settings(&app_dirs, &global_settings);
 
@@ -1075,6 +1097,25 @@ impl UiState {
 
         let stock = stock_value_from_tools(&self.tools);
         let _ = save_stock(&app_dirs, &stock);
+    }
+
+    pub fn log_event(&mut self, message: impl Into<String>) {
+        let created_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let id = format!("event-{}", created_ms);
+        self.events.push(AppEvent {
+            id,
+            message: message.into(),
+            created_ms,
+        });
+
+        const MAX_EVENT_HISTORY: usize = 200;
+        if self.events.len() > MAX_EVENT_HISTORY {
+            let drop_count = self.events.len() - MAX_EVENT_HISTORY;
+            self.events.drain(0..drop_count);
+        }
     }
 
     pub fn selected_machine(&self) -> Option<&MachineProfile> {
@@ -1670,6 +1711,7 @@ impl UiState {
     }
 
     pub fn add_machine_profile(&mut self, mut profile: MachineProfile) {
+        profile.built_in = false;
         profile.name = self.unique_machine_name(&profile.name, None);
         profile.id = self.make_machine_id(&profile.name);
         let selected = profile.id.clone();
@@ -2081,11 +2123,12 @@ impl UiState {
     pub fn delete_cnc_profile_with_cascade(&mut self, cnc_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_cnc_profile(cnc_id);
 
+        if !impact.dependent_process_profiles.is_empty() {
+            return impact;
+        }
+
         self.machines.retain(|machine| machine.id != cnc_id);
         self.machine_mru.retain(|id| id != cnc_id);
-
-        self.process_profiles
-            .retain(|profile| profile.cnc_profile_id != cnc_id);
 
         let next_processing_id = self
             .selected_process_profile_id
@@ -2119,9 +2162,11 @@ impl UiState {
     pub fn delete_fixture_profile_with_cascade(&mut self, fixture_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_fixture_profile(fixture_id);
 
+        if !impact.dependent_process_profiles.is_empty() {
+            return impact;
+        }
+
         self.fixtures.retain(|fixture| fixture.id != fixture_id);
-        self.process_profiles
-            .retain(|profile| profile.fixture_profile_id != fixture_id);
 
         let next_processing_id = self
             .selected_process_profile_id
@@ -2159,9 +2204,11 @@ impl UiState {
     pub fn delete_toolset_profile_with_cascade(&mut self, toolset_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_toolset_profile(toolset_id);
 
+        if !impact.dependent_process_profiles.is_empty() {
+            return impact;
+        }
+
         self.toolsets.retain(|toolset| toolset.id != toolset_id);
-        self.process_profiles
-            .retain(|profile| profile.toolset_profile_id != toolset_id);
 
         let next_processing_id = self
             .selected_process_profile_id

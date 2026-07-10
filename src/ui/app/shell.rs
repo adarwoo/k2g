@@ -399,6 +399,30 @@ fn rail_icon(screen: Screen) -> Element {
 }
 
 #[component]
+pub fn EventNotifications(state: Signal<UiState>) -> Element {
+    let snapshot = state.read().clone();
+    let visible_events = snapshot
+        .events
+        .iter()
+        .rev()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if visible_events.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "event-toast-stack",
+            for event in visible_events.into_iter() {
+                div { key: "{event.id}", class: "event-toast", "{event.message}" }
+            }
+        }
+    }
+}
+
+#[component]
 pub fn StatusBar(state: Signal<UiState>, boot: UiLaunchData) -> Element {
     let snapshot = state.read().clone();
     let board_label = snapshot

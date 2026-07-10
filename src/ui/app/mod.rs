@@ -24,7 +24,7 @@ use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
 use project::JobScreen;
 use process_profiles::ProcessProfilesScreen;
-use shell::{AppTopBar, DiagnosticsBanner, NavigationRail, StatusBar};
+use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar};
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;
 
@@ -81,33 +81,6 @@ pub fn AppRoot() -> Element {
         style { "{APP_STYLE}" }
 
         div { class: if snapshot.theme == Theme::Dark { "app-shell shell-theme-dark" } else { "app-shell shell-theme-light" },
-            if snapshot.show_first_launch {
-                div { class: "wizard-overlay",
-                    div { class: "wizard-dialog",
-                        h2 { "Welcome to KiCad CNC Generator" }
-                        p { "Create your first CNC profile to start using the plugin." }
-                        div { class: "wizard-actions",
-                            button {
-                                class: "btn btn-primary",
-                                onclick: move |_| state.with_mut(|s| s.add_demo_machine()),
-                                "Create Demo Machine"
-                            }
-                            button {
-                                class: "btn btn-secondary",
-                                onclick: move |_| {
-                                    state
-                                        .with_mut(|s| {
-                                            s.show_first_launch = false;
-                                            s.selected_screen = Screen::CncProfiles;
-                                        });
-                                },
-                                "Skip"
-                            }
-                        }
-                    }
-                }
-            }
-
             AppTopBar { state, error_count, warning_count }
 
             DiagnosticsBanner {
@@ -147,6 +120,8 @@ pub fn AppRoot() -> Element {
                     }
                 }
             }
+
+            EventNotifications { state }
 
             StatusBar { state, boot: boot.clone() }
         }
