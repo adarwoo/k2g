@@ -13,8 +13,8 @@ use crate::ui::unit_service;
 use crate::units::{FeedRate, Length};
 
 #[component]
-pub fn CncScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
@@ -51,6 +51,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
     let selected_id = machine.id.clone();
     let is_built_in = machine.built_in;
     let editor_read_only = !has_selected_machine || is_built_in;
+    let unit_system = snapshot.unit_system;
 
     let mut field_error_message = use_signal(|| None::<String>);
     let mut fixture_x_is_editing = use_signal(|| false);
@@ -103,7 +104,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
 
     rsx! {
         div { class: "screen single",
-            section { class: "panel grow",
+            section { class: "panel grow profile-screen-panel",
                 article { class: "setup-card section-block cnc-manager-shell",
                     div { class: "panel-header",
                         div {
@@ -118,7 +119,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                             selected_profile_id: snapshot.selected_machine_id.clone(),
                             can_export: has_selected_machine,
                             on_select: move |id| {
-                                state.with_mut(|s| s.select_machine_profile_by_id(Some(id)));
+                                state.with_mut(|s| s.ui.select_machine_profile_by_id(Some(id)));
                             },
                             on_clone: move |_| {
                                 let Some(selected) = selected_profile.clone() else {
@@ -130,11 +131,11 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 show_name_dialog.set(true);
                             },
                             on_delete: move |_| {
-                                let Some(cnc_id) = state.read().selected_machine_id.clone() else {
+                                let Some(cnc_id) = state.read().ui.selected_machine_id.clone() else {
                                     status_message.set("No CNC profile selected".to_string());
                                     return;
                                 };
-                                let impact = state.read().impact_delete_cnc_profile(&cnc_id);
+                                let impact = state.read().ui.impact_delete_cnc_profile(&cnc_id);
                                 if !impact.dependent_process_profiles.is_empty() {
                                     let description = format_impact_warning(
                                         "Cannot delete CNC profile because it is referenced by processing profiles:",
@@ -152,14 +153,14 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 if confirmed == rfd::MessageDialogResult::Yes {
                                     state
                                         .with_mut(|s| {
-                                            let _ = s.delete_cnc_profile_with_cascade(&cnc_id);
-                                            s.log_event("CNC profile deleted");
+                                            let _ = s.ui.delete_cnc_profile_with_cascade(&cnc_id);
+                                            s.ui.log_event("CNC profile deleted");
                                         });
                                     status_message.set("CNC profile deleted".to_string());
                                 }
                             },
                             on_export: move |_| {
-                                let Some(current) = state.read().selected_machine().cloned() else {
+                                let Some(current) = state.read().ui.selected_machine().cloned() else {
                                     status_message.set("No CNC profile selected".to_string());
                                     return;
                                 };
@@ -200,7 +201,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                     }
                                 };
                                 if fs::write(&output_path, yaml).is_ok() {
-                                    state.with_mut(|s| s.log_event("CNC profile exported"));
+                                    state.with_mut(|s| s.ui.log_event("CNC profile exported"));
                                     status_message.set("CNC profile exported".to_string());
                                 } else {
                                     status_message.set("Export failed: unable to write file".to_string());
@@ -266,8 +267,8 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                 }
                                 state
                                     .with_mut(|s| {
-                                        s.add_machine_profile(parsed);
-                                        s.log_event("CNC profile imported");
+                                        s.ui.add_machine_profile(parsed);
+                                        s.ui.log_event("CNC profile imported");
                                     });
                                 status_message.set("CNC profile imported and selected".to_string());
                             },
@@ -295,13 +296,13 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                     return;
                                 }
                                 if *dialog_is_clone.read() {
-                                    state.with_mut(|s| s.clone_selected_machine());
-                                    let result = state.with_mut(|s| s.rename_selected_machine(&name));
+                                    state.with_mut(|s| s.ui.clone_selected_machine());
+                                    let result = state.with_mut(|s| s.ui.rename_selected_machine(&name));
                                     if let Err(message) = result {
                                         status_message.set(message);
                                         return;
                                     }
-                                    state.with_mut(|s| s.log_event("CNC profile cloned"));
+                                    state.with_mut(|s| s.ui.log_event("CNC profile cloned"));
                                     status_message.set("CNC profile cloned".to_string());
                                 } else {
                                     let selected_template_key = dialog_template_key.read().clone();
@@ -325,8 +326,8 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                                             profile.name = name.clone();
                                             profile.id = String::new();
                                             profile.built_in = false;
-                                            s.add_machine_profile(profile);
-                                            s.log_event("CNC profile added");
+                                            s.ui.add_machine_profile(profile);
+                                            s.ui.log_event("CNC profile added");
                                         });
                                     status_message.set("CNC profile created".to_string());
                                 }
@@ -336,7 +337,7 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                     }
                 }
 
-                article { class: "setup-card section-block",
+                article { class: "setup-card section-block profile-editor-shell",
                     div { class: "panel-header",
                         h3 {
                             if has_selected_machine {
@@ -347,970 +348,1019 @@ pub fn CncScreen(state: Signal<UiState>) -> Element {
                         }
                     }
 
-                    if !has_selected_profile {
-                        p {
-                            "No CNC profile selected. Add a profile from a template in the top section."
+                    div { class: "profile-editor-scroll",
+
+                        if !has_selected_profile {
+                            p {
+                                "No CNC profile selected. Add a profile from a template in the top section."
+                            }
+                            p { class: "diag-status",
+                                "The details editor is read-only until a profile is selected."
+                            }
                         }
-                        p { class: "diag-status",
-                            "The details editor is read-only until a profile is selected."
-                        }
-                    }
 
-                    if has_selected_machine && !is_built_in {
-                        div { class: if editor_read_only { "edit-grid read-only" } else { "edit-grid" },
-                            div { class: "field section-subfield",
-                                label { "Profile name" }
-                                div { class: "sub-field",
-                                    if editor_read_only {
-                                        p { class: "diag-status", "{machine.name}" }
-                                    } else {
-                                        input {
-                                            value: machine.name.clone(),
-                                            autofocus: snapshot.focus_profile_name_editor,
-                                            oninput: move |evt| {
-                                                let proposed = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        match s.rename_selected_machine(&proposed) {
-                                                            Ok(_) => {
-                                                                s.focus_profile_name_editor = false;
-                                                                status_message.set(String::new());
-                                                            }
-                                                            Err(msg) => {
-                                                                status_message.set(msg);
-                                                            }
-                                                        }
-                                                    });
-                                            },
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-subfield",
-                                label { "ATC slots" }
-                                div { class: "sub-field",
-                                    input {
-                                        r#type: "number",
-                                        min: "0",
-                                        disabled: editor_read_only,
-                                        value: "{machine.atc_slot_count}",
-                                        oninput: {
-                                            let selected_id = selected_id.clone();
-                                            move |evt| {
-                                                let value = evt.value().parse::<u8>().unwrap_or(0);
-                                                state
-                                                    .with_mut(|s| {
-                                                        if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                        {
-                                                            t.atc_slot_count = value;
-                                                        }
-                                                        s.seed_rack_slots(value);
-                                                    });
-                                            }
-                                        },
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Fixture plate" }
-
-                                if let Some(message) = field_error_message.read().clone() {
-                                    p { class: "diag-status", "{message}" }
-                                }
-
+                        if has_selected_machine && !is_built_in {
+                            div { class: if editor_read_only { "edit-grid read-only" } else { "edit-grid" },
                                 div { class: "field section-subfield",
-                                    label { "Fixture X" }
+                                    label { "Profile name" }
                                     div { class: "sub-field",
-                                        if *fixture_x_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: fixture_x_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    fixture_x_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = fixture_x_draft.read().trim().to_string();
-                                                            match unit_service::parse_length_with_preference(
-                                                                &raw,
-                                                                snapshot.unit_system,
-                                                            ) {
-                                                                Ok(length) if length.as_mm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.fixture_plate_max_x = length.as_mm().round().max(0.0)
-                                                                                    as u32;
-                                                                            }
-                                                                        });
-                                                                    fixture_x_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Fixture X must be a valid non-negative length".to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                            fixture_x_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                        fixture_x_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
+                                        if editor_read_only {
+                                            p { class: "diag-status", "{machine.name}" }
                                         } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_x_is_editing.set(true);
-                                                        fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{fixture_x_display}"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "Fixture Y" }
-                                    div { class: "sub-field",
-                                        if *fixture_y_is_editing.read() {
                                             input {
-                                                class: "stock-detail-input",
-                                                value: fixture_y_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
+                                                value: machine.name.clone(),
+                                                autofocus: snapshot.focus_profile_name_editor,
                                                 oninput: move |evt| {
-                                                    fixture_y_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = fixture_y_draft.read().trim().to_string();
-                                                            match unit_service::parse_length_with_preference(
-                                                                &raw,
-                                                                snapshot.unit_system,
-                                                            ) {
-                                                                Ok(length) if length.as_mm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.fixture_plate_max_y = length.as_mm().round().max(0.0)
-                                                                                    as u32;
-                                                                            }
-                                                                        });
-                                                                    fixture_y_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Fixture Y must be a valid non-negative length".to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                            fixture_y_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                        fixture_y_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_y_is_editing.set(true);
-                                                        fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{fixture_y_display}"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "Max feed rate" }
-                                    div { class: "sub-field",
-                                        if *feed_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: feed_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    feed_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let feed_edit_seed = feed_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = feed_draft.read().trim().to_string();
-                                                            match unit_service::parse_feed_with_preference(
-                                                                &raw,
-                                                                snapshot.unit_system,
-                                                            ) {
-                                                                Ok(feed_rate) if feed_rate.as_mm_per_min() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.max_feed_rate_mm_per_min = feed_rate
-                                                                                    .as_mm_per_min()
-                                                                                    .round()
-                                                                                    .max(0.0) as u32;
-                                                                            }
-                                                                        });
-                                                                    feed_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Max feed rate must be a valid non-negative feed rate"
-                                                                                    .to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            feed_draft.set(feed_edit_seed.clone());
-                                                            feed_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let feed_edit_seed = feed_edit_seed.clone();
-                                                    move |_| {
-                                                        feed_draft.set(feed_edit_seed.clone());
-                                                        feed_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let feed_edit_seed = feed_edit_seed.clone();
-                                                    move |_| {
-                                                        feed_is_editing.set(true);
-                                                        feed_draft.set(feed_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{feed_display}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Spindle" }
-
-                                div { class: "field section-subfield",
-                                    label { "Min" }
-                                    div { class: "sub-field",
-                                        if *spindle_min_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: spindle_min_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    spindle_min_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let spindle_min_edit_seed = spindle_min_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = spindle_min_draft.read().trim().to_string();
-                                                            match unit_service::parse_rotational_speed(&raw) {
-                                                                Ok(speed) if speed.as_rpm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.spindle_min_rpm = speed.as_rpm().round().max(0.0) as u32;
-                                                                            }
-                                                                        });
-                                                                    spindle_min_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Spindle min must be a valid non-negative rpm value"
-                                                                                    .to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            spindle_min_draft.set(spindle_min_edit_seed.clone());
-                                                            spindle_min_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let spindle_min_edit_seed = spindle_min_edit_seed.clone();
-                                                    move |_| {
-                                                        spindle_min_draft.set(spindle_min_edit_seed.clone());
-                                                        spindle_min_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let spindle_min_edit_seed = spindle_min_edit_seed.clone();
-                                                    move |_| {
-                                                        spindle_min_is_editing.set(true);
-                                                        spindle_min_draft.set(spindle_min_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{spindle_min_display}"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "Max" }
-                                    div { class: "sub-field",
-                                        if *spindle_max_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: spindle_max_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    spindle_max_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let spindle_max_edit_seed = spindle_max_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = spindle_max_draft.read().trim().to_string();
-                                                            match unit_service::parse_rotational_speed(&raw) {
-                                                                Ok(speed) if speed.as_rpm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.spindle_max_rpm = speed.as_rpm().round().max(0.0) as u32;
-                                                                            }
-                                                                        });
-                                                                    spindle_max_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Spindle max must be a valid non-negative rpm value"
-                                                                                    .to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            spindle_max_draft.set(spindle_max_edit_seed.clone());
-                                                            spindle_max_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let spindle_max_edit_seed = spindle_max_edit_seed.clone();
-                                                    move |_| {
-                                                        spindle_max_draft.set(spindle_max_edit_seed.clone());
-                                                        spindle_max_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let spindle_max_edit_seed = spindle_max_edit_seed.clone();
-                                                    move |_| {
-                                                        spindle_max_is_editing.set(true);
-                                                        spindle_max_draft.set(spindle_max_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{spindle_max_display}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Coordinate origin" }
-
-                                div { class: "field section-subfield",
-                                    label { "X axis origin" }
-                                    select {
-                                        value: "{machine.origin_x0}",
-                                        onchange: {
-                                            let selected_id = selected_id.clone();
-                                            move |evt| {
-                                                let value = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                        {
-                                                            t.origin_x0 = value;
-                                                        }
-                                                    });
-                                            }
-                                        },
-                                        option { value: "Left", "Left" }
-                                        option { value: "Right", "Right" }
-                                        option { value: "Front", "Front" }
-                                        option { value: "Back", "Back" }
-                                    }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "Y axis origin" }
-                                    select {
-                                        value: "{machine.origin_y0}",
-                                        onchange: {
-                                            let selected_id = selected_id.clone();
-                                            move |evt| {
-                                                let value = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                        {
-                                                            t.origin_y0 = value;
-                                                        }
-                                                    });
-                                            }
-                                        },
-                                        option { value: "Front", "Front" }
-                                        option { value: "Back", "Back" }
-                                        option { value: "Left", "Left" }
-                                        option { value: "Right", "Right" }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Axis scaling" }
-
-                                if let Some(message) = scaling_error_message.read().clone() {
-                                    p { class: "diag-status", "{message}" }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "X scale" }
-                                    if *scaling_x_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: scaling_x_draft.read().clone(),
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            oninput: move |evt| {
-                                                scaling_x_draft.set(evt.value());
-                                            },
-                                            onkeydown: {
-                                                let scaling_x_edit_seed = scaling_x_edit_seed.clone();
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let key = evt.key().to_string().to_ascii_lowercase();
-                                                    if key == "enter" || key == "numpadenter" {
-                                                        let raw = scaling_x_draft.read().trim().to_string();
-                                                        match unit_service::parse_percentage(&raw) {
-                                                            Ok(value) if (1.0..=500.0).contains(&value) => {
-                                                                state
-                                                                    .with_mut(|s| {
-                                                                        if let Some(t) = s
-                                                                            .machines
-                                                                            .iter_mut()
-                                                                            .find(|m| m.id == selected_id)
-                                                                        {
-                                                                            t.scaling_x = value as f32;
-                                                                        }
-                                                                    });
-                                                                scaling_x_is_editing.set(false);
-                                                                scaling_error_message.set(None);
-                                                            }
-                                                            _ => {
-                                                                scaling_error_message
-                                                                    .set(Some("X scale must be between 1 and 500".to_string()));
-                                                            }
-                                                        }
-                                                    } else if key == "escape" || key == "esc" {
-                                                        evt.stop_propagation();
-                                                        scaling_x_draft.set(scaling_x_edit_seed.clone());
-                                                        scaling_x_is_editing.set(false);
-                                                        scaling_error_message.set(None);
-                                                    }
-                                                }
-                                            },
-                                            onfocusout: {
-                                                let scaling_x_edit_seed = scaling_x_edit_seed.clone();
-                                                move |_| {
-                                                    scaling_x_draft.set(scaling_x_edit_seed.clone());
-                                                    scaling_x_is_editing.set(false);
-                                                }
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onclick: {
-                                                let scaling_x_edit_seed = scaling_x_edit_seed.clone();
-                                                move |_| {
-                                                    scaling_x_is_editing.set(true);
-                                                    scaling_x_draft.set(scaling_x_edit_seed.clone());
-                                                    scaling_error_message.set(None);
-                                                }
-                                            },
-                                            "{scaling_x_display}"
-                                        }
-                                    }
-                                }
-
-                                div { class: "field section-subfield",
-                                    label { "Y scale" }
-                                    if *scaling_y_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: scaling_y_draft.read().clone(),
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            oninput: move |evt| {
-                                                scaling_y_draft.set(evt.value());
-                                            },
-                                            onkeydown: {
-                                                let scaling_y_edit_seed = scaling_y_edit_seed.clone();
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let key = evt.key().to_string().to_ascii_lowercase();
-                                                    if key == "enter" || key == "numpadenter" {
-                                                        let raw = scaling_y_draft.read().trim().to_string();
-                                                        match unit_service::parse_percentage(&raw) {
-                                                            Ok(value) if (1.0..=500.0).contains(&value) => {
-                                                                state
-                                                                    .with_mut(|s| {
-                                                                        if let Some(t) = s
-                                                                            .machines
-                                                                            .iter_mut()
-                                                                            .find(|m| m.id == selected_id)
-                                                                        {
-                                                                            t.scaling_y = value as f32;
-                                                                        }
-                                                                    });
-                                                                scaling_y_is_editing.set(false);
-                                                                scaling_error_message.set(None);
-                                                            }
-                                                            _ => {
-                                                                scaling_error_message
-                                                                    .set(Some("Y scale must be between 1 and 500".to_string()));
-                                                            }
-                                                        }
-                                                    } else if key == "escape" || key == "esc" {
-                                                        evt.stop_propagation();
-                                                        scaling_y_draft.set(scaling_y_edit_seed.clone());
-                                                        scaling_y_is_editing.set(false);
-                                                        scaling_error_message.set(None);
-                                                    }
-                                                }
-                                            },
-                                            onfocusout: {
-                                                let scaling_y_edit_seed = scaling_y_edit_seed.clone();
-                                                move |_| {
-                                                    scaling_y_draft.set(scaling_y_edit_seed.clone());
-                                                    scaling_y_is_editing.set(false);
-                                                }
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onclick: {
-                                                let scaling_y_edit_seed = scaling_y_edit_seed.clone();
-                                                move |_| {
-                                                    scaling_y_is_editing.set(true);
-                                                    scaling_y_draft.set(scaling_y_edit_seed.clone());
-                                                    scaling_error_message.set(None);
-                                                }
-                                            },
-                                            "{scaling_y_display}"
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Line numbering" }
-
-                                div { class: "field section-subfield",
-                                    label { class: "checkbox-line",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: machine.line_numbering_enabled,
-                                            oninput: {
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let enabled = evt.checked();
+                                                    let proposed = evt.value();
                                                     state
                                                         .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                            {
-                                                                t.line_numbering_enabled = enabled;
+                                                            match s.ui.rename_selected_machine(&proposed) {
+                                                                Ok(_) => {
+                                                                    s.ui.focus_profile_name_editor = false;
+                                                                    status_message.set(String::new());
+                                                                }
+                                                                Err(msg) => {
+                                                                    status_message.set(msg);
+                                                                }
                                                             }
                                                         });
-                                                }
-                                            },
+                                                },
+                                            }
                                         }
-                                        span { "Emit line numbers" }
                                     }
                                 }
 
-                                if machine.line_numbering_enabled {
-                                    div { class: "field section-subfield",
-                                        label { "Increment" }
+                                div { class: "field section-subfield",
+                                    label { "ATC slots" }
+                                    div { class: "sub-field",
                                         input {
                                             r#type: "number",
-                                            min: "1",
-                                            step: "1",
-                                            value: "{machine.line_numbering_increment}",
+                                            min: "0",
+                                            disabled: editor_read_only,
+                                            value: "{machine.atc_slot_count}",
                                             oninput: {
                                                 let selected_id = selected_id.clone();
                                                 move |evt| {
-                                                    let value = evt.value().parse::<u32>().unwrap_or(10).max(1);
+                                                    let value = evt.value().parse::<u8>().unwrap_or(0);
                                                     state
                                                         .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
+                                                            if let Some(t) = s
+                                                                .ui
+                                                                .machines
+                                                                .iter_mut()
+                                                                .find(|m| m.id == selected_id)
                                                             {
-                                                                t.line_numbering_increment = value;
+                                                                t.atc_slot_count = value;
                                                             }
+                                                            s.ui.seed_rack_slots(value);
                                                         });
                                                 }
                                             },
                                         }
                                     }
                                 }
-                            }
 
-                            div { class: "field section-block full-width",
-                                h4 { "G-code templates" }
+                                div { class: "field section-block",
+                                    h4 { "Fixture plate" }
 
-                                p { class: "diag-status",
-                                    "Use {{placeholders}} where documented. Unknown placeholders are preserved as-is."
-                                }
-
-                                div { class: "field section-subfield section-block",
-                                    h4 { "Header / Footer" }
+                                    if let Some(message) = field_error_message.read().clone() {
+                                        p { class: "diag-status", "{message}" }
+                                    }
 
                                     div { class: "field section-subfield",
-                                        label { "Header" }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{header_rows}",
-                                            value: "{machine.gcode_header}",
-                                            oninput: {
+                                        label { "Fixture X" }
+                                        div { class: "sub-field",
+                                            if *fixture_x_is_editing.read() {
+                                                input {
+                                                    class: "stock-detail-input",
+                                                    value: fixture_x_draft.read().clone(),
+                                                    autofocus: true,
+                                                    onmounted: move |evt| async move {
+                                                        let _ = evt.set_focus(true).await;
+                                                    },
+                                                    oninput: move |evt| {
+                                                        fixture_x_draft.set(evt.value());
+                                                    },
+                                                    onkeydown: {
+                                                        let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                                        let selected_id = selected_id.clone();
+                                                        move |evt| {
+                                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                                            if key == "enter" || key == "numpadenter" {
+                                                                let raw = fixture_x_draft.read().trim().to_string();
+                                                                match unit_service::parse_length_with_preference(&raw, unit_system) {
+                                                                    Ok(length) if length.as_mm() >= 0.0 => {
+                                                                        state
+                                                                            .with_mut(|s| {
+                                                                                if let Some(t) = s
+                                                                                    .ui
+                                                                                    .machines
+                                                                                    .iter_mut()
+                                                                                    .find(|m| m.id == selected_id)
+                                                                                {
+                                                                                    t.fixture_plate_max_x = length.as_mm().round().max(0.0)
+                                                                                        as u32;
+                                                                                }
+                                                                            });
+                                                                        fixture_x_is_editing.set(false);
+                                                                        field_error_message.set(None);
+                                                                    }
+                                                                    _ => {
+                                                                        field_error_message
+                                                                            .set(
+                                                                                Some(
+                                                                                    "Fixture X must be a valid non-negative length".to_string(),
+                                                                                ),
+                                                                            );
+                                                                    }
+                                                                }
+                                                            } else if key == "escape" || key == "esc" {
+                                                                evt.stop_propagation();
+                                                                fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                                fixture_x_is_editing.set(false);
+                                                                field_error_message.set(None);
+                                                            }
+                                                        }
+                                                    },
+                                                    onfocusout: {
+                                                        let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                                        move |_| {
+                                                            fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                            fixture_x_is_editing.set(false);
+                                                        }
+                                                    },
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-input stock-detail-trigger",
+                                                    onclick: {
+                                                        let fixture_x_edit_seed = fixture_x_edit_seed.clone();
+                                                        move |_| {
+                                                            fixture_x_is_editing.set(true);
+                                                            fixture_x_draft.set(fixture_x_edit_seed.clone());
+                                                            field_error_message.set(None);
+                                                        }
+                                                    },
+                                                    "{fixture_x_display}"
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "Fixture Y" }
+                                        div { class: "sub-field",
+                                            if *fixture_y_is_editing.read() {
+                                                input {
+                                                    class: "stock-detail-input",
+                                                    value: fixture_y_draft.read().clone(),
+                                                    autofocus: true,
+                                                    onmounted: move |evt| async move {
+                                                        let _ = evt.set_focus(true).await;
+                                                    },
+                                                    oninput: move |evt| {
+                                                        fixture_y_draft.set(evt.value());
+                                                    },
+                                                    onkeydown: {
+                                                        let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                                        let selected_id = selected_id.clone();
+                                                        move |evt| {
+                                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                                            if key == "enter" || key == "numpadenter" {
+                                                                let raw = fixture_y_draft.read().trim().to_string();
+                                                                match unit_service::parse_length_with_preference(&raw, unit_system) {
+                                                                    Ok(length) if length.as_mm() >= 0.0 => {
+                                                                        state
+                                                                            .with_mut(|s| {
+                                                                                if let Some(t) = s
+                                                                                    .ui
+                                                                                    .machines
+                                                                                    .iter_mut()
+                                                                                    .find(|m| m.id == selected_id)
+                                                                                {
+                                                                                    t.fixture_plate_max_y = length.as_mm().round().max(0.0)
+                                                                                        as u32;
+                                                                                }
+                                                                            });
+                                                                        fixture_y_is_editing.set(false);
+                                                                        field_error_message.set(None);
+                                                                    }
+                                                                    _ => {
+                                                                        field_error_message
+                                                                            .set(
+                                                                                Some(
+                                                                                    "Fixture Y must be a valid non-negative length".to_string(),
+                                                                                ),
+                                                                            );
+                                                                    }
+                                                                }
+                                                            } else if key == "escape" || key == "esc" {
+                                                                evt.stop_propagation();
+                                                                fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                                fixture_y_is_editing.set(false);
+                                                                field_error_message.set(None);
+                                                            }
+                                                        }
+                                                    },
+                                                    onfocusout: {
+                                                        let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                                        move |_| {
+                                                            fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                            fixture_y_is_editing.set(false);
+                                                        }
+                                                    },
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-input stock-detail-trigger",
+                                                    onclick: {
+                                                        let fixture_y_edit_seed = fixture_y_edit_seed.clone();
+                                                        move |_| {
+                                                            fixture_y_is_editing.set(true);
+                                                            fixture_y_draft.set(fixture_y_edit_seed.clone());
+                                                            field_error_message.set(None);
+                                                        }
+                                                    },
+                                                    "{fixture_y_display}"
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "Max feed rate" }
+                                        div { class: "sub-field",
+                                            if *feed_is_editing.read() {
+                                                input {
+                                                    class: "stock-detail-input",
+                                                    value: feed_draft.read().clone(),
+                                                    autofocus: true,
+                                                    onmounted: move |evt| async move {
+                                                        let _ = evt.set_focus(true).await;
+                                                    },
+                                                    oninput: move |evt| {
+                                                        feed_draft.set(evt.value());
+                                                    },
+                                                    onkeydown: {
+                                                        let feed_edit_seed = feed_edit_seed.clone();
+                                                        let selected_id = selected_id.clone();
+                                                        move |evt| {
+                                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                                            if key == "enter" || key == "numpadenter" {
+                                                                let raw = feed_draft.read().trim().to_string();
+                                                                match unit_service::parse_feed_with_preference(&raw, unit_system) {
+                                                                    Ok(feed_rate) if feed_rate.as_mm_per_min() >= 0.0 => {
+                                                                        state
+                                                                            .with_mut(|s| {
+                                                                                if let Some(t) = s
+                                                                                    .ui
+                                                                                    .machines
+                                                                                    .iter_mut()
+                                                                                    .find(|m| m.id == selected_id)
+                                                                                {
+                                                                                    t.max_feed_rate_mm_per_min = feed_rate
+                                                                                        .as_mm_per_min()
+                                                                                        .round()
+                                                                                        .max(0.0) as u32;
+                                                                                }
+                                                                            });
+                                                                        feed_is_editing.set(false);
+                                                                        field_error_message.set(None);
+                                                                    }
+                                                                    _ => {
+                                                                        field_error_message
+                                                                            .set(
+                                                                                Some(
+                                                                                    "Max feed rate must be a valid non-negative feed rate"
+                                                                                        .to_string(),
+                                                                                ),
+                                                                            );
+                                                                    }
+                                                                }
+                                                            } else if key == "escape" || key == "esc" {
+                                                                evt.stop_propagation();
+                                                                feed_draft.set(feed_edit_seed.clone());
+                                                                feed_is_editing.set(false);
+                                                                field_error_message.set(None);
+                                                            }
+                                                        }
+                                                    },
+                                                    onfocusout: {
+                                                        let feed_edit_seed = feed_edit_seed.clone();
+                                                        move |_| {
+                                                            feed_draft.set(feed_edit_seed.clone());
+                                                            feed_is_editing.set(false);
+                                                        }
+                                                    },
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-input stock-detail-trigger",
+                                                    onclick: {
+                                                        let feed_edit_seed = feed_edit_seed.clone();
+                                                        move |_| {
+                                                            feed_is_editing.set(true);
+                                                            feed_draft.set(feed_edit_seed.clone());
+                                                            field_error_message.set(None);
+                                                        }
+                                                    },
+                                                    "{feed_display}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "field section-block",
+                                    h4 { "Spindle" }
+
+                                    div { class: "field section-subfield",
+                                        label { "Min" }
+                                        div { class: "sub-field",
+                                            if *spindle_min_is_editing.read() {
+                                                input {
+                                                    class: "stock-detail-input",
+                                                    value: spindle_min_draft.read().clone(),
+                                                    autofocus: true,
+                                                    onmounted: move |evt| async move {
+                                                        let _ = evt.set_focus(true).await;
+                                                    },
+                                                    oninput: move |evt| {
+                                                        spindle_min_draft.set(evt.value());
+                                                    },
+                                                    onkeydown: {
+                                                        let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                                        let selected_id = selected_id.clone();
+                                                        move |evt| {
+                                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                                            if key == "enter" || key == "numpadenter" {
+                                                                let raw = spindle_min_draft.read().trim().to_string();
+                                                                match unit_service::parse_rotational_speed(&raw) {
+                                                                    Ok(speed) if speed.as_rpm() >= 0.0 => {
+                                                                        state
+                                                                            .with_mut(|s| {
+                                                                                if let Some(t) = s
+                                                                                    .ui
+                                                                                    .machines
+                                                                                    .iter_mut()
+                                                                                    .find(|m| m.id == selected_id)
+                                                                                {
+                                                                                    t.spindle_min_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                                }
+                                                                            });
+                                                                        spindle_min_is_editing.set(false);
+                                                                        field_error_message.set(None);
+                                                                    }
+                                                                    _ => {
+                                                                        field_error_message
+                                                                            .set(
+                                                                                Some(
+                                                                                    "Spindle min must be a valid non-negative rpm value"
+                                                                                        .to_string(),
+                                                                                ),
+                                                                            );
+                                                                    }
+                                                                }
+                                                            } else if key == "escape" || key == "esc" {
+                                                                evt.stop_propagation();
+                                                                spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                                spindle_min_is_editing.set(false);
+                                                                field_error_message.set(None);
+                                                            }
+                                                        }
+                                                    },
+                                                    onfocusout: {
+                                                        let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                                        move |_| {
+                                                            spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                            spindle_min_is_editing.set(false);
+                                                        }
+                                                    },
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-input stock-detail-trigger",
+                                                    onclick: {
+                                                        let spindle_min_edit_seed = spindle_min_edit_seed.clone();
+                                                        move |_| {
+                                                            spindle_min_is_editing.set(true);
+                                                            spindle_min_draft.set(spindle_min_edit_seed.clone());
+                                                            field_error_message.set(None);
+                                                        }
+                                                    },
+                                                    "{spindle_min_display}"
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "Max" }
+                                        div { class: "sub-field",
+                                            if *spindle_max_is_editing.read() {
+                                                input {
+                                                    class: "stock-detail-input",
+                                                    value: spindle_max_draft.read().clone(),
+                                                    autofocus: true,
+                                                    onmounted: move |evt| async move {
+                                                        let _ = evt.set_focus(true).await;
+                                                    },
+                                                    oninput: move |evt| {
+                                                        spindle_max_draft.set(evt.value());
+                                                    },
+                                                    onkeydown: {
+                                                        let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                                        let selected_id = selected_id.clone();
+                                                        move |evt| {
+                                                            let key = evt.key().to_string().to_ascii_lowercase();
+                                                            if key == "enter" || key == "numpadenter" {
+                                                                let raw = spindle_max_draft.read().trim().to_string();
+                                                                match unit_service::parse_rotational_speed(&raw) {
+                                                                    Ok(speed) if speed.as_rpm() >= 0.0 => {
+                                                                        state
+                                                                            .with_mut(|s| {
+                                                                                if let Some(t) = s
+                                                                                    .ui
+                                                                                    .machines
+                                                                                    .iter_mut()
+                                                                                    .find(|m| m.id == selected_id)
+                                                                                {
+                                                                                    t.spindle_max_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                                }
+                                                                            });
+                                                                        spindle_max_is_editing.set(false);
+                                                                        field_error_message.set(None);
+                                                                    }
+                                                                    _ => {
+                                                                        field_error_message
+                                                                            .set(
+                                                                                Some(
+                                                                                    "Spindle max must be a valid non-negative rpm value"
+                                                                                        .to_string(),
+                                                                                ),
+                                                                            );
+                                                                    }
+                                                                }
+                                                            } else if key == "escape" || key == "esc" {
+                                                                evt.stop_propagation();
+                                                                spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                                spindle_max_is_editing.set(false);
+                                                                field_error_message.set(None);
+                                                            }
+                                                        }
+                                                    },
+                                                    onfocusout: {
+                                                        let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                                        move |_| {
+                                                            spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                            spindle_max_is_editing.set(false);
+                                                        }
+                                                    },
+                                                }
+                                            } else {
+                                                button {
+                                                    r#type: "button",
+                                                    class: "stock-detail-input stock-detail-trigger",
+                                                    onclick: {
+                                                        let spindle_max_edit_seed = spindle_max_edit_seed.clone();
+                                                        move |_| {
+                                                            spindle_max_is_editing.set(true);
+                                                            spindle_max_draft.set(spindle_max_edit_seed.clone());
+                                                            field_error_message.set(None);
+                                                        }
+                                                    },
+                                                    "{spindle_max_display}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "field section-block",
+                                    h4 { "Coordinate origin" }
+
+                                    div { class: "field section-subfield",
+                                        label { "X axis origin" }
+                                        select {
+                                            value: "{machine.origin_x0}",
+                                            onchange: {
                                                 let selected_id = selected_id.clone();
                                                 move |evt| {
                                                     let value = evt.value();
                                                     state
                                                         .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
+                                                            if let Some(t) = s
+                                                                .ui
+                                                                .machines
+                                                                .iter_mut()
+                                                                .find(|m| m.id == selected_id)
                                                             {
-                                                                t.gcode_header = value;
+                                                                t.origin_x0 = value;
                                                             }
                                                         });
                                                 }
                                             },
+                                            option { value: "Left", "Left" }
+                                            option { value: "Right", "Right" }
+                                            option { value: "Front", "Front" }
+                                            option { value: "Back", "Back" }
                                         }
                                     }
 
                                     div { class: "field section-subfield",
-                                        label { "Footer" }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{footer_rows}",
-                                            value: "{machine.gcode_footer}",
-                                            oninput: {
+                                        label { "Y axis origin" }
+                                        select {
+                                            value: "{machine.origin_y0}",
+                                            onchange: {
                                                 let selected_id = selected_id.clone();
                                                 move |evt| {
                                                     let value = evt.value();
                                                     state
                                                         .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
+                                                            if let Some(t) = s
+                                                                .ui
+                                                                .machines
+                                                                .iter_mut()
+                                                                .find(|m| m.id == selected_id)
                                                             {
-                                                                t.gcode_footer = value;
+                                                                t.origin_y0 = value;
                                                             }
                                                         });
                                                 }
                                             },
+                                            option { value: "Front", "Front" }
+                                            option { value: "Back", "Back" }
+                                            option { value: "Left", "Left" }
+                                            option { value: "Right", "Right" }
                                         }
                                     }
                                 }
 
-                                div { class: "field section-subfield section-block",
-                                    h4 { "Drill cycle" }
+                                div { class: "field section-block",
+                                    h4 { "Axis scaling" }
 
-                                    for (lbl , getter , setter) in [
-                                        ("First move", machine.drill_first_move.clone(), "drill_first_move"),
-                                        (
-                                            "Cycle mode (last)",
-                                            machine.drill_cycle_mode_last.clone(),
-                                            "drill_cycle_mode_last",
-                                        ),
-                                        (
-                                            "Cycle mode (series)",
-                                            machine.drill_cycle_mode_series.clone(),
-                                            "drill_cycle_mode_series",
-                                        ),
-                                        ("Cycle start", machine.drill_cycle_start.clone(), "drill_cycle_start"),
-                                        ("Next hole", machine.drill_next_hole.clone(), "drill_next_hole"),
-                                        ("Cycle cancel", machine.drill_cycle_cancel.clone(), "drill_cycle_cancel"),
-                                    ]
-                                    {
-                                        div { class: "field section-subfield",
-                                            label { "{lbl}" }
+                                    if let Some(message) = scaling_error_message.read().clone() {
+                                        p { class: "diag-status", "{message}" }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "X scale" }
+                                        if *scaling_x_is_editing.read() {
                                             input {
-                                                value: "{getter}",
+                                                class: "stock-detail-input",
+                                                value: scaling_x_draft.read().clone(),
+                                                autofocus: true,
+                                                onmounted: move |evt| async move {
+                                                    let _ = evt.set_focus(true).await;
+                                                },
+                                                oninput: move |evt| {
+                                                    scaling_x_draft.set(evt.value());
+                                                },
+                                                onkeydown: {
+                                                    let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let key = evt.key().to_string().to_ascii_lowercase();
+                                                        if key == "enter" || key == "numpadenter" {
+                                                            let raw = scaling_x_draft.read().trim().to_string();
+                                                            match unit_service::parse_percentage(&raw) {
+                                                                Ok(value) if (1.0..=500.0).contains(&value) => {
+                                                                    state
+                                                                        .with_mut(|s| {
+                                                                            if let Some(t) = s
+                                                                                .ui
+                                                                                .machines
+                                                                                .iter_mut()
+                                                                                .find(|m| m.id == selected_id)
+                                                                            {
+                                                                                t.scaling_x = value as f32;
+                                                                            }
+                                                                        });
+                                                                    scaling_x_is_editing.set(false);
+                                                                    scaling_error_message.set(None);
+                                                                }
+                                                                _ => {
+                                                                    scaling_error_message
+                                                                        .set(Some("X scale must be between 1 and 500".to_string()));
+                                                                }
+                                                            }
+                                                        } else if key == "escape" || key == "esc" {
+                                                            evt.stop_propagation();
+                                                            scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                                            scaling_x_is_editing.set(false);
+                                                            scaling_error_message.set(None);
+                                                        }
+                                                    }
+                                                },
+                                                onfocusout: {
+                                                    let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                                    move |_| {
+                                                        scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                                        scaling_x_is_editing.set(false);
+                                                    }
+                                                },
+                                            }
+                                        } else {
+                                            button {
+                                                r#type: "button",
+                                                class: "stock-detail-input stock-detail-trigger",
+                                                onclick: {
+                                                    let scaling_x_edit_seed = scaling_x_edit_seed.clone();
+                                                    move |_| {
+                                                        scaling_x_is_editing.set(true);
+                                                        scaling_x_draft.set(scaling_x_edit_seed.clone());
+                                                        scaling_error_message.set(None);
+                                                    }
+                                                },
+                                                "{scaling_x_display}"
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "Y scale" }
+                                        if *scaling_y_is_editing.read() {
+                                            input {
+                                                class: "stock-detail-input",
+                                                value: scaling_y_draft.read().clone(),
+                                                autofocus: true,
+                                                onmounted: move |evt| async move {
+                                                    let _ = evt.set_focus(true).await;
+                                                },
+                                                oninput: move |evt| {
+                                                    scaling_y_draft.set(evt.value());
+                                                },
+                                                onkeydown: {
+                                                    let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let key = evt.key().to_string().to_ascii_lowercase();
+                                                        if key == "enter" || key == "numpadenter" {
+                                                            let raw = scaling_y_draft.read().trim().to_string();
+                                                            match unit_service::parse_percentage(&raw) {
+                                                                Ok(value) if (1.0..=500.0).contains(&value) => {
+                                                                    state
+                                                                        .with_mut(|s| {
+                                                                            if let Some(t) = s
+                                                                                .ui
+                                                                                .machines
+                                                                                .iter_mut()
+                                                                                .find(|m| m.id == selected_id)
+                                                                            {
+                                                                                t.scaling_y = value as f32;
+                                                                            }
+                                                                        });
+                                                                    scaling_y_is_editing.set(false);
+                                                                    scaling_error_message.set(None);
+                                                                }
+                                                                _ => {
+                                                                    scaling_error_message
+                                                                        .set(Some("Y scale must be between 1 and 500".to_string()));
+                                                                }
+                                                            }
+                                                        } else if key == "escape" || key == "esc" {
+                                                            evt.stop_propagation();
+                                                            scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                                            scaling_y_is_editing.set(false);
+                                                            scaling_error_message.set(None);
+                                                        }
+                                                    }
+                                                },
+                                                onfocusout: {
+                                                    let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                                    move |_| {
+                                                        scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                                        scaling_y_is_editing.set(false);
+                                                    }
+                                                },
+                                            }
+                                        } else {
+                                            button {
+                                                r#type: "button",
+                                                class: "stock-detail-input stock-detail-trigger",
+                                                onclick: {
+                                                    let scaling_y_edit_seed = scaling_y_edit_seed.clone();
+                                                    move |_| {
+                                                        scaling_y_is_editing.set(true);
+                                                        scaling_y_draft.set(scaling_y_edit_seed.clone());
+                                                        scaling_error_message.set(None);
+                                                    }
+                                                },
+                                                "{scaling_y_display}"
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "field section-block",
+                                    h4 { "Line numbering" }
+
+                                    div { class: "field section-subfield",
+                                        label { class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: machine.line_numbering_enabled,
                                                 oninput: {
                                                     let selected_id = selected_id.clone();
-                                                    let field = setter.to_string();
                                                     move |evt| {
-                                                        let value = evt.value();
-                                                        let field = field.clone();
+                                                        let enabled = evt.checked();
                                                         state
                                                             .with_mut(|s| {
-                                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
                                                                 {
-                                                                    match field.as_str() {
-                                                                        "drill_first_move" => t.drill_first_move = value,
-                                                                        "drill_cycle_mode_last" => t.drill_cycle_mode_last = value,
-                                                                        "drill_cycle_mode_series" => {
-                                                                            t.drill_cycle_mode_series = value;
+                                                                    t.line_numbering_enabled = enabled;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
+                                            span { "Emit line numbers" }
+                                        }
+                                    }
+
+                                    if machine.line_numbering_enabled {
+                                        div { class: "field section-subfield",
+                                            label { "Increment" }
+                                            input {
+                                                r#type: "number",
+                                                min: "1",
+                                                step: "1",
+                                                value: "{machine.line_numbering_increment}",
+                                                oninput: {
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let value = evt.value().parse::<u32>().unwrap_or(10).max(1);
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.line_numbering_increment = value;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "field section-block full-width",
+                                    h4 { "G-code templates" }
+
+                                    p { class: "diag-status",
+                                        "Use {{placeholders}} where documented. Unknown placeholders are preserved as-is."
+                                    }
+
+                                    div { class: "field section-subfield section-block",
+                                        h4 { "Header / Footer" }
+
+                                        div { class: "field section-subfield",
+                                            label { "Header" }
+                                            textarea {
+                                                class: "gcode-editor cnc-template-editor",
+                                                rows: "{header_rows}",
+                                                value: "{machine.gcode_header}",
+                                                oninput: {
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let value = evt.value();
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.gcode_header = value;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field section-subfield",
+                                            label { "Footer" }
+                                            textarea {
+                                                class: "gcode-editor cnc-template-editor",
+                                                rows: "{footer_rows}",
+                                                value: "{machine.gcode_footer}",
+                                                oninput: {
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let value = evt.value();
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.gcode_footer = value;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
+                                        }
+                                    }
+
+                                    div { class: "field section-subfield section-block",
+                                        h4 { "Drill cycle" }
+
+                                        for (lbl , getter , setter) in [
+                                            ("First move", machine.drill_first_move.clone(), "drill_first_move"),
+                                            (
+                                                "Cycle mode (last)",
+                                                machine.drill_cycle_mode_last.clone(),
+                                                "drill_cycle_mode_last",
+                                            ),
+                                            (
+                                                "Cycle mode (series)",
+                                                machine.drill_cycle_mode_series.clone(),
+                                                "drill_cycle_mode_series",
+                                            ),
+                                            ("Cycle start", machine.drill_cycle_start.clone(), "drill_cycle_start"),
+                                            ("Next hole", machine.drill_next_hole.clone(), "drill_next_hole"),
+                                            ("Cycle cancel", machine.drill_cycle_cancel.clone(), "drill_cycle_cancel"),
+                                        ]
+                                        {
+                                            div { class: "field section-subfield",
+                                                label { "{lbl}" }
+                                                input {
+                                                    value: "{getter}",
+                                                    oninput: {
+                                                        let selected_id = selected_id.clone();
+                                                        let field = setter.to_string();
+                                                        move |evt| {
+                                                            let value = evt.value();
+                                                            let field = field.clone();
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .ui
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        match field.as_str() {
+                                                                            "drill_first_move" => t.drill_first_move = value,
+                                                                            "drill_cycle_mode_last" => t.drill_cycle_mode_last = value,
+                                                                            "drill_cycle_mode_series" => {
+                                                                                t.drill_cycle_mode_series = value;
+                                                                            }
+                                                                            "drill_cycle_start" => t.drill_cycle_start = value,
+                                                                            "drill_next_hole" => t.drill_next_hole = value,
+                                                                            "drill_cycle_cancel" => t.drill_cycle_cancel = value,
+                                                                            _ => {}
                                                                         }
-                                                                        "drill_cycle_start" => t.drill_cycle_start = value,
-                                                                        "drill_next_hole" => t.drill_next_hole = value,
-                                                                        "drill_cycle_cancel" => t.drill_cycle_cancel = value,
-                                                                        _ => {}
                                                                     }
-                                                                }
-                                                            });
-                                                    }
-                                                },
+                                                                });
+                                                        }
+                                                    },
+                                                }
                                             }
                                         }
                                     }
-                                }
 
-                                div { class: "field section-subfield section-block",
-                                    h4 { "Routing" }
+                                    div { class: "field section-subfield section-block",
+                                        h4 { "Routing" }
 
-                                    div { class: "field section-subfield",
-                                        label { "Plunge and offset" }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{route_plunge_rows}",
-                                            value: "{machine.route_plunge_and_offset}",
-                                            oninput: {
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let value = evt.value();
-                                                    state
-                                                        .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                            {
-                                                                t.route_plunge_and_offset = value;
-                                                            }
-                                                        });
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                    for (lbl , getter , setter) in [
-                                        ("Arc UP", machine.route_arc_up.clone(), "route_arc_up"),
-                                        ("Arc DOWN", machine.route_arc_down.clone(), "route_arc_down"),
-                                        ("Retract", machine.route_retract.clone(), "route_retract"),
-                                    ]
-                                    {
                                         div { class: "field section-subfield",
-                                            label { "{lbl}" }
-                                            input {
-                                                value: "{getter}",
+                                            label { "Plunge and offset" }
+                                            textarea {
+                                                class: "gcode-editor cnc-template-editor",
+                                                rows: "{route_plunge_rows}",
+                                                value: "{machine.route_plunge_and_offset}",
                                                 oninput: {
                                                     let selected_id = selected_id.clone();
-                                                    let field = setter.to_string();
                                                     move |evt| {
                                                         let value = evt.value();
-                                                        let field = field.clone();
                                                         state
                                                             .with_mut(|s| {
-                                                                if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
                                                                 {
-                                                                    match field.as_str() {
-                                                                        "route_arc_up" => t.route_arc_up = value,
-                                                                        "route_arc_down" => t.route_arc_down = value,
-                                                                        "route_retract" => t.route_retract = value,
-                                                                        _ => {}
-                                                                    }
+                                                                    t.route_plunge_and_offset = value;
                                                                 }
                                                             });
                                                     }
                                                 },
                                             }
                                         }
-                                    }
-                                }
 
-                                div { class: "field section-subfield section-block",
-                                    h4 { "Tool change" }
-
-                                    div { class: "field section-subfield",
-                                        label { "Manual prompt" }
-                                        p { class: "diag-status",
-                                            "Only emitted when ATC is disabled."
-                                        }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{manual_prompt_rows}",
-                                            value: "{machine.tool_change_manual_prompt}",
-                                            oninput: {
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let value = evt.value();
-                                                    state
-                                                        .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                            {
-                                                                t.tool_change_manual_prompt = value;
-                                                            }
-                                                        });
+                                        for (lbl , getter , setter) in [
+                                            ("Arc UP", machine.route_arc_up.clone(), "route_arc_up"),
+                                            ("Arc DOWN", machine.route_arc_down.clone(), "route_arc_down"),
+                                            ("Retract", machine.route_retract.clone(), "route_retract"),
+                                        ]
+                                        {
+                                            div { class: "field section-subfield",
+                                                label { "{lbl}" }
+                                                input {
+                                                    value: "{getter}",
+                                                    oninput: {
+                                                        let selected_id = selected_id.clone();
+                                                        let field = setter.to_string();
+                                                        move |evt| {
+                                                            let value = evt.value();
+                                                            let field = field.clone();
+                                                            state
+                                                                .with_mut(|s| {
+                                                                    if let Some(t) = s
+                                                                        .ui
+                                                                        .machines
+                                                                        .iter_mut()
+                                                                        .find(|m| m.id == selected_id)
+                                                                    {
+                                                                        match field.as_str() {
+                                                                            "route_arc_up" => t.route_arc_up = value,
+                                                                            "route_arc_down" => t.route_arc_down = value,
+                                                                            "route_retract" => t.route_retract = value,
+                                                                            _ => {}
+                                                                        }
+                                                                    }
+                                                                });
+                                                        }
+                                                    },
                                                 }
-                                            },
+                                            }
                                         }
                                     }
 
-                                    div { class: "field section-subfield",
-                                        label { "Command" }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{tool_change_rows}",
-                                            value: "{machine.tool_change_command}",
-                                            oninput: {
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let value = evt.value();
-                                                    state
-                                                        .with_mut(|s| {
-                                                            if let Some(t) = s.machines.iter_mut().find(|m| m.id == selected_id)
-                                                            {
-                                                                t.tool_change_command = value;
-                                                            }
-                                                        });
-                                                }
-                                            },
+                                    div { class: "field section-subfield section-block",
+                                        h4 { "Tool change" }
+
+                                        div { class: "field section-subfield",
+                                            label { "Manual prompt" }
+                                            p { class: "diag-status",
+                                                "Only emitted when ATC is disabled."
+                                            }
+                                            textarea {
+                                                class: "gcode-editor cnc-template-editor",
+                                                rows: "{manual_prompt_rows}",
+                                                value: "{machine.tool_change_manual_prompt}",
+                                                oninput: {
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let value = evt.value();
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.tool_change_manual_prompt = value;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field section-subfield",
+                                            label { "Command" }
+                                            textarea {
+                                                class: "gcode-editor cnc-template-editor",
+                                                rows: "{tool_change_rows}",
+                                                value: "{machine.tool_change_command}",
+                                                oninput: {
+                                                    let selected_id = selected_id.clone();
+                                                    move |evt| {
+                                                        let value = evt.value();
+                                                        state
+                                                            .with_mut(|s| {
+                                                                if let Some(t) = s
+                                                                    .ui
+                                                                    .machines
+                                                                    .iter_mut()
+                                                                    .find(|m| m.id == selected_id)
+                                                                {
+                                                                    t.tool_change_command = value;
+                                                                }
+                                                            });
+                                                    }
+                                                },
+                                            }
                                         }
                                     }
                                 }

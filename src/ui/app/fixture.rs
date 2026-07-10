@@ -2,14 +2,13 @@ use dioxus::prelude::*;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 
-use super::super::model::*;
 use super::profiles_common::{
     format_impact_warning, slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog,
 };
 
 #[component]
-pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
@@ -24,8 +23,8 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
 
     rsx! {
         div { class: "screen single",
-            section { class: "panel grow",
-                article { class: "setup-card section-block cnc-manager-shell",
+            section { class: "panel grow profile-screen-panel",
+                article { class: "setup-card section-block cnc-manager-shell profile-manager-shell",
                     div { class: "panel-header",
                         div {
                             h3 { "Fixture profile management" }
@@ -39,10 +38,10 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                             selected_profile_id: snapshot.selected_fixture_id.clone(),
                             can_export: selected_fixture.is_some(),
                             on_select: move |id| {
-                                state.with_mut(|s| s.selected_fixture_id = Some(id));
+                                state.with_mut(|s| s.ui.selected_fixture_id = Some(id));
                             },
                             on_clone: move |_| {
-                                let Some(selected) = state.read().selected_fixture().cloned() else {
+                                let Some(selected) = state.read().ui.selected_fixture().cloned() else {
                                     status_message.set("No fixture profile selected".to_string());
                                     return;
                                 };
@@ -51,11 +50,11 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                 show_name_dialog.set(true);
                             },
                             on_delete: move |_| {
-                                let Some(fixture_id) = state.read().selected_fixture_id.clone() else {
+                                let Some(fixture_id) = state.read().ui.selected_fixture_id.clone() else {
                                     status_message.set("No fixture profile selected".to_string());
                                     return;
                                 };
-                                let impact = state.read().impact_delete_fixture_profile(&fixture_id);
+                                let impact = state.read().ui.impact_delete_fixture_profile(&fixture_id);
                                 if !impact.dependent_process_profiles.is_empty() {
                                     let description = format_impact_warning(
                                         "Cannot delete fixture profile because it is referenced by processing profiles:",
@@ -73,14 +72,14 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                 if confirmed == rfd::MessageDialogResult::Yes {
                                     state
                                         .with_mut(|s| {
-                                            let _ = s.delete_fixture_profile_with_cascade(&fixture_id);
-                                            s.log_event("Fixture profile deleted");
+                                            let _ = s.ui.delete_fixture_profile_with_cascade(&fixture_id);
+                                            s.ui.log_event("Fixture profile deleted");
                                         });
                                     status_message.set("Fixture profile deleted".to_string());
                                 }
                             },
                             on_export: move |_| {
-                                let Some(current) = state.read().selected_fixture().cloned() else {
+                                let Some(current) = state.read().ui.selected_fixture().cloned() else {
                                     status_message.set("No fixture profile selected".to_string());
                                     return;
                                 };
@@ -115,7 +114,7 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                     output_path = output_path.with_file_name(new_name);
                                 }
 
-                                let yaml = match state.read().export_selected_fixture_yaml() {
+                                let yaml = match state.read().ui.export_selected_fixture_yaml() {
                                     Ok(v) => v,
                                     Err(message) => {
                                         status_message.set(message);
@@ -123,7 +122,7 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                     }
                                 };
                                 if fs::write(&output_path, yaml).is_ok() {
-                                    state.with_mut(|s| s.log_event("Fixture profile exported"));
+                                    state.with_mut(|s| s.ui.log_event("Fixture profile exported"));
                                     status_message.set("Fixture profile exported".to_string());
                                 } else {
                                     status_message.set("Export failed: unable to write file".to_string());
@@ -168,10 +167,10 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                         return;
                                     }
                                 };
-                                let result = state.with_mut(|s| s.import_fixture_profile_yaml(&text));
+                                let result = state.with_mut(|s| s.ui.import_fixture_profile_yaml(&text));
                                 match result {
                                     Ok(_) => {
-                                        state.with_mut(|s| s.log_event("Fixture profile imported"));
+                                        state.with_mut(|s| s.ui.log_event("Fixture profile imported"));
                                         status_message.set("Fixture profile imported and selected".to_string())
                                     }
                                     Err(message) => status_message.set(message),
@@ -184,9 +183,9 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                         p { class: "diag-status", "{status_message}" }
                     }
 
-                    div { class: "setup-card cnc-profile-details-panel",
+                    div { class: "setup-card cnc-profile-details-panel profile-editor-shell",
                         if let Some(fixture) = selected_fixture.as_ref() {
-                            div { class: "edit-grid",
+                            div { class: "profile-editor-top",
                                 div { class: "field",
                                     label { "Profile name" }
                                     input {
@@ -194,43 +193,47 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                                         value: "{fixture.name}",
                                         oninput: move |evt| {
                                             let result = state
-                                                .with_mut(|s| { s.rename_selected_fixture_profile(&evt.value()) });
+                                                .with_mut(|s| { s.ui.rename_selected_fixture_profile(&evt.value()) });
                                             if let Err(message) = result {
                                                 status_message.set(message);
                                             }
                                         },
                                     }
                                 }
+                            }
 
-                                div { class: "field",
-                                    label { "Board holding method" }
-                                    input {
-                                        r#type: "text",
-                                        value: "{fixture.backing_board}",
-                                        oninput: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| { s.update_selected_fixture_backing_board(&evt.value()) });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
+                            div { class: "profile-editor-scroll",
+                                div { class: "edit-grid",
+                                    div { class: "field",
+                                        label { "Board holding method" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{fixture.backing_board}",
+                                            oninput: move |evt| {
+                                                let result = state
+                                                    .with_mut(|s| { s.ui.update_selected_fixture_backing_board(&evt.value()) });
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                        }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Work origin reference" }
-                                    input {
-                                        r#type: "text",
-                                        value: "{fixture.coordinate_context}",
-                                        oninput: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| {
-                                                    s.update_selected_fixture_coordinate_context(&evt.value())
-                                                });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
+                                    div { class: "field",
+                                        label { "Work origin reference" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{fixture.coordinate_context}",
+                                            oninput: move |evt| {
+                                                let result = state
+                                                    .with_mut(|s| {
+                                                        s.ui.update_selected_fixture_coordinate_context(&evt.value())
+                                                    });
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                        }
                                     }
                                 }
                             }
@@ -259,18 +262,18 @@ pub fn FixtureProfilesScreen(state: Signal<UiState>) -> Element {
                             let result = if *dialog_is_clone.read() {
                                 state
                                     .with_mut(|s| {
-                                        let result = s.clone_selected_fixture_profile();
+                                        let result = s.ui.clone_selected_fixture_profile();
                                         if result.is_ok() {
-                                            let _ = s.rename_selected_fixture_profile(&name);
-                                            s.log_event("Fixture profile cloned");
+                                            let _ = s.ui.rename_selected_fixture_profile(&name);
+                                            s.ui.log_event("Fixture profile cloned");
                                         }
                                         result
                                     })
                             } else {
                                 state
                                     .with_mut(|s| {
-                                        s.add_fixture_profile(&name);
-                                        s.log_event("Fixture profile added");
+                                        s.ui.add_fixture_profile(&name);
+                                        s.ui.log_event("Fixture profile added");
                                         Ok(String::new())
                                     })
                             };

@@ -78,8 +78,8 @@ impl StockTypeFilter {
 }
 
 #[component]
-pub fn StockScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let has_atc = snapshot.selected_machine_has_atc();
     let unit_system = snapshot.unit_system;
 
@@ -416,7 +416,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                     let mut added = 0usize;
                                     state
                                         .with_mut(|s| {
-                                            added = s.add_tools_from_catalog_selection(&selected);
+                                            added = s.ui.add_tools_from_catalog_selection(&selected);
                                         });
                                     stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
@@ -454,7 +454,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                     let mut removed = 0usize;
                                     state
                                         .with_mut(|s| {
-                                            removed = s.remove_tools(&selected);
+                                            removed = s.ui.remove_tools(&selected);
                                         });
                                     if active_detail_tool_id
                                         .as_ref()
@@ -512,9 +512,8 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                             let mut cloned_tool = None::<Tool>;
                                             state
                                                 .with_mut(|s| {
-                                                    if let Some(new_id) = s.clone_tool(&tool_id) {
-                                                        cloned_tool = s
-                                                            .tools
+                                                    if let Some(new_id) = s.ui.clone_tool(&tool_id) {
+                                                        cloned_tool = s.ui.tools
                                                             .iter()
                                                             .find(|entry| entry.id == new_id)
                                                             .cloned();
@@ -576,8 +575,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-                                                        .tools
+                                                    if let Some(target) = ui_state.ui.tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
@@ -638,8 +636,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -749,8 +746,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                 detail_field_popup_message.set(None);
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -795,8 +791,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -907,8 +902,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-                                                                                .tools
+                                                                            if let Some(target) = ui_state.ui.tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
@@ -953,8 +947,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                                             state
                                                                 .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-                                                                        .tools
+                                                                    if let Some(target) = ui_state.ui.tools
                                                                         .iter_mut()
                                                                         .find(|entry| entry.id == tool_id)
                                                                     {
@@ -983,8 +976,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -1002,8 +994,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -1109,8 +1100,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-                                                                                .tools
+                                                                            if let Some(target) = ui_state.ui.tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
@@ -1159,8 +1149,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-                                                                            .tools
+                                                                        if let Some(target) = ui_state.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
@@ -1264,8 +1253,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-                                                                                .tools
+                                                                            if let Some(target) = ui_state.ui.tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
@@ -1294,8 +1282,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-                                                        .tools
+                                                    if let Some(target) = ui_state.ui.tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
@@ -1319,8 +1306,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-                                                        .tools
+                                                    if let Some(target) = ui_state.ui.tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
@@ -1501,8 +1487,7 @@ pub fn StockScreen(state: Signal<UiState>) -> Element {
                                                                 let value = evt.value();
                                                                 state
                                                                     .with_mut(|s| {
-                                                                        if let Some(target) = s
-                                                                            .tools
+                                                                        if let Some(target) = s.ui.tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {

@@ -4,6 +4,7 @@ use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
 use crate::board::collect_board_snapshot_for_board;
+use crate::ctx::{ctx_snapshot, sync_ctx_from_ui_state};
 use crate::kicad_wrapper::KiCadClientBlocking;
 use kicad_ipc_rs::DocumentType;
 
@@ -31,12 +32,7 @@ use toolset::ToolsetProfilesScreen;
 #[component]
 pub fn AppRoot() -> Element {
     let boot = boot_data().clone();
-    let mut state = use_signal(|| {
-        UiState::new(
-            boot.save_filename_override.clone(),
-            boot.board_snapshot.clone(),
-        )
-    });
+    let mut state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
     let mut startup_board_sync_done = use_signal(|| false);
 
@@ -55,7 +51,7 @@ pub fn AppRoot() -> Element {
                         boards.dedup();
                         if !boards.is_empty() {
                             if let Ok(board_snapshot) = collect_board_snapshot_for_board(&client, Some(&boards[0])) {
-                                state.with_mut(|s| s.board = Some(board_snapshot));
+                                state.with_mut(|s| s.ui.board = Some(board_snapshot));
                             }
                         }
                     }
@@ -70,10 +66,11 @@ pub fn AppRoot() -> Element {
     // Persist all mutable configuration domains automatically.
     use_effect(move || {
         let snapshot = state.read().clone();
-        snapshot.persist_all();
+        snapshot.ui.persist_all();
+        sync_ctx_from_ui_state(&snapshot.ui);
     });
 
-    let snapshot = state.read().clone();
+    let snapshot = state.read().clone().ui;
     let error_count = snapshot.errors.iter().filter(|e| e.is_error).count();
     let warning_count = snapshot.errors.len().saturating_sub(error_count);
 

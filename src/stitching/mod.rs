@@ -435,6 +435,7 @@ fn signed_area_nm2(pts: &[(i64, i64)]) -> i128 {
 /// - Inner holes are offset **outward** (positive delta).
 ///
 /// Returns `(outer_paths, hole_paths)` both in nm coordinates.
+#[allow(dead_code)]
 pub fn routing_offset(
     contours: &[Contour],
     tool_radius_nm: i64,

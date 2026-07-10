@@ -6,12 +6,14 @@ use super::setup::{cnc_profile_library, parse_machine_profile_yaml};
 use super::super::model::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SetupTab {
     General,
     Cnc,
     Catalogs,
 }
 
+#[allow(dead_code)]
 impl SetupTab {
     pub fn label(self) -> &'static str {
         match self {
@@ -56,11 +58,11 @@ pub fn SetupSidebar(active_tab: Signal<SetupTab>) -> Element {
 
 #[component]
 pub fn GeneralSettingsPanel(
-    state: Signal<UiState>,
+    state: Signal<crate::ctx::AppCtx>,
     kicad_status: String,
     board_snapshot_summary: Option<String>,
 ) -> Element {
-    let snapshot = state.read().clone();
+    let snapshot = state.read().clone().ui;
 
     rsx! {
         section { class: "setup-stage",
@@ -80,7 +82,7 @@ pub fn GeneralSettingsPanel(
                                 let value = evt.value();
                                 state
                                     .with_mut(|s| {
-                                        s.theme = if value == "light" { Theme::Light } else { Theme::Dark };
+                                        s.ui.theme = if value == "light" { Theme::Light } else { Theme::Dark };
                                     });
                             },
                             option { value: "dark", "Dark" }
@@ -105,11 +107,11 @@ pub fn GeneralSettingsPanel(
 
 #[component]
 pub fn MachineProfilesPanel(
-    state: Signal<UiState>,
+    state: Signal<crate::ctx::AppCtx>,
     selected_library_profile: Signal<String>,
     import_feedback: Signal<String>,
 ) -> Element {
-    let snapshot = state.read().clone();
+    let snapshot = state.read().clone().ui;
     let library_profiles = cnc_profile_library();
 
     rsx! {
@@ -144,7 +146,7 @@ pub fn MachineProfilesPanel(
                                 let key = selected_library_profile.read().clone();
                                 let selected = profiles.iter().find(|profile| profile.key == key).cloned();
                                 if let Some(profile) = selected {
-                                    state.with_mut(|s| s.add_machine_profile(profile.machine));
+                                    state.with_mut(|s| s.ui.add_machine_profile(profile.machine));
                                     import_feedback.set("CNC profile added from library".to_string());
                                 } else {
                                     import_feedback
@@ -207,7 +209,7 @@ pub fn MachineProfilesPanel(
                                     return;
                                 }
                             };
-                            state.with_mut(|s| s.add_machine_profile(profile));
+                            state.with_mut(|s| s.ui.add_machine_profile(profile));
                             import_feedback.set("CNC profile imported and selected".to_string());
                         },
                         "Import CNC profile"
@@ -238,7 +240,10 @@ pub fn MachineProfilesPanel(
                                     onclick: {
                                         let machine_id = machine.id.clone();
                                         move |_| {
-                                            state.with_mut(|s| s.select_machine_profile_by_id(Some(machine_id.clone())))
+                                            state
+                                                .with_mut(|s| {
+                                                    s.ui.select_machine_profile_by_id(Some(machine_id.clone()))
+                                                })
                                         }
                                     },
                                     "Select"
@@ -253,8 +258,8 @@ pub fn MachineProfilesPanel(
 }
 
 #[component]
-pub fn CatalogManagementPanel(state: Signal<UiState>, import_feedback: Signal<String>) -> Element {
-    let snapshot = state.read().clone();
+pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback: Signal<String>) -> Element {
+    let snapshot = state.read().clone().ui;
 
     rsx! {
         section { class: "setup-stage",
@@ -295,7 +300,7 @@ pub fn CatalogManagementPanel(state: Signal<UiState>, import_feedback: Signal<St
                                 .unwrap_or("catalog")
                                 .to_string();
                             state
-                                .with_mut(|s| match s.import_catalog_text(&stem, &text) {
+                                .with_mut(|s| match s.ui.import_catalog_text(&stem, &text) {
                                     Ok(name) => import_feedback.set(format!("Catalog '{name}' imported")),
                                     Err(msg) => import_feedback.set(msg),
                                 });
@@ -341,7 +346,7 @@ pub fn CatalogManagementPanel(state: Signal<UiState>, import_feedback: Signal<St
                                                     move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                match s.remove_catalog(&key) {
+                                                                match s.ui.remove_catalog(&key) {
                                                                     Ok(_) => import_feedback.set("Catalog deleted".to_string()),
                                                                     Err(msg) => import_feedback.set(msg),
                                                                 }

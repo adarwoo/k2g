@@ -116,6 +116,7 @@ pub fn length_input_step(unit_system: UnitSystem) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub fn feed_input_step(unit_system: UnitSystem) -> &'static str {
     match unit_system {
         UnitSystem::Metric => "0.001",
@@ -173,6 +174,7 @@ pub fn display_feed_value_from_mm_per_min(value_mm_per_min: f64, unit_system: Un
     }
 }
 
+#[allow(dead_code)]
 pub fn mm_per_min_from_display_feed(display_value: f64, unit_system: UnitSystem) -> f64 {
     match unit_system {
         UnitSystem::Metric => display_value,
@@ -186,6 +188,7 @@ pub fn format_length_input_value_from_mm(value_mm: f64, unit_system: UnitSystem)
     format_trimmed(display_value, step, digits)
 }
 
+#[allow(dead_code)]
 pub fn format_feed_input_value_from_mm_per_min(
     value_mm_per_min: f64,
     unit_system: UnitSystem,

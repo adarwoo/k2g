@@ -2,14 +2,13 @@ use dioxus::prelude::*;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 
-use super::super::model::*;
 use super::profiles_common::{
     format_impact_warning, slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog,
 };
 
 #[component]
-pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
@@ -24,8 +23,8 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
 
     rsx! {
         div { class: "screen single",
-            section { class: "panel grow",
-                article { class: "setup-card section-block cnc-manager-shell",
+            section { class: "panel grow profile-screen-panel",
+                article { class: "setup-card section-block cnc-manager-shell profile-manager-shell",
                     div { class: "panel-header",
                         div {
                             h3 { "Toolset profile management" }
@@ -39,10 +38,10 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                             selected_profile_id: snapshot.selected_toolset_id.clone(),
                             can_export: selected_toolset.is_some(),
                             on_select: move |id| {
-                                state.with_mut(|s| s.select_toolset_profile_by_id(Some(id)));
+                                state.with_mut(|s| s.ui.select_toolset_profile_by_id(Some(id)));
                             },
                             on_clone: move |_| {
-                                let Some(selected) = state.read().selected_toolset().cloned() else {
+                                let Some(selected) = state.read().ui.selected_toolset().cloned() else {
                                     status_message.set("No toolset profile selected".to_string());
                                     return;
                                 };
@@ -51,11 +50,11 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                 show_name_dialog.set(true);
                             },
                             on_delete: move |_| {
-                                let Some(toolset_id) = state.read().selected_toolset_id.clone() else {
+                                let Some(toolset_id) = state.read().ui.selected_toolset_id.clone() else {
                                     status_message.set("No toolset profile selected".to_string());
                                     return;
                                 };
-                                let impact = state.read().impact_delete_toolset_profile(&toolset_id);
+                                let impact = state.read().ui.impact_delete_toolset_profile(&toolset_id);
                                 if !impact.dependent_process_profiles.is_empty() {
                                     let description = format_impact_warning(
                                         "Cannot delete toolset profile because it is referenced by processing profiles:",
@@ -73,14 +72,14 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                 if confirmed == rfd::MessageDialogResult::Yes {
                                     state
                                         .with_mut(|s| {
-                                            let _ = s.delete_toolset_profile_with_cascade(&toolset_id);
-                                            s.log_event("Toolset profile deleted");
+                                            let _ = s.ui.delete_toolset_profile_with_cascade(&toolset_id);
+                                            s.ui.log_event("Toolset profile deleted");
                                         });
                                     status_message.set("Toolset profile deleted".to_string());
                                 }
                             },
                             on_export: move |_| {
-                                let Some(current) = state.read().selected_toolset().cloned() else {
+                                let Some(current) = state.read().ui.selected_toolset().cloned() else {
                                     status_message.set("No toolset profile selected".to_string());
                                     return;
                                 };
@@ -115,7 +114,7 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                     output_path = output_path.with_file_name(new_name);
                                 }
 
-                                let yaml = match state.read().export_selected_toolset_yaml() {
+                                let yaml = match state.read().ui.export_selected_toolset_yaml() {
                                     Ok(v) => v,
                                     Err(message) => {
                                         status_message.set(message);
@@ -123,7 +122,7 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                     }
                                 };
                                 if fs::write(&output_path, yaml).is_ok() {
-                                    state.with_mut(|s| s.log_event("Toolset profile exported"));
+                                    state.with_mut(|s| s.ui.log_event("Toolset profile exported"));
                                     status_message.set("Toolset profile exported".to_string());
                                 } else {
                                     status_message.set("Export failed: unable to write file".to_string());
@@ -169,10 +168,10 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                     }
                                 };
 
-                                let result = state.with_mut(|s| s.import_toolset_profile_yaml(&text));
+                                let result = state.with_mut(|s| s.ui.import_toolset_profile_yaml(&text));
                                 match result {
                                     Ok(_) => {
-                                        state.with_mut(|s| s.log_event("Toolset profile imported"));
+                                        state.with_mut(|s| s.ui.log_event("Toolset profile imported"));
                                         status_message.set("Toolset profile imported and selected".to_string());
                                     }
                                     Err(message) => status_message.set(message),
@@ -185,9 +184,9 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                         p { class: "diag-status", "{status_message}" }
                     }
 
-                    div { class: "setup-card cnc-profile-details-panel",
+                    div { class: "setup-card cnc-profile-details-panel profile-editor-shell",
                         if let Some(toolset) = selected_toolset.as_ref() {
-                            div { class: "edit-grid",
+                            div { class: "profile-editor-top",
                                 div { class: "field",
                                     label { "Profile name" }
                                     input {
@@ -195,132 +194,140 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                                         value: "{toolset.name}",
                                         oninput: move |evt| {
                                             let result = state
-                                                .with_mut(|s| { s.rename_selected_toolset_profile(&evt.value()) });
+                                                .with_mut(|s| { s.ui.rename_selected_toolset_profile(&evt.value()) });
                                             if let Err(message) = result {
                                                 status_message.set(message);
                                             }
                                         },
                                     }
                                 }
+                            }
 
-                                div { class: "field",
-                                    label { "Description" }
-                                    input {
-                                        r#type: "text",
-                                        value: "{toolset.description}",
-                                        oninput: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| { s.update_selected_toolset_description(&evt.value()) });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
+                            div { class: "profile-editor-scroll",
+                                div { class: "edit-grid",
+                                    div { class: "field",
+                                        label { "Description" }
+                                        input {
+                                            r#type: "text",
+                                            value: "{toolset.description}",
+                                            oninput: move |evt| {
+                                                let result = state
+                                                    .with_mut(|s| { s.ui.update_selected_toolset_description(&evt.value()) });
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                        }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Generation policy" }
-                                    select {
-                                        value: toolset.generation_policy.as_key(),
-                                        onchange: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| { s.set_selected_toolset_generation_policy(&evt.value()) });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
-                                        option { value: "fixed_toolset", "Fixed toolset" }
-                                        option { value: "allow_reload", "Allow reload" }
-                                        option { value: "allow_hybrid", "Allow hybrid" }
+                                    div { class: "field",
+                                        label { "Generation policy" }
+                                        select {
+                                            value: toolset.generation_policy.as_key(),
+                                            onchange: move |evt| {
+                                                let result = state
+                                                    .with_mut(|s| { s.ui.set_selected_toolset_generation_policy(&evt.value()) });
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                            option { value: "fixed_toolset", "Fixed toolset" }
+                                            option { value: "allow_reload", "Allow reload" }
+                                            option { value: "allow_hybrid", "Allow hybrid" }
+                                        }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Slot count" }
-                                    input {
-                                        r#type: "number",
-                                        min: "1",
-                                        max: "64",
-                                        value: "{toolset.slots.len()}",
-                                        oninput: move |evt| {
-                                            let count = evt.value().parse::<u8>().unwrap_or(1).clamp(1, 64);
-                                            let result = state.with_mut(|s| s.set_selected_toolset_slot_count(count));
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
+                                    div { class: "field",
+                                        label { "Slot count" }
+                                        input {
+                                            r#type: "number",
+                                            min: "1",
+                                            max: "64",
+                                            value: "{toolset.slots.len()}",
+                                            oninput: move |evt| {
+                                                let count = evt.value().parse::<u8>().unwrap_or(1).clamp(1, 64);
+                                                let result = state.with_mut(|s| s.ui.set_selected_toolset_slot_count(count));
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                        }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Slots" }
-                                    div { class: "profile-list",
-                                        for (slot_index , slot) in toolset.slots.iter() {
-                                            div { class: "profile-list-item editable",
-                                                div {
-                                                    div { class: "profile-list-title",
-                                                        "T{slot_index}"
-                                                    }
-                                                    div { class: "profile-list-meta",
-                                                        if slot.disabled {
-                                                            "do_not_use"
-                                                        } else if slot.locked {
-                                                            "fixed"
-                                                        } else {
-                                                            "spare"
+                                    div { class: "field",
+                                        label { "Slots" }
+                                        div { class: "profile-list",
+                                            for (slot_index , slot) in toolset.slots.iter() {
+                                                div { class: "profile-list-item editable",
+                                                    div {
+                                                        div { class: "profile-list-title",
+                                                            "T{slot_index}"
+                                                        }
+                                                        div { class: "profile-list-meta",
+                                                            if slot.disabled {
+                                                                "do_not_use"
+                                                            } else if slot.locked {
+                                                                "fixed"
+                                                            } else {
+                                                                "spare"
+                                                            }
                                                         }
                                                     }
-                                                }
-                                                div { class: "actions",
-                                                    select {
-                                                        value: if slot.disabled { "do_not_use" } else if slot.locked { "fixed" } else { "spare" },
-                                                        onchange: {
-                                                            let idx = *slot_index;
-                                                            let current_tool = slot.tool_id.clone();
-                                                            move |evt| {
-                                                                let mode = evt.value();
-                                                                let tool_id = if mode == "fixed" {
-                                                                    current_tool
-                                                                        .clone()
-                                                                        .or_else(|| {
-                                                                            state.read().tools.first().map(|tool| tool.id.clone())
-                                                                        })
-                                                                } else {
-                                                                    None
-                                                                };
-                                                                let result = state
-                                                                    .with_mut(|s| { s.set_selected_toolset_slot_mode(idx, &mode, tool_id) });
-                                                                if let Err(message) = result {
-                                                                    status_message.set(message);
-                                                                }
-                                                            }
-                                                        },
-                                                        option { value: "spare", "spare" }
-                                                        option { value: "fixed", "fixed" }
-                                                        option { value: "do_not_use", "do_not_use" }
-                                                    }
-                                                    if !slot.disabled {
+                                                    div { class: "actions",
                                                         select {
-                                                            disabled: !slot.locked,
-                                                            value: slot.tool_id.clone().unwrap_or_default(),
+                                                            value: if slot.disabled { "do_not_use" } else if slot.locked { "fixed" } else { "spare" },
                                                             onchange: {
                                                                 let idx = *slot_index;
+                                                                let current_tool = slot.tool_id.clone();
                                                                 move |evt| {
-                                                                    let tool_id = evt.value();
-                                                                    let selected = if tool_id.trim().is_empty() { None } else { Some(tool_id) };
+                                                                    let mode = evt.value();
+                                                                    let tool_id = if mode == "fixed" {
+                                                                        current_tool
+                                                                            .clone()
+                                                                            .or_else(|| {
+                                                                                state.read().ui.tools.first().map(|tool| tool.id.clone())
+                                                                            })
+                                                                    } else {
+                                                                        None
+                                                                    };
                                                                     let result = state
                                                                         .with_mut(|s| {
-                                                                            s.set_selected_toolset_slot_mode(idx, "fixed", selected)
+                                                                            s.ui.set_selected_toolset_slot_mode(idx, &mode, tool_id)
                                                                         });
                                                                     if let Err(message) = result {
                                                                         status_message.set(message);
                                                                     }
                                                                 }
                                                             },
-                                                            option { value: "", "Select tool" }
-                                                            for tool in snapshot.tools.iter() {
-                                                                option { value: "{tool.id}",
-                                                                    "{tool.display_name()}"
+                                                            option { value: "spare", "spare" }
+                                                            option { value: "fixed", "fixed" }
+                                                            option { value: "do_not_use",
+                                                                "do_not_use"
+                                                            }
+                                                        }
+                                                        if !slot.disabled {
+                                                            select {
+                                                                disabled: !slot.locked,
+                                                                value: slot.tool_id.clone().unwrap_or_default(),
+                                                                onchange: {
+                                                                    let idx = *slot_index;
+                                                                    move |evt| {
+                                                                        let tool_id = evt.value();
+                                                                        let selected = if tool_id.trim().is_empty() { None } else { Some(tool_id) };
+                                                                        let result = state
+                                                                            .with_mut(|s| {
+                                                                                s.ui.set_selected_toolset_slot_mode(idx, "fixed", selected)
+                                                                            });
+                                                                        if let Err(message) = result {
+                                                                            status_message.set(message);
+                                                                        }
+                                                                    }
+                                                                },
+                                                                option { value: "", "Select tool" }
+                                                                for tool in snapshot.tools.iter() {
+                                                                    option { value: "{tool.id}",
+                                                                        "{tool.display_name()}"
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -356,18 +363,18 @@ pub fn ToolsetProfilesScreen(state: Signal<UiState>) -> Element {
                             let result = if *dialog_is_clone.read() {
                                 state
                                     .with_mut(|s| {
-                                        let result = s.clone_selected_toolset_profile();
+                                        let result = s.ui.clone_selected_toolset_profile();
                                         if result.is_ok() {
-                                            let _ = s.rename_selected_toolset_profile(&name);
-                                            s.log_event("Toolset profile cloned");
+                                            let _ = s.ui.rename_selected_toolset_profile(&name);
+                                            s.ui.log_event("Toolset profile cloned");
                                         }
                                         result
                                     })
                             } else {
                                 state
                                     .with_mut(|s| {
-                                        s.add_toolset_profile(&name);
-                                        s.log_event("Toolset profile added");
+                                        s.ui.add_toolset_profile(&name);
+                                        s.ui.log_event("Toolset profile added");
                                         Ok(String::new())
                                     })
                             };

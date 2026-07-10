@@ -14,11 +14,11 @@ use crate::user_path::ensure_app_dirs;
 
 #[component]
 pub fn AppTopBar(
-    state: Signal<UiState>,
+    state: Signal<crate::ctx::AppCtx>,
     error_count: usize,
     warning_count: usize,
 ) -> Element {
-    let snapshot = state.read().clone();
+    let snapshot = state.read().clone().ui;
 
     let has_board = snapshot.board.is_some();
     let has_machine = snapshot.selected_machine().is_some();
@@ -113,7 +113,7 @@ pub fn AppTopBar(
                     button {
                         class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.unit_system = UnitSystem::Metric);
+                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Metric);
                             persist_unit_system(UnitSystem::Metric);
                         },
                         "mm"
@@ -121,7 +121,7 @@ pub fn AppTopBar(
                     button {
                         class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.unit_system = UnitSystem::Imperial);
+                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Imperial);
                             persist_unit_system(UnitSystem::Imperial);
                         },
                         "in"
@@ -129,7 +129,7 @@ pub fn AppTopBar(
                     button {
                         class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.unit_system = UnitSystem::Mil);
+                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Mil);
                             persist_unit_system(UnitSystem::Mil);
                         },
                         "mil"
@@ -161,7 +161,7 @@ pub fn AppTopBar(
                         } else {
                             Theme::Dark
                         };
-                        state.with_mut(|s| s.theme = next);
+                        state.with_mut(|s| s.ui.theme = next);
                         persist_theme(next);
                     },
                     if snapshot.theme == Theme::Dark {
@@ -263,8 +263,8 @@ pub fn DiagnosticsBanner(
 }
 
 #[component]
-pub fn NavigationRail(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn NavigationRail(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let nav_items = [
         Some(Screen::Project),
         None,
@@ -284,7 +284,7 @@ pub fn NavigationRail(state: Signal<UiState>) -> Element {
                     button {
                         key: "{screen.key()}",
                         class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
-                        onclick: move |_| state.with_mut(|s| s.select_screen(screen)),
+                        onclick: move |_| state.with_mut(|s| s.ui.select_screen(screen)),
                         span { class: "rail-button-content",
                             span { class: "rail-button-icon", {rail_icon(screen)} }
                             span { class: "rail-button-text", "{screen.label()}" }
@@ -399,8 +399,8 @@ fn rail_icon(screen: Screen) -> Element {
 }
 
 #[component]
-pub fn EventNotifications(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn EventNotifications(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let visible_events = snapshot
         .events
         .iter()
@@ -423,8 +423,8 @@ pub fn EventNotifications(state: Signal<UiState>) -> Element {
 }
 
 #[component]
-pub fn StatusBar(state: Signal<UiState>, boot: UiLaunchData) -> Element {
-    let snapshot = state.read().clone();
+pub fn StatusBar(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
+    let snapshot = state.read().clone().ui;
     let board_label = snapshot
         .board
         .as_ref()

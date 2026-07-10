@@ -15,6 +15,7 @@ pub fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> Stri
     lines.join("\n")
 }
 
+#[allow(dead_code)]
 pub fn format_impact_summary(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     format!(
         "{}: {} primary, {} dependent process profile(s), {} live project(s)",

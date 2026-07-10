@@ -8,8 +8,8 @@ use super::profiles_common::{
 };
 
 #[component]
-pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
@@ -24,8 +24,8 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
 
     rsx! {
         div { class: "screen single",
-            section { class: "panel grow",
-                article { class: "setup-card section-block cnc-manager-shell",
+            section { class: "panel grow profile-screen-panel",
+                article { class: "setup-card section-block cnc-manager-shell profile-manager-shell",
                     div { class: "panel-header",
                         div {
                             h3 { "Processing profile management" }
@@ -38,11 +38,15 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                             profiles: profile_options,
                             selected_profile_id: snapshot.selected_process_profile_id.clone(),
                             can_export: selected_process_profile.is_some(),
-                            on_select: move |id| {
-                                state.with_mut(|s| s.select_process_profile_by_id(Some(id)));
+                            on_select: move |id: String| {
+                                state
+                                    .with_mut(|s| {
+                                        s.ui.select_process_profile_by_id(Some(id.clone()));
+                                        s.ui.mark_last_edited_process_profile(Some(id));
+                                    });
                             },
                             on_clone: move |_| {
-                                let Some(selected) = state.read().selected_process_profile().cloned() else {
+                                let Some(selected) = state.read().ui.selected_process_profile().cloned() else {
                                     status_message.set("No processing profile selected".to_string());
                                     return;
                                 };
@@ -51,11 +55,11 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                 show_name_dialog.set(true);
                             },
                             on_delete: move |_| {
-                                let Some(profile_id) = state.read().selected_process_profile_id.clone() else {
+                                let Some(profile_id) = state.read().ui.selected_process_profile_id.clone() else {
                                     status_message.set("No processing profile selected".to_string());
                                     return;
                                 };
-                                let impact = state.read().impact_delete_process_profile(&profile_id);
+                                let impact = state.read().ui.impact_delete_process_profile(&profile_id);
                                 let description = format_impact_warning("Delete processing profile?", &impact);
                                 let confirmed = MessageDialog::new()
                                     .set_level(MessageLevel::Warning)
@@ -66,14 +70,14 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                 if confirmed == rfd::MessageDialogResult::Yes {
                                     state
                                         .with_mut(|s| {
-                                            let _ = s.delete_process_profile_with_cascade(&profile_id);
-                                            s.log_event("Processing profile deleted");
+                                            let _ = s.ui.delete_process_profile_with_cascade(&profile_id);
+                                            s.ui.log_event("Processing profile deleted");
                                         });
                                     status_message.set("Processing profile deleted".to_string());
                                 }
                             },
                             on_export: move |_| {
-                                let Some(profile) = state.read().selected_process_profile().cloned() else {
+                                let Some(profile) = state.read().ui.selected_process_profile().cloned() else {
                                     status_message.set("No processing profile selected".to_string());
                                     return;
                                 };
@@ -107,7 +111,7 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                     output_path = output_path.with_file_name(new_name);
                                 }
 
-                                let yaml = match state.read().export_selected_process_profile_yaml() {
+                                let yaml = match state.read().ui.export_selected_process_profile_yaml() {
                                     Ok(v) => v,
                                     Err(message) => {
                                         status_message.set(message);
@@ -115,7 +119,7 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                     }
                                 };
                                 if fs::write(&output_path, yaml).is_ok() {
-                                    state.with_mut(|s| s.log_event("Processing profile exported"));
+                                    state.with_mut(|s| s.ui.log_event("Processing profile exported"));
                                     status_message.set("Processing profile exported".to_string());
                                 } else {
                                     status_message.set("Export failed: unable to write file".to_string());
@@ -163,10 +167,10 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                         return;
                                     }
                                 };
-                                let result = state.with_mut(|s| s.import_process_profile_yaml(&text));
+                                let result = state.with_mut(|s| s.ui.import_process_profile_yaml(&text));
                                 match result {
                                     Ok(_) => {
-                                        state.with_mut(|s| s.log_event("Processing profile imported"));
+                                        state.with_mut(|s| s.ui.log_event("Processing profile imported"));
                                         status_message
                                             .set("Processing profile imported and selected".to_string())
                                     }
@@ -180,9 +184,9 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                         p { class: "diag-status", "{status_message}" }
                     }
 
-                    div { class: "setup-card cnc-profile-details-panel",
+                    div { class: "setup-card cnc-profile-details-panel profile-editor-shell",
                         if let Some(profile) = selected_process_profile.as_ref() {
-                            div { class: "edit-grid",
+                            div { class: "profile-editor-top",
                                 div { class: "field",
                                     label { "Profile name" }
                                     input {
@@ -190,86 +194,92 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                                         value: "{profile.name}",
                                         oninput: move |evt| {
                                             let value = evt.value();
-                                            let result = state.with_mut(|s| s.rename_selected_process_profile(&value));
+                                            let result = state.with_mut(|s| s.ui.rename_selected_process_profile(&value));
                                             if let Err(message) = result {
                                                 status_message.set(message);
                                             }
                                         },
                                     }
                                 }
+                            }
 
-                                div { class: "field",
-                                    label { "CNC profile" }
-                                    select {
-                                        value: "{profile.cnc_profile_id}",
-                                        onchange: move |evt| {
-                                            let value = evt.value();
-                                            let result = state.with_mut(|s| s.set_selected_process_profile_cnc(&value));
-                                            if let Err(message) = result {
-                                                status_message.set(message);
+                            div { class: "profile-editor-scroll",
+                                div { class: "edit-grid",
+                                    div { class: "field",
+                                        label { "CNC profile" }
+                                        select {
+                                            value: "{profile.cnc_profile_id}",
+                                            onchange: move |evt| {
+                                                let value = evt.value();
+                                                let result = state.with_mut(|s| s.ui.set_selected_process_profile_cnc(&value));
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                            for machine in snapshot.machines.iter() {
+                                                option { value: "{machine.id}", "{machine.name}" }
                                             }
-                                        },
-                                        for machine in snapshot.machines.iter() {
-                                            option { value: "{machine.id}", "{machine.name}" }
                                         }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Fixture profile" }
-                                    select {
-                                        value: "{profile.fixture_profile_id}",
-                                        onchange: move |evt| {
-                                            let value = evt.value();
-                                            let result = state.with_mut(|s| s.set_selected_process_profile_fixture(&value));
-                                            if let Err(message) = result {
-                                                status_message.set(message);
+                                    div { class: "field",
+                                        label { "Fixture profile" }
+                                        select {
+                                            value: "{profile.fixture_profile_id}",
+                                            onchange: move |evt| {
+                                                let value = evt.value();
+                                                let result = state
+                                                    .with_mut(|s| s.ui.set_selected_process_profile_fixture(&value));
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                            for fixture in snapshot.fixtures.iter() {
+                                                option { value: "{fixture.id}", "{fixture.name}" }
                                             }
-                                        },
-                                        for fixture in snapshot.fixtures.iter() {
-                                            option { value: "{fixture.id}", "{fixture.name}" }
                                         }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Toolset profile" }
-                                    select {
-                                        value: "{profile.toolset_profile_id}",
-                                        onchange: move |evt| {
-                                            let value = evt.value();
-                                            let result = state.with_mut(|s| s.set_selected_process_profile_toolset(&value));
-                                            if let Err(message) = result {
-                                                status_message.set(message);
+                                    div { class: "field",
+                                        label { "Toolset profile" }
+                                        select {
+                                            value: "{profile.toolset_profile_id}",
+                                            onchange: move |evt| {
+                                                let value = evt.value();
+                                                let result = state
+                                                    .with_mut(|s| s.ui.set_selected_process_profile_toolset(&value));
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                            for toolset in snapshot.toolsets.iter() {
+                                                option { value: "{toolset.id}", "{toolset.name}" }
                                             }
-                                        },
-                                        for toolset in snapshot.toolsets.iter() {
-                                            option { value: "{toolset.id}", "{toolset.name}" }
                                         }
                                     }
-                                }
 
-                                div { class: "field",
-                                    label { "Default operations" }
-                                    for op in ProductionOperation::all().iter() {
-                                        label { class: "checkbox-line",
-                                            input {
-                                                r#type: "checkbox",
-                                                checked: profile.default_operations.contains(op),
-                                                oninput: {
-                                                    let operation = *op;
-                                                    move |_| {
-                                                        let result = state
-                                                            .with_mut(|s| {
-                                                                s.toggle_selected_process_profile_operation(operation)
-                                                            });
-                                                        if let Err(message) = result {
-                                                            status_message.set(message);
+                                    div { class: "field",
+                                        label { "Default operations" }
+                                        for op in ProductionOperation::all().iter() {
+                                            label { class: "checkbox-line",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    checked: profile.default_operations.contains(op),
+                                                    oninput: {
+                                                        let operation = *op;
+                                                        move |_| {
+                                                            let result = state
+                                                                .with_mut(|s| {
+                                                                    s.ui.toggle_selected_process_profile_operation(operation)
+                                                                });
+                                                            if let Err(message) = result {
+                                                                status_message.set(message);
+                                                            }
                                                         }
-                                                    }
-                                                },
+                                                    },
+                                                }
+                                                span { "{op.label()}" }
                                             }
-                                            span { "{op.label()}" }
                                         }
                                     }
                                 }
@@ -299,18 +309,18 @@ pub fn ProcessProfilesScreen(state: Signal<UiState>) -> Element {
                             let result = if *dialog_is_clone.read() {
                                 state
                                     .with_mut(|s| {
-                                        let result = s.clone_selected_process_profile();
+                                        let result = s.ui.clone_selected_process_profile();
                                         if result.is_ok() {
-                                            let _ = s.rename_selected_process_profile(&name);
-                                            s.log_event("Processing profile cloned");
+                                            let _ = s.ui.rename_selected_process_profile(&name);
+                                            s.ui.log_event("Processing profile cloned");
                                         }
                                         result
                                     })
                             } else {
                                 state
                                     .with_mut(|s| {
-                                        s.add_process_profile(&name);
-                                        s.log_event("Processing profile added");
+                                        s.ui.add_process_profile(&name);
+                                        s.ui.log_event("Processing profile added");
                                         Ok(String::new())
                                     })
                             };

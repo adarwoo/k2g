@@ -6,8 +6,8 @@ use super::super::model::*;
 use super::setup_sections::{CatalogManagementPanel, GeneralSettingsPanel, MachineProfilesPanel, SetupSidebar, SetupTab};
 
 #[component]
-pub fn SetupScreen(state: Signal<UiState>, boot: UiLaunchData) -> Element {
-    let snapshot = state.read().clone();
+pub fn SetupScreen(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
+    let snapshot = state.read().clone().ui;
     let library_profiles = cnc_profile_library();
     let selected_library_profile = use_signal(|| {
         library_profiles

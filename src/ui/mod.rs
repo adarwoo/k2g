@@ -29,6 +29,8 @@ pub fn launch(data: UiLaunchData) {
         warn!("Could not locate app directories; will use defaults");
     }
 
+    crate::ctx::initialize_ctx(boot_data().clone());
+
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("k2g - KiCAD to GCode")
         .with_window_icon(load_window_icon());

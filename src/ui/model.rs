@@ -104,6 +104,7 @@ impl UnitSystem {
         }
     }
 
+    #[allow(dead_code)]
     pub fn user_unit_system(self) -> UserUnitSystem {
         match self {
             Self::Metric => UserUnitSystem::Metric,
@@ -272,6 +273,7 @@ impl ToolsetGenerationPolicy {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             Self::FixedToolset => "Fixed toolset",
@@ -743,6 +745,7 @@ pub struct JobConfig {
 #[derive(Clone, PartialEq)]
 pub struct AppError {
     pub id: String,
+    pub domain: String,
     pub is_error: bool,
     pub message: String,
     pub details: Option<String>,
@@ -783,6 +786,7 @@ pub struct UiState {
     pub selected_fixture_id: Option<String>,
     pub process_profiles: Vec<JobProfile>,
     pub selected_process_profile_id: Option<String>,
+    pub last_edited_process_profile_id: Option<String>,
     pub toolsets: Vec<ToolsetProfile>,
     pub selected_toolset_id: Option<String>,
     pub machine_mru: Vec<String>,
@@ -881,6 +885,7 @@ impl UiState {
             selected_fixture_id: Some("fixture-default".to_string()),
             process_profiles: vec![],
             selected_process_profile_id: None,
+            last_edited_process_profile_id: None,
             toolsets: vec![],
             selected_toolset_id: None,
             machine_mru: vec![],
@@ -1006,14 +1011,13 @@ impl UiState {
         }
 
         let selected_process = persisted
-            .selected_process_profile_id
+            .last_edited_process_profile_id
             .clone()
             .filter(|selected| {
                 self.process_profiles
                     .iter()
                     .any(|profile| profile.id == *selected)
-            })
-            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+            });
 
         let selected_cnc = persisted
             .selected_cnc_profile_id
@@ -1028,9 +1032,27 @@ impl UiState {
             .clone()
             .filter(|selected| self.toolsets.iter().any(|profile| profile.id == *selected));
 
+        self.last_edited_process_profile_id = selected_process.clone();
+
         if selected_process.is_some() {
             self.select_process_profile_by_id(selected_process);
         } else {
+            if !self.board.is_some() {
+                let fallback_process = persisted
+                    .selected_process_profile_id
+                    .clone()
+                    .filter(|selected| {
+                        self.process_profiles
+                            .iter()
+                            .any(|profile| profile.id == *selected)
+                    })
+                    .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+                if fallback_process.is_some() {
+                    self.select_process_profile_by_id(fallback_process);
+                    return;
+                }
+            }
+
             let selected_machine = selected_cnc
                 .clone()
                 .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
@@ -1065,6 +1087,7 @@ impl UiState {
                 "mode": self.theme.as_str(),
             },
             "selected_process_profile_id": self.selected_process_profile_id,
+            "last_edited_process_profile_id": self.last_edited_process_profile_id,
             "selected_cnc_profile_id": self.selected_machine_id,
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
@@ -1118,6 +1141,30 @@ impl UiState {
         }
     }
 
+    fn push_runtime_error(&mut self, domain: &str, message: String, details: Option<String>) {
+        let created_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        self.errors.push(AppError {
+            id: format!("err-{}", created_ms),
+            domain: domain.to_string(),
+            is_error: true,
+            message: message.clone(),
+            details,
+        });
+        const MAX_ERRORS: usize = 200;
+        if self.errors.len() > MAX_ERRORS {
+            let drop_count = self.errors.len() - MAX_ERRORS;
+            self.errors.drain(0..drop_count);
+        }
+        self.log_event(message);
+    }
+
+    pub fn mark_last_edited_process_profile(&mut self, id: Option<String>) {
+        self.last_edited_process_profile_id = id;
+    }
+
     pub fn selected_machine(&self) -> Option<&MachineProfile> {
         self.selected_machine_id
             .as_ref()
@@ -1152,6 +1199,8 @@ impl UiState {
     }
 
     pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
+        let previous_profile = self.selected_process_profile().cloned();
+        let previous_selected_operations = self.project_config.selected_operations.clone();
         self.selected_process_profile_id = id.clone();
 
         let Some(selected_id) = id else {
@@ -1164,13 +1213,116 @@ impl UiState {
             .find(|profile| profile.id == selected_id)
             .cloned()
         else {
+            self.selected_process_profile_id = None;
             return;
         };
 
-        self.select_machine_profile_by_id(Some(profile.cnc_profile_id));
-        self.selected_fixture_id = Some(profile.fixture_profile_id);
-        self.select_toolset_profile_by_id(Some(profile.toolset_profile_id));
-        self.project_config.selected_operations = profile.default_operations;
+        let resolved_machine_id = if self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id)
+        {
+            profile.cnc_profile_id.clone()
+        } else {
+            let fallback = self
+                .selected_machine_id
+                .clone()
+                .filter(|id| self.machines.iter().any(|machine| machine.id == *id))
+                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
+            self.push_runtime_error(
+                "process-profile",
+                format!(
+                    "Processing profile '{}' references an unavailable CNC profile; using default.",
+                    profile.name
+                ),
+                Some(format!("Missing CNC profile id: {}", profile.cnc_profile_id)),
+            );
+            fallback.unwrap_or(profile.cnc_profile_id.clone())
+        };
+        self.select_machine_profile_by_id(Some(resolved_machine_id));
+
+        let resolved_fixture_id = if self
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.id == profile.fixture_profile_id)
+        {
+            profile.fixture_profile_id.clone()
+        } else {
+            let fallback = self
+                .selected_fixture_id
+                .clone()
+                .filter(|id| self.fixtures.iter().any(|fixture| fixture.id == *id))
+                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
+            self.push_runtime_error(
+                "process-profile",
+                format!(
+                    "Processing profile '{}' references an unavailable fixture profile; using default.",
+                    profile.name
+                ),
+                Some(format!("Missing fixture profile id: {}", profile.fixture_profile_id)),
+            );
+            fallback.unwrap_or(profile.fixture_profile_id.clone())
+        };
+        self.selected_fixture_id = Some(resolved_fixture_id);
+
+        let resolved_toolset_id = if self
+            .toolsets
+            .iter()
+            .any(|toolset| toolset.id == profile.toolset_profile_id)
+        {
+            profile.toolset_profile_id.clone()
+        } else {
+            let fallback = self
+                .selected_toolset_id
+                .clone()
+                .filter(|id| self.toolsets.iter().any(|toolset| toolset.id == *id))
+                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()));
+            self.push_runtime_error(
+                "process-profile",
+                format!(
+                    "Processing profile '{}' references an unavailable toolset profile; using default.",
+                    profile.name
+                ),
+                Some(format!("Missing toolset profile id: {}", profile.toolset_profile_id)),
+            );
+            fallback.unwrap_or(profile.toolset_profile_id.clone())
+        };
+        self.select_toolset_profile_by_id(Some(resolved_toolset_id));
+
+        let mut next_operations = profile.default_operations.clone();
+        if let Some(previous) = previous_profile.filter(|p| p.id != profile.id) {
+            for op in ProductionOperation::all().iter().copied() {
+                let previous_default = previous.default_operations.contains(&op);
+                let previous_value = previous_selected_operations.contains(&op);
+                if previous_default == previous_value {
+                    continue;
+                }
+
+                if previous_value {
+                    if profile.default_operations.contains(&op) {
+                        if !next_operations.contains(&op) {
+                            next_operations.push(op);
+                        }
+                    } else {
+                        self.push_runtime_error(
+                            "process-profile",
+                            format!(
+                                "Operation override '{}' is not allowed by processing profile '{}'; using profile default.",
+                                op.label(),
+                                profile.name
+                            ),
+                            None,
+                        );
+                    }
+                } else if profile.default_operations.contains(&op) {
+                    next_operations.retain(|existing| *existing != op);
+                }
+            }
+        }
+
+        let ordered_operations = ProductionOperation::all()
+            .iter()
+            .copied()
+            .filter(|op| next_operations.contains(op))
+            .collect::<Vec<_>>();
+        self.project_config.selected_operations = ordered_operations;
         self.gcode_modified = false;
     }
 
@@ -1214,6 +1366,7 @@ impl UiState {
 
         if let Some(target) = self.process_profiles.iter_mut().find(|profile| profile.id == selected) {
             target.name = unique.clone();
+            self.last_edited_process_profile_id = Some(selected);
             return Ok(unique);
         }
 
@@ -1239,6 +1392,7 @@ impl UiState {
         });
 
         self.select_process_profile_by_id(Some(id.clone()));
+        self.last_edited_process_profile_id = Some(id.clone());
         Ok(id)
     }
 
@@ -1258,6 +1412,7 @@ impl UiState {
         {
             profile.cnc_profile_id = cnc_id.to_string();
             self.select_process_profile_by_id(Some(selected_id));
+            self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
         }
 
@@ -1280,6 +1435,7 @@ impl UiState {
         {
             profile.fixture_profile_id = fixture_id.to_string();
             self.select_process_profile_by_id(Some(selected_id));
+            self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
         }
 
@@ -1302,6 +1458,7 @@ impl UiState {
         {
             profile.toolset_profile_id = toolset_id.to_string();
             self.select_process_profile_by_id(Some(selected_id));
+            self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
         }
 
@@ -1347,6 +1504,7 @@ impl UiState {
         let selected = profile.id.clone();
         self.process_profiles.push(profile);
         self.select_process_profile_by_id(Some(selected.clone()));
+        self.last_edited_process_profile_id = Some(selected.clone());
         Ok(selected)
     }
 
@@ -1629,6 +1787,7 @@ impl UiState {
             }
 
             self.select_process_profile_by_id(Some(selected_id));
+            self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
         }
 
@@ -1766,6 +1925,7 @@ impl UiState {
         Err("Selected CNC profile was not found".to_string())
     }
 
+    #[allow(dead_code)]
     pub fn add_demo_machine(&mut self) {
         let machine = MachineProfile {
             name: format!("Demo CNC profile {}", self.machines.len() + 1),
@@ -1986,7 +2146,8 @@ impl UiState {
             toolset_profile_id: toolset_id,
             default_operations,
         });
-        self.select_process_profile_by_id(Some(id));
+        self.select_process_profile_by_id(Some(id.clone()));
+        self.last_edited_process_profile_id = Some(id);
     }
 
     pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {

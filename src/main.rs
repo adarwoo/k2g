@@ -2,6 +2,7 @@ mod catalog;
 mod board;
 mod cli;
 mod config;
+mod ctx;
 mod kicad_wrapper;
 mod stitching;
 mod ui;

@@ -66,21 +66,34 @@ pub const APP_STYLE: &str = r#"
     --shadow: 0 12px 34px rgba(15, 23, 42, 0.08);
 }
 
+html,
 body {
     margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
     font-family: "Segoe UI", "Noto Sans", sans-serif;
     color: var(--text);
     background: radial-gradient(circle at 0% 0%, #232933 0%, var(--bg) 45%);
 }
 
+#main {
+    width: 100%;
+    height: 100%;
+    min-height: 100%;
+}
+
 .app-shell {
     height: 100vh;
     width: 100vw;
+    max-height: 100vh;
+    max-width: 100vw;
     display: flex;
     flex-direction: column;
     background: var(--bg);
     color: var(--text);
     position: relative;
+    overflow: hidden;
 }
 
 .shell-topbar {
@@ -249,6 +262,7 @@ body {
     flex: 1;
     min-height: 0;
     display: flex;
+    overflow: hidden;
 }
 
 .shell-rail {
@@ -336,14 +350,17 @@ body {
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
     background:
         radial-gradient(circle at top left, rgba(245, 158, 11, 0.08), transparent 22%),
         linear-gradient(180deg, color-mix(in srgb, var(--bg) 92%, #000 8%) 0%, var(--bg) 100%);
 }
 
 .screen-host {
-    height: 100%;
+    flex: 1;
     min-height: 0;
+    overflow: auto;
 }
 
 .diag-banner-wrap {
@@ -468,7 +485,9 @@ body {
 }
 
 .shell-statusbar {
+    height: 30px;
     min-height: 30px;
+    flex: 0 0 30px;
     display: flex;
     align-items: center;
     gap: 14px;
@@ -1201,6 +1220,41 @@ body {
 
 .panel.grow {
     overflow: auto;
+}
+
+.profile-screen-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.profile-manager-shell {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.profile-editor-shell {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.profile-editor-top {
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+}
+
+.profile-editor-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+}
+
+.profile-editor-scroll .edit-grid {
+    overflow: visible;
 }
 
 .panel-header {

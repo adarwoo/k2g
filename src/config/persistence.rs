@@ -29,6 +29,8 @@ pub struct PersistenceState {
     pub toolset_profiles: BTreeMap<String, Value>,
     /// ID of currently selected process profile (from global settings)
     pub selected_process_profile_id: Option<String>,
+    /// ID of last edited processing profile in processing profile view
+    pub last_edited_process_profile_id: Option<String>,
     /// ID of currently selected CNC profile (from global settings)
     pub selected_cnc_profile_id: Option<String>,
     /// ID of currently selected fixture profile (from global settings)
@@ -50,6 +52,10 @@ pub fn load_all_configs(
     let global_settings = global_mgr.get_content().clone();
     let selected_process_profile_id = global_settings
         .get("selected_process_profile_id")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let last_edited_process_profile_id = global_settings
+        .get("last_edited_process_profile_id")
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     let selected_cnc_profile_id = global_settings
@@ -83,6 +89,7 @@ pub fn load_all_configs(
         processing_profiles,
         toolset_profiles,
         selected_process_profile_id,
+        last_edited_process_profile_id,
         selected_cnc_profile_id,
         selected_fixture_profile_id,
         selected_toolset_profile_id,

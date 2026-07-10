@@ -67,8 +67,8 @@ fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String 
 }
 
 #[component]
-pub fn JobScreen(state: Signal<UiState>) -> Element {
-    let snapshot = state.read().clone();
+pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let snapshot = state.read().clone().ui;
     let board_refresh_status = use_signal(String::new);
     let open_board_filenames = use_signal(Vec::<String>::new);
     let mut selected_board_filename = use_signal(String::new);
@@ -370,7 +370,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
                                 onclick: {
                                     let target = *view;
-                                    move |_| state.with_mut(|s| s.selected_project_view = target)
+                                    move |_| state.with_mut(|s| s.ui.selected_project_view = target)
                                 },
                                 "{view.label()}"
                             }
@@ -692,9 +692,8 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                     oninput: move |evt| {
                                         let value = evt.value();
                                         state
-                                            .with_mut(|s| {
-                                                s.gcode = value;
-                                                s.gcode_modified = true;
+                                            .with_mut(|s| { s.ui.gcode = value;
+                                                s.ui.gcode_modified = true;
                                             });
                                     },
                                 }
@@ -747,7 +746,7 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                                 state
                                     .with_mut(|s| {
                                         let selected = if value.trim().is_empty() { None } else { Some(value) };
-                                        s.select_process_profile_by_id(selected);
+                                        s.ui.select_process_profile_by_id(selected);
                                     });
                             },
                             option { value: "", "Select processing profile" }
@@ -765,694 +764,680 @@ pub fn JobScreen(state: Signal<UiState>) -> Element {
                         }
                     }
 
-                    div { class: "field",
-                        label { "Operations" }
-                        for op in ProductionOperation::all().iter() {
-                            button {
-                                key: "{op.label()}",
-                                class: if snapshot.project_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
-                                onclick: {
-                                    let operation = *op;
-                                    move |_| state.with_mut(|s| s.toggle_operation(operation))
+                    if snapshot.selected_process_profile_id.is_none() {
+                        p { class: "diag-status",
+                            "Select a processing profile to display project attributes."
+                        }
+                    }
+
+                    if snapshot.selected_process_profile_id.is_some() {
+                        div { class: "field",
+                            label { "Operations" }
+                            for op in ProductionOperation::all().iter() {
+                                button {
+                                    key: "{op.label()}",
+                                    class: if snapshot.project_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
+                                    onclick: {
+                                        let operation = *op;
+                                        move |_| state.with_mut(|s| s.ui.toggle_operation(operation))
+                                    },
+                                    "{op.label()}"
+                                }
+                            }
+                        }
+
+                        div { class: "field",
+                            label { "Side to machine" }
+                            select {
+                                value: snapshot.project_config.side.as_str(),
+                                onchange: move |evt| {
+                                    let v = evt.value();
+                                    state
+                                        .with_mut(|s| { s.ui.project_config.side = if v == "bottom" {
+                                                Side::Bottom
+                                            } else {
+                                                Side::Top
+                                            };
+                                        });
                                 },
-                                "{op.label()}"
+                                option { value: "top", "Top (Component side)" }
+                                option { value: "bottom", "Bottom (Solder side)" }
                             }
                         }
-                    }
 
-                    div { class: "field",
-                        label { "Side to machine" }
-                        select {
-                            value: snapshot.project_config.side.as_str(),
-                            onchange: move |evt| {
-                                let v = evt.value();
-                                state
-                                    .with_mut(|s| {
-                                        s.project_config.side = if v == "bottom" {
-                                            Side::Bottom
-                                        } else {
-                                            Side::Top
-                                        };
-                                    });
-                            },
-                            option { value: "top", "Top (Component side)" }
-                            option { value: "bottom", "Bottom (Solder side)" }
-                        }
-                    }
-
-                    div { class: "field",
-                        label { "Cut depth strategy" }
-                        div { class: "radio-group vertical",
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "cut_depth_strategy",
-                                        value: "automatic",
-                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::Automatic,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
-                                                });
-                                        },
-                                    }
-                                    span { "Automatic (recommended)" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "cut_depth_strategy",
-                                        value: "single_pass",
-                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
-                                                });
-                                        },
-                                    }
-                                    span { "Single Pass" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "cut_depth_strategy",
-                                        value: "multi_pass",
-                                        checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
-                                                });
-                                        },
-                                    }
-                                    span { "Multi-pass" }
-                                }
-                                if snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass {
-                                    div { class: "sub-field",
-                                        span { "Max depth per pass: " }
+                        div { class: "field",
+                            label { "Cut depth strategy" }
+                            div { class: "radio-group vertical",
+                                div { class: "radio-option",
+                                    label {
                                         input {
-                                            r#type: "number",
-                                            step: "0.1",
-                                            value: "{snapshot.project_config.multi_pass_max_depth_mm}",
-                                            oninput: move |evt| {
-                                                let value = evt.value().parse::<f32>().unwrap_or(1.0);
-                                                state.with_mut(|s| s.project_config.multi_pass_max_depth_mm = value);
-                                            },
-                                        }
-                                        span { " mm" }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if milling_outline_enabled {
-                        details { class: "field collapsible-group",
-                            summary { "Outline milling" }
-
-                            div { class: "field section-subfield",
-                                label { "Router tool selection" }
-                                p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
-                                select {
-                                    value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                .unwrap_or_default(),
-                                    onchange: move |evt| {
-                                        let value = evt.value();
-                                        state
-                                            .with_mut(|s| {
-                                                s.project_config.outline_router_tool_id = if value.trim().is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(value.clone())
-                                                };
-                                                let router_d = s
-                                                    .project_config
-                                                    .outline_router_tool_id
-                                                    .as_ref()
-                                                    .and_then(|id| s.tools.iter().find(|t| &t.id == id))
-                                                    .map(|t| t.diameter.as_mm());
-                                                if let Some(drill_id) = s.project_config.mouse_bite_drill_tool_id.clone()
-                                                {
-                                                    let valid = s
-                                                        .tools
-                                                        .iter()
-                                                        .find(|t| t.id == drill_id)
-                                                        .map(|t| {
-                                                            let kind_ok = t.kind.to_ascii_lowercase().contains("drill");
-                                                            let d = t.diameter.as_mm();
-                                                            let in_range = (0.5..=1.5).contains(&d);
-                                                            let router_ok = router_d.map(|r| d <= r).unwrap_or(false);
-                                                            kind_ok && in_range && router_ok
-                                                        })
-                                                        .unwrap_or(false);
-                                                    if !valid {
-                                                        s.project_config.mouse_bite_drill_tool_id = None;
-                                                    }
-                                                }
-                                            });
-                                    },
-                                    option { value: "", "Select router tool" }
-                                    for tool in eligible_router_tools.iter() {
-                                        option { value: "{tool.id}",
-                                            "{tool.display_name()} ({tool.diameter})"
-                                        }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-subfield",
-                                label { "Number of tabs" }
-                                input {
-                                    r#type: "number",
-                                    min: "0",
-                                    step: "1",
-                                    value: "{snapshot.project_config.tab_count}",
-                                    oninput: move |evt| {
-                                        let value = evt.value().parse::<u8>().unwrap_or(0);
-                                        state.with_mut(|s| s.project_config.tab_count = value);
-                                    },
-                                }
-                            }
-
-                            if snapshot.project_config.tab_count > 0 {
-                                div { class: "field section-subfield",
-                                    label { "Width of tabs" }
-                                    p { class: "diag-status", "Recommended default: {tab_width_hint}" }
-                                    div { class: "sub-field",
-                                        input {
-                                            r#type: "number",
-                                            min: "0",
-                                            step: "{tab_width_step}",
-                                            value: "{tab_width_display}",
-                                            oninput: move |evt| {
-                                                let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
+                                            r#type: "radio",
+                                            name: "cut_depth_strategy",
+                                            value: "automatic",
+                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::Automatic,
+                                            onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| {
-                                                        s.project_config.tab_width_mm = unit_service::mm_from_display_length(
-                                                            value as f64,
-                                                            s.unit_system,
-                                                        ) as f32;
+                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
                                                     });
                                             },
                                         }
-                                        if tab_width_is_overridden {
-                                            div { class: "stock-detail-original-group",
-                                                span { class: "stock-detail-original-value",
-                                                    "{unit_service::format_length_display(Length::from_mm(snapshot.project_config.tab_width_baseline_mm as f64), snapshot.unit_system)}"
+                                        span { "Automatic (recommended)" }
+                                    }
+                                }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "cut_depth_strategy",
+                                            value: "single_pass",
+                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
+                                                    });
+                                            },
+                                        }
+                                        span { "Single Pass" }
+                                    }
+                                }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "cut_depth_strategy",
+                                            value: "multi_pass",
+                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
+                                                    });
+                                            },
+                                        }
+                                        span { "Multi-pass" }
+                                    }
+                                    if snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass {
+                                        div { class: "sub-field",
+                                            span { "Max depth per pass: " }
+                                            input {
+                                                r#type: "number",
+                                                step: "0.1",
+                                                value: "{snapshot.project_config.multi_pass_max_depth_mm}",
+                                                oninput: move |evt| {
+                                                    let value = evt.value().parse::<f32>().unwrap_or(1.0);
+                                                    state.with_mut(|s| s.ui.project_config.multi_pass_max_depth_mm = value);
+                                                },
+                                            }
+                                            span { " mm" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if milling_outline_enabled {
+                            details { class: "field collapsible-group",
+                                summary { "Outline milling" }
+
+                                div { class: "field section-subfield",
+                                    label { "Router tool selection" }
+                                    p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
+                                    select {
+                                        value: snapshot
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                        onchange: move |evt| {
+                                            let value = evt.value();
+                                            state
+                                                .with_mut(|s| { s.ui.project_config.outline_router_tool_id = if value.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(value.clone())
+                                                    };
+                                                    let router_d = s.ui.project_config
+                                                        .outline_router_tool_id
+                                                        .as_ref()
+                                                        .and_then(|id| s.ui.tools.iter().find(|t| &t.id == id))
+                                                        .map(|t| t.diameter.as_mm());
+                                                    if let Some(drill_id) = s.ui.project_config.mouse_bite_drill_tool_id.clone()
+                                                    {
+                                                        let valid = s.ui.tools
+                                                            .iter()
+                                                            .find(|t| t.id == drill_id)
+                                                            .map(|t| {
+                                                                let kind_ok = t.kind.to_ascii_lowercase().contains("drill");
+                                                                let d = t.diameter.as_mm();
+                                                                let in_range = (0.5..=1.5).contains(&d);
+                                                                let router_ok = router_d.map(|r| d <= r).unwrap_or(false);
+                                                                kind_ok && in_range && router_ok
+                                                            })
+                                                            .unwrap_or(false);
+                                                        if !valid {
+                                                            s.ui.project_config.mouse_bite_drill_tool_id = None;
+                                                        }
+                                                    }
+                                                });
+                                        },
+                                        option { value: "", "Select router tool" }
+                                        for tool in eligible_router_tools.iter() {
+                                            option { value: "{tool.id}",
+                                                "{tool.display_name()} ({tool.diameter})"
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div { class: "field section-subfield",
+                                    label { "Number of tabs" }
+                                    input {
+                                        r#type: "number",
+                                        min: "0",
+                                        step: "1",
+                                        value: "{snapshot.project_config.tab_count}",
+                                        oninput: move |evt| {
+                                            let value = evt.value().parse::<u8>().unwrap_or(0);
+                                            state.with_mut(|s| s.ui.project_config.tab_count = value);
+                                        },
+                                    }
+                                }
+
+                                if snapshot.project_config.tab_count > 0 {
+                                    div { class: "field section-subfield",
+                                        label { "Width of tabs" }
+                                        p { class: "diag-status",
+                                            "Recommended default: {tab_width_hint}"
+                                        }
+                                        div { class: "sub-field",
+                                            input {
+                                                r#type: "number",
+                                                min: "0",
+                                                step: "{tab_width_step}",
+                                                value: "{tab_width_display}",
+                                                oninput: move |evt| {
+                                                    let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
+                                                    state
+                                                        .with_mut(|s| { s.ui.project_config.tab_width_mm = unit_service::mm_from_display_length(
+                                                                value as f64,
+                                                                s.ui.unit_system,
+                                                            ) as f32;
+                                                        });
+                                                },
+                                            }
+                                            if tab_width_is_overridden {
+                                                div { class: "stock-detail-original-group",
+                                                    span { class: "stock-detail-original-value",
+                                                        "{unit_service::format_length_display(Length::from_mm(snapshot.project_config.tab_width_baseline_mm as f64), snapshot.unit_system)}"
+                                                    }
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "stock-detail-revert-btn",
+                                                        title: "Revert to original setting",
+                                                        onclick: move |_| {
+                                                            state
+                                                                .with_mut(|s| { s.ui.project_config.tab_width_mm = s.ui.project_config.tab_width_baseline_mm;
+                                                                });
+                                                        },
+                                                        "↺"
+                                                    }
                                                 }
-                                                button {
-                                                    r#type: "button",
-                                                    class: "stock-detail-revert-btn",
-                                                    title: "Revert to original setting",
-                                                    onclick: move |_| {
+                                            }
+                                        }
+                                        p { class: "diag-status", "{tab_width_display_label}" }
+                                    }
+
+                                    div { class: "field section-subfield",
+                                        label { "Mouse bites" }
+                                        label { class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: snapshot.project_config.mouse_bites_enabled,
+                                                oninput: move |evt| {
+                                                    let enabled = evt.checked();
+                                                    state.with_mut(|s| s.ui.project_config.mouse_bites_enabled = enabled);
+                                                },
+                                            }
+                                            span { "Enable mouse bites" }
+                                        }
+                                    }
+
+                                    if snapshot.project_config.mouse_bites_enabled {
+                                        div { class: "field section-subfield",
+                                            label { "Center-to-center" }
+                                            div { class: "sub-field",
+                                                input {
+                                                    r#type: "number",
+                                                    min: "{mouse_bite_pitch_min}",
+                                                    max: "{mouse_bite_pitch_max}",
+                                                    step: "{tab_width_step}",
+                                                    value: "{mouse_bite_pitch_display}",
+                                                    oninput: move |evt| {
+                                                        let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
                                                         state
-                                                            .with_mut(|s| {
-                                                                s.project_config.tab_width_mm = s.project_config.tab_width_baseline_mm;
+                                                            .with_mut(|s| { s.ui.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
+                                                                    value as f64,
+                                                                    s.ui.unit_system,
+                                                                ) as f32;
                                                             });
                                                     },
-                                                    "↺"
+                                                }
+                                            }
+                                            p { class: "diag-status",
+                                                "{mouse_bite_pitch_display_label}"
+                                            }
+                                        }
+
+                                        div { class: "field section-subfield",
+                                            label { "Mouse-bite drill tool" }
+                                            p { class: "diag-status",
+                                                "Only drill bits 0.5-1.5mm, and not larger than selected router diameter"
+                                            }
+                                            select {
+                                                disabled: snapshot.project_config.outline_router_tool_id.is_none(),
+                                                value: snapshot
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                onchange: move |evt| {
+                                                    let value = evt.value();
+                                                    state
+                                                        .with_mut(|s| { s.ui.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty() {
+                                                                None
+                                                            } else {
+                                                                Some(value)
+                                                            };
+                                                        });
+                                                },
+                                                option { value: "", "Select drill tool" }
+                                                for tool in eligible_mouse_bite_drills.iter() {
+                                                    option { value: "{tool.id}",
+                                                        "{tool.display_name()} ({tool.diameter})"
+                                                    }
                                                 }
                                             }
                                         }
                                     }
-                                    p { class: "diag-status", "{tab_width_display_label}" }
                                 }
+                            }
+                        }
 
-                                div { class: "field section-subfield",
-                                    label { "Mouse bites" }
-                                    label { class: "checkbox-line",
+                        div { class: "field",
+                            label { "Board thickness" }
+                            p { class: "diag-status",
+                                if let Some(actual_label) = board_thickness_actual_label.as_ref() {
+                                    "Actual board thickness (KiCad board data): {actual_label}"
+                                } else {
+                                    "Actual board thickness (KiCad board data): unavailable"
+                                }
+                            }
+                            div { class: "radio-group vertical",
+                                div { class: "radio-option",
+                                    label {
                                         input {
-                                            r#type: "checkbox",
-                                            checked: snapshot.project_config.mouse_bites_enabled,
-                                            oninput: move |evt| {
-                                                let enabled = evt.checked();
-                                                state.with_mut(|s| s.project_config.mouse_bites_enabled = enabled);
+                                            r#type: "radio",
+                                            name: "board_thickness_mode",
+                                            value: "automatic",
+                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
+                                                    });
                                             },
                                         }
-                                        span { "Enable mouse bites" }
+                                        span { "Automatic (from KiCad board data)" }
+                                    }
+                                    if board_thickness_is_automatic {
+                                        p { class: "diag-status",
+                                            if let Some(thickness_label) = board_thickness_stats_value.as_ref() {
+                                                "Detected thickness: {thickness_label}"
+                                            } else {
+                                                "Detected thickness: unavailable (refresh board snapshot with board open in KiCad)"
+                                            }
+                                        }
                                     }
                                 }
-
-                                if snapshot.project_config.mouse_bites_enabled {
-                                    div { class: "field section-subfield",
-                                        label { "Center-to-center" }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "board_thickness_mode",
+                                            value: "preset",
+                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Preset,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Preset;
+                                                    });
+                                            },
+                                        }
+                                        span { "Preset values" }
+                                    }
+                                    select {
+                                        disabled: snapshot.project_config.board_thickness_mode != BoardThicknessMode::Preset,
+                                        value: "{snapshot.project_config.board_thickness_preset_mm}",
+                                        onchange: move |evt| {
+                                            let value = evt.value().parse::<f32>().unwrap_or(1.6);
+                                            state.with_mut(|s| s.ui.project_config.board_thickness_preset_mm = value);
+                                        },
+                                        option { value: "0.8", "0.8 mm" }
+                                        option { value: "1.0", "1.0 mm" }
+                                        option { value: "1.2", "1.2 mm" }
+                                        option { value: "1.6", "1.6 mm" }
+                                        option { value: "2.0", "2.0 mm" }
+                                        option { value: "2.4", "2.4 mm" }
+                                    }
+                                }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "board_thickness_mode",
+                                            value: "user_defined",
+                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
+                                                    });
+                                            },
+                                        }
+                                        span { "User-defined value" }
+                                    }
+                                    if snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined {
                                         div { class: "sub-field",
                                             input {
                                                 r#type: "number",
-                                                min: "{mouse_bite_pitch_min}",
-                                                max: "{mouse_bite_pitch_max}",
-                                                step: "{tab_width_step}",
-                                                value: "{mouse_bite_pitch_display}",
+                                                step: "{board_thickness_step}",
+                                                value: "{unit_service::format_length_input_value_from_mm(snapshot.project_config.board_thickness_user_value as f64, snapshot.unit_system)}",
                                                 oninput: move |evt| {
-                                                    let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
+                                                    let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
                                                     state
-                                                        .with_mut(|s| {
-                                                            s.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
+                                                        .with_mut(|s| { s.ui.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
                                                                 value as f64,
-                                                                s.unit_system,
+                                                                s.ui.unit_system,
                                                             ) as f32;
                                                         });
                                                 },
                                             }
                                         }
-                                        p { class: "diag-status", "{mouse_bite_pitch_display_label}" }
-                                    }
-
-                                    div { class: "field section-subfield",
-                                        label { "Mouse-bite drill tool" }
                                         p { class: "diag-status",
-                                            "Only drill bits 0.5-1.5mm, and not larger than selected router diameter"
-                                        }
-                                        select {
-                                            disabled: snapshot.project_config.outline_router_tool_id.is_none(),
-                                            value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
-                                            onchange: move |evt| {
-                                                let value = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty() {
-                                                            None
-                                                        } else {
-                                                            Some(value)
-                                                        };
-                                                    });
-                                            },
-                                            option { value: "", "Select drill tool" }
-                                            for tool in eligible_mouse_bite_drills.iter() {
-                                                option { value: "{tool.id}",
-                                                    "{tool.display_name()} ({tool.diameter})"
-                                                }
-                                            }
+                                            "{board_thickness_user_display_label}"
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
-
-                    div { class: "field",
-                        label { "Board thickness" }
-                        p { class: "diag-status",
-                            if let Some(actual_label) = board_thickness_actual_label.as_ref() {
-                                "Actual board thickness (KiCad board data): {actual_label}"
-                            } else {
-                                "Actual board thickness (KiCad board data): unavailable"
-                            }
-                        }
-                        div { class: "radio-group vertical",
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_thickness_mode",
-                                        value: "automatic",
-                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
-                                                });
-                                        },
-                                    }
-                                    span { "Automatic (from KiCad board data)" }
-                                }
-                                if board_thickness_is_automatic {
-                                    p { class: "diag-status",
-                                        if let Some(thickness_label) = board_thickness_stats_value.as_ref() {
-                                            "Detected thickness: {thickness_label}"
-                                        } else {
-                                            "Detected thickness: unavailable (refresh board snapshot with board open in KiCad)"
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_thickness_mode",
-                                        value: "preset",
-                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Preset,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Preset;
-                                                });
-                                        },
-                                    }
-                                    span { "Preset values" }
-                                }
-                                select {
-                                    disabled: snapshot.project_config.board_thickness_mode != BoardThicknessMode::Preset,
-                                    value: "{snapshot.project_config.board_thickness_preset_mm}",
-                                    onchange: move |evt| {
-                                        let value = evt.value().parse::<f32>().unwrap_or(1.6);
-                                        state.with_mut(|s| s.project_config.board_thickness_preset_mm = value);
-                                    },
-                                    option { value: "0.8", "0.8 mm" }
-                                    option { value: "1.0", "1.0 mm" }
-                                    option { value: "1.2", "1.2 mm" }
-                                    option { value: "1.6", "1.6 mm" }
-                                    option { value: "2.0", "2.0 mm" }
-                                    option { value: "2.4", "2.4 mm" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_thickness_mode",
-                                        value: "user_defined",
-                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
-                                                });
-                                        },
-                                    }
-                                    span { "User-defined value" }
-                                }
-                                if snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined {
-                                    div { class: "sub-field",
-                                        input {
-                                            r#type: "number",
-                                            step: "{board_thickness_step}",
-                                            value: "{unit_service::format_length_input_value_from_mm(snapshot.project_config.board_thickness_user_value as f64, snapshot.unit_system)}",
-                                            oninput: move |evt| {
-                                                let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
-                                                            value as f64,
-                                                            s.unit_system,
-                                                        ) as f32;
-                                                    });
-                                            },
-                                        }
-                                    }
-                                    p { class: "diag-status", "{board_thickness_user_display_label}" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_thickness_mode",
-                                        value: "probe",
-                                        checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_thickness_mode = BoardThicknessMode::Probe;
-                                                });
-                                        },
-                                    }
-                                    span { "Probe" }
-                                }
-                            }
-                        }
-
-                        if board_thickness_is_entered {
-                            div { class: "field section-subfield",
-                                label { "Z0 determination" }
-                                div { class: "nested-radio-group",
+                                div { class: "radio-option",
                                     label {
                                         input {
                                             r#type: "radio",
-                                            name: "z0_determination_mode",
-                                            value: "manual_adjust_z0",
-                                            checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
+                                            name: "board_thickness_mode",
+                                            value: "probe",
+                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| {
-                                                        s.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
+                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Probe;
                                                     });
                                             },
                                         }
-                                        span { "Manually adjust Z0" }
-                                    }
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "z0_determination_mode",
-                                            value: "touch_probe",
-                                            checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
-                                                    });
-                                            },
-                                        }
-                                        span { "Use touch probe" }
+                                        span { "Probe" }
                                     }
                                 }
                             }
-                        }
 
-                        if board_thickness_is_probe || board_thickness_uses_touch_probe {
-                            div { class: "field section-subfield",
-                                label { "Touch probe setup" }
-                                div { class: "nested-radio-group",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "touch_probe_source",
-                                            value: "manual_installation",
-                                            checked: snapshot.project_config.touch_probe_source == TouchProbeSource::ManualInstallation,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
-                                                    });
-                                            },
-                                        }
-                                        span { "Manual installation of the touch probe" }
-                                    }
-                                    if has_atc {
-                                        label {
-                                            input {
-                                                r#type: "radio",
-                                                name: "touch_probe_source",
-                                                value: "atc_slot",
-                                                checked: snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot,
-                                                onchange: move |_| {
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
-                                                        });
-                                                },
-                                            }
-                                            span { "Load touch probe from slot" }
-                                        }
-                                    }
-                                    if has_atc && board_thickness_uses_atc_probe {
-                                        div { class: "sub-field",
-                                            span { "Slot" }
-                                            input {
-                                                r#type: "number",
-                                                min: "0",
-                                                max: "{atc_slot_count}",
-                                                step: "1",
-                                                value: "{snapshot.project_config.touch_probe_atc_slot}",
-                                                oninput: move |evt| {
-                                                    let value = evt.value().parse::<u8>().unwrap_or(0).min(atc_slot_count);
-                                                    state.with_mut(|s| s.project_config.touch_probe_atc_slot = value);
-                                                },
-                                            }
-                                            span { " / 0-{atc_slot_count}" }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    div { class: "field",
-                        label { "Board orientation" }
-                        div { class: "radio-group vertical",
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_orientation",
-                                        value: "automatic",
-                                        checked: snapshot.project_config.board_orientation == BoardOrientation::Automatic,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_orientation = BoardOrientation::Automatic;
-                                                });
-                                        },
-                                    }
-                                    span { "Automatic" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_orientation",
-                                        value: "no_rotation",
-                                        checked: snapshot.project_config.board_orientation == BoardOrientation::NoRotation,
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_orientation = BoardOrientation::NoRotation;
-                                                });
-                                        },
-                                    }
-                                    span { "No rotation" }
-                                }
-                            }
-                            div { class: "radio-option",
-                                label {
-                                    input {
-                                        r#type: "radio",
-                                        name: "board_orientation",
-                                        value: "rotate_group",
-                                        checked: matches!(
-                                            snapshot.project_config.board_orientation,
-                                            BoardOrientation::Rotate90
-                                            | BoardOrientation::Rotate180
-                                            | BoardOrientation::Rotate270
-                                            | BoardOrientation::RotateCustom
-                                        ),
-                                        onchange: move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.project_config.board_orientation = BoardOrientation::Rotate90;
-                                                });
-                                        },
-                                    }
-                                    span { "Rotate" }
-                                }
-                                if matches!(
-                                    snapshot.project_config.board_orientation,
-                                    BoardOrientation::Rotate90
-                                    | BoardOrientation::Rotate180
-                                    | BoardOrientation::Rotate270
-                                    | BoardOrientation::RotateCustom
-                                )
-                                {
+                            if board_thickness_is_entered {
+                                div { class: "field section-subfield",
+                                    label { "Z0 determination" }
                                     div { class: "nested-radio-group",
                                         label {
                                             input {
                                                 r#type: "radio",
-                                                name: "board_rotation_angle",
-                                                value: "90",
-                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate90,
+                                                name: "z0_determination_mode",
+                                                value: "manual_adjust_z0",
+                                                checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| {
-                                                            s.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                        .with_mut(|s| { s.ui.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
                                                         });
                                                 },
                                             }
-                                            span { "90°" }
+                                            span { "Manually adjust Z0" }
                                         }
                                         label {
                                             input {
                                                 r#type: "radio",
-                                                name: "board_rotation_angle",
-                                                value: "180",
-                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate180,
+                                                name: "z0_determination_mode",
+                                                value: "touch_probe",
+                                                checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| {
-                                                            s.project_config.board_orientation = BoardOrientation::Rotate180;
+                                                        .with_mut(|s| { s.ui.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
                                                         });
                                                 },
                                             }
-                                            span { "180°" }
+                                            span { "Use touch probe" }
                                         }
+                                    }
+                                }
+                            }
+
+                            if board_thickness_is_probe || board_thickness_uses_touch_probe {
+                                div { class: "field section-subfield",
+                                    label { "Touch probe setup" }
+                                    div { class: "nested-radio-group",
                                         label {
                                             input {
                                                 r#type: "radio",
-                                                name: "board_rotation_angle",
-                                                value: "270",
-                                                checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate270,
+                                                name: "touch_probe_source",
+                                                value: "manual_installation",
+                                                checked: snapshot.project_config.touch_probe_source == TouchProbeSource::ManualInstallation,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| {
-                                                            s.project_config.board_orientation = BoardOrientation::Rotate270;
+                                                        .with_mut(|s| { s.ui.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
                                                         });
                                                 },
                                             }
-                                            span { "270°" }
+                                            span { "Manual installation of the touch probe" }
                                         }
-                                        label {
-                                            input {
-                                                r#type: "radio",
-                                                name: "board_rotation_angle",
-                                                value: "custom",
-                                                checked: snapshot.project_config.board_orientation == BoardOrientation::RotateCustom,
-                                                onchange: move |_| {
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.board_orientation = BoardOrientation::RotateCustom;
-                                                        });
-                                                },
+                                        if has_atc {
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "touch_probe_source",
+                                                    value: "atc_slot",
+                                                    checked: snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot,
+                                                    onchange: move |_| {
+                                                        state
+                                                            .with_mut(|s| { s.ui.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
+                                                            });
+                                                    },
+                                                }
+                                                span { "Load touch probe from slot" }
                                             }
-                                            span { "Custom" }
                                         }
-                                        if snapshot.project_config.board_orientation == BoardOrientation::RotateCustom {
-                                            div { class: "custom-angle-input",
+                                        if has_atc && board_thickness_uses_atc_probe {
+                                            div { class: "sub-field",
+                                                span { "Slot" }
                                                 input {
                                                     r#type: "number",
                                                     min: "0",
-                                                    max: "360",
-                                                    step: "0.1",
-                                                    value: "{snapshot.project_config.board_orientation_custom_degrees}",
+                                                    max: "{atc_slot_count}",
+                                                    step: "1",
+                                                    value: "{snapshot.project_config.touch_probe_atc_slot}",
                                                     oninput: move |evt| {
-                                                        let value = evt.value().parse::<f32>().unwrap_or(0.0).clamp(0.0, 360.0);
-                                                        state.with_mut(|s| s.project_config.board_orientation_custom_degrees = value);
+                                                        let value = evt.value().parse::<u8>().unwrap_or(0).min(atc_slot_count);
+                                                        state.with_mut(|s| s.ui.project_config.touch_probe_atc_slot = value);
                                                     },
                                                 }
-                                                span { "Custom angle" }
+                                                span { " / 0-{atc_slot_count}" }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if has_atc {
                         div { class: "field",
-                            label { "Automatic tool change" }
-                            select {
-                                value: snapshot.project_config.atc_strategy.as_str(),
-                                onchange: move |evt| {
-                                    let v = evt.value();
-                                    state
-                                        .with_mut(|s| {
-                                            s.project_config.atc_strategy = if v == "overwrite" {
-                                                AtcRackStrategy::Overwrite
-                                            } else if v == "reuse" {
-                                                AtcRackStrategy::Reuse
-                                            } else {
-                                                AtcRackStrategy::Off
-                                            };
-                                        });
-                                },
-                                option { value: "off", "Manual tool change" }
-                                option { value: "reuse", "Reuse rack" }
-                                option { value: "overwrite", "Overwrite rack" }
+                            label { "Board orientation" }
+                            div { class: "radio-group vertical",
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "board_orientation",
+                                            value: "automatic",
+                                            checked: snapshot.project_config.board_orientation == BoardOrientation::Automatic,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Automatic;
+                                                    });
+                                            },
+                                        }
+                                        span { "Automatic" }
+                                    }
+                                }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "board_orientation",
+                                            value: "no_rotation",
+                                            checked: snapshot.project_config.board_orientation == BoardOrientation::NoRotation,
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::NoRotation;
+                                                    });
+                                            },
+                                        }
+                                        span { "No rotation" }
+                                    }
+                                }
+                                div { class: "radio-option",
+                                    label {
+                                        input {
+                                            r#type: "radio",
+                                            name: "board_orientation",
+                                            value: "rotate_group",
+                                            checked: matches!(
+                                                snapshot.project_config.board_orientation,
+                                                BoardOrientation::Rotate90
+                                                | BoardOrientation::Rotate180
+                                                | BoardOrientation::Rotate270
+                                                | BoardOrientation::RotateCustom
+                                            ),
+                                            onchange: move |_| {
+                                                state
+                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                    });
+                                            },
+                                        }
+                                        span { "Rotate" }
+                                    }
+                                    if matches!(
+                                        snapshot.project_config.board_orientation,
+                                        BoardOrientation::Rotate90
+                                        | BoardOrientation::Rotate180
+                                        | BoardOrientation::Rotate270
+                                        | BoardOrientation::RotateCustom
+                                    )
+                                    {
+                                        div { class: "nested-radio-group",
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "board_rotation_angle",
+                                                    value: "90",
+                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate90,
+                                                    onchange: move |_| {
+                                                        state
+                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                            });
+                                                    },
+                                                }
+                                                span { "90°" }
+                                            }
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "board_rotation_angle",
+                                                    value: "180",
+                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate180,
+                                                    onchange: move |_| {
+                                                        state
+                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate180;
+                                                            });
+                                                    },
+                                                }
+                                                span { "180°" }
+                                            }
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "board_rotation_angle",
+                                                    value: "270",
+                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate270,
+                                                    onchange: move |_| {
+                                                        state
+                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate270;
+                                                            });
+                                                    },
+                                                }
+                                                span { "270°" }
+                                            }
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "board_rotation_angle",
+                                                    value: "custom",
+                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::RotateCustom,
+                                                    onchange: move |_| {
+                                                        state
+                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::RotateCustom;
+                                                            });
+                                                    },
+                                                }
+                                                span { "Custom" }
+                                            }
+                                            if snapshot.project_config.board_orientation == BoardOrientation::RotateCustom {
+                                                div { class: "custom-angle-input",
+                                                    input {
+                                                        r#type: "number",
+                                                        min: "0",
+                                                        max: "360",
+                                                        step: "0.1",
+                                                        value: "{snapshot.project_config.board_orientation_custom_degrees}",
+                                                        oninput: move |evt| {
+                                                            let value = evt.value().parse::<f32>().unwrap_or(0.0).clamp(0.0, 360.0);
+                                                            state.with_mut(|s| s.ui.project_config.board_orientation_custom_degrees = value);
+                                                        },
+                                                    }
+                                                    span { "Custom angle" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if has_atc {
+                            div { class: "field",
+                                label { "Automatic tool change" }
+                                select {
+                                    value: snapshot.project_config.atc_strategy.as_str(),
+                                    onchange: move |evt| {
+                                        let v = evt.value();
+                                        state
+                                            .with_mut(|s| { s.ui.project_config.atc_strategy = if v == "overwrite" {
+                                                    AtcRackStrategy::Overwrite
+                                                } else if v == "reuse" {
+                                                    AtcRackStrategy::Reuse
+                                                } else {
+                                                    AtcRackStrategy::Off
+                                                };
+                                            });
+                                    },
+                                    option { value: "off", "Manual tool change" }
+                                    option { value: "reuse", "Reuse rack" }
+                                    option { value: "overwrite", "Overwrite rack" }
+                                }
                             }
                         }
                     }
