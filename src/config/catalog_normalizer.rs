@@ -1,133 +1,22 @@
-//! First-run initialization — writes embedded catalog and schema files to the
-//! user data directory the first time the application executes.
-//!
-//! Catalogs are only written if they do not already exist so that user edits
-//! are preserved across upgrades.  Schema files are always overwritten because
-//! they are reference-only and should track the application version.
-
-use log::{info, warn};
+use log::info;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
-use crate::units::{Angle, AngleUnit, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, RotationalSpeedUnit};
-use crate::user_path::{ensure_app_dirs, UserPathError};
+use crate::units::{
+    Angle, AngleUnit, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed,
+    RotationalSpeedUnit,
+};
 
-// ---------------------------------------------------------------------------
-// Embedded resource files (compiled into the binary)
-// ---------------------------------------------------------------------------
+pub fn backfill_catalog_fields(path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
 
-macro_rules! embedded_schema {
-    ($name:literal, $path:literal) => {
-        ($name, include_str!($path))
-    };
-}
+    let yaml_value: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| format!("yaml parse failed: {e}"))?;
 
-macro_rules! embedded_schemas {
-    ($($name:literal => $path:literal),+ $(,)?) => {
-        &[
-            $(embedded_schema!($name, $path),)+
-        ]
-    };
-}
-
-// --- Schemas (always overwritten on startup) ---
-const SCHEMAS: &[(&str, &str)] = embedded_schemas!(
-    "catalog" => "../../resources/schemas/catalog.yaml",
-    "settings" => "../../resources/schemas/settings.yaml",
-    "cnc" => "../../resources/schemas/cnc.yaml",
-    "fixture" => "../../resources/schemas/fixture.yaml",
-    "processing" => "../../resources/schemas/processing.yaml",
-    "toolset" => "../../resources/schemas/toolset.yaml",
-    "stock" => "../../resources/schemas/stock.yaml",
-    "id" => "../../resources/schemas/id.yaml",
-    "units" => "../../resources/schemas/units.yaml",
-);
-
-// --- Catalogs (written only on first run; user edits are preserved) ---
-const CATALOGS: &[(&str, &str)] = &[
-    ("kyocera.yaml",  include_str!("../../resources/catalogs/kyocera.yaml")),
-    ("unionfab.yaml", include_str!("../../resources/catalogs/unionfab.yaml")),
-    ("generic.yaml",  include_str!("../../resources/catalogs/generic.yaml")),
-];
-
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Ensure the user data directory tree exists and populate it with the
-/// built-in files.
-///
-/// Errors are returned rather than panicked so that the caller can decide
-/// whether to abort or continue with degraded functionality.
-pub fn first_run_init() -> Result<(), UserPathError> {
-    let dirs = ensure_app_dirs()?;
-
-    // Schemas — always refresh from the embedded copy.
-    for (name, content) in SCHEMAS {
-        let dest = dirs.schemas.join(format!("{}.yaml", name));
-        match std::fs::write(&dest, content) {
-            Ok(_) => info!("Wrote schema reference: {}", dest.display()),
-            Err(e) => warn!("Could not write schema '{}': {e}", dest.display()),
-        }
-    }
-
-    // Catalogs — write only if the file does not yet exist.
-    for (name, content) in CATALOGS {
-        let dest = dirs.catalogs.join(name);
-        if dest.exists() {
-            if let Err(e) = backfill_catalog_fields(&dest) {
-                warn!("Could not backfill catalog '{}': {e}", dest.display());
-            }
-            continue;
-        }
-        match std::fs::write(&dest, content) {
-            Ok(_) => info!("Created default catalog: {}", dest.display()),
-            Err(e) => warn!("Could not write catalog '{}': {e}", dest.display()),
-        }
-
-        if let Err(e) = backfill_catalog_fields(&dest) {
-            warn!("Could not backfill catalog '{}': {e}", dest.display());
-        }
-    }
-
-    Ok(())
-}
-
-/// Return the path to the user catalogs directory, creating the directory
-/// tree first if needed.
-#[allow(dead_code)]
-pub fn catalog_dir() -> Result<std::path::PathBuf, UserPathError> {
-    ensure_app_dirs().map(|d| d.catalogs)
-}
-
-pub(crate) fn parse_catalog_with_backfill(
-    text: &str,
-    stem: &str,
-) -> Result<crate::catalog::types::Catalog, String> {
-    let normalized = text.trim_start_matches('\u{feff}');
-    let yaml_value: serde_yaml::Value = serde_yaml::from_str(normalized)
-        .map_err(|e| format!("yaml parse failed: {e}"))?;
-
-    let mut json_value: Value = serde_json::to_value(yaml_value)
-        .map_err(|e| format!("yaml->json conversion failed: {e}"))?;
-
-    normalize_catalog_fields(&mut json_value, stem, true, true);
-
-    serde_json::from_value(json_value)
-        .map_err(|e| format!("catalog decode failed: {e}"))
-}
-
-fn backfill_catalog_fields(path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("read failed: {e}"))?;
-
-    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&text)
-        .map_err(|e| format!("yaml parse failed: {e}"))?;
-
-    let mut json_value: Value = serde_json::to_value(yaml_value)
-        .map_err(|e| format!("yaml->json conversion failed: {e}"))?;
+    let mut json_value: Value =
+        serde_json::to_value(yaml_value).map_err(|e| format!("yaml->json conversion failed: {e}"))?;
 
     let stem = path
         .file_stem()
@@ -139,20 +28,19 @@ fn backfill_catalog_fields(path: &Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let out_yaml: serde_yaml::Value = serde_json::from_value(json_value)
-        .map_err(|e| format!("json->yaml conversion failed: {e}"))?;
+    let out_yaml: serde_yaml::Value =
+        serde_json::from_value(json_value).map_err(|e| format!("json->yaml conversion failed: {e}"))?;
 
     let out_text = serde_yaml::to_string(&out_yaml)
         .map_err(|e| format!("yaml serialization failed: {e}"))?;
 
-    std::fs::write(path, out_text)
-        .map_err(|e| format!("write failed: {e}"))?;
+    std::fs::write(path, out_text).map_err(|e| format!("write failed: {e}"))?;
 
     info!("Backfilled catalog metadata: {}", path.display());
     Ok(())
 }
 
-pub(crate) fn normalize_catalog_fields(
+pub fn normalize_catalog_fields(
     root: &mut Value,
     stem: &str,
     inject_missing: bool,
@@ -160,17 +48,24 @@ pub(crate) fn normalize_catalog_fields(
 ) -> bool {
     let mut changed = false;
 
-    let Some(sections) = root
-        .get_mut("sections")
-        .and_then(Value::as_array_mut)
-    else {
+    if inject_missing && root.get("$schema").is_none() {
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert("$schema".to_string(), Value::String("catalog.yaml".to_string()));
+            changed = true;
+        }
+    }
+
+    let Some(sections) = root.get_mut("sections").and_then(Value::as_array_mut) else {
         return false;
     };
 
     for (section_idx, section) in sections.iter_mut().enumerate() {
         if inject_missing && !section.get("default_flute_length_unit").is_some() {
             if let Some(obj) = section.as_object_mut() {
-                obj.insert("default_flute_length_unit".to_string(), Value::String("mm".to_string()));
+                obj.insert(
+                    "default_flute_length_unit".to_string(),
+                    Value::String("mm".to_string()),
+                );
                 changed = true;
             }
         }
@@ -189,10 +84,7 @@ pub(crate) fn normalize_catalog_fields(
             .unwrap_or("Section");
         let section_slug = slugify(section_name);
 
-        let Some(tools) = section
-            .get_mut("tools")
-            .and_then(Value::as_array_mut)
-        else {
+        let Some(tools) = section.get_mut("tools").and_then(Value::as_array_mut) else {
             continue;
         };
 
@@ -227,10 +119,26 @@ pub(crate) fn normalize_catalog_fields(
                 .unwrap_or_else(|| default_point_angle(stem, &tool_type, diameter_mm) as f64);
 
             if canonicalize_typed_values {
-                changed |= normalize_typed_value(obj, "diameter", &diameter_unit, normalize_length_value);
-                changed |= normalize_typed_value(obj, "flute_length", &flute_length_unit, normalize_length_value);
-                changed |= normalize_typed_value(obj, "z_feed", &section_feed_unit, normalize_feed_value);
-                changed |= normalize_typed_value(obj, "table_feed", &section_feed_unit, normalize_feed_value);
+                changed |= normalize_typed_value(
+                    obj,
+                    "diameter",
+                    &diameter_unit,
+                    normalize_length_value,
+                );
+                changed |= normalize_typed_value(
+                    obj,
+                    "flute_length",
+                    &flute_length_unit,
+                    normalize_length_value,
+                );
+                changed |=
+                    normalize_typed_value(obj, "z_feed", &section_feed_unit, normalize_feed_value);
+                changed |= normalize_typed_value(
+                    obj,
+                    "table_feed",
+                    &section_feed_unit,
+                    normalize_feed_value,
+                );
             }
 
             if canonicalize_typed_values {
@@ -242,7 +150,6 @@ pub(crate) fn normalize_catalog_fields(
                 }
             }
 
-            // Accept legacy key name from older catalogs and migrate it to `sku`.
             if obj.get("sku").is_none() {
                 if let Some(legacy_sku) = obj.get("sku_name").and_then(Value::as_str) {
                     obj.insert("sku".to_string(), Value::String(legacy_sku.to_string()));
@@ -267,12 +174,8 @@ pub(crate) fn normalize_catalog_fields(
                 changed = true;
             }
 
-            // New schema requires a stable UUIDv7-like id for each catalog tool.
             if !obj.contains_key("id") {
-                let sku_for_id = obj
-                    .get("sku")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
+                let sku_for_id = obj.get("sku").and_then(Value::as_str).unwrap_or("");
                 let id = stable_uuid_v7(&[
                     stem,
                     &section_slug,
@@ -297,15 +200,13 @@ pub(crate) fn normalize_catalog_fields(
                     let z_min_depth = diameter
                         .map(|value| default_z_min_depth(value, point_angle))
                         .unwrap_or_else(|| format_length_with_unit(0.0, &diameter_unit));
-                    obj.insert(
-                        "z_min_depth".to_string(),
-                        Value::String(z_min_depth),
-                    );
+                    obj.insert("z_min_depth".to_string(), Value::String(z_min_depth));
                     changed = true;
                 }
             } else if let Some(raw_value) = obj.get("z_min_depth") {
                 if let Some(normalized) = normalize_length_value(raw_value, &diameter_unit) {
-                    let needs_update = !matches!(raw_value, Value::String(current) if current == &normalized);
+                    let needs_update =
+                        !matches!(raw_value, Value::String(current) if current == &normalized);
                     if canonicalize_typed_values && needs_update {
                         obj.insert("z_min_depth".to_string(), Value::String(normalized));
                         changed = true;
@@ -471,9 +372,7 @@ fn default_feed_unit_suffix(unit: FeedRateUnit) -> &'static str {
 
 fn format_diameter_token(value: f64) -> String {
     let raw = format!("{value:.3}");
-    raw.trim_end_matches('0')
-        .trim_end_matches('.')
-        .to_string()
+    raw.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 fn slugify(input: &str) -> String {
@@ -509,7 +408,6 @@ fn stable_uuid_v7(parts: &[&str]) -> String {
     bytes[..8].copy_from_slice(&a.to_be_bytes());
     bytes[8..].copy_from_slice(&b.to_be_bytes());
 
-    // UUID version 7, RFC variant.
     bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
@@ -537,7 +435,9 @@ fn stable_uuid_v7(parts: &[&str]) -> String {
 fn _parse_rpm_value(value: &Value) -> Option<RotationalSpeed> {
     match value {
         Value::Number(number) => number.as_f64().map(RotationalSpeed::from_rpm),
-        Value::String(text) => RotationalSpeed::from_string(text, Some(RotationalSpeedUnit::Rpm)).ok(),
+        Value::String(text) => {
+            RotationalSpeed::from_string(text, Some(RotationalSpeedUnit::Rpm)).ok()
+        }
         _ => None,
     }
 }

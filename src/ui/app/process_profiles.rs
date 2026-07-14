@@ -8,14 +8,14 @@ use super::profiles_common::{
 };
 
 #[component]
-pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let snapshot = state.read().clone().ui;
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
-    let mut dialog_name = use_signal(|| "My processing profile".to_string());
+    let mut dialog_name = use_signal(|| "My machining profile".to_string());
 
-    let selected_process_profile = snapshot.selected_process_profile().cloned();
+    let selected_machining_profile = snapshot.selected_process_profile().cloned();
     let profile_options = snapshot
         .process_profiles
         .iter()
@@ -28,16 +28,16 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                 article { class: "setup-card section-block cnc-manager-shell profile-manager-shell",
                     div { class: "panel-header",
                         div {
-                            h3 { "Processing profile management" }
+                            h3 { "Machining profile management" }
                             p {
-                                "Processing profiles bind CNC, fixture, and toolset defaults plus operation defaults."
+                                "Machining profiles define a job context. A job can include multiple machining steps, each with a start and an end."
                             }
                         }
                         ProfileLifecycleToolbar {
-                            profile_type_label: "Processing".to_string(),
+                            profile_type_label: "Machining".to_string(),
                             profiles: profile_options,
                             selected_profile_id: snapshot.selected_process_profile_id.clone(),
-                            can_export: selected_process_profile.is_some(),
+                            can_export: selected_machining_profile.is_some(),
                             on_select: move |id: String| {
                                 state
                                     .with_mut(|s| {
@@ -47,7 +47,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             },
                             on_clone: move |_| {
                                 let Some(selected) = state.read().ui.selected_process_profile().cloned() else {
-                                    status_message.set("No processing profile selected".to_string());
+                                    status_message.set("No machining profile selected".to_string());
                                     return;
                                 };
                                 dialog_is_clone.set(true);
@@ -56,14 +56,14 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             },
                             on_delete: move |_| {
                                 let Some(profile_id) = state.read().ui.selected_process_profile_id.clone() else {
-                                    status_message.set("No processing profile selected".to_string());
+                                    status_message.set("No machining profile selected".to_string());
                                     return;
                                 };
                                 let impact = state.read().ui.impact_delete_process_profile(&profile_id);
-                                let description = format_impact_warning("Delete processing profile?", &impact);
+                                let description = format_impact_warning("Delete machining profile?", &impact);
                                 let confirmed = MessageDialog::new()
                                     .set_level(MessageLevel::Warning)
-                                    .set_title("Delete processing profile")
+                                    .set_title("Delete machining profile")
                                     .set_description(&description)
                                     .set_buttons(MessageButtons::YesNo)
                                     .show();
@@ -71,24 +71,24 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     state
                                         .with_mut(|s| {
                                             let _ = s.ui.delete_process_profile_with_cascade(&profile_id);
-                                            s.ui.log_event("Processing profile deleted");
+                                            s.ui.log_event("Machining profile deleted");
                                         });
-                                    status_message.set("Processing profile deleted".to_string());
+                                    status_message.set("Machining profile deleted".to_string());
                                 }
                             },
                             on_export: move |_| {
                                 let Some(profile) = state.read().ui.selected_process_profile().cloned() else {
-                                    status_message.set("No processing profile selected".to_string());
+                                    status_message.set("No machining profile selected".to_string());
                                     return;
                                 };
                                 let default_name = format!(
-                                    "{}.processing-profile.yaml",
-                                    slug_file_name(&profile.name, "processing-profile"),
+                                    "{}.machining-profile.yaml",
+                                    slug_file_name(&profile.name, "machining-profile"),
                                 );
                                 let picked = FileDialog::new()
-                                    .set_title("Export processing profile")
+                                    .set_title("Export machining profile")
                                     .set_file_name(&default_name)
-                                    .add_filter("Processing profile YAML", &["yaml", "yml"])
+                                    .add_filter("Machining profile YAML", &["yaml", "yml"])
                                     .save_file();
                                 let Some(path) = picked else {
                                     return;
@@ -100,14 +100,14 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     .and_then(|f| f.to_str())
                                     .unwrap_or_default()
                                     .to_ascii_lowercase();
-                                if !file_name.ends_with(".processing-profile.yaml")
-                                    && !file_name.ends_with(".processing-profile.yml")
+                                if !file_name.ends_with(".machining-profile.yaml")
+                                    && !file_name.ends_with(".machining-profile.yml")
                                 {
                                     let stem = output_path
                                         .file_stem()
                                         .and_then(|s| s.to_str())
-                                        .unwrap_or("processing-profile");
-                                    let new_name = format!("{}.processing-profile.yaml", stem);
+                                        .unwrap_or("machining-profile");
+                                    let new_name = format!("{}.machining-profile.yaml", stem);
                                     output_path = output_path.with_file_name(new_name);
                                 }
 
@@ -119,21 +119,21 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     }
                                 };
                                 if fs::write(&output_path, yaml).is_ok() {
-                                    state.with_mut(|s| s.ui.log_event("Processing profile exported"));
-                                    status_message.set("Processing profile exported".to_string());
+                                    state.with_mut(|s| s.ui.log_event("Machining profile exported"));
+                                    status_message.set("Machining profile exported".to_string());
                                 } else {
                                     status_message.set("Export failed: unable to write file".to_string());
                                 }
                             },
                             on_add: move |_| {
                                 dialog_is_clone.set(false);
-                                dialog_name.set("My processing profile".to_string());
+                                dialog_name.set("My machining profile".to_string());
                                 show_name_dialog.set(true);
                             },
                             on_import: move |_| {
                                 let picked = FileDialog::new()
-                                    .set_title("Import processing profile")
-                                    .add_filter("Processing profile YAML", &["yaml", "yml"])
+                                    .set_title("Import machining profile")
+                                    .add_filter("Machining profile YAML", &["yaml", "yml"])
                                     .pick_file();
 
                                 let Some(path) = picked else {
@@ -145,12 +145,14 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     .and_then(|name| name.to_str())
                                     .unwrap_or_default()
                                     .to_ascii_lowercase();
-                                let valid_name = file_name.ends_with(".processing-profile.yaml")
+                                let valid_name = file_name.ends_with(".machining-profile.yaml")
+                                    || file_name.ends_with(".machining-profile.yml")
+                                    || file_name.ends_with(".processing-profile.yaml")
                                     || file_name.ends_with(".processing-profile.yml");
                                 if !valid_name {
                                     status_message
                                         .set(
-                                            "Processing profile import failed: file name must end with .processing-profile.yaml or .processing-profile.yml"
+                                            "Machining profile import failed: file name must end with .machining-profile.yaml/.yml (or legacy .processing-profile.yaml/.yml)"
                                                 .to_string(),
                                         );
                                     return;
@@ -161,7 +163,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     Err(_) => {
                                         status_message
                                             .set(
-                                                "Processing profile import failed: file not readable"
+                                                "Machining profile import failed: file not readable"
                                                     .to_string(),
                                             );
                                         return;
@@ -170,9 +172,9 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 let result = state.with_mut(|s| s.ui.import_process_profile_yaml(&text));
                                 match result {
                                     Ok(_) => {
-                                        state.with_mut(|s| s.ui.log_event("Processing profile imported"));
+                                        state.with_mut(|s| s.ui.log_event("Machining profile imported"));
                                         status_message
-                                            .set("Processing profile imported and selected".to_string())
+                                            .set("Machining profile imported and selected".to_string())
                                     }
                                     Err(message) => status_message.set(message),
                                 }
@@ -185,7 +187,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     }
 
                     div { class: "setup-card cnc-profile-details-panel profile-editor-shell",
-                        if let Some(profile) = selected_process_profile.as_ref() {
+                        if let Some(profile) = selected_machining_profile.as_ref() {
                             div { class: "profile-editor-top",
                                 div { class: "field",
                                     label { "Profile name" }
@@ -259,7 +261,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     }
 
                                     div { class: "field",
-                                        label { "Default operations" }
+                                        label { "Default machining steps" }
                                         for op in ProductionOperation::all().iter() {
                                             label { class: "checkbox-line",
                                                 input {
@@ -285,14 +287,14 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
                             }
                         } else {
-                            p { class: "diag-status", "Select a processing profile to edit details." }
+                            p { class: "diag-status", "Select a machining profile to edit details." }
                         }
                     }
                 }
 
                 if *show_name_dialog.read() {
                     ProfileNameDialog {
-                        title: if *dialog_is_clone.read() { "Clone processing profile".to_string() } else { "Add processing profile".to_string() },
+                        title: if *dialog_is_clone.read() { "Clone machining profile".to_string() } else { "Add machining profile".to_string() },
                         name_label: "Profile name".to_string(),
                         name_value: dialog_name.read().clone(),
                         template_options: Vec::<(String, String)>::new(),
@@ -312,7 +314,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         let result = s.ui.clone_selected_process_profile();
                                         if result.is_ok() {
                                             let _ = s.ui.rename_selected_process_profile(&name);
-                                            s.ui.log_event("Processing profile cloned");
+                                            s.ui.log_event("Machining profile cloned");
                                         }
                                         result
                                     })
@@ -320,7 +322,7 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 state
                                     .with_mut(|s| {
                                         s.ui.add_process_profile(&name);
-                                        s.ui.log_event("Processing profile added");
+                                        s.ui.log_event("Machining profile added");
                                         Ok(String::new())
                                     })
                             };
@@ -329,9 +331,9 @@ pub fn ProcessProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     status_message
                                         .set(
                                             if *dialog_is_clone.read() {
-                                                "Processing profile cloned".to_string()
+                                                "Machining profile cloned".to_string()
                                             } else {
-                                                "Processing profile created".to_string()
+                                                "Machining profile created".to_string()
                                             },
                                         );
                                     show_name_dialog.set(false);

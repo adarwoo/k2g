@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::units::{FeedRate, Length, RotationalSpeed};
 use crate::ui::unit_service;
+use crate::ctx::sync_ctx_from_ui_state_and_persist_realms;
 
 use super::super::model::*;
 
@@ -79,6 +80,33 @@ impl StockTypeFilter {
 
 #[component]
 pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+    let mut stock_persist_armed = use_signal(|| false);
+    let mut last_stock_fingerprint = use_signal(String::new);
+
+    use_effect(move || {
+        state.with_mut(|s| s.ensure_catalogs_loaded());
+    });
+
+    // Persist stock when tool content changes (skip initial mount snapshot).
+    use_effect(move || {
+        let tools = state.read().ui.tools.clone();
+        let fingerprint = stock_fingerprint(&tools);
+
+        if !*stock_persist_armed.read() {
+            stock_persist_armed.set(true);
+            last_stock_fingerprint.set(fingerprint);
+            return;
+        }
+
+        if *last_stock_fingerprint.read() == fingerprint {
+            return;
+        }
+
+        last_stock_fingerprint.set(fingerprint);
+        let snapshot = state.read().clone();
+        sync_ctx_from_ui_state_and_persist_realms(&snapshot.ui, &[PersistRealm::Stock]);
+    });
+
     let snapshot = state.read().clone().ui;
     let has_atc = snapshot.selected_machine_has_atc();
     let unit_system = snapshot.unit_system;
@@ -513,7 +541,9 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             state
                                                 .with_mut(|s| {
                                                     if let Some(new_id) = s.ui.clone_tool(&tool_id) {
-                                                        cloned_tool = s.ui.tools
+                                                        cloned_tool = s
+                                                            .ui
+                                                            .tools
                                                             .iter()
                                                             .find(|entry| entry.id == new_id)
                                                             .cloned();
@@ -575,13 +605,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state.ui.tools
+                                                    if let Some(target) = ui_state
+                                                        .ui
+                                                        .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
                                                         target.name = value.clone();
                                                     }
                                                 });
+                                            persist_stock_realm_now(state);
                                         }
                                     },
                                 }
@@ -636,13 +669,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.diameter = length;
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                         Ok(_) => {
@@ -746,13 +782,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 detail_field_popup_message.set(None);
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.diameter = original_diameter;
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                     },
@@ -791,13 +830,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.point_angle = angle;
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                         Ok(_) => {
@@ -902,13 +944,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state.ui.tools
+                                                                            if let Some(target) = ui_state
+                                                                                .ui
+                                                                                .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
                                                                                 target.point_angle = original_point_angle;
                                                                             }
                                                                         });
+                                                                    persist_stock_realm_now(state);
                                                                 }
                                                             }
                                                         },
@@ -947,13 +992,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                                             state
                                                                 .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state.ui.tools
+                                                                    if let Some(target) = ui_state
+                                                                        .ui
+                                                                        .tools
                                                                         .iter_mut()
                                                                         .find(|entry| entry.id == tool_id)
                                                                     {
                                                                         target.feed_rate = None;
                                                                     }
                                                                 });
+                                                            persist_stock_realm_now(state);
                                                         }
                                                         return;
                                                     }
@@ -976,13 +1024,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.feed_rate = Some(feed_rate);
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                         Ok(None) => {
@@ -994,13 +1045,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.feed_rate = None;
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                         Err(message) => {
@@ -1100,13 +1154,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state.ui.tools
+                                                                            if let Some(target) = ui_state
+                                                                                .ui
+                                                                                .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
                                                                                 target.feed_rate = Some(original_feed_rate);
                                                                             }
                                                                         });
+                                                                    persist_stock_realm_now(state);
                                                                 }
                                                             }
                                                         },
@@ -1149,13 +1206,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             if let Some(tool_id) = detail_tool_id.read().clone() {
                                                                 state
                                                                     .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state.ui.tools
+                                                                        if let Some(target) = ui_state
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.spindle_speed = Some(value);
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         }
                                                         Err(_) => {
@@ -1253,13 +1313,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     detail_field_popup_message.set(None);
                                                                     state
                                                                         .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state.ui.tools
+                                                                            if let Some(target) = ui_state
+                                                                                .ui
+                                                                                .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
                                                                             {
                                                                                 target.spindle_speed = Some(original_spindle_speed);
                                                                             }
                                                                         });
+                                                                    persist_stock_realm_now(state);
                                                                 }
                                                             }
                                                         },
@@ -1282,13 +1345,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state.ui.tools
+                                                    if let Some(target) = ui_state
+                                                        .ui
+                                                        .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
                                                         target.status = tool_status_from_value(&value);
                                                     }
                                                 });
+                                            persist_stock_realm_now(state);
                                         }
                                     },
                                     option { value: "in-stock", "In stock" }
@@ -1306,13 +1372,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         if let Some(tool_id) = detail_tool_id.read().clone() {
                                             state
                                                 .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state.ui.tools
+                                                    if let Some(target) = ui_state
+                                                        .ui
+                                                        .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
                                                     {
                                                         target.preference = tool_preference_from_value(&value);
                                                     }
                                                 });
+                                            persist_stock_realm_now(state);
                                         }
                                     },
                                     option { value: "preferred", "Preferred" }
@@ -1487,13 +1556,16 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 let value = evt.value();
                                                                 state
                                                                     .with_mut(|s| {
-                                                                        if let Some(target) = s.ui.tools
+                                                                        if let Some(target) = s
+                                                                            .ui
+                                                                            .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
                                                                         {
                                                                             target.status = tool_status_from_value(&value);
                                                                         }
                                                                     });
+                                                                persist_stock_realm_now(state);
                                                             }
                                                         },
                                                         option { value: "in-stock", "In stock" }
@@ -1799,5 +1871,44 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
 
 fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> String {
     unit_service::format_length_display(tool.diameter, unit_system)
+}
+
+fn persist_stock_realm_now(state: Signal<crate::ctx::AppCtx>) {
+    let snapshot = state.read().clone();
+    sync_ctx_from_ui_state_and_persist_realms(&snapshot.ui, &[PersistRealm::Stock]);
+}
+
+fn stock_fingerprint(tools: &[Tool]) -> String {
+    let mut out = String::new();
+    for tool in tools {
+        let feed_rate = tool
+            .feed_rate
+            .map(|value| value.as_mm_per_min().to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let spindle_speed = tool
+            .spindle_speed
+            .map(|value| value.as_rpm().to_string())
+            .unwrap_or_else(|| "null".to_string());
+        let manufacturer = tool.manufacturer.as_deref().unwrap_or_default();
+        let sku = tool.sku.as_deref().unwrap_or_default();
+
+        out.push_str(&format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+            tool.id,
+            tool.composite_name,
+            tool.name,
+            tool.kind,
+            tool.diameter.as_mm(),
+            tool.point_angle.as_degrees(),
+            feed_rate,
+            spindle_speed,
+            tool.status.label(),
+            tool.preference.label(),
+            tool.source_catalog,
+            manufacturer,
+            sku,
+        ));
+    }
+    out
 }
 

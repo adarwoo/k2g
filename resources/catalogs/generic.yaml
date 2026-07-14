@@ -1,3 +1,5 @@
+$schema: catalog.yaml
+
 name: Generic
 description: >
   Generic metric PCB tooling with conservative machining parameters.

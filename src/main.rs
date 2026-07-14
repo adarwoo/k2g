@@ -1,8 +1,10 @@
-mod catalog;
 mod board;
 mod cli;
 mod config;
 mod ctx;
+mod domain;
+mod app_state;
+mod id;
 mod kicad_wrapper;
 mod stitching;
 mod ui;
@@ -15,13 +17,6 @@ use stitching::stitch_edge_shapes;
 use ui::UiLaunchData;
 
 fn main() {
-    // First-run: write built-in catalogs and schema references to the user
-    // data directory.  Failure is non-fatal — the application continues with
-    // degraded catalog functionality and logs a warning.
-    if let Err(e) = catalog::init::first_run_init() {
-        eprintln!("warning: could not initialise user data directory: {e}");
-    }
-
     let cli_args: Vec<String> = std::env::args().collect();
 
     let args = CliArgs::parse_args();

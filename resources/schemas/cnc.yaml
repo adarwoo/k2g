@@ -1,5 +1,6 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "cnc.yaml"
+x-schema-version: 1
 
 title: CNC Profile
 description: >
@@ -204,7 +205,7 @@ properties:
       #
       scaling:
         description: >
-          Axis scaling multipliers. A value of 1.0 means no scaling. 
+          Axis scaling multipliers. A value of 1.0 means no scaling.
           Values are applied as output = input * scaling.
 
         type: object

@@ -1,3 +1,5 @@
+$schema: catalog.yaml
+
 name: UnionFab
 description: >
   Union Tool P-Series precision PCB drill bits and routing tools.

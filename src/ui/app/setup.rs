@@ -1,9 +1,79 @@
 use dioxus::prelude::*;
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use crate::units::{FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, RotationalSpeedUnit};
 use super::super::model::*;
 use super::setup_sections::{CatalogManagementPanel, GeneralSettingsPanel, MachineProfilesPanel, SetupSidebar, SetupTab};
+
+const CNC_SCHEMA_TEXT: &str = include_str!("../../../resources/schemas/cnc.yaml");
+
+pub(super) fn cnc_schema_required_paths() -> &'static BTreeSet<String> {
+    static REQUIRED: OnceLock<BTreeSet<String>> = OnceLock::new();
+    REQUIRED.get_or_init(|| parse_cnc_required_paths(CNC_SCHEMA_TEXT))
+}
+
+pub(super) fn cnc_required_field_label(key: &str) -> Option<&'static str> {
+    match key {
+        "machine.fixture_plate.x" => Some("Fixture X"),
+        "machine.fixture_plate.y" => Some("Fixture Y"),
+        "machine.max_feed_rate" => Some("Max feed rate"),
+        "machine.spindle_rpm_min" => Some("Spindle min"),
+        "machine.spindle_rpm_max" => Some("Spindle max"),
+        "machine.atc_slot_count" => Some("ATC slots"),
+        "machine.origin.x0" => Some("X axis origin"),
+        "machine.origin.y0" => Some("Y axis origin"),
+        "machine.scaling.x" => Some("X scale"),
+        "machine.scaling.y" => Some("Y scale"),
+        "machine.line_numbering_increment" => Some("Line numbering increment"),
+        _ => None,
+    }
+}
+
+fn parse_cnc_required_paths(schema_text: &str) -> BTreeSet<String> {
+    let schema: serde_yaml::Value = match serde_yaml::from_str(schema_text) {
+        Ok(value) => value,
+        Err(_) => return BTreeSet::new(),
+    };
+
+    let mut out = BTreeSet::new();
+    collect_required_paths(&schema, None, &mut out);
+    out
+}
+
+fn collect_required_paths(
+    node: &serde_yaml::Value,
+    prefix: Option<&str>,
+    out: &mut BTreeSet<String>,
+) {
+    let Some(required) = node.get("required").and_then(|v| v.as_sequence()) else {
+        return;
+    };
+
+    let properties = node.get("properties").and_then(|v| v.as_mapping());
+
+    for required_name in required.iter().filter_map(|v| v.as_str()) {
+        let path = match prefix {
+            Some(parent) if !parent.is_empty() => format!("{}.{}", parent, required_name),
+            _ => required_name.to_string(),
+        };
+        out.insert(path.clone());
+
+        let Some(props) = properties else {
+            continue;
+        };
+
+        let key = serde_yaml::Value::String(required_name.to_string());
+        if let Some(child) = props.get(&key) {
+            collect_required_paths(child, Some(&path), out);
+        }
+    }
+}
+
+const GENMITSU_3018_TEMPLATE: &str = include_str!("../../../resources/cnc_templates/genmitsu_3018.yaml");
+const MASSO_G3_NO_ATC_TEMPLATE: &str = include_str!("../../../resources/cnc_templates/masso_g3_no_atc.yaml");
+const MASSO_G3_WITH_ATC_TEMPLATE: &str = include_str!("../../../resources/cnc_templates/masso_g3_with_atc.yaml");
 
 #[component]
 pub fn SetupScreen(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
@@ -202,6 +272,7 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         route_retract,
         tool_change_manual_prompt,
         tool_change_command,
+        pending_required_fields: BTreeSet::new(),
     })
 }
 
@@ -213,56 +284,169 @@ pub(super) struct LibraryProfile {
 }
 
 pub(super) fn cnc_profile_library() -> Vec<LibraryProfile> {
-    vec![
-        LibraryProfile {
-            key: "masso-g3-compact".to_string(),
-            name: "Masso G3 Compact".to_string(),
-            machine: MachineProfile {
-                id: "library-masso-g3-compact".to_string(),
-                name: "Masso G3 Compact".to_string(),
-                built_in: true,
-                fixture_plate_max_x: 300,
-                fixture_plate_max_y: 200,
-                max_feed_rate_mm_per_min: 2000,
-                spindle_min_rpm: 3000,
-                spindle_max_rpm: 24000,
-                atc_slot_count: 8,
-                ..MachineProfile::default()
-            },
-        },
-        LibraryProfile {
-            key: "masso-g3-manual".to_string(),
-            name: "Masso G3 Manual Tool Change".to_string(),
-            machine: MachineProfile {
-                id: "library-masso-g3-manual".to_string(),
-                name: "Masso G3 Manual Tool Change".to_string(),
-                built_in: true,
-                fixture_plate_max_x: 250,
-                fixture_plate_max_y: 180,
-                max_feed_rate_mm_per_min: 2000,
-                spindle_min_rpm: 2500,
-                spindle_max_rpm: 18000,
-                atc_slot_count: 0,
-                ..MachineProfile::default()
-            },
-        },
-        LibraryProfile {
-            key: "router-gantry-pro".to_string(),
-            name: "Router Gantry Pro".to_string(),
-            machine: MachineProfile {
-                id: "library-router-gantry-pro".to_string(),
-                name: "Router Gantry Pro".to_string(),
-                built_in: true,
-                fixture_plate_max_x: 500,
-                fixture_plate_max_y: 350,
-                max_feed_rate_mm_per_min: 3000,
-                spindle_min_rpm: 4000,
-                spindle_max_rpm: 22000,
-                atc_slot_count: 10,
-                ..MachineProfile::default()
-            },
-        },
-    ]
+    let templates = [
+        ("genmitsu-3018", "Genmitsu 3018-Pro", GENMITSU_3018_TEMPLATE),
+        ("masso-g3-no-atc", "Masso G3 - Manual Tool Change", MASSO_G3_NO_ATC_TEMPLATE),
+        ("masso-g3-with-atc", "Masso G3 - With ATC", MASSO_G3_WITH_ATC_TEMPLATE),
+    ];
+
+    templates
+        .iter()
+        .map(|(key, fallback_name, raw)| parse_machine_template_yaml(raw, key, fallback_name))
+        .collect()
+}
+
+fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> LibraryProfile {
+    let mut machine = MachineProfile::default();
+    machine.id = format!("template-{}", slug(key));
+    machine.name = fallback_name.to_string();
+    machine.built_in = true;
+
+    let mut pending_required_fields = BTreeSet::new();
+    let required_paths = cnc_schema_required_paths();
+
+    let mark_missing = |pending: &mut BTreeSet<String>, path: &str| {
+        if required_paths.contains(path) {
+            pending.insert(path.to_string());
+        }
+    };
+
+    let root: serde_yaml::Value = serde_yaml::from_str(text).unwrap_or(serde_yaml::Value::Null);
+    if let Some(name) = root.get("name").and_then(|v| v.as_str()) {
+        if !name.trim().is_empty() {
+            machine.name = name.trim().to_string();
+        }
+    }
+
+    let machine_node = root.get("machine");
+
+    let fixture = machine_node.and_then(|m| m.get("fixture_plate"));
+    let fx = fixture.and_then(|f| f.get("x")).and_then(|v| v.as_str());
+    if let Some(raw) = fx {
+        if let Ok(length) = Length::from_string(raw, Some(LengthUnit::Mm)) {
+            machine.fixture_plate_max_x = length.as_mm().round().max(0.0) as u32;
+        }
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.fixture_plate.x");
+    }
+
+    let fy = fixture.and_then(|f| f.get("y")).and_then(|v| v.as_str());
+    if let Some(raw) = fy {
+        if let Ok(length) = Length::from_string(raw, Some(LengthUnit::Mm)) {
+            machine.fixture_plate_max_y = length.as_mm().round().max(0.0) as u32;
+        }
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.fixture_plate.y");
+    }
+
+    let max_feed = machine_node
+        .and_then(|m| m.get("max_feed_rate"))
+        .and_then(|v| v.as_str());
+    if let Some(raw) = max_feed {
+        if let Ok(rate) = FeedRate::from_string(raw, Some(FeedRateUnit::MmPerMin)) {
+            machine.max_feed_rate_mm_per_min = rate.as_mm_per_min().round().max(0.0) as u32;
+        }
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.max_feed_rate");
+    }
+
+    let spindle_min = machine_node
+        .and_then(|m| m.get("spindle_rpm_min"))
+        .and_then(|v| v.as_str());
+    if let Some(raw) = spindle_min {
+        if let Ok(value) = RotationalSpeed::from_string(raw, Some(RotationalSpeedUnit::Rpm)) {
+            machine.spindle_min_rpm = value.as_rpm().round().max(0.0) as u32;
+        }
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.spindle_rpm_min");
+    }
+
+    let spindle_max = machine_node
+        .and_then(|m| m.get("spindle_rpm_max"))
+        .and_then(|v| v.as_str());
+    if let Some(raw) = spindle_max {
+        if let Ok(value) = RotationalSpeed::from_string(raw, Some(RotationalSpeedUnit::Rpm)) {
+            machine.spindle_max_rpm = value.as_rpm().round().max(0.0) as u32;
+        }
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.spindle_rpm_max");
+    }
+
+    if let Some(atc) = machine_node
+        .and_then(|m| m.get("atc_slot_count"))
+        .and_then(|v| v.as_i64())
+    {
+        machine.atc_slot_count = atc.clamp(0, u8::MAX as i64) as u8;
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.atc_slot_count");
+    }
+
+    let origin = machine_node.and_then(|m| m.get("origin"));
+    if let Some(x0) = origin.and_then(|o| o.get("x0")).and_then(|v| v.as_str()) {
+        machine.origin_x0 = capitalize_axis_origin(x0, "Left");
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.origin.x0");
+    }
+    if let Some(y0) = origin.and_then(|o| o.get("y0")).and_then(|v| v.as_str()) {
+        machine.origin_y0 = capitalize_axis_origin(y0, "Front");
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.origin.y0");
+    }
+
+    let scaling = machine_node.and_then(|m| m.get("scaling"));
+    if let Some(x) = scaling.and_then(|s| s.get("x")).and_then(|v| v.as_f64()) {
+        machine.scaling_x = x as f32;
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.scaling.x");
+    }
+    if let Some(y) = scaling.and_then(|s| s.get("y")).and_then(|v| v.as_f64()) {
+        machine.scaling_y = y as f32;
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.scaling.y");
+    }
+
+    let line_numbering = machine_node.and_then(|m| m.get("line_numbering"));
+    if let Some(enabled) = line_numbering
+        .and_then(|l| l.get("enabled"))
+        .and_then(|v| v.as_bool())
+    {
+        machine.line_numbering_enabled = enabled;
+    }
+    if let Some(increment) = line_numbering
+        .and_then(|l| l.get("increment"))
+        .and_then(|v| v.as_i64())
+    {
+        machine.line_numbering_increment = increment.max(0) as u32;
+    } else if let Some(increment) = machine_node
+        .and_then(|m| m.get("line_numbering_increment"))
+        .and_then(|v| v.as_i64())
+    {
+        machine.line_numbering_increment = increment.max(0) as u32;
+    } else {
+        mark_missing(&mut pending_required_fields, "machine.line_numbering_increment");
+    }
+
+    machine.pending_required_fields = pending_required_fields;
+
+    LibraryProfile {
+        key: key.to_string(),
+        name: machine.name.clone(),
+        machine,
+    }
+}
+
+fn capitalize_axis_origin(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    let mut chars = trimmed.chars();
+    let first = chars
+        .next()
+        .map(|c| c.to_ascii_uppercase().to_string())
+        .unwrap_or_default();
+    let rest = chars.as_str().to_ascii_lowercase();
+    format!("{}{}", first, rest)
 }
 
 fn slug(input: &str) -> String {

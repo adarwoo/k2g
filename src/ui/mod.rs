@@ -6,29 +6,11 @@ pub mod unit_service;
 use std::sync::OnceLock;
 
 pub use model::UiLaunchData;
-use crate::config::PersistenceState;
 
 static BOOT_DATA: OnceLock<UiLaunchData> = OnceLock::new();
-static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
 
 pub fn launch(data: UiLaunchData) {
     let _ = BOOT_DATA.set(data);
-    use log::warn;
-    use crate::user_path::ensure_app_dirs;
-    use crate::config::load_all_configs;
-
-    // Try to load persisted configurations
-    if let Ok(app_dirs) = ensure_app_dirs() {
-        if let Ok(persistence_state) = load_all_configs(&app_dirs, &app_dirs.schemas) {
-            // Store persistence state for the app to use
-            let _ = PERSISTENCE_STATE.set(persistence_state);
-        } else {
-            warn!("Could not load persisted configuration; will use defaults");
-        }
-    } else {
-        warn!("Could not locate app directories; will use defaults");
-    }
-
     crate::ctx::initialize_ctx(boot_data().clone());
 
     let window = dioxus::desktop::WindowBuilder::new()
@@ -55,9 +37,4 @@ pub fn boot_data() -> &'static UiLaunchData {
     BOOT_DATA
         .get()
         .expect("UI launch data must be initialized before launch")
-}
-
-#[allow(dead_code)]
-pub fn persistence_state() -> Option<&'static PersistenceState> {
-    PERSISTENCE_STATE.get()
 }

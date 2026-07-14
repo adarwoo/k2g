@@ -1,4 +1,5 @@
 $schema: http://json-schema.org/draft-07/schema#
+x-schema-version: 1
 type: object
 description: |
   This file is written Yaml (Yaml.org)

@@ -23,8 +23,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 
     rsx! {
         div { class: "screen single",
-            section { class: "panel grow profile-screen-panel",
-                article { class: "setup-card section-block cnc-manager-shell profile-manager-shell",
+            section { class: "panel grow profile-screen-panel setup-card section-block cnc-manager-shell profile-manager-shell",
                     div { class: "panel-header",
                         div {
                             h3 { "Toolset profile management" }
@@ -57,7 +56,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 let impact = state.read().ui.impact_delete_toolset_profile(&toolset_id);
                                 if !impact.dependent_process_profiles.is_empty() {
                                     let description = format_impact_warning(
-                                        "Cannot delete toolset profile because it is referenced by processing profiles:",
+                                        "Cannot delete toolset profile because it is referenced by machining profiles:",
                                         &impact,
                                     );
                                     status_message.set(description);
@@ -342,7 +341,6 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             p { class: "diag-status", "Select a toolset profile to edit details." }
                         }
                     }
-                }
 
                 if *show_name_dialog.read() {
                     ProfileNameDialog {

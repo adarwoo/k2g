@@ -1301,6 +1301,20 @@ p {
     font-weight: 700;
 }
 
+.required-pending > label,
+.required-pending .checkbox-line,
+.required-pending-help {
+    color: var(--warn);
+}
+
+.required-pending > .sub-field > input,
+.required-pending > .sub-field > select,
+.required-pending > .sub-field > textarea,
+.required-pending > .sub-field > .stock-detail-input {
+    border-color: color-mix(in srgb, var(--warn) 65%, var(--border));
+    background: color-mix(in srgb, var(--warn) 10%, var(--bg-elev));
+}
+
 .project-layout .panel.fixed .field > label {
     text-transform: none;
     letter-spacing: 0;

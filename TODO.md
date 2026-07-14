@@ -126,3 +126,37 @@ It is possible to save the project data. Once save, the project name in place of
 
 Adding a <filename> to the cli which is a saved project.
 When opening a project file, the top bar shows the file.
+
+
+## Persistence
+
+Let's work on the persistence of data. Any change to persistable data should trigger the persistence of the data to disk.
+The config manager is responsible for this.
+Here is the core principle I want you to implement:
+Every persistable data such as a stock item (stock items are save as units unlike profiles which are saved whole) is associated with a hash value of the cannonical representation of the data. Rationale: the hash is not influenced by external factors than the data.
+The item has a Rust struct
+
+
+src
+ |__
+ |__ main.rs
+ |__ cli.rs
+ |__ core
+ |    |__ ctx.rs
+ |    |__ app_state.rs
+ |    |__ stiching.rs
+ |    |__ units.ss
+ |    |__ user_path.rs
+ |    |__ kicad_wrappers.rs
+ |    |__ config
+ |    |     |__ <all config files>
+ |__ ui
+ |__ utils ?? Any generic helpers
+ |__ rhai
+ |   |__ parser.rs
+ |   |__ interpreter.rs
+ |__ ui
+ |    |__ model
+ |    |     |__ <all model files>
+ |    |__ view
+ |          |__ <all viewing files>

@@ -11,6 +11,9 @@
 
 use std::path::PathBuf;
 
+pub const GLOBAL_SETTINGS_SECTION: &str = "global.setting";
+pub const STOCK_SECTION: &str = "stock";
+
 /// Handles to all k2g user data subdirectories.
 pub struct AppDirs {
     /// Root data directory (e.g. `%APPDATA%\k2g` on Windows).
@@ -23,6 +26,10 @@ pub struct AppDirs {
     pub schemas: PathBuf,
     /// Persisted configuration files (global.setting.yaml, stock.yaml).
     pub configs: PathBuf,
+    /// Global settings file path (`configs/global.setting.yaml`).
+    pub global_settings: PathBuf,
+    /// Stock inventory file path (`configs/stock.yaml`).
+    pub stock: PathBuf,
     /// Persisted CNC profile files (subdirectory of configs).
     pub cnc_profiles: PathBuf,
     /// Persisted fixture profile files (subdirectory of configs).
@@ -51,26 +58,30 @@ pub fn k2g_data_dir() -> Option<PathBuf> {
     platform_data_dir()
 }
 
-    /// Ensure the full application directory tree exists and is writable.
-    ///
-    /// Creates `catalogs/`, `last_session/`, `schemas/`, `configs/`, and profile subdirectories
-    /// under `configs/`.
-    /// under the k2g data root if they are absent. Each directory is probed for write access by
-    /// creating and immediately removing a sentinel file.
-    pub fn ensure_app_dirs() -> Result<AppDirs, UserPathError> {
-        let root = k2g_data_dir().ok_or(UserPathError::NoPlatformDir)?;
+/// Ensure the full application directory tree exists and is writable.
+///
+/// Creates `catalogs/`, `last_session/`, `schemas/`, `configs/`, and profile subdirectories
+/// under `configs/`.
+/// under the k2g data root if they are absent. Each directory is probed for write access by
+/// creating and immediately removing a sentinel file.
+pub fn ensure_app_dirs() -> Result<AppDirs, UserPathError> {
+    let root = k2g_data_dir().ok_or(UserPathError::NoPlatformDir)?;
 
-        let configs = root.join("configs");
-        let cnc_profiles = configs.join("cnc_profiles");
-        let fixture_profiles = configs.join("fixture_profiles");
-        let processing_profiles = configs.join("processing_profiles");
-        let toolset_profiles = configs.join("toolset_profiles");
+    let configs = root.join("configs");
+    let global_settings = configs.join(format!("{}.yaml", GLOBAL_SETTINGS_SECTION));
+    let stock = configs.join(format!("{}.yaml", STOCK_SECTION));
+    let cnc_profiles = configs.join("cnc_profiles");
+    let fixture_profiles = configs.join("fixture_profiles");
+    let processing_profiles = configs.join("processing_profiles");
+    let toolset_profiles = configs.join("toolset_profiles");
 
     let dirs = AppDirs {
         catalogs: root.join("catalogs"),
         last_session: root.join("last_session"),
         schemas: root.join("schemas"),
         configs,
+        global_settings,
+        stock,
         cnc_profiles,
         fixture_profiles,
         processing_profiles,

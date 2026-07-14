@@ -4,7 +4,7 @@ use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
 use crate::board::collect_board_snapshot_for_board;
-use crate::ctx::{ctx_snapshot, sync_ctx_from_ui_state};
+use crate::ctx::{ctx_snapshot, sync_ctx_from_ui_state_and_persist};
 use crate::kicad_wrapper::KiCadClientBlocking;
 use kicad_ipc_rs::DocumentType;
 
@@ -12,10 +12,12 @@ mod cnc;
 mod catalog;
 mod fixture;
 mod profiles_common;
-mod project;
+#[path = "project.rs"]
+mod job;
 mod setup;
 mod setup_sections;
-mod process_profiles;
+#[path = "process_profiles.rs"]
+mod machining_profiles;
 mod shell;
 mod stock;
 mod toolset;
@@ -23,8 +25,8 @@ mod toolset;
 use cnc::CncScreen;
 use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
-use project::JobScreen;
-use process_profiles::ProcessProfilesScreen;
+use job::JobScreen;
+use machining_profiles::MachiningProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar};
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;
@@ -66,8 +68,7 @@ pub fn AppRoot() -> Element {
     // Persist all mutable configuration domains automatically.
     use_effect(move || {
         let snapshot = state.read().clone();
-        snapshot.ui.persist_all();
-        sync_ctx_from_ui_state(&snapshot.ui);
+        sync_ctx_from_ui_state_and_persist(&snapshot.ui);
     });
 
     let snapshot = state.read().clone().ui;
@@ -92,7 +93,7 @@ pub fn AppRoot() -> Element {
                 main { class: "shell-content",
                     div { class: "screen-host",
                         match snapshot.selected_screen {
-                            Screen::Project => rsx! {
+                            Screen::Job => rsx! {
                                 JobScreen { state }
                             },
                             Screen::CncProfiles => rsx! {
@@ -101,8 +102,8 @@ pub fn AppRoot() -> Element {
                             Screen::FixtureProfiles => rsx! {
                                 FixtureProfilesScreen { state }
                             },
-                            Screen::ProcessProfiles => rsx! {
-                                ProcessProfilesScreen { state }
+                            Screen::MachiningProfiles => rsx! {
+                                MachiningProfilesScreen { state }
                             },
                             Screen::ToolsetProfiles => rsx! {
                                 ToolsetProfilesScreen { state }

@@ -18,7 +18,7 @@ impl SetupTab {
     pub fn label(self) -> &'static str {
         match self {
             Self::General => "General Settings",
-            Self::Cnc => "CNC Profiles",
+            Self::Cnc => "CNC Templates",
             Self::Catalogs => "Catalogs",
         }
     }
@@ -26,7 +26,7 @@ impl SetupTab {
     pub fn caption(self) -> &'static str {
         match self {
             Self::General => "Runtime and display",
-            Self::Cnc => "Profile library and import",
+            Self::Cnc => "Template library and profile import",
             Self::Catalogs => "Installed stock catalogs",
         }
     }
@@ -117,8 +117,10 @@ pub fn MachineProfilesPanel(
     rsx! {
         section { class: "setup-stage",
             div { class: "setup-stage-header",
-                h2 { "CNC profiles" }
-                p { "Add a machine from the built-in library or import a CNC profile YAML file." }
+                h2 { "CNC templates" }
+                p {
+                    "Add a machine from internal templates or import an external CNC profile YAML file."
+                }
             }
 
             if !import_feedback.read().is_empty() {
@@ -127,9 +129,9 @@ pub fn MachineProfilesPanel(
 
             div { class: "setup-card-grid two-up",
                 article { class: "setup-card",
-                    h3 { "Add from library" }
+                    h3 { "Add from templates" }
                     div { class: "field",
-                        label { "Library profile" }
+                        label { "Template" }
                         select {
                             value: selected_library_profile.read().clone(),
                             onchange: move |evt| selected_library_profile.set(evt.value()),
@@ -147,14 +149,14 @@ pub fn MachineProfilesPanel(
                                 let selected = profiles.iter().find(|profile| profile.key == key).cloned();
                                 if let Some(profile) = selected {
                                     state.with_mut(|s| s.ui.add_machine_profile(profile.machine));
-                                    import_feedback.set("CNC profile added from library".to_string());
+                                    import_feedback.set("CNC profile added from template".to_string());
                                 } else {
                                     import_feedback
-                                        .set("Unable to add CNC profile from library".to_string());
+                                        .set("Unable to add CNC profile from template".to_string());
                                 }
                             }
                         },
-                        "Add CNC profile"
+                        "Add CNC profile from template"
                     }
                 }
 
@@ -259,6 +261,10 @@ pub fn MachineProfilesPanel(
 
 #[component]
 pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback: Signal<String>) -> Element {
+    use_effect(move || {
+        state.with_mut(|s| s.ensure_catalogs_loaded());
+    });
+
     let snapshot = state.read().clone().ui;
 
     rsx! {
@@ -300,7 +306,7 @@ pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback
                                 .unwrap_or("catalog")
                                 .to_string();
                             state
-                                .with_mut(|s| match s.ui.import_catalog_text(&stem, &text) {
+                                .with_mut(|s| match s.import_catalog_text(&stem, &text) {
                                     Ok(name) => import_feedback.set(format!("Catalog '{name}' imported")),
                                     Err(msg) => import_feedback.set(msg),
                                 });
@@ -346,7 +352,7 @@ pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback
                                                     move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                match s.ui.remove_catalog(&key) {
+                                                                match s.remove_catalog(&key) {
                                                                     Ok(_) => import_feedback.set("Catalog deleted".to_string()),
                                                                     Err(msg) => import_feedback.set(msg),
                                                                 }

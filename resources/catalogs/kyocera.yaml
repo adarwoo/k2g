@@ -1,3 +1,5 @@
+$schema: catalog.yaml
+
 name: Kyocera
 description: >
   Kyocera Series 100 drill catalog imported from manufacturer data.

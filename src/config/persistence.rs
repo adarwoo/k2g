@@ -1,14 +1,18 @@
 /// Configuration persistence system for loading and saving all config files
 /// at startup and during runtime.
 
-use crate::user_path::AppDirs;
+use crate::user_path::{AppDirs, GLOBAL_SETTINGS_SECTION, STOCK_SECTION};
 use log::{error, info, warn};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::manager::YamlConfigManager;
+use super::manager::{queue_persist_document, YamlConfigManager};
 use super::ConfigError;
 
 /// Encapsulates all persisted configuration state
@@ -48,7 +52,7 @@ pub fn load_all_configs(
 
     // Load global settings
     let global_mgr =
-        YamlConfigManager::new("global.setting", schema_dir, &app_dirs.configs)?;
+        YamlConfigManager::new(GLOBAL_SETTINGS_SECTION, schema_dir, &app_dirs.configs)?;
     let global_settings = global_mgr.get_content().clone();
     let selected_process_profile_id = global_settings
         .get("selected_process_profile_id")
@@ -72,7 +76,7 @@ pub fn load_all_configs(
         .map(|s| s.to_string());
 
     // Load stock config
-    let stock_mgr = YamlConfigManager::new("stock", schema_dir, &app_dirs.configs)?;
+    let stock_mgr = YamlConfigManager::new(STOCK_SECTION, schema_dir, &app_dirs.configs)?;
     let stock = stock_mgr.get_content().clone();
 
     // Load all profile domains from their subdirectories.
@@ -94,6 +98,98 @@ pub fn load_all_configs(
         selected_fixture_profile_id,
         selected_toolset_profile_id,
     })
+}
+
+/// Load all persisted configuration files with per-domain fallbacks.
+///
+/// Unlike `load_all_configs`, this never fails the whole load when one
+/// domain has issues. It is intended for startup fallback paths.
+pub fn load_all_configs_best_effort(app_dirs: &AppDirs, schema_dir: &Path) -> PersistenceState {
+    info!(
+        "Loading configuration (best-effort) from {:?}",
+        app_dirs.configs
+    );
+
+    let global_settings = match YamlConfigManager::new(GLOBAL_SETTINGS_SECTION, schema_dir, &app_dirs.configs) {
+        Ok(mgr) => mgr.get_content().clone(),
+        Err(err) => {
+            warn!("Failed to load global settings: {}", err);
+            serde_json::json!({
+                "units": "mm",
+                "theme": "Light",
+                "selected_process_profile_id": Value::Null,
+                "selected_cnc_profile_id": Value::Null,
+                "selected_fixture_profile_id": Value::Null,
+                "selected_toolset_profile_id": Value::Null,
+            })
+        }
+    };
+
+    let stock = match YamlConfigManager::new(STOCK_SECTION, schema_dir, &app_dirs.configs) {
+        Ok(mgr) => mgr.get_content().clone(),
+        Err(err) => {
+            warn!("Failed to load stock settings: {}", err);
+            serde_json::json!({ "tools": [] })
+        }
+    };
+
+    let cnc_profiles = match load_cnc_profiles(&app_dirs.cnc_profiles, schema_dir) {
+        Ok(v) => v,
+        Err(err) => {
+            warn!("Failed to load CNC profiles: {}", err);
+            BTreeMap::new()
+        }
+    };
+    let fixture_profiles = match load_profiles_from_dir(&app_dirs.fixture_profiles) {
+        Ok(v) => v,
+        Err(err) => {
+            warn!("Failed to load fixture profiles: {}", err);
+            BTreeMap::new()
+        }
+    };
+    let processing_profiles = match load_profiles_from_dir(&app_dirs.processing_profiles) {
+        Ok(v) => v,
+        Err(err) => {
+            warn!("Failed to load processing profiles: {}", err);
+            BTreeMap::new()
+        }
+    };
+    let toolset_profiles = match load_profiles_from_dir(&app_dirs.toolset_profiles) {
+        Ok(v) => v,
+        Err(err) => {
+            warn!("Failed to load toolset profiles: {}", err);
+            BTreeMap::new()
+        }
+    };
+
+    PersistenceState {
+        selected_process_profile_id: global_settings
+            .get("selected_process_profile_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        last_edited_process_profile_id: global_settings
+            .get("last_edited_process_profile_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        selected_cnc_profile_id: global_settings
+            .get("selected_cnc_profile_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        selected_fixture_profile_id: global_settings
+            .get("selected_fixture_profile_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        selected_toolset_profile_id: global_settings
+            .get("selected_toolset_profile_id")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        global_settings,
+        stock,
+        cnc_profiles,
+        fixture_profiles,
+        processing_profiles,
+        toolset_profiles,
+    }
 }
 
 /// Load all CNC profile YAML files from the cnc_profiles directory
@@ -213,17 +309,34 @@ pub fn save_global_settings(
     app_dirs: &AppDirs,
     global_settings: &Value,
 ) -> Result<(), ConfigError> {
-    save_config_file(
-        &app_dirs.configs,
-        "global.setting",
-        global_settings,
+    if let Some(parent) = app_dirs.global_settings.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            error!("Failed to create config directory: {}", e);
+            ConfigError::Io(e)
+        })?;
+    }
+
+    let mut item_values = BTreeMap::new();
+    item_values.insert(
+        format!("config:{}", GLOBAL_SETTINGS_SECTION),
+        global_settings.clone(),
+    );
+    queue_persist_document(
+        app_dirs.global_settings.clone(),
+        item_values,
+        global_settings.clone(),
     )
 }
 
 /// Save tool stock to stock.yaml
 #[allow(dead_code)]
 pub fn save_stock(app_dirs: &AppDirs, stock: &Value) -> Result<(), ConfigError> {
-    save_config_file(&app_dirs.configs, "stock", stock)
+    fs::create_dir_all(&app_dirs.configs).map_err(|e| {
+        error!("Failed to create config directory: {}", e);
+        ConfigError::Io(e)
+    })?;
+
+    write_yaml_file_atomically(&app_dirs.stock, stock)
 }
 
 /// Save a single CNC profile to cnc_profiles/{profile_name}.yaml
@@ -242,24 +355,12 @@ pub fn save_cnc_profile(
         })?;
     }
 
-    let yaml_value: serde_yaml::Value = serde_json::from_value(profile_data.clone())
-        .map_err(|e| {
-            error!("Failed to convert CNC profile to YAML: {}", e);
-            ConfigError::SchemaParse(e.to_string())
-        })?;
-
-    let yaml_str = serde_yaml::to_string(&yaml_value).map_err(|e| {
-        error!("Failed to serialize CNC profile: {}", e);
-        ConfigError::ConfigParse(e.to_string())
-    })?;
-
-    fs::write(&file_path, yaml_str).map_err(|e| {
-        error!("Failed to write CNC profile to {:?}: {}", file_path, e);
-        ConfigError::Io(e)
-    })?;
-
-    info!("Saved CNC profile: {:?}", file_path);
-    Ok(())
+    let mut item_values = BTreeMap::new();
+    item_values.insert(
+        format!("cnc_profile:{}", profile_name),
+        profile_data.clone(),
+    );
+    queue_persist_document(file_path, item_values, profile_data.clone())
 }
 
 pub fn save_cnc_profiles(
@@ -303,25 +404,9 @@ fn save_config_file(
     })?;
 
     let file_path = config_dir.join(format!("{}.yaml", file_stem));
-
-    let yaml_value: serde_yaml::Value = serde_json::from_value(content.clone())
-        .map_err(|e| {
-            error!("Failed to convert {} to YAML: {}", file_stem, e);
-            ConfigError::SchemaParse(e.to_string())
-        })?;
-
-    let yaml_str = serde_yaml::to_string(&yaml_value).map_err(|e| {
-        error!("Failed to serialize {}: {}", file_stem, e);
-        ConfigError::ConfigParse(e.to_string())
-    })?;
-
-    fs::write(&file_path, yaml_str).map_err(|e| {
-        error!("Failed to write {} to {:?}: {}", file_stem, file_path, e);
-        ConfigError::Io(e)
-    })?;
-
-    info!("Saved {}: {:?}", file_stem, file_path);
-    Ok(())
+    let mut item_values = BTreeMap::new();
+    item_values.insert(format!("config:{}", file_stem), content.clone());
+    queue_persist_document(file_path, item_values, content.clone())
 }
 
 fn save_profile_map(
@@ -351,12 +436,62 @@ fn save_profile_map(
 
     for (id, profile_data) in profiles {
         let file_path = dir.join(format!("{}.yaml", id));
-        let yaml_value: serde_yaml::Value = serde_json::from_value(profile_data.clone())
-            .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
-        let yaml_str = serde_yaml::to_string(&yaml_value)
-            .map_err(|e| ConfigError::ConfigParse(e.to_string()))?;
-        fs::write(&file_path, yaml_str).map_err(ConfigError::Io)?;
+        let mut item_values = BTreeMap::new();
+        item_values.insert(
+            format!("profile:{}:{}", dir.display(), id),
+            profile_data.clone(),
+        );
+        queue_persist_document(file_path, item_values, profile_data.clone())?;
     }
 
     Ok(())
+}
+
+fn write_yaml_file_atomically(file_path: &Path, content: &Value) -> Result<(), ConfigError> {
+    let yaml_value: serde_yaml::Value = serde_json::from_value(content.clone())
+        .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
+    let yaml_payload = serde_yaml::to_string(&yaml_value)
+        .map_err(|e| ConfigError::ConfigParse(e.to_string()))?;
+
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).map_err(ConfigError::Io)?;
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let temp_name = format!(
+        ".k2g.tmp.stock.{}.{}.yaml",
+        process::id(),
+        nanos
+    );
+    let temp_path = file_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(temp_name);
+
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp_path)
+        .map_err(ConfigError::Io)?;
+
+    file.write_all(yaml_payload.as_bytes()).map_err(ConfigError::Io)?;
+    file.flush().map_err(ConfigError::Io)?;
+    file.sync_all().map_err(ConfigError::Io)?;
+    drop(file);
+
+    match fs::rename(&temp_path, file_path) {
+        Ok(()) => Ok(()),
+        Err(first_err) => {
+            if file_path.exists() {
+                fs::remove_file(file_path).map_err(ConfigError::Io)?;
+                fs::rename(&temp_path, file_path).map_err(ConfigError::Io)
+            } else {
+                let _ = fs::remove_file(&temp_path);
+                Err(ConfigError::Io(first_err))
+            }
+        }
+    }
 }

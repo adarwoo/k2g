@@ -353,10 +353,10 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
         views.push(JobCenterView::Rack);
     }
 
-    let active_view = if snapshot.selected_project_view == JobCenterView::Rack && !has_atc {
+    let active_view = if snapshot.selected_job_view == JobCenterView::Rack && !has_atc {
         JobCenterView::Board
     } else {
-        snapshot.selected_project_view
+        snapshot.selected_job_view
     };
 
     rsx! {
@@ -370,7 +370,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
                                 onclick: {
                                     let target = *view;
-                                    move |_| state.with_mut(|s| s.ui.selected_project_view = target)
+                                    move |_| state.with_mut(|s| s.ui.selected_job_view = target)
                                 },
                                 "{view.label()}"
                             }
@@ -671,7 +671,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             div { class: "screen single",
                                 div { class: "machining-summary",
                                     div { class: "impact-item",
-                                        div { class: "impact-name", "Operations" }
+                                        div { class: "impact-name", "Machining steps" }
                                         div { class: "impact-state", "{snapshot.project_config.selected_operations.len()} selected" }
                                     }
                                     div { class: "impact-item",
@@ -680,6 +680,9 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             "{snapshot.rack_slots.iter().filter(|(_, slot)| slot.tool_id.is_some()).count()}"
                                         }
                                     }
+                                }
+                                p { class: "diag-status",
+                                    "A job can be made of several machining steps. Each step has a start and an end."
                                 }
                                 div { class: "canvas-mock", "Machining: operation flow + tool paths" }
                             }
@@ -692,7 +695,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     oninput: move |evt| {
                                         let value = evt.value();
                                         state
-                                            .with_mut(|s| { s.ui.gcode = value;
+                                            .with_mut(|s| {
+                                                s.ui.gcode = value;
                                                 s.ui.gcode_modified = true;
                                             });
                                     },
@@ -735,10 +739,10 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                 }
 
                 section { class: "panel fixed",
-                    h3 { "Project configuration" }
+                    h3 { "Job configuration" }
 
                     div { class: "field",
-                        label { "Processing" }
+                        label { "Machining profile" }
                         select {
                             value: snapshot.selected_process_profile_id.clone().unwrap_or_default(),
                             onchange: move |evt| {
@@ -749,13 +753,13 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         s.ui.select_process_profile_by_id(selected);
                                     });
                             },
-                            option { value: "", "Select processing profile" }
+                            option { value: "", "Select machining profile" }
                             for profile in snapshot.process_profiles.iter() {
                                 option { value: "{profile.id}", "{profile.name}" }
                             }
                         }
                         p { class: "diag-status",
-                            "Processing defines project bindings for CNC and fixture."
+                            "Machining profile defines job bindings for CNC and fixture."
                         }
                         if let Some(active_profile) = snapshot.selected_process_profile() {
                             p { class: "diag-status",
@@ -766,13 +770,13 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 
                     if snapshot.selected_process_profile_id.is_none() {
                         p { class: "diag-status",
-                            "Select a processing profile to display project attributes."
+                            "Select a machining profile to display job attributes."
                         }
                     }
 
                     if snapshot.selected_process_profile_id.is_some() {
                         div { class: "field",
-                            label { "Operations" }
+                            label { "Machining steps" }
                             for op in ProductionOperation::all().iter() {
                                 button {
                                     key: "{op.label()}",
@@ -793,7 +797,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 onchange: move |evt| {
                                     let v = evt.value();
                                     state
-                                        .with_mut(|s| { s.ui.project_config.side = if v == "bottom" {
+                                        .with_mut(|s| {
+                                            s.ui.project_config.side = if v == "bottom" {
                                                 Side::Bottom
                                             } else {
                                                 Side::Top
@@ -817,7 +822,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::Automatic,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
                                                     });
                                             },
                                         }
@@ -833,7 +839,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
                                                     });
                                             },
                                         }
@@ -849,7 +856,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
                                                     });
                                             },
                                         }
@@ -883,26 +891,35 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                     select {
                                         value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
                                         onchange: move |evt| {
                                             let value = evt.value();
                                             state
-                                                .with_mut(|s| { s.ui.project_config.outline_router_tool_id = if value.trim().is_empty() {
+                                                .with_mut(|s| {
+                                                    s.ui.project_config.outline_router_tool_id = if value.trim().is_empty() {
                                                         None
                                                     } else {
                                                         Some(value.clone())
                                                     };
-                                                    let router_d = s.ui.project_config
+                                                    let router_d = s
+                                                        .ui
+                                                        .project_config
                                                         .outline_router_tool_id
                                                         .as_ref()
                                                         .and_then(|id| s.ui.tools.iter().find(|t| &t.id == id))
                                                         .map(|t| t.diameter.as_mm());
-                                                    if let Some(drill_id) = s.ui.project_config.mouse_bite_drill_tool_id.clone()
+                                                    if let Some(drill_id) = s
+                                                        .ui
+                                                        .project_config
+                                                        .mouse_bite_drill_tool_id
+                                                        .clone()
                                                     {
-                                                        let valid = s.ui.tools
+                                                        let valid = s
+                                                            .ui
+                                                            .tools
                                                             .iter()
                                                             .find(|t| t.id == drill_id)
                                                             .map(|t| {
@@ -957,7 +974,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 oninput: move |evt| {
                                                     let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.tab_width_mm = unit_service::mm_from_display_length(
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.tab_width_mm = unit_service::mm_from_display_length(
                                                                 value as f64,
                                                                 s.ui.unit_system,
                                                             ) as f32;
@@ -975,7 +993,11 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                         title: "Revert to original setting",
                                                         onclick: move |_| {
                                                             state
-                                                                .with_mut(|s| { s.ui.project_config.tab_width_mm = s.ui.project_config.tab_width_baseline_mm;
+                                                                .with_mut(|s| {
+                                                                    s.ui.project_config.tab_width_mm = s
+                                                                        .ui
+                                                                        .project_config
+                                                                        .tab_width_baseline_mm;
                                                                 });
                                                         },
                                                         "↺"
@@ -1014,7 +1036,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     oninput: move |evt| {
                                                         let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
                                                                     value as f64,
                                                                     s.ui.unit_system,
                                                                 ) as f32;
@@ -1035,14 +1058,16 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             select {
                                                 disabled: snapshot.project_config.outline_router_tool_id.is_none(),
                                                 value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
                                                 onchange: move |evt| {
                                                     let value = evt.value();
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty() {
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty()
+                                                            {
                                                                 None
                                                             } else {
                                                                 Some(value)
@@ -1081,7 +1106,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
                                                     });
                                             },
                                         }
@@ -1106,7 +1132,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Preset,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Preset;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Preset;
                                                     });
                                             },
                                         }
@@ -1136,7 +1163,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
                                                     });
                                             },
                                         }
@@ -1151,7 +1179,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 oninput: move |evt| {
                                                     let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
                                                                 value as f64,
                                                                 s.ui.unit_system,
                                                             ) as f32;
@@ -1173,7 +1202,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_thickness_mode = BoardThicknessMode::Probe;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Probe;
                                                     });
                                             },
                                         }
@@ -1194,7 +1224,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
                                                         });
                                                 },
                                             }
@@ -1208,7 +1239,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
                                                         });
                                                 },
                                             }
@@ -1230,7 +1262,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 checked: snapshot.project_config.touch_probe_source == TouchProbeSource::ManualInstallation,
                                                 onchange: move |_| {
                                                     state
-                                                        .with_mut(|s| { s.ui.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
+                                                        .with_mut(|s| {
+                                                            s.ui.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
                                                         });
                                                 },
                                             }
@@ -1245,7 +1278,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     checked: snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot,
                                                     onchange: move |_| {
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
                                                             });
                                                     },
                                                 }
@@ -1286,7 +1320,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_orientation == BoardOrientation::Automatic,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Automatic;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_orientation = BoardOrientation::Automatic;
                                                     });
                                             },
                                         }
@@ -1302,7 +1337,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             checked: snapshot.project_config.board_orientation == BoardOrientation::NoRotation,
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::NoRotation;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_orientation = BoardOrientation::NoRotation;
                                                     });
                                             },
                                         }
@@ -1324,7 +1360,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             ),
                                             onchange: move |_| {
                                                 state
-                                                    .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                    .with_mut(|s| {
+                                                        s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
                                                     });
                                             },
                                         }
@@ -1347,7 +1384,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate90,
                                                     onchange: move |_| {
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
                                                             });
                                                     },
                                                 }
@@ -1361,7 +1399,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate180,
                                                     onchange: move |_| {
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate180;
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate180;
                                                             });
                                                     },
                                                 }
@@ -1375,7 +1414,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate270,
                                                     onchange: move |_| {
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::Rotate270;
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate270;
                                                             });
                                                     },
                                                 }
@@ -1389,7 +1429,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     checked: snapshot.project_config.board_orientation == BoardOrientation::RotateCustom,
                                                     onchange: move |_| {
                                                         state
-                                                            .with_mut(|s| { s.ui.project_config.board_orientation = BoardOrientation::RotateCustom;
+                                                            .with_mut(|s| {
+                                                                s.ui.project_config.board_orientation = BoardOrientation::RotateCustom;
                                                             });
                                                     },
                                                 }
@@ -1425,7 +1466,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     onchange: move |evt| {
                                         let v = evt.value();
                                         state
-                                            .with_mut(|s| { s.ui.project_config.atc_strategy = if v == "overwrite" {
+                                            .with_mut(|s| {
+                                                s.ui.project_config.atc_strategy = if v == "overwrite" {
                                                     AtcRackStrategy::Overwrite
                                                 } else if v == "reuse" {
                                                     AtcRackStrategy::Reuse

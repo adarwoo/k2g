@@ -3,14 +3,10 @@ use std::sync::OnceLock;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use serde_json::{json, Value};
 
 use super::super::model::*;
 use super::super::UiLaunchData;
-use crate::config::save_global_settings;
-use crate::ui::unit_service;
-use crate::ui::persistence_state;
-use crate::user_path::ensure_app_dirs;
+use crate::ctx::{UiCommand, apply_ui_command, ctx_snapshot};
 
 #[component]
 pub fn AppTopBar(
@@ -33,7 +29,7 @@ pub fn AppTopBar(
     let process_profile_name = snapshot
         .selected_process_profile()
         .map(|profile| profile.name.clone())
-        .unwrap_or_else(|| "No processing selected".to_string());
+        .unwrap_or_else(|| "No machining profile selected".to_string());
     let fixture_name = snapshot
         .selected_fixture()
         .map(|fixture| fixture.name.clone())
@@ -88,7 +84,7 @@ pub fn AppTopBar(
             }
 
             div { class: "topbar-board",
-                span { class: "topbar-label", "Processing" }
+                span { class: "topbar-label", "Machining" }
                 span { class: if has_process_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
                     "{process_profile_name}"
                 }
@@ -113,29 +109,26 @@ pub fn AppTopBar(
                     button {
                         class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Metric);
-                            persist_unit_system(UnitSystem::Metric);
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Metric));
                         },
                         "mm"
                     }
                     button {
                         class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Imperial);
-                            persist_unit_system(UnitSystem::Imperial);
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Imperial));
                         },
                         "in"
                     }
                     button {
                         class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            state.with_mut(|s| s.ui.unit_system = UnitSystem::Mil);
-                            persist_unit_system(UnitSystem::Mil);
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Mil));
                         },
                         "mil"
                     }
                 }
-                SummaryChip { label: "Project", value: ops_label }
+                SummaryChip { label: "Job", value: ops_label }
             }
 
             div { class: "shell-spacer" }
@@ -156,13 +149,7 @@ pub fn AppTopBar(
                 button {
                     class: "icon-button",
                     onclick: move |_| {
-                        let next = if snapshot.theme == Theme::Dark {
-                            Theme::Light
-                        } else {
-                            Theme::Dark
-                        };
-                        state.with_mut(|s| s.ui.theme = next);
-                        persist_theme(next);
+                        dispatch_ui_command(state, UiCommand::ToggleTheme);
                     },
                     if snapshot.theme == Theme::Dark {
                         "Theme: Dark"
@@ -173,6 +160,11 @@ pub fn AppTopBar(
             }
         }
     }
+}
+
+fn dispatch_ui_command(mut state: Signal<crate::ctx::AppCtx>, command: UiCommand) {
+    apply_ui_command(command);
+    state.set(ctx_snapshot());
 }
 
 fn app_icon_data_url() -> &'static str {
@@ -266,9 +258,9 @@ pub fn DiagnosticsBanner(
 pub fn NavigationRail(state: Signal<crate::ctx::AppCtx>) -> Element {
     let snapshot = state.read().clone().ui;
     let nav_items = [
-        Some(Screen::Project),
+        Some(Screen::Job),
         None,
-        Some(Screen::ProcessProfiles),
+        Some(Screen::MachiningProfiles),
         Some(Screen::CncProfiles),
         Some(Screen::FixtureProfiles),
         Some(Screen::ToolsetProfiles),
@@ -300,7 +292,7 @@ pub fn NavigationRail(state: Signal<crate::ctx::AppCtx>) -> Element {
 
 fn rail_icon(screen: Screen) -> Element {
     match screen {
-        Screen::Project => rsx! {
+        Screen::Job => rsx! {
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
@@ -325,20 +317,48 @@ fn rail_icon(screen: Screen) -> Element {
         Screen::FixtureProfiles => rsx! {
             svg {
                 class: "rail-icon-svg",
-                view_box: "0 0 24 24",
+                view_box: "0 0 64 64",
                 "aria-hidden": "true",
-                rect {
-                    x: "4",
-                    y: "5",
-                    width: "16",
-                    height: "14",
-                    rx: "2",
+                circle { cx: "21", cy: "22", r: "4.5" }
+                line {
+                    x1: "21",
+                    y1: "12.5",
+                    x2: "21",
+                    y2: "16.5",
                 }
-                path { d: "M8 5v14" }
-                path { d: "M16 5v14" }
+                line {
+                    x1: "21",
+                    y1: "27.5",
+                    x2: "21",
+                    y2: "31.5",
+                }
+                line {
+                    x1: "11.5",
+                    y1: "22",
+                    x2: "15.5",
+                    y2: "22",
+                }
+                line {
+                    x1: "26.5",
+                    y1: "22",
+                    x2: "30.5",
+                    y2: "22",
+                }
+                circle {
+                    cx: "46",
+                    cy: "20",
+                    r: "2.2",
+                    fill: "currentColor",
+                }
+                path { d: "M15 47 C 22 47, 24 39, 31 39 S 40 47, 47 47" }
+                path {
+                    d: "M44.5 44 L49 47 L44.5 50 Z",
+                    fill: "currentColor",
+                    stroke: "none",
+                }
             }
         },
-        Screen::ProcessProfiles => rsx! {
+        Screen::MachiningProfiles => rsx! {
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
@@ -450,84 +470,4 @@ pub fn StatusBar(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Eleme
     }
 }
 
-fn persist_unit_system(unit_system: UnitSystem) {
-    let Ok(app_dirs) = ensure_app_dirs() else {
-        return;
-    };
-
-    let mut global_settings = persistence_state()
-        .map(|state| state.global_settings.clone())
-        .unwrap_or_else(|| json!({}));
-
-    if !global_settings.is_object() {
-        global_settings = json!({});
-    }
-
-    let Some(root) = global_settings.as_object_mut() else {
-        return;
-    };
-
-    let units_value = root.entry("units".to_string()).or_insert_with(|| json!({}));
-    if !units_value.is_object() {
-        *units_value = json!({});
-    }
-
-    let Some(units) = units_value.as_object_mut() else {
-        return;
-    };
-
-    units.insert(
-        "system".to_string(),
-        Value::String(unit_system.as_str().to_string()),
-    );
-    if !units.contains_key("size_unit") {
-        units.insert(
-            "size_unit".to_string(),
-            Value::String(match unit_system {
-                UnitSystem::Metric => "mm".to_string(),
-                UnitSystem::Imperial => "in".to_string(),
-                UnitSystem::Mil => "mil".to_string(),
-            }),
-        );
-    }
-    if !units.contains_key("speed_unit") {
-        units.insert(
-            "speed_unit".to_string(),
-            Value::String(unit_service::feed_unit_label(unit_system).to_string()),
-        );
-    }
-
-    let _ = save_global_settings(&app_dirs, &global_settings);
-}
-
-fn persist_theme(theme: Theme) {
-    let Ok(app_dirs) = ensure_app_dirs() else {
-        return;
-    };
-
-    let mut global_settings = persistence_state()
-        .map(|state| state.global_settings.clone())
-        .unwrap_or_else(|| json!({}));
-
-    if !global_settings.is_object() {
-        global_settings = json!({});
-    }
-
-    let Some(root) = global_settings.as_object_mut() else {
-        return;
-    };
-
-    let theme_value = root.entry("theme".to_string()).or_insert_with(|| json!({}));
-    if !theme_value.is_object() {
-        *theme_value = json!({});
-    }
-
-    let Some(theme_root) = theme_value.as_object_mut() else {
-        return;
-    };
-
-    theme_root.insert("mode".to_string(), Value::String(theme.as_str().to_string()));
-
-    let _ = save_global_settings(&app_dirs, &global_settings);
-}
 

@@ -1,517 +1,63 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::board::BoardSnapshot;
-use crate::catalog::init::{catalog_dir, parse_catalog_with_backfill};
-use crate::catalog::types::{Catalog, ToolType};
-use crate::catalog::CatalogManager;
 use crate::config::{
-    save_cnc_profiles, save_fixture_profiles, save_global_settings, save_processing_profiles,
-    save_stock, save_toolset_profiles,
+    ConfigError, save_cnc_profiles, save_fixture_profiles, save_global_settings,
+    save_processing_profiles, save_stock, save_toolset_profiles,
 };
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
-use crate::user_path::ensure_app_dirs;
+use crate::ctx::persistence_state;
+use crate::domain::stock::{stock_value_from_tools, tools_from_stock_value};
+use crate::id::new_uuid_v7_like;
+use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+use crate::user_path::{AppDirs, ensure_app_dirs};
 use serde_json::{json, Value};
-use super::persistence_state;
 
-#[derive(Clone, PartialEq)]
-pub struct UiLaunchData {
-    pub env_vars: Vec<(String, String)>,
-    pub cli_args: Vec<String>,
-    pub kicad_status: String,
-    pub board_snapshot: Option<BoardSnapshot>,
-    pub save_filename_override: Option<String>,
-}
+mod ui_shell;
+mod profiles;
+mod stock;
+mod job;
+mod runtime;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Screen {
-    Project,
-    CncProfiles,
-    FixtureProfiles,
-    ProcessProfiles,
-    ToolsetProfiles,
-    Stock,
-    Catalog,
-}
+pub use ui_shell::{GenerationState, JobCenterView, Screen, Theme, UiLaunchData, UnitSystem};
+pub use profiles::{
+    CascadeDeleteImpact, FixtureProfile, JobProfile, MachineProfile, ToolsetGenerationPolicy,
+    ToolsetProfile,
+};
+pub use stock::{
+    CatalogStockCatalog, CatalogStockSection, CatalogStockTool, Tool, ToolPreference, ToolStatus,
+};
+pub use job::{
+    AtcRackStrategy, BoardOrientation, BoardThicknessMode, CutDepthStrategy, JobConfig,
+    ProductionOperation, RotationMode, Side, TouchProbeSource, Z0DeterminationMode,
+};
+pub use runtime::{AppError, AppEvent, BoardLayers, RackSlot, UiState};
 
-impl Screen {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Project => "Project",
-            Self::CncProfiles => "CNC",
-            Self::FixtureProfiles => "Fixtures",
-            Self::ProcessProfiles => "Processing",
-            Self::ToolsetProfiles => "Toolset",
-            Self::Stock => "Stock",
-            Self::Catalog => "Catalog",
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Project => "project",
-            Self::CncProfiles => "cnc-profiles",
-            Self::FixtureProfiles => "fixture-profiles",
-            Self::ProcessProfiles => "process-profiles",
-            Self::ToolsetProfiles => "toolset-profiles",
-            Self::Stock => "stock",
-            Self::Catalog => "catalog",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum JobCenterView {
-    Board,
-    Machining,
-    Code,
-    Rack,
-}
-
-impl JobCenterView {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Board => "Board",
-            Self::Machining => "Machining",
-            Self::Code => "Code",
-            Self::Rack => "Rack",
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Board => "board",
-            Self::Machining => "machining",
-            Self::Code => "code",
-            Self::Rack => "rack",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UnitSystem {
-    Metric,
-    Imperial,
-    Mil,
-}
-
-impl UnitSystem {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Metric => "metric",
-            Self::Imperial => "imperial",
-            Self::Mil => "mil",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn user_unit_system(self) -> UserUnitSystem {
-        match self {
-            Self::Metric => UserUnitSystem::Metric,
-            Self::Imperial | Self::Mil => UserUnitSystem::Imperial,
-        }
-    }
-
-    pub fn length_unit_label(self) -> &'static str {
-        match self {
-            Self::Metric => "mm",
-            Self::Imperial => "\"",
-            Self::Mil => "mil",
-        }
-    }
-
-    pub fn feed_unit_label(self) -> &'static str {
-        match self {
-            Self::Metric => "mm/min",
-            Self::Imperial | Self::Mil => "in/min",
-        }
-    }
-
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Theme {
-    Light,
-    Dark,
-}
-
-impl Theme {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    pub fn from_str(value: &str) -> Self {
-        match value {
-            "light" => Self::Light,
-            _ => Self::Dark,
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum GenerationState {
-    Idle,
-    Generating,
-    Failed,
-}
-
-#[derive(Clone)]
-pub struct MachineProfile {
-    pub id: String,
-    pub name: String,
-    pub built_in: bool,
-    /// Fixture plate X travel, stored in mm.
-    pub fixture_plate_max_x: u32,
-    /// Fixture plate Y travel, stored in mm.
-    pub fixture_plate_max_y: u32,
-    /// Maximum feed rate, stored in mm/min.
-    pub max_feed_rate_mm_per_min: u32,
-    pub spindle_min_rpm: u32,
-    pub spindle_max_rpm: u32,
-    pub atc_slot_count: u8,
-    pub origin_x0: String,
-    pub origin_y0: String,
-    pub scaling_x: f32,
-    pub scaling_y: f32,
-    pub line_numbering_enabled: bool,
-    pub line_numbering_increment: u32,
-    pub gcode_header: String,
-    pub gcode_footer: String,
-    pub drill_first_move: String,
-    pub drill_cycle_mode_last: String,
-    pub drill_cycle_mode_series: String,
-    pub drill_cycle_start: String,
-    pub drill_next_hole: String,
-    pub drill_cycle_cancel: String,
-    pub route_plunge_and_offset: String,
-    pub route_arc_up: String,
-    pub route_arc_down: String,
-    pub route_retract: String,
-    pub tool_change_manual_prompt: String,
-    pub tool_change_command: String,
-}
-
-impl Default for MachineProfile {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            built_in: false,
-            fixture_plate_max_x: 300,
-            fixture_plate_max_y: 200,
-            max_feed_rate_mm_per_min: 2000,
-            spindle_min_rpm: 3000,
-            spindle_max_rpm: 24000,
-            atc_slot_count: 0,
-            origin_x0: "Left".to_string(),
-            origin_y0: "Front".to_string(),
-            scaling_x: 100.0,
-            scaling_y: 100.0,
-            line_numbering_enabled: false,
-            line_numbering_increment: 10,
-            gcode_header: concat!(
-                "(Created by kicad2gcode from '{pcb_filename}' - {timestamp})\n",
-                "(Reset all back to safe defaults)\n",
-                "G17 G54 G40 G49 G80 G90\n",
-                "G21\n",
-                "G10 P0\n",
-                "(Establish the Z-Safe)\n",
-                "G0 Z{z_safe}"
-            ).to_string(),
-            gcode_footer: "(end of file)".to_string(),
-            drill_first_move: "G0 X{x} Y{y} Z{z_safe}".to_string(),
-            drill_cycle_mode_last: "G98".to_string(),
-            drill_cycle_mode_series: "G99".to_string(),
-            drill_cycle_start: "G81 Z{z_bottom} R{z_retract} F{z_feedrate}".to_string(),
-            drill_next_hole: "X{x} Y{y}".to_string(),
-            drill_cycle_cancel: "G80".to_string(),
-            route_plunge_and_offset: "G90 G0 X{x} Y{y}\nG1 Z{z_bottom} F{z_feedrate}\nG1 Y{y_plus_id}".to_string(),
-            route_arc_up: "G2 I0 J-{id}".to_string(),
-            route_arc_down: "G3 I0 J-{id}".to_string(),
-            route_retract: "G0 Z{z_safe}".to_string(),
-            tool_change_manual_prompt: "MSG Load {tool_name} {tool_diameter}\nM01".to_string(),
-            tool_change_command: "M05\n{manual_message}\nT{slot} M06\nS{rpm}".to_string(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct FixtureProfile {
-    pub id: String,
-    pub name: String,
-    pub coordinate_context: String,
-    pub backing_board: String,
-}
-
-#[derive(Clone)]
-pub struct JobProfile {
-    pub id: String,
-    pub name: String,
-    pub cnc_profile_id: String,
-    pub fixture_profile_id: String,
-    pub toolset_profile_id: String,
-    pub default_operations: Vec<ProductionOperation>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ToolsetGenerationPolicy {
-    FixedToolset,
-    AllowReload,
-    AllowHybrid,
-}
-
-impl ToolsetGenerationPolicy {
-    pub fn as_key(self) -> &'static str {
-        match self {
-            Self::FixedToolset => "fixed_toolset",
-            Self::AllowReload => "allow_reload",
-            Self::AllowHybrid => "allow_hybrid",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::FixedToolset => "Fixed toolset",
-            Self::AllowReload => "Allow reload",
-            Self::AllowHybrid => "Allow hybrid",
-        }
-    }
-
-    pub fn from_key(value: &str) -> Self {
-        match value {
-            "fixed_toolset" => Self::FixedToolset,
-            "allow_reload" => Self::AllowReload,
-            _ => Self::AllowHybrid,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ToolsetProfile {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub generation_policy: ToolsetGenerationPolicy,
-    pub slots: BTreeMap<u8, RackSlot>,
-}
-
-#[derive(Clone, Default)]
-pub struct CascadeDeleteImpact {
-    pub primary_profiles: Vec<String>,
-    pub dependent_process_profiles: Vec<String>,
-    pub deleted_live_projects: Vec<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ToolStatus {
-    InStock,
-    OutOfStock,
-}
-
-impl ToolStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::InStock => "In stock",
-            Self::OutOfStock => "Out of stock",
-        }
-    }
-
-    pub fn class_name(self) -> &'static str {
-        match self {
-            Self::InStock => "status-in-stock",
-            Self::OutOfStock => "status-out-of-stock",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ToolPreference {
-    Preferred,
-    Neutral,
-    NotPreferred,
-}
-
-impl ToolPreference {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Preferred => "Preferred",
-            Self::Neutral => "Neutral",
-            Self::NotPreferred => "Not preferred",
-        }
-    }
-
-    pub fn class_name(self) -> &'static str {
-        match self {
-            Self::Preferred => "status-preferred",
-            Self::Neutral => "status-neutral",
-            Self::NotPreferred => "status-not-preferred",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct Tool {
-    pub id: String,
-    pub composite_name: String,
-    pub name: String,
-    pub kind: String,
-    pub diameter: Length,
-    pub catalog_diameter: Option<Length>,
-    pub point_angle: Angle,
-    pub catalog_point_angle: Option<Angle>,
-    pub feed_rate: Option<FeedRate>,
-    pub catalog_feed_rate: Option<FeedRate>,
-    pub spindle_speed: Option<RotationalSpeed>,
-    pub catalog_spindle_speed: Option<RotationalSpeed>,
-    pub status: ToolStatus,
-    pub preference: ToolPreference,
-    pub source_catalog: String,
-    pub manufacturer: Option<String>,
-    pub sku: Option<String>,
-}
-
-impl Tool {
-    pub fn display_name(&self) -> String {
-        let composite = self.composite_name.trim();
-        let nickname = self.name.trim();
-
-        if nickname.is_empty() {
-            composite.to_string()
-        } else {
-            format!("{} - {}", composite, nickname)
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct CatalogStockTool {
-    pub key: String,
-    pub catalog_name: String,
-    pub section_name: String,
-    pub display_name: String,
-    pub kind: String,
-    pub diameter: Length,
-    pub point_angle: Angle,
-    pub feed_rate: Option<FeedRate>,
-    pub spindle_speed: Option<RotationalSpeed>,
-    pub sku: Option<String>,
-}
-
-#[derive(Clone)]
-pub struct CatalogStockSection {
-    pub key: String,
-    pub name: String,
-    pub tools: Vec<CatalogStockTool>,
-}
-
-#[derive(Clone)]
-pub struct CatalogStockCatalog {
-    pub key: String,
-    pub name: String,
-    pub built_in: bool,
-    pub sections: Vec<CatalogStockSection>,
-}
-
-#[allow(dead_code)]
-pub fn load_stock_catalog_index() -> Vec<CatalogStockCatalog> {
-    // Primary source: user catalog directory.  Files are parsed and validated
-    // by CatalogManager; only valid catalogs are included.
-    let mut source_catalogs: Vec<(String, Catalog, bool)> = Vec::new();
-
-    if let (Ok(mut manager), Ok(dir)) = (CatalogManager::new(), catalog_dir()) {
-        let _ = manager.load_dir(&dir);
-        source_catalogs = manager
-            .catalogs()
-            .map(|(stem, catalog)| (stem.to_string(), catalog.clone(), false))
-            .collect();
-    }
-
-    // Fallback to built-in catalogs if user dir load yields no valid entries.
-    if source_catalogs.is_empty() {
-        let sources = [
-            ("kyocera".to_string(), include_str!("../../resources/catalogs/kyocera.yaml")),
-            ("unionfab".to_string(), include_str!("../../resources/catalogs/unionfab.yaml")),
-            ("generic".to_string(), include_str!("../../resources/catalogs/generic.yaml")),
-        ];
-
-        for (stem, text) in sources {
-            if let Ok(catalog) = parse_catalog_with_backfill(text, &stem) {
-                source_catalogs.push((stem, catalog, true));
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-
-    for (stem, catalog, built_in) in source_catalogs {
-        let catalog_key = slug(&stem);
-        let mut sections = Vec::new();
-
-        for (section_idx, section) in catalog.sections.iter().enumerate() {
-            let section_key = format!("{}::s{}", catalog_key, section_idx);
-            let mut tools = Vec::new();
-
-            for (tool_idx, tool) in section.tools.iter().enumerate() {
-                let feed_rate = tool
-                    .table_feed
-                    .or(tool.z_feed);
-
-                let kind = match tool.tool_type {
-                    ToolType::Drillbit => "Drill",
-                    ToolType::Routerbit => "Router",
-                    ToolType::Engraver => "Engraver",
-                    ToolType::Vbit => "V-bit",
-                    ToolType::Endmill => "Endmill",
-                }
-                .to_string();
-
-                let sku_name = tool.sku.clone().unwrap_or_default();
-                let display_name = if sku_name.trim().is_empty() {
-                    format!("{} {}", kind, tool.diameter.unit_display(UserUnitSystem::Metric).user)
-                } else {
-                    sku_name.clone()
-                };
-
-                tools.push(CatalogStockTool {
-                    key: format!("{}::t{}", section_key, tool_idx),
-                    catalog_name: catalog.name.clone(),
-                    section_name: section.name.clone(),
-                    display_name,
-                    kind,
-                    diameter: tool.diameter,
-                    point_angle: tool.point_angle,
-                    feed_rate,
-                    spindle_speed: tool.spindle_rpm,
-                    sku: tool.sku.clone(),
-                });
-            }
-
-            sections.push(CatalogStockSection {
-                key: section_key,
-                name: section.name.clone(),
-                tools,
-            });
-        }
-
-        out.push(CatalogStockCatalog {
-            key: catalog_key,
-            name: catalog.name,
-            built_in,
-            sections,
-        });
-    }
-
-    out
-}
+// =============================================================================
+// MODEL HIERARCHY MAP
+// =============================================================================
+// 1) UI shell models
+//    - UiLaunchData, Screen, JobCenterView, UnitSystem, Theme, GenerationState
+//
+// 2) Schema-bound profile models
+//    - CNC profile                -> resources/schemas/cnc.yaml
+//    - Fixture profile            -> resources/schemas/fixture.yaml
+//    - Machining profile          -> resources/schemas/processing.yaml
+//    - Toolset profile            -> resources/schemas/toolset.yaml
+//
+// 3) Schema-bound stock/catalog models
+//    - Tool stock                -> resources/schemas/stock.yaml
+//    - Catalog index snapshot    -> resources/schemas/catalog.yaml
+//
+// 4) Job runtime configuration
+//    - JobConfig and operation strategy enums
+//
+// 5) UI runtime state and persistence
+//    - UiState and its mutators/import/export helpers
+//
+// 6) Schema conversion helpers
+//    - *_to_value / *_from_value and primitive parsing helpers
 
 fn slug(input: &str) -> String {
     let mut out = String::new();
@@ -528,350 +74,35 @@ fn slug(input: &str) -> String {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    Top,
-    Bottom,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistRealm {
+    GlobalSettings,
+    CncProfiles,
+    FixtureProfiles,
+    ProcessingProfiles,
+    ToolsetProfiles,
+    Stock,
 }
 
-impl Side {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Top => "top",
-            Self::Bottom => "bottom",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum RotationMode {
-    Auto,
-    Manual,
-}
-
-impl RotationMode {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Manual => "manual",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum AtcRackStrategy {
-    Off,
-    Reuse,
-    Overwrite,
-}
-
-impl AtcRackStrategy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Reuse => "reuse",
-            Self::Overwrite => "overwrite",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ProductionOperation {
-    DrillLocatingPins,
-    DrillPth,
-    DrillNpth,
-    RouteBoard,
-    MillBoard,
-}
-
-impl ProductionOperation {
-    pub fn all() -> [Self; 5] {
-        [
-            Self::DrillLocatingPins,
-            Self::DrillPth,
-            Self::DrillNpth,
-            Self::RouteBoard,
-            Self::MillBoard,
-        ]
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::DrillLocatingPins => "Drill Locating Pins",
-            Self::DrillPth => "Drill Plated Through Holes (PTH)",
-            Self::DrillNpth => "Drill Non-Plated Through Holes (NPTH)",
-            Self::RouteBoard => "Route Board Outline",
-            Self::MillBoard => "Mill Board Outline",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CutDepthStrategy {
-    Automatic,
-    SinglePass,
-    MultiPass,
-}
-
-impl CutDepthStrategy {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::SinglePass => "single_pass",
-            Self::MultiPass => "multi_pass",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic (recommended)",
-            Self::SinglePass => "Single Pass",
-            Self::MultiPass => "Multi-pass",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BoardThicknessMode {
-    Automatic,
-    Preset,
-    UserDefined,
-    Probe,
-}
-
-impl BoardThicknessMode {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::Preset => "preset",
-            Self::UserDefined => "user_defined",
-            Self::Probe => "probe",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Z0DeterminationMode {
-    ManualAdjustZ0,
-    TouchProbe,
-}
-
-impl Z0DeterminationMode {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ManualAdjustZ0 => "manual_adjust_z0",
-            Self::TouchProbe => "touch_probe",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum TouchProbeSource {
-    ManualInstallation,
-    AtcSlot,
-}
-
-impl TouchProbeSource {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ManualInstallation => "manual_installation",
-            Self::AtcSlot => "atc_slot",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BoardOrientation {
-    Automatic,
-    NoRotation,
-    Rotate90,
-    Rotate180,
-    Rotate270,
-    RotateCustom,
-}
-
-impl BoardOrientation {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::NoRotation => "no_rotation",
-            Self::Rotate90 => "rotate_90",
-            Self::Rotate180 => "rotate_180",
-            Self::Rotate270 => "rotate_270",
-            Self::RotateCustom => "rotate_custom",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct JobConfig {
-    pub selected_operations: Vec<ProductionOperation>,
-    pub side: Side,
-    pub rotation_mode: RotationMode,
-    pub rotation_angle: i32,
-    pub atc_strategy: AtcRackStrategy,
-    pub tab_count: u8,
-    pub tab_width_mm: f32,
-    pub tab_width_baseline_mm: f32,
-    pub allow_routing_holes: bool,
-    pub drill_then_route: bool,
-    pub pilot_hole_fallback: bool,
-    pub cut_depth_strategy: CutDepthStrategy,
-    pub multi_pass_max_depth_mm: f32,
-    pub outline_router_tool_id: Option<String>,
-    pub board_thickness_mode: BoardThicknessMode,
-    pub board_thickness_preset_mm: f32,
-    pub board_thickness_user_value: f32,
-    pub z0_determination_mode: Z0DeterminationMode,
-    pub touch_probe_source: TouchProbeSource,
-    pub touch_probe_atc_slot: u8,
-    pub mouse_bites_enabled: bool,
-    pub mouse_bite_pitch_mm: f32,
-    pub mouse_bite_drill_tool_id: Option<String>,
-    pub board_orientation: BoardOrientation,
-    pub board_orientation_custom_degrees: f32,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, PartialEq)]
-pub struct AppError {
-    pub id: String,
-    pub domain: String,
-    pub is_error: bool,
-    pub message: String,
-    pub details: Option<String>,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct AppEvent {
-    pub id: String,
-    pub message: String,
-    pub created_ms: u64,
-}
-
-#[derive(Clone)]
-pub struct RackSlot {
-    pub tool_id: Option<String>,
-    pub locked: bool,
-    pub disabled: bool,
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct BoardLayers {
-    pub holes: bool,
-    pub routes: bool,
-    pub paths: bool,
-    pub tabs: bool,
-}
-
-#[derive(Clone)]
-pub struct UiState {
-    pub selected_screen: Screen,
-    pub selected_project_view: JobCenterView,
-    pub unit_system: UnitSystem,
-    pub theme: Theme,
-    pub machines: Vec<MachineProfile>,
-    pub selected_machine_id: Option<String>,
-    pub fixtures: Vec<FixtureProfile>,
-    pub selected_fixture_id: Option<String>,
-    pub process_profiles: Vec<JobProfile>,
-    pub selected_process_profile_id: Option<String>,
-    pub last_edited_process_profile_id: Option<String>,
-    pub toolsets: Vec<ToolsetProfile>,
-    pub selected_toolset_id: Option<String>,
-    pub machine_mru: Vec<String>,
-    pub focus_profile_name_editor: bool,
-    pub catalogs: Vec<CatalogStockCatalog>,
-    pub tools: Vec<Tool>,
-    pub errors: Vec<AppError>,
-    pub events: Vec<AppEvent>,
-    pub generation_state: GenerationState,
-    pub project_config: JobConfig,
-    pub gcode: String,
-    pub save_filename: String,
-    pub gcode_modified: bool,
-    pub show_first_launch: bool,
-    pub rack_slots: BTreeMap<u8, RackSlot>,
-    #[allow(dead_code)]
-    pub board_layers: BoardLayers,
-    pub board: Option<BoardSnapshot>,
+impl PersistRealm {
+    pub const ALL: [PersistRealm; 6] = [
+        PersistRealm::GlobalSettings,
+        PersistRealm::CncProfiles,
+        PersistRealm::FixtureProfiles,
+        PersistRealm::ProcessingProfiles,
+        PersistRealm::ToolsetProfiles,
+        PersistRealm::Stock,
+    ];
 }
 
 impl UiState {
+    // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(save_filename_override: Option<String>, board_snapshot: Option<BoardSnapshot>) -> Self {
-        let tools = vec![
-            Tool {
-                id: "tool-1".to_string(),
-                composite_name: "0.8mm Carbide Drill".to_string(),
-                name: "Pilot holes".to_string(),
-                kind: "Drill".to_string(),
-                diameter: Length::from_mm(0.8),
-                catalog_diameter: Some(Length::from_mm(0.8)),
-                point_angle: Angle::from_degrees(130.0),
-                catalog_point_angle: Some(Angle::from_degrees(130.0)),
-                feed_rate: Some(FeedRate::from_mm_per_min(120.0)),
-                catalog_feed_rate: Some(FeedRate::from_mm_per_min(120.0)),
-                spindle_speed: Some(RotationalSpeed::from_rpm(18_000.0)),
-                catalog_spindle_speed: Some(RotationalSpeed::from_rpm(18_000.0)),
-                status: ToolStatus::InStock,
-                preference: ToolPreference::Preferred,
-                source_catalog: "CNCLab / Drills".to_string(),
-                manufacturer: Some("CNCLab".to_string()),
-                sku: Some("DRL-08".to_string()),
-            },
-            Tool {
-                id: "tool-2".to_string(),
-                composite_name: "1.0mm End Mill".to_string(),
-                name: "Outline router".to_string(),
-                kind: "End Mill".to_string(),
-                diameter: Length::from_mm(1.0),
-                catalog_diameter: Some(Length::from_mm(1.0)),
-                point_angle: Angle::from_degrees(180.0),
-                catalog_point_angle: Some(Angle::from_degrees(180.0)),
-                feed_rate: Some(FeedRate::from_mm_per_min(280.0)),
-                catalog_feed_rate: Some(FeedRate::from_mm_per_min(280.0)),
-                spindle_speed: Some(RotationalSpeed::from_rpm(16_000.0)),
-                catalog_spindle_speed: Some(RotationalSpeed::from_rpm(16_000.0)),
-                status: ToolStatus::InStock,
-                preference: ToolPreference::Neutral,
-                source_catalog: "CNCLab / End Mills".to_string(),
-                manufacturer: Some("CNCLab".to_string()),
-                sku: Some("EM-10".to_string()),
-            },
-            Tool {
-                id: "tool-3".to_string(),
-                composite_name: "30deg V-Bit".to_string(),
-                name: String::new(),
-                kind: "V-Bit".to_string(),
-                diameter: Length::from_mm(0.2),
-                catalog_diameter: None,
-                point_angle: Angle::from_degrees(30.0),
-                catalog_point_angle: None,
-                feed_rate: None,
-                catalog_feed_rate: None,
-                spindle_speed: None,
-                catalog_spindle_speed: None,
-                status: ToolStatus::OutOfStock,
-                preference: ToolPreference::NotPreferred,
-                source_catalog: "Manual".to_string(),
-                manufacturer: None,
-                sku: None,
-            },
-        ];
+        let tools = vec![];
 
         let mut state = Self {
-            selected_screen: Screen::Project,
-            selected_project_view: JobCenterView::Board,
+            selected_screen: Screen::Job,
+            selected_job_view: JobCenterView::Board,
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -890,7 +121,7 @@ impl UiState {
             selected_toolset_id: None,
             machine_mru: vec![],
             focus_profile_name_editor: false,
-            catalogs: built_in_catalogs(),
+            catalogs: vec![],
             tools,
             errors: vec![],
             events: vec![],
@@ -955,6 +186,7 @@ impl UiState {
         state
     }
 
+    // Loads persisted domains and resolves cross-domain selections.
     pub fn hydrate_from_persistence(&mut self) {
         let Some(persisted) = persistence_state() else {
             return;
@@ -995,6 +227,10 @@ impl UiState {
         let persisted_tools = tools_from_stock_value(&persisted.stock);
         if !persisted_tools.is_empty() {
             self.tools = persisted_tools;
+        } else if let Some(disk_tools) = load_tools_direct_from_disk() {
+            if !disk_tools.is_empty() {
+                self.tools = disk_tools;
+            }
         }
 
         let persisted_toolsets: Vec<ToolsetProfile> = persisted
@@ -1072,56 +308,131 @@ impl UiState {
         }
     }
 
-    pub fn persist_all(&self) {
+    pub fn persist_realms(&self, realms: &[PersistRealm]) {
         let Ok(app_dirs) = ensure_app_dirs() else {
             return;
         };
 
-        let global_settings = json!({
-            "units": {
-                "system": self.unit_system.as_str(),
-                "size_unit": self.unit_system.length_unit_label(),
-                "speed_unit": self.unit_system.feed_unit_label(),
+        for realm in realms {
+            match realm {
+                PersistRealm::GlobalSettings => self.persist_global_settings(&app_dirs),
+                PersistRealm::CncProfiles => {
+                    self.persist_profile_map_realm(
+                        &app_dirs,
+                        &self.machines,
+                        |machine| machine.id.clone(),
+                        machine_profile_to_value,
+                        save_cnc_profiles,
+                    );
+                }
+                PersistRealm::FixtureProfiles => {
+                    self.persist_profile_map_realm(
+                        &app_dirs,
+                        &self.fixtures,
+                        |fixture| fixture.id.clone(),
+                        fixture_profile_to_value,
+                        save_fixture_profiles,
+                    );
+                }
+                PersistRealm::ProcessingProfiles => {
+                    self.persist_profile_map_realm(
+                        &app_dirs,
+                        &self.process_profiles,
+                        |profile| profile.id.clone(),
+                        process_profile_to_value,
+                        save_processing_profiles,
+                    );
+                }
+                PersistRealm::ToolsetProfiles => self.persist_toolset_profiles(&app_dirs),
+                PersistRealm::Stock => self.persist_stock(&app_dirs),
+            }
+        }
+    }
+
+    pub(crate) fn realm_payload(&self, realm: PersistRealm) -> Value {
+        match realm {
+            PersistRealm::GlobalSettings => self.make_global_settings_payload(),
+            PersistRealm::CncProfiles => serde_json::to_value(
+                self.machines
+                    .iter()
+                    .map(|machine| (machine.id.clone(), machine_profile_to_value(machine)))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .unwrap_or(Value::Null),
+            PersistRealm::FixtureProfiles => serde_json::to_value(
+                self.fixtures
+                    .iter()
+                    .map(|fixture| (fixture.id.clone(), fixture_profile_to_value(fixture)))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .unwrap_or(Value::Null),
+            PersistRealm::ProcessingProfiles => serde_json::to_value(
+                self.process_profiles
+                    .iter()
+                    .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .unwrap_or(Value::Null),
+            PersistRealm::ToolsetProfiles => {
+                serde_json::to_value(build_toolset_profiles(&self.toolsets)).unwrap_or(Value::Null)
+            }
+            PersistRealm::Stock => stock_value_from_tools(&self.tools),
+        }
+    }
+
+    fn persist_global_settings(&self, app_dirs: &AppDirs) {
+        let global_settings = self.make_global_settings_payload();
+        let _ = save_global_settings(&app_dirs, &global_settings);
+    }
+
+    fn make_global_settings_payload(&self) -> Value {
+        json!({
+            "units": match self.unit_system {
+                UnitSystem::Metric => "mm",
+                UnitSystem::Imperial => "in",
+                UnitSystem::Mil => "mil",
             },
-            "theme": {
-                "mode": self.theme.as_str(),
+            "theme": match self.theme {
+                Theme::Light => "Light",
+                Theme::Dark => "Dark",
             },
             "selected_process_profile_id": self.selected_process_profile_id,
-            "last_edited_process_profile_id": self.last_edited_process_profile_id,
             "selected_cnc_profile_id": self.selected_machine_id,
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
-        });
-        let _ = save_global_settings(&app_dirs, &global_settings);
+        })
+    }
 
-        let cnc_profiles = self
-            .machines
-            .iter()
-            .map(|machine| (machine.id.clone(), machine_profile_to_value(machine)))
-            .collect::<BTreeMap<_, _>>();
-        let _ = save_cnc_profiles(&app_dirs, &cnc_profiles);
-
-        let fixture_profiles = self
-            .fixtures
-            .iter()
-            .map(|fixture| (fixture.id.clone(), fixture_profile_to_value(fixture)))
-            .collect::<BTreeMap<_, _>>();
-        let _ = save_fixture_profiles(&app_dirs, &fixture_profiles);
-
-        let processing_profiles = self
-            .process_profiles
-            .iter()
-            .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
-            .collect::<BTreeMap<_, _>>();
-        let _ = save_processing_profiles(&app_dirs, &processing_profiles);
-
-        let toolset_profiles = build_toolset_profiles(&self.toolsets);
-        let _ = save_toolset_profiles(&app_dirs, &toolset_profiles);
-
+    fn persist_stock(&self, app_dirs: &AppDirs) {
         let stock = stock_value_from_tools(&self.tools);
         let _ = save_stock(&app_dirs, &stock);
     }
 
+    fn persist_stock_snapshot(&self) {
+        self.persist_realms(&[PersistRealm::Stock]);
+    }
+
+    fn persist_toolset_profiles(&self, app_dirs: &AppDirs) {
+        let toolset_profiles = build_toolset_profiles(&self.toolsets);
+        let _ = save_toolset_profiles(&app_dirs, &toolset_profiles);
+    }
+
+    fn persist_profile_map_realm<T>(
+        &self,
+        app_dirs: &AppDirs,
+        items: &[T],
+        id_of: impl Fn(&T) -> String,
+        to_value: impl Fn(&T) -> Value,
+        save_fn: impl Fn(&AppDirs, &BTreeMap<String, Value>) -> Result<(), ConfigError>,
+    ) {
+        let values = items
+            .iter()
+            .map(|item| (id_of(item), to_value(item)))
+            .collect::<BTreeMap<_, _>>();
+        let _ = save_fn(app_dirs, &values);
+    }
+
+    // Runtime event log helper for UI notifications.
     pub fn log_event(&mut self, message: impl Into<String>) {
         let created_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1141,6 +452,7 @@ impl UiState {
         }
     }
 
+    // Runtime error helper for domain-tagged diagnostics.
     fn push_runtime_error(&mut self, domain: &str, message: String, details: Option<String>) {
         let created_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1229,7 +541,7 @@ impl UiState {
             self.push_runtime_error(
                 "process-profile",
                 format!(
-                    "Processing profile '{}' references an unavailable CNC profile; using default.",
+                    "Machining profile '{}' references an unavailable CNC profile; using default.",
                     profile.name
                 ),
                 Some(format!("Missing CNC profile id: {}", profile.cnc_profile_id)),
@@ -1253,7 +565,7 @@ impl UiState {
             self.push_runtime_error(
                 "process-profile",
                 format!(
-                    "Processing profile '{}' references an unavailable fixture profile; using default.",
+                    "Machining profile '{}' references an unavailable fixture profile; using default.",
                     profile.name
                 ),
                 Some(format!("Missing fixture profile id: {}", profile.fixture_profile_id)),
@@ -1277,7 +589,7 @@ impl UiState {
             self.push_runtime_error(
                 "process-profile",
                 format!(
-                    "Processing profile '{}' references an unavailable toolset profile; using default.",
+                    "Machining profile '{}' references an unavailable toolset profile; using default.",
                     profile.name
                 ),
                 Some(format!("Missing toolset profile id: {}", profile.toolset_profile_id)),
@@ -1304,7 +616,7 @@ impl UiState {
                         self.push_runtime_error(
                             "process-profile",
                             format!(
-                                "Operation override '{}' is not allowed by processing profile '{}'; using profile default.",
+                                "Operation override '{}' is not allowed by machining profile '{}'; using profile default.",
                                 op.label(),
                                 profile.name
                             ),
@@ -1329,7 +641,7 @@ impl UiState {
     fn unique_process_profile_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
         let trimmed = base_name.trim();
         let base = if trimmed.is_empty() {
-            "Processing profile".to_string()
+            "Machining profile".to_string()
         } else {
             trimmed.to_string()
         };
@@ -1356,7 +668,7 @@ impl UiState {
 
     pub fn rename_selected_process_profile(&mut self, new_name: &str) -> Result<String, String> {
         let Some(selected) = self.selected_process_profile_id.clone() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         let unique = self.unique_process_profile_name(new_name, Some(selected.as_str()));
@@ -1370,17 +682,17 @@ impl UiState {
             return Ok(unique);
         }
 
-        Err("Selected processing profile was not found".to_string())
+        Err("Selected machining profile was not found".to_string())
     }
 
     pub fn clone_selected_process_profile(&mut self) -> Result<String, String> {
         let Some(current) = self.selected_process_profile().cloned() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         let clone_name_seed = format!("{} - copy", current.name.trim());
         let unique_name = self.unique_process_profile_name(&clone_name_seed, None);
-        let id = format!("project-profile-{}", slug(&unique_name));
+        let id = format!("machining-profile-{}", slug(&unique_name));
 
         self.process_profiles.push(JobProfile {
             id: id.clone(),
@@ -1402,7 +714,7 @@ impl UiState {
         }
 
         let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         if let Some(profile) = self
@@ -1416,7 +728,7 @@ impl UiState {
             return Ok(());
         }
 
-        Err("Selected processing profile was not found".to_string())
+        Err("Selected machining profile was not found".to_string())
     }
 
     pub fn set_selected_process_profile_fixture(&mut self, fixture_id: &str) -> Result<(), String> {
@@ -1425,7 +737,7 @@ impl UiState {
         }
 
         let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         if let Some(profile) = self
@@ -1439,7 +751,7 @@ impl UiState {
             return Ok(());
         }
 
-        Err("Selected processing profile was not found".to_string())
+        Err("Selected machining profile was not found".to_string())
     }
 
     pub fn set_selected_process_profile_toolset(&mut self, toolset_id: &str) -> Result<(), String> {
@@ -1448,7 +760,7 @@ impl UiState {
         }
 
         let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         if let Some(profile) = self
@@ -1462,27 +774,27 @@ impl UiState {
             return Ok(());
         }
 
-        Err("Selected processing profile was not found".to_string())
+        Err("Selected machining profile was not found".to_string())
     }
 
     pub fn import_process_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
         let yaml_value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|_| "Processing profile import failed: invalid YAML".to_string())?;
+            serde_yaml::from_str(yaml).map_err(|_| "Machining profile import failed: invalid YAML".to_string())?;
         let json_value: Value = serde_json::to_value(yaml_value)
-            .map_err(|_| "Processing profile import failed: invalid data".to_string())?;
+            .map_err(|_| "Machining profile import failed: invalid data".to_string())?;
         let Some(mut profile) = process_profile_from_value(&json_value) else {
-            return Err("Processing profile import failed: missing required processing fields".to_string());
+            return Err("Machining profile import failed: missing required machining fields".to_string());
         };
 
         profile.name = self.unique_process_profile_name(&profile.name, None);
-        profile.id = format!("project-profile-{}", slug(&profile.name));
+        profile.id = format!("machining-profile-{}", slug(&profile.name));
 
         if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
             profile.cnc_profile_id = self
                 .selected_machine_id
                 .clone()
                 .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
-                .ok_or_else(|| "Processing profile import failed: no CNC profile is available".to_string())?;
+                .ok_or_else(|| "Machining profile import failed: no CNC profile is available".to_string())?;
         }
 
         if !self.fixtures.iter().any(|fixture| fixture.id == profile.fixture_profile_id) {
@@ -1490,7 +802,7 @@ impl UiState {
                 .selected_fixture_id
                 .clone()
                 .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
-                .ok_or_else(|| "Processing profile import failed: no fixture profile is available".to_string())?;
+                .ok_or_else(|| "Machining profile import failed: no fixture profile is available".to_string())?;
         }
 
         if !self.toolsets.iter().any(|toolset| toolset.id == profile.toolset_profile_id) {
@@ -1498,7 +810,7 @@ impl UiState {
                 .selected_toolset_id
                 .clone()
                 .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
-                .ok_or_else(|| "Processing profile import failed: no toolset profile is available".to_string())?;
+                .ok_or_else(|| "Machining profile import failed: no toolset profile is available".to_string())?;
         }
 
         let selected = profile.id.clone();
@@ -1510,7 +822,7 @@ impl UiState {
 
     pub fn export_selected_process_profile_yaml(&self) -> Result<String, String> {
         let Some(profile) = self.selected_process_profile() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         let value = process_profile_to_value(profile);
@@ -1768,7 +1080,7 @@ impl UiState {
         op: ProductionOperation,
     ) -> Result<(), String> {
         let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No processing profile selected".to_string());
+            return Err("No machining profile selected".to_string());
         };
 
         if let Some(profile) = self
@@ -1791,7 +1103,7 @@ impl UiState {
             return Ok(());
         }
 
-        Err("Selected processing profile was not found".to_string())
+        Err("Selected machining profile was not found".to_string())
     }
 
     pub fn selected_machine_has_atc(&self) -> bool {
@@ -1867,6 +1179,7 @@ impl UiState {
             self.machine_mru.retain(|m| m != &id);
             self.machine_mru.insert(0, id);
         }
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
     pub fn add_machine_profile(&mut self, mut profile: MachineProfile) {
@@ -1890,8 +1203,8 @@ impl UiState {
                 .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
             if let Some(fixture_id) = fixture_id {
                 let process_profile = JobProfile {
-                    id: "project-profile-default".to_string(),
-                    name: "Default processing profile".to_string(),
+                    id: "machining-profile-default".to_string(),
+                    name: "Default machining profile".to_string(),
                     cnc_profile_id: profile.id.clone(),
                     fixture_profile_id: fixture_id,
                     toolset_profile_id: self
@@ -1902,9 +1215,16 @@ impl UiState {
                     default_operations: vec![ProductionOperation::DrillPth],
                 };
                 self.process_profiles.push(process_profile);
-                self.select_process_profile_by_id(Some("project-profile-default".to_string()));
+                self.select_process_profile_by_id(Some("machining-profile-default".to_string()));
             }
         }
+
+        self.persist_realms(&[
+            PersistRealm::CncProfiles,
+            PersistRealm::ProcessingProfiles,
+            PersistRealm::ToolsetProfiles,
+            PersistRealm::GlobalSettings,
+        ]);
     }
 
     pub fn rename_selected_machine(&mut self, new_name: &str) -> Result<String, String> {
@@ -1918,8 +1238,10 @@ impl UiState {
         }
 
         if let Some(target) = self.machines.iter_mut().find(|m| m.id == selected) {
-            target.name = unique;
-            return Ok(target.name.clone());
+            target.name = unique.clone();
+            let renamed = target.name.clone();
+            self.persist_realms(&[PersistRealm::CncProfiles]);
+            return Ok(renamed);
         }
 
         Err("Selected CNC profile was not found".to_string())
@@ -2131,7 +1453,7 @@ impl UiState {
 
         let unique_name = self.unique_process_profile_name(name, None);
 
-        let id = format!("project-profile-{}", slug(&unique_name));
+        let id = format!("machining-profile-{}", slug(&unique_name));
         let default_operations = if self.project_config.selected_operations.is_empty() {
             vec![ProductionOperation::DrillPth]
         } else {
@@ -2170,7 +1492,7 @@ impl UiState {
         {
             impact
                 .dependent_process_profiles
-                .push(format!("Processing profile: {}", profile.name));
+                .push(format!("Machining profile: {}", profile.name));
         }
 
         if self
@@ -2179,7 +1501,7 @@ impl UiState {
             .map(|id| dependent_ids.contains(id))
             .unwrap_or(false)
         {
-            impact.deleted_live_projects.push("Active project session".to_string());
+            impact.deleted_live_projects.push("Active job session".to_string());
         }
 
         impact
@@ -2207,7 +1529,7 @@ impl UiState {
         {
             impact
                 .dependent_process_profiles
-                .push(format!("Processing profile: {}", profile.name));
+                .push(format!("Machining profile: {}", profile.name));
         }
 
         if self
@@ -2216,7 +1538,7 @@ impl UiState {
             .map(|id| dependent_ids.contains(id))
             .unwrap_or(false)
         {
-            impact.deleted_live_projects.push("Active project session".to_string());
+            impact.deleted_live_projects.push("Active job session".to_string());
         }
 
         impact
@@ -2231,7 +1553,7 @@ impl UiState {
         {
             impact
                 .primary_profiles
-                .push(format!("Processing profile: {}", profile.name));
+                .push(format!("Machining profile: {}", profile.name));
         }
         if self
             .selected_process_profile_id
@@ -2239,7 +1561,7 @@ impl UiState {
             .map(|id| id == process_profile_id)
             .unwrap_or(false)
         {
-            impact.deleted_live_projects.push("Active project session".to_string());
+            impact.deleted_live_projects.push("Active job session".to_string());
         }
         impact
     }
@@ -2266,7 +1588,7 @@ impl UiState {
         {
             impact
                 .dependent_process_profiles
-                .push(format!("Processing profile: {}", profile.name));
+                .push(format!("Machining profile: {}", profile.name));
         }
 
         if self
@@ -2275,7 +1597,7 @@ impl UiState {
             .map(|id| dependent_ids.contains(id))
             .unwrap_or(false)
         {
-            impact.deleted_live_projects.push("Active project session".to_string());
+            impact.deleted_live_projects.push("Active job session".to_string());
         }
 
         impact
@@ -2316,6 +1638,12 @@ impl UiState {
             self.show_first_launch = true;
             self.selected_screen = Screen::CncProfiles;
         }
+
+        self.persist_realms(&[
+            PersistRealm::CncProfiles,
+            PersistRealm::GlobalSettings,
+            PersistRealm::ProcessingProfiles,
+        ]);
 
         impact
     }
@@ -2397,7 +1725,7 @@ impl UiState {
     pub fn add_demo_tool(&mut self) {
         let idx = self.tools.len() + 1;
         self.tools.push(Tool {
-            id: format!("tool-{idx}"),
+            id: self.next_tool_id(),
             composite_name: format!("0.6mm End Mill {idx}"),
             name: String::new(),
             kind: "End Mill".to_string(),
@@ -2415,16 +1743,15 @@ impl UiState {
             manufacturer: None,
             sku: None,
         });
+        self.persist_stock_snapshot();
     }
 
     fn next_tool_id(&self) -> String {
-        let mut idx = self.tools.len() + 1;
         loop {
-            let candidate = format!("tool-{idx}");
+            let candidate = new_uuid_v7_like();
             if !self.tools.iter().any(|t| t.id == candidate) {
                 return candidate;
             }
-            idx += 1;
         }
     }
 
@@ -2452,66 +1779,6 @@ impl UiState {
             }
             index += 1;
         }
-    }
-
-    fn unique_catalog_name(&self, base_name: &str) -> String {
-        let base = if base_name.trim().is_empty() {
-            "Catalog".to_string()
-        } else {
-            base_name.trim().to_string()
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} ({})", base, index)
-            };
-            if !self.catalogs.iter().any(|c| c.name == candidate) {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    fn unique_catalog_key(&self, base: &str) -> String {
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.to_string()
-            } else {
-                format!("{}-{}", base, index)
-            };
-            if !self.catalogs.iter().any(|c| c.key == candidate) {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    pub fn import_catalog_text(&mut self, stem: &str, yaml_text: &str) -> Result<String, String> {
-        let catalog = parse_catalog_with_backfill(yaml_text, stem)
-            .map_err(|_| "Catalog import failed: invalid YAML or schema".to_string())?;
-        let unique_name = self.unique_catalog_name(&catalog.name);
-        let key_base = format!("import-{}", slug(stem));
-        let unique_key = self.unique_catalog_key(&key_base);
-        let stock_catalog = catalog_to_stock_catalog(&unique_key, &unique_name, &catalog, false);
-        self.catalogs.push(stock_catalog);
-        Ok(unique_name)
-    }
-
-    pub fn remove_catalog(&mut self, catalog_key: &str) -> Result<(), String> {
-        let Some(entry) = self.catalogs.iter().find(|c| c.key == catalog_key).cloned() else {
-            return Err("Catalog not found".to_string());
-        };
-
-        if entry.built_in {
-            return Err("Built-in catalogs cannot be deleted".to_string());
-        }
-
-        self.catalogs.retain(|c| c.key != catalog_key);
-        Ok(())
     }
 
     pub fn add_tools_from_catalog_selection(&mut self, selected_tool_keys: &[String]) -> usize {
@@ -2578,6 +1845,10 @@ impl UiState {
             }
         }
 
+        if added > 0 {
+            self.persist_stock_snapshot();
+        }
+
         added
     }
 
@@ -2590,6 +1861,7 @@ impl UiState {
             ..source
         };
         self.tools.push(clone);
+        self.persist_stock_snapshot();
         Some(new_id)
     }
 
@@ -2647,7 +1919,11 @@ impl UiState {
             self.project_config.mouse_bite_drill_tool_id = None;
         }
 
-        before.saturating_sub(self.tools.len())
+        let removed = before.saturating_sub(self.tools.len());
+        if removed > 0 {
+            self.persist_stock_snapshot();
+        }
+        removed
     }
 
     pub fn select_screen(&mut self, screen: Screen) {
@@ -2685,6 +1961,25 @@ impl UiState {
     }
 }
 
+fn load_tools_direct_from_disk() -> Option<Vec<Tool>> {
+    let app_dirs = ensure_app_dirs().ok()?;
+    let raw = fs::read_to_string(&app_dirs.stock).ok()?;
+    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&raw).ok()?;
+    let json_value: Value = serde_json::to_value(yaml_value).ok()?;
+    Some(tools_from_stock_value(&json_value))
+}
+
+// -----------------------------------------------------------------------------
+// 6) SCHEMA CONVERSION HELPERS
+// -----------------------------------------------------------------------------
+// Conversion helpers isolate schema document shapes from in-memory structs.
+//
+// Grouped by schema domain:
+// - cnc.yaml         : machine_profile_to_value / machine_profile_from_value
+// - fixture.yaml     : fixture_profile_to_value / fixture_profile_from_value
+// - processing.yaml  : process_profile_to_value / process_profile_from_value
+// - stock.yaml       : stock_value_from_tools / tools_from_stock_value
+// - toolset.yaml     : toolset_profile_to_value / toolset_profile_from_value
 fn machine_profile_to_value(machine: &MachineProfile) -> Value {
     json!({
         "schema_version": 1,
@@ -2914,6 +2209,7 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .or_else(|| value.get("tool_change_command").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
+        pending_required_fields: BTreeSet::new(),
     })
 }
 
@@ -3032,155 +2328,7 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
     })
 }
 
-fn stock_value_from_tools(tools: &[Tool]) -> Value {
-    let tool_values = tools
-        .iter()
-        .enumerate()
-        .map(|(index, tool)| {
-            json!({
-                "id": tool.id,
-                "summary": tool.display_name(),
-                "availability": tool_status_to_key(tool.status),
-                "preference": tool_preference_to_key(tool.preference),
-                "order": index,
-                "ref": {
-                    "catalog": tool.source_catalog,
-                    "tool_id": tool.id,
-                    "section": Value::Null,
-                    "sku": tool.sku,
-                },
-                "base": {
-                    "name": tool.composite_name,
-                    "kind": tool_kind_to_key(&tool.kind),
-                    "manufacturer": tool.manufacturer,
-                    "sku": tool.sku,
-                    "diameter": tool.diameter,
-                    "point_angle": tool.point_angle,
-                    "spindle": tool.spindle_speed,
-                    "z_feed": tool.feed_rate,
-                    "table_feed": tool.feed_rate,
-                },
-                "overrides": {
-                    "name": if tool.name.trim().is_empty() { Value::Null } else { Value::String(tool.name.clone()) },
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({ "tools": tool_values })
-}
-
-fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
-    let Some(items) = stock.get("tools").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-
-    items
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, item)| {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("tool-{}", idx + 1));
-
-            let base = item.get("base").unwrap_or(item);
-            let overrides = item.get("overrides").unwrap_or(&Value::Null);
-
-            let composite_name = base
-                .get("name")
-                .and_then(Value::as_str)
-                .or_else(|| item.get("summary").and_then(Value::as_str))
-                .unwrap_or("Tool")
-                .to_string();
-
-            let name = overrides
-                .get("name")
-                .and_then(Value::as_str)
-                .or_else(|| item.get("name").and_then(Value::as_str))
-                .unwrap_or("")
-                .to_string();
-
-            let kind = base
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(tool_kind_from_key)
-                .unwrap_or_else(|| "End Mill".to_string());
-
-            let diameter = base
-                .get("diameter")
-                .and_then(value_to_length)
-                .or_else(|| item.get("diameter").and_then(value_to_length))
-                .unwrap_or_else(|| Length::from_mm(1.0));
-
-            let point_angle = base
-                .get("point_angle")
-                .and_then(value_to_angle)
-                .or_else(|| item.get("point_angle").and_then(value_to_angle))
-                .unwrap_or_else(|| Angle::from_degrees(180.0));
-
-            let feed_rate = base
-                .get("table_feed")
-                .and_then(value_to_feed)
-                .or_else(|| base.get("z_feed").and_then(value_to_feed))
-                .or_else(|| item.get("feed_rate").and_then(value_to_feed));
-
-            let spindle_speed = base
-                .get("spindle")
-                .and_then(value_to_rpm_speed)
-                .or_else(|| item.get("spindle_speed").and_then(value_to_rpm_speed));
-
-            let source_catalog = item
-                .pointer("/ref/catalog")
-                .and_then(Value::as_str)
-                .or_else(|| item.get("source_catalog").and_then(Value::as_str))
-                .unwrap_or("Manual")
-                .to_string();
-
-            let manufacturer = base
-                .get("manufacturer")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .or_else(|| item.get("manufacturer").and_then(Value::as_str).map(ToString::to_string));
-
-            let sku = base
-                .get("sku")
-                .and_then(Value::as_str)
-                .map(ToString::to_string)
-                .or_else(|| item.get("sku").and_then(Value::as_str).map(ToString::to_string));
-
-            Some(Tool {
-                id,
-                composite_name,
-                name,
-                kind,
-                diameter,
-                catalog_diameter: Some(diameter),
-                point_angle,
-                catalog_point_angle: Some(point_angle),
-                feed_rate,
-                catalog_feed_rate: feed_rate,
-                spindle_speed,
-                catalog_spindle_speed: spindle_speed,
-                status: item
-                    .get("availability")
-                    .and_then(Value::as_str)
-                    .map(tool_status_from_key)
-                    .unwrap_or(ToolStatus::InStock),
-                preference: item
-                    .get("preference")
-                    .and_then(Value::as_str)
-                    .map(tool_preference_from_key)
-                    .unwrap_or(ToolPreference::Neutral),
-                source_catalog,
-                manufacturer,
-                sku,
-            })
-        })
-        .collect()
-}
-
+// toolset.yaml -> ToolsetProfile conversion boundary.
 fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
     let id = value.get("id")?.as_str()?.to_string();
     let name = value.get("name")?.as_str()?.to_string();
@@ -3237,6 +2385,7 @@ fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
     })
 }
 
+// ToolsetProfile -> toolset.yaml conversion boundary.
 fn toolset_profile_to_value(profile: &ToolsetProfile) -> Value {
     let slot_values = profile
         .slots
@@ -3309,57 +2458,6 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
     }
 }
 
-fn tool_status_to_key(status: ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::InStock => "in_stock",
-        ToolStatus::OutOfStock => "out_of_stock",
-    }
-}
-
-fn tool_status_from_key(value: &str) -> ToolStatus {
-    match value {
-        "out_of_stock" => ToolStatus::OutOfStock,
-        _ => ToolStatus::InStock,
-    }
-}
-
-fn tool_preference_to_key(preference: ToolPreference) -> &'static str {
-    match preference {
-        ToolPreference::Preferred => "preferred",
-        ToolPreference::Neutral => "neutral",
-        ToolPreference::NotPreferred => "not_preferred",
-    }
-}
-
-fn tool_preference_from_key(value: &str) -> ToolPreference {
-    match value {
-        "preferred" => ToolPreference::Preferred,
-        "not_preferred" => ToolPreference::NotPreferred,
-        _ => ToolPreference::Neutral,
-    }
-}
-
-fn tool_kind_to_key(kind: &str) -> &'static str {
-    match kind.to_ascii_lowercase().as_str() {
-        "drill" | "drillbit" => "drillbit",
-        "router" | "routerbit" => "routerbit",
-        "engraver" => "engraver",
-        "v-bit" | "vbit" => "vbit",
-        _ => "endmill",
-    }
-}
-
-fn tool_kind_from_key(value: &str) -> String {
-    match value {
-        "drillbit" => "Drill".to_string(),
-        "routerbit" => "Router".to_string(),
-        "engraver" => "Engraver".to_string(),
-        "vbit" => "V-Bit".to_string(),
-        "endmill" => "End Mill".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn value_to_length(value: &Value) -> Option<Length> {
     match value {
         Value::String(v) => Length::from_string(v, None).ok(),
@@ -3396,27 +2494,27 @@ fn value_to_rpm(value: &Value) -> Option<f64> {
     value_to_rpm_speed(value).map(RotationalSpeed::as_rpm)
 }
 
-fn value_to_angle(value: &Value) -> Option<Angle> {
-    match value {
-        Value::String(v) => Angle::from_string(v, None).ok(),
-        Value::Number(v) => v.as_f64().map(Angle::from_degrees),
-        _ => None,
-    }
-}
-
 fn load_persisted_unit_system() -> UnitSystem {
     let Some(state) = persistence_state() else {
         return UnitSystem::Metric;
     };
 
-    match state
+    let units_value = state
         .global_settings
         .get("units")
-        .and_then(|units| units.get("system"))
-        .and_then(|system| system.as_str())
-    {
+        .and_then(Value::as_str)
+        .or_else(|| {
+            // Backward compatibility for legacy nested shape.
+            state
+                .global_settings
+                .get("units")
+                .and_then(|units| units.get("system"))
+                .and_then(Value::as_str)
+        });
+
+    match units_value {
         Some("mil") => UnitSystem::Mil,
-        Some("imperial") => UnitSystem::Imperial,
+        Some("in") | Some("imperial") => UnitSystem::Imperial,
         _ => UnitSystem::Metric,
     }
 }
@@ -3429,11 +2527,18 @@ fn load_persisted_theme() -> Theme {
     let theme_mode = state
         .global_settings
         .get("theme")
-        .and_then(|theme| theme.get("mode"))
-        .and_then(|mode| mode.as_str())
+        .and_then(Value::as_str)
+        .or_else(|| {
+            // Backward compatibility for legacy nested shape.
+            state
+                .global_settings
+                .get("theme")
+                .and_then(|theme| theme.get("mode"))
+                .and_then(Value::as_str)
+        })
         .unwrap_or("dark");
 
-    Theme::from_str(theme_mode)
+    Theme::from_str(&theme_mode.to_ascii_lowercase())
 }
 
 pub fn sample_gcode() -> String {
@@ -3452,82 +2557,6 @@ G0 Z5.0\n\
 M5\n\
 M30\n"
         .to_string()
-}
-
-fn catalog_to_stock_catalog(
-    key: &str,
-    display_name: &str,
-    catalog: &Catalog,
-    built_in: bool,
-) -> CatalogStockCatalog {
-    let mut sections = Vec::new();
-
-    for (section_idx, section) in catalog.sections.iter().enumerate() {
-        let section_key = format!("{}::s{}", key, section_idx);
-        let mut tools = Vec::new();
-
-        for (tool_idx, tool) in section.tools.iter().enumerate() {
-            let feed_rate = tool.table_feed.or(tool.z_feed);
-            let kind = match tool.tool_type {
-                ToolType::Drillbit => "Drill",
-                ToolType::Routerbit => "Router",
-                ToolType::Engraver => "Engraver",
-                ToolType::Vbit => "V-bit",
-                ToolType::Endmill => "Endmill",
-            }
-            .to_string();
-
-            let sku_name = tool.sku.clone().unwrap_or_default();
-            let display_tool_name = if sku_name.trim().is_empty() {
-                format!("{} {}", kind, tool.diameter.unit_display(UserUnitSystem::Metric).user)
-            } else {
-                sku_name.clone()
-            };
-
-            tools.push(CatalogStockTool {
-                key: format!("{}::t{}", section_key, tool_idx),
-                catalog_name: display_name.to_string(),
-                section_name: section.name.clone(),
-                display_name: display_tool_name,
-                kind,
-                diameter: tool.diameter,
-                point_angle: tool.point_angle,
-                feed_rate,
-                spindle_speed: tool.spindle_rpm,
-                sku: tool.sku.clone(),
-            });
-        }
-
-        sections.push(CatalogStockSection {
-            key: section_key,
-            name: section.name.clone(),
-            tools,
-        });
-    }
-
-    CatalogStockCatalog {
-        key: key.to_string(),
-        name: display_name.to_string(),
-        built_in,
-        sections,
-    }
-}
-
-fn built_in_catalogs() -> Vec<CatalogStockCatalog> {
-    let sources = [
-        ("kyocera", include_str!("../../resources/catalogs/kyocera.yaml")),
-        ("unionfab", include_str!("../../resources/catalogs/unionfab.yaml")),
-        ("generic", include_str!("../../resources/catalogs/generic.yaml")),
-    ];
-
-    let mut out = Vec::new();
-    for (stem, text) in sources {
-        if let Ok(catalog) = parse_catalog_with_backfill(text, stem) {
-            let key = format!("builtin-{}", slug(stem));
-            out.push(catalog_to_stock_catalog(&key, &catalog.name, &catalog, true));
-        }
-    }
-    out
 }
 
 

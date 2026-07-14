@@ -1,5 +1,6 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "processing.yaml"
+x-schema-version: 1
 
 title: Processing
 description: >
