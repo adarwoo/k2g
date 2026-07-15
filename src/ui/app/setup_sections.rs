@@ -62,7 +62,7 @@ pub fn GeneralSettingsPanel(
     kicad_status: String,
     board_snapshot_summary: Option<String>,
 ) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
 
     rsx! {
         section { class: "setup-stage",
@@ -82,7 +82,7 @@ pub fn GeneralSettingsPanel(
                                 let value = evt.value();
                                 state
                                     .with_mut(|s| {
-                                        s.ui.theme = if value == "light" { Theme::Light } else { Theme::Dark };
+                                        s.theme = if value == "light" { Theme::Light } else { Theme::Dark };
                                     });
                             },
                             option { value: "dark", "Dark" }
@@ -111,7 +111,7 @@ pub fn MachineProfilesPanel(
     selected_library_profile: Signal<String>,
     import_feedback: Signal<String>,
 ) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let library_profiles = cnc_profile_library();
 
     rsx! {
@@ -148,7 +148,7 @@ pub fn MachineProfilesPanel(
                                 let key = selected_library_profile.read().clone();
                                 let selected = profiles.iter().find(|profile| profile.key == key).cloned();
                                 if let Some(profile) = selected {
-                                    state.with_mut(|s| s.ui.add_machine_profile(profile.machine));
+                                    super::mutate_ctx(state, |s| s.add_machine_profile(profile.machine));
                                     import_feedback.set("CNC profile added from template".to_string());
                                 } else {
                                     import_feedback
@@ -211,7 +211,7 @@ pub fn MachineProfilesPanel(
                                     return;
                                 }
                             };
-                            state.with_mut(|s| s.ui.add_machine_profile(profile));
+                            super::mutate_ctx(state, |s| s.add_machine_profile(profile));
                             import_feedback.set("CNC profile imported and selected".to_string());
                         },
                         "Import CNC profile"
@@ -244,7 +244,7 @@ pub fn MachineProfilesPanel(
                                         move |_| {
                                             state
                                                 .with_mut(|s| {
-                                                    s.ui.select_machine_profile_by_id(Some(machine_id.clone()))
+                                                    s.select_machine_profile_by_id(Some(machine_id.clone()))
                                                 })
                                         }
                                     },
@@ -262,10 +262,10 @@ pub fn MachineProfilesPanel(
 #[component]
 pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback: Signal<String>) -> Element {
     use_effect(move || {
-        state.with_mut(|s| s.ensure_catalogs_loaded());
+        super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });
 
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
 
     rsx! {
         section { class: "setup-stage",

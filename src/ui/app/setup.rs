@@ -77,7 +77,7 @@ const MASSO_G3_WITH_ATC_TEMPLATE: &str = include_str!("../../../resources/cnc_te
 
 #[component]
 pub fn SetupScreen(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let library_profiles = cnc_profile_library();
     let selected_library_profile = use_signal(|| {
         library_profiles

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use log::{error, info, warn};
 use serde_json::Value;
-use crate::id::new_uuid_v7_like;
+use uuid::Uuid;
 
 use super::{
     defaults::{populate_defaults, synchronize},
@@ -355,7 +355,7 @@ fn migrate_legacy_stock_ids(value: &mut Value) -> bool {
             continue;
         }
 
-        let replacement = new_uuid_v7_like();
+        let replacement = Uuid::now_v7().to_string();
         if let Some(obj) = item.as_object_mut() {
             obj.insert("id".to_string(), Value::String(replacement.clone()));
         }

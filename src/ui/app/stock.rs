@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 
 use crate::units::{FeedRate, Length, RotationalSpeed};
 use crate::ui::unit_service;
-use crate::ctx::sync_ctx_from_ui_state_and_persist_realms;
 
 use super::super::model::*;
 
@@ -11,12 +10,22 @@ use super::super::model::*;
 enum StockSortMode {
     RecentFirst,
     Type,
+    SizeAscending,
+    SizeDescending,
+    Status,
+    Preference,
+    SourceCatalog,
 }
 
 impl StockSortMode {
     fn from_value(value: &str) -> Self {
         match value {
             "type" => Self::Type,
+            "size_asc" => Self::SizeAscending,
+            "size_desc" => Self::SizeDescending,
+            "status" => Self::Status,
+            "preference" => Self::Preference,
+            "source_catalog" => Self::SourceCatalog,
             _ => Self::RecentFirst,
         }
     }
@@ -25,6 +34,11 @@ impl StockSortMode {
         match self {
             Self::RecentFirst => "recent",
             Self::Type => "type",
+            Self::SizeAscending => "size_asc",
+            Self::SizeDescending => "size_desc",
+            Self::Status => "status",
+            Self::Preference => "preference",
+            Self::SourceCatalog => "source_catalog",
         }
     }
 }
@@ -84,12 +98,12 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let mut last_stock_fingerprint = use_signal(String::new);
 
     use_effect(move || {
-        state.with_mut(|s| s.ensure_catalogs_loaded());
+        super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });
 
     // Persist stock when tool content changes (skip initial mount snapshot).
     use_effect(move || {
-        let tools = state.read().ui.tools.clone();
+        let tools = state.read().tools.clone();
         let fingerprint = stock_fingerprint(&tools);
 
         if !*stock_persist_armed.read() {
@@ -103,11 +117,10 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
         }
 
         last_stock_fingerprint.set(fingerprint);
-        let snapshot = state.read().clone();
-        sync_ctx_from_ui_state_and_persist_realms(&snapshot.ui, &[PersistRealm::Stock]);
+        persist_stock_realm_now(state);
     });
 
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let has_atc = snapshot.selected_machine_has_atc();
     let unit_system = snapshot.unit_system;
 
@@ -176,6 +189,39 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
         StockSortMode::Type => filtered_tools.sort_by(|left, right| {
             stock_tool_type_rank(&left.1.kind)
                 .cmp(&stock_tool_type_rank(&right.1.kind))
+                .then_with(|| right.0.cmp(&left.0))
+        }),
+        StockSortMode::SizeAscending => filtered_tools.sort_by(|left, right| {
+            left.1
+                .diameter
+                .as_mm()
+                .partial_cmp(&right.1.diameter.as_mm())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.0.cmp(&left.0))
+        }),
+        StockSortMode::SizeDescending => filtered_tools.sort_by(|left, right| {
+            right.1
+                .diameter
+                .as_mm()
+                .partial_cmp(&left.1.diameter.as_mm())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.0.cmp(&left.0))
+        }),
+        StockSortMode::Status => filtered_tools.sort_by(|left, right| {
+            stock_tool_status_rank(left.1.status)
+                .cmp(&stock_tool_status_rank(right.1.status))
+                .then_with(|| right.0.cmp(&left.0))
+        }),
+        StockSortMode::Preference => filtered_tools.sort_by(|left, right| {
+            stock_tool_preference_rank(left.1.preference)
+                .cmp(&stock_tool_preference_rank(right.1.preference))
+                .then_with(|| right.0.cmp(&left.0))
+        }),
+        StockSortMode::SourceCatalog => filtered_tools.sort_by(|left, right| {
+            left.1
+                .source_catalog
+                .to_ascii_lowercase()
+                .cmp(&right.1.source_catalog.to_ascii_lowercase())
                 .then_with(|| right.0.cmp(&left.0))
         }),
     }
@@ -311,6 +357,11 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             onchange: move |evt| stock_sort_mode.set(StockSortMode::from_value(&evt.value())),
                             option { value: "recent", "Latest first" }
                             option { value: "type", "Sort by type" }
+                            option { value: "size_asc", "Size: small to large" }
+                            option { value: "size_desc", "Size: large to small" }
+                            option { value: "status", "Sort by stock status" }
+                            option { value: "preference", "Sort by preference" }
+                            option { value: "source_catalog", "Sort by source catalog" }
                         }
                         if selected_stock_count > 0 {
                             button {
@@ -444,7 +495,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     let mut added = 0usize;
                                     state
                                         .with_mut(|s| {
-                                            added = s.ui.add_tools_from_catalog_selection(&selected);
+                                            added = s.add_tools_from_catalog_selection(&selected);
                                         });
                                     stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
@@ -482,7 +533,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     let mut removed = 0usize;
                                     state
                                         .with_mut(|s| {
-                                            removed = s.ui.remove_tools(&selected);
+                                            removed = s.remove_tools(&selected);
                                         });
                                     if active_detail_tool_id
                                         .as_ref()
@@ -540,9 +591,9 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             let mut cloned_tool = None::<Tool>;
                                             state
                                                 .with_mut(|s| {
-                                                    if let Some(new_id) = s.ui.clone_tool(&tool_id) {
+                                                    if let Some(new_id) = s.clone_tool(&tool_id) {
                                                         cloned_tool = s
-                                                            .ui
+
                                                             .tools
                                                             .iter()
                                                             .find(|entry| entry.id == new_id)
@@ -606,7 +657,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             state
                                                 .with_mut(|ui_state| {
                                                     if let Some(target) = ui_state
-                                                        .ui
+
                                                         .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
@@ -670,7 +721,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -783,7 +834,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -831,7 +882,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -945,7 +996,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     state
                                                                         .with_mut(|ui_state| {
                                                                             if let Some(target) = ui_state
-                                                                                .ui
+
                                                                                 .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
@@ -993,7 +1044,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             state
                                                                 .with_mut(|ui_state| {
                                                                     if let Some(target) = ui_state
-                                                                        .ui
+
                                                                         .tools
                                                                         .iter_mut()
                                                                         .find(|entry| entry.id == tool_id)
@@ -1025,7 +1076,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -1046,7 +1097,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -1155,7 +1206,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     state
                                                                         .with_mut(|ui_state| {
                                                                             if let Some(target) = ui_state
-                                                                                .ui
+
                                                                                 .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
@@ -1207,7 +1258,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|ui_state| {
                                                                         if let Some(target) = ui_state
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -1314,7 +1365,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                     state
                                                                         .with_mut(|ui_state| {
                                                                             if let Some(target) = ui_state
-                                                                                .ui
+
                                                                                 .tools
                                                                                 .iter_mut()
                                                                                 .find(|entry| entry.id == tool_id)
@@ -1346,7 +1397,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             state
                                                 .with_mut(|ui_state| {
                                                     if let Some(target) = ui_state
-                                                        .ui
+
                                                         .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
@@ -1373,7 +1424,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             state
                                                 .with_mut(|ui_state| {
                                                     if let Some(target) = ui_state
-                                                        .ui
+
                                                         .tools
                                                         .iter_mut()
                                                         .find(|entry| entry.id == tool_id)
@@ -1557,7 +1608,7 @@ pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 state
                                                                     .with_mut(|s| {
                                                                         if let Some(target) = s
-                                                                            .ui
+
                                                                             .tools
                                                                             .iter_mut()
                                                                             .find(|entry| entry.id == tool_id)
@@ -1848,6 +1899,21 @@ fn stock_tool_type_rank(kind: &str) -> u8 {
     }
 }
 
+fn stock_tool_status_rank(status: ToolStatus) -> u8 {
+    match status {
+        ToolStatus::InStock => 0,
+        ToolStatus::OutOfStock => 1,
+    }
+}
+
+fn stock_tool_preference_rank(preference: ToolPreference) -> u8 {
+    match preference {
+        ToolPreference::Preferred => 0,
+        ToolPreference::Neutral => 1,
+        ToolPreference::NotPreferred => 2,
+    }
+}
+
 fn tool_diameter(tool: &Tool, unit_system: UnitSystem) -> String {
     unit_service::format_length_display(tool.diameter, unit_system)
 }
@@ -1874,8 +1940,10 @@ fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> St
 }
 
 fn persist_stock_realm_now(state: Signal<crate::ctx::AppCtx>) {
+    // Persist from the UI signal snapshot because stock edits are applied there first.
+    // Using global ctx here can miss recent in-screen edits before they are synced.
     let snapshot = state.read().clone();
-    sync_ctx_from_ui_state_and_persist_realms(&snapshot.ui, &[PersistRealm::Stock]);
+    snapshot.persist_realms(&[PersistRealm::Stock]);
 }
 
 fn stock_fingerprint(tools: &[Tool]) -> String {

@@ -3,8 +3,6 @@ mod cli;
 mod config;
 mod ctx;
 mod domain;
-mod app_state;
-mod id;
 mod kicad_wrapper;
 mod stitching;
 mod ui;

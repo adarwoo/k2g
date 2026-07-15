@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 use super::manager::{queue_persist_document, YamlConfigManager};
 use super::ConfigError;
@@ -221,6 +222,14 @@ fn load_cnc_profiles(
             if path.extension().and_then(|s| s.to_str()) == Some("yaml")
                 || path.extension().and_then(|s| s.to_str()) == Some("yml")
             {
+                if !has_uuid_file_stem(&path) {
+                    warn!(
+                        "Skipping CNC profile '{}': filename stem is not a UUID",
+                        path.display()
+                    );
+                    continue;
+                }
+
                 if let Ok(profile_data) = load_cnc_profile(&path, schema_dir) {
                     if let Some(id) = profile_data.get("id").and_then(Value::as_str) {
                         profiles.insert(id.to_string(), profile_data);
@@ -253,6 +262,14 @@ fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>
         let path = entry.path();
         let ext = path.extension().and_then(|s| s.to_str());
         if ext != Some("yaml") && ext != Some("yml") {
+            continue;
+        }
+
+        if !has_uuid_file_stem(&path) {
+            warn!(
+                "Skipping profile '{}': filename stem is not a UUID",
+                path.display()
+            );
             continue;
         }
 
@@ -415,6 +432,17 @@ fn save_profile_map(
 ) -> Result<(), ConfigError> {
     fs::create_dir_all(dir).map_err(ConfigError::Io)?;
 
+    let mut id_to_stem = BTreeMap::<String, String>::new();
+    for id in profiles.keys() {
+        let stem = profile_stem_for_id(id);
+        id_to_stem.insert(id.clone(), stem);
+    }
+
+    let expected_stems = id_to_stem
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+
     // Remove stale yaml files that no longer exist in memory.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -428,23 +456,46 @@ fn save_profile_map(
                 continue;
             };
 
-            if !profiles.contains_key(stem) {
+            if !expected_stems.contains(stem) {
                 let _ = fs::remove_file(&path);
             }
         }
     }
 
     for (id, profile_data) in profiles {
-        let file_path = dir.join(format!("{}.yaml", id));
+        let Some(stem) = id_to_stem.get(id) else {
+            continue;
+        };
+        let file_path = dir.join(format!("{}.yaml", stem));
         let mut item_values = BTreeMap::new();
         item_values.insert(
-            format!("profile:{}:{}", dir.display(), id),
+            format!("profile:{}:{}:{}", dir.display(), id, stem),
             profile_data.clone(),
         );
         queue_persist_document(file_path, item_values, profile_data.clone())?;
     }
 
     Ok(())
+}
+
+fn profile_stem_for_id(
+    id: &str,
+) -> String {
+    // Profile filename stems are UUIDs to ensure immutable, unique file names.
+    // If `id` is already a UUID, keep it. For legacy non-UUID ids, derive a
+    // deterministic UUIDv5 so filenames remain stable across saves.
+    if let Ok(parsed) = Uuid::parse_str(id) {
+        parsed.to_string()
+    } else {
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, id.as_bytes()).to_string()
+    }
+}
+
+fn has_uuid_file_stem(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|stem| Uuid::parse_str(stem).ok())
+        .is_some()
 }
 
 fn write_yaml_file_atomically(file_path: &Path, content: &Value) -> Result<(), ConfigError> {

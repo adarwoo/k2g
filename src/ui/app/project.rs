@@ -68,7 +68,7 @@ fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String 
 
 #[component]
 pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let board_refresh_status = use_signal(String::new);
     let open_board_filenames = use_signal(Vec::<String>::new);
     let mut selected_board_filename = use_signal(String::new);
@@ -370,7 +370,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
                                 onclick: {
                                     let target = *view;
-                                    move |_| state.with_mut(|s| s.ui.selected_job_view = target)
+                                    move |_| super::mutate_ctx(state, |s| s.selected_job_view = target)
                                 },
                                 "{view.label()}"
                             }
@@ -696,8 +696,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         let value = evt.value();
                                         state
                                             .with_mut(|s| {
-                                                s.ui.gcode = value;
-                                                s.ui.gcode_modified = true;
+                                                s.gcode = value;
+                                                s.gcode_modified = true;
                                             });
                                     },
                                 }
@@ -750,7 +750,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 state
                                     .with_mut(|s| {
                                         let selected = if value.trim().is_empty() { None } else { Some(value) };
-                                        s.ui.select_process_profile_by_id(selected);
+                                        s.select_process_profile_by_id(selected);
                                     });
                             },
                             option { value: "", "Select machining profile" }
@@ -783,7 +783,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     class: if snapshot.project_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
                                     onclick: {
                                         let operation = *op;
-                                        move |_| state.with_mut(|s| s.ui.toggle_operation(operation))
+                                        move |_| super::mutate_ctx(state, |s| s.toggle_operation(operation))
                                     },
                                     "{op.label()}"
                                 }
@@ -798,7 +798,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     let v = evt.value();
                                     state
                                         .with_mut(|s| {
-                                            s.ui.project_config.side = if v == "bottom" {
+                                            s.project_config.side = if v == "bottom" {
                                                 Side::Bottom
                                             } else {
                                                 Side::Top
@@ -823,7 +823,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
+                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
                                                     });
                                             },
                                         }
@@ -840,7 +840,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
+                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
                                                     });
                                             },
                                         }
@@ -857,7 +857,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
+                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
                                                     });
                                             },
                                         }
@@ -872,7 +872,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 value: "{snapshot.project_config.multi_pass_max_depth_mm}",
                                                 oninput: move |evt| {
                                                     let value = evt.value().parse::<f32>().unwrap_or(1.0);
-                                                    state.with_mut(|s| s.ui.project_config.multi_pass_max_depth_mm = value);
+                                                    super::mutate_ctx(state, |s| s.project_config.multi_pass_max_depth_mm = value);
                                                 },
                                             }
                                             span { " mm" }
@@ -899,26 +899,26 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             let value = evt.value();
                                             state
                                                 .with_mut(|s| {
-                                                    s.ui.project_config.outline_router_tool_id = if value.trim().is_empty() {
+                                                    s.project_config.outline_router_tool_id = if value.trim().is_empty() {
                                                         None
                                                     } else {
                                                         Some(value.clone())
                                                     };
                                                     let router_d = s
-                                                        .ui
+                                                        
                                                         .project_config
                                                         .outline_router_tool_id
                                                         .as_ref()
-                                                        .and_then(|id| s.ui.tools.iter().find(|t| &t.id == id))
+                                                        .and_then(|id| s.tools.iter().find(|t| &t.id == id))
                                                         .map(|t| t.diameter.as_mm());
                                                     if let Some(drill_id) = s
-                                                        .ui
+                                                        
                                                         .project_config
                                                         .mouse_bite_drill_tool_id
                                                         .clone()
                                                     {
                                                         let valid = s
-                                                            .ui
+                                                            
                                                             .tools
                                                             .iter()
                                                             .find(|t| t.id == drill_id)
@@ -931,7 +931,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             })
                                                             .unwrap_or(false);
                                                         if !valid {
-                                                            s.ui.project_config.mouse_bite_drill_tool_id = None;
+                                                            s.project_config.mouse_bite_drill_tool_id = None;
                                                         }
                                                     }
                                                 });
@@ -954,7 +954,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         value: "{snapshot.project_config.tab_count}",
                                         oninput: move |evt| {
                                             let value = evt.value().parse::<u8>().unwrap_or(0);
-                                            state.with_mut(|s| s.ui.project_config.tab_count = value);
+                                            super::mutate_ctx(state, |s| s.project_config.tab_count = value);
                                         },
                                     }
                                 }
@@ -975,9 +975,9 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.tab_width_mm = unit_service::mm_from_display_length(
+                                                            s.project_config.tab_width_mm = unit_service::mm_from_display_length(
                                                                 value as f64,
-                                                                s.ui.unit_system,
+                                                                s.unit_system,
                                                             ) as f32;
                                                         });
                                                 },
@@ -994,8 +994,8 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                         onclick: move |_| {
                                                             state
                                                                 .with_mut(|s| {
-                                                                    s.ui.project_config.tab_width_mm = s
-                                                                        .ui
+                                                                    s.project_config.tab_width_mm = s
+                                                                        
                                                                         .project_config
                                                                         .tab_width_baseline_mm;
                                                                 });
@@ -1016,7 +1016,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 checked: snapshot.project_config.mouse_bites_enabled,
                                                 oninput: move |evt| {
                                                     let enabled = evt.checked();
-                                                    state.with_mut(|s| s.ui.project_config.mouse_bites_enabled = enabled);
+                                                    super::mutate_ctx(state, |s| s.project_config.mouse_bites_enabled = enabled);
                                                 },
                                             }
                                             span { "Enable mouse bites" }
@@ -1037,9 +1037,9 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                         let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
+                                                                s.project_config.mouse_bite_pitch_mm = unit_service::mm_from_display_length(
                                                                     value as f64,
-                                                                    s.ui.unit_system,
+                                                                    s.unit_system,
                                                                 ) as f32;
                                                             });
                                                     },
@@ -1066,7 +1066,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     let value = evt.value();
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty()
+                                                            s.project_config.mouse_bite_drill_tool_id = if value.trim().is_empty()
                                                             {
                                                                 None
                                                             } else {
@@ -1107,7 +1107,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
+                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
                                                     });
                                             },
                                         }
@@ -1133,7 +1133,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Preset;
+                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Preset;
                                                     });
                                             },
                                         }
@@ -1144,7 +1144,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         value: "{snapshot.project_config.board_thickness_preset_mm}",
                                         onchange: move |evt| {
                                             let value = evt.value().parse::<f32>().unwrap_or(1.6);
-                                            state.with_mut(|s| s.ui.project_config.board_thickness_preset_mm = value);
+                                            super::mutate_ctx(state, |s| s.project_config.board_thickness_preset_mm = value);
                                         },
                                         option { value: "0.8", "0.8 mm" }
                                         option { value: "1.0", "1.0 mm" }
@@ -1164,7 +1164,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
+                                                        s.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
                                                     });
                                             },
                                         }
@@ -1180,9 +1180,9 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
+                                                            s.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
                                                                 value as f64,
-                                                                s.ui.unit_system,
+                                                                s.unit_system,
                                                             ) as f32;
                                                         });
                                                 },
@@ -1203,7 +1203,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_thickness_mode = BoardThicknessMode::Probe;
+                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Probe;
                                                     });
                                             },
                                         }
@@ -1225,7 +1225,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
+                                                            s.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
                                                         });
                                                 },
                                             }
@@ -1240,7 +1240,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
+                                                            s.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
                                                         });
                                                 },
                                             }
@@ -1263,7 +1263,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 onchange: move |_| {
                                                     state
                                                         .with_mut(|s| {
-                                                            s.ui.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
+                                                            s.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
                                                         });
                                                 },
                                             }
@@ -1279,7 +1279,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     onchange: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
+                                                                s.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
                                                             });
                                                     },
                                                 }
@@ -1297,7 +1297,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     value: "{snapshot.project_config.touch_probe_atc_slot}",
                                                     oninput: move |evt| {
                                                         let value = evt.value().parse::<u8>().unwrap_or(0).min(atc_slot_count);
-                                                        state.with_mut(|s| s.ui.project_config.touch_probe_atc_slot = value);
+                                                        super::mutate_ctx(state, |s| s.project_config.touch_probe_atc_slot = value);
                                                     },
                                                 }
                                                 span { " / 0-{atc_slot_count}" }
@@ -1321,7 +1321,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_orientation = BoardOrientation::Automatic;
+                                                        s.project_config.board_orientation = BoardOrientation::Automatic;
                                                     });
                                             },
                                         }
@@ -1338,7 +1338,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_orientation = BoardOrientation::NoRotation;
+                                                        s.project_config.board_orientation = BoardOrientation::NoRotation;
                                                     });
                                             },
                                         }
@@ -1361,7 +1361,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             onchange: move |_| {
                                                 state
                                                     .with_mut(|s| {
-                                                        s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                        s.project_config.board_orientation = BoardOrientation::Rotate90;
                                                     });
                                             },
                                         }
@@ -1385,7 +1385,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     onchange: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate90;
+                                                                s.project_config.board_orientation = BoardOrientation::Rotate90;
                                                             });
                                                     },
                                                 }
@@ -1400,7 +1400,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     onchange: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate180;
+                                                                s.project_config.board_orientation = BoardOrientation::Rotate180;
                                                             });
                                                     },
                                                 }
@@ -1415,7 +1415,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     onchange: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.board_orientation = BoardOrientation::Rotate270;
+                                                                s.project_config.board_orientation = BoardOrientation::Rotate270;
                                                             });
                                                     },
                                                 }
@@ -1430,7 +1430,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                     onchange: move |_| {
                                                         state
                                                             .with_mut(|s| {
-                                                                s.ui.project_config.board_orientation = BoardOrientation::RotateCustom;
+                                                                s.project_config.board_orientation = BoardOrientation::RotateCustom;
                                                             });
                                                     },
                                                 }
@@ -1446,7 +1446,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                         value: "{snapshot.project_config.board_orientation_custom_degrees}",
                                                         oninput: move |evt| {
                                                             let value = evt.value().parse::<f32>().unwrap_or(0.0).clamp(0.0, 360.0);
-                                                            state.with_mut(|s| s.ui.project_config.board_orientation_custom_degrees = value);
+                                                            super::mutate_ctx(state, |s| s.project_config.board_orientation_custom_degrees = value);
                                                         },
                                                     }
                                                     span { "Custom angle" }
@@ -1467,7 +1467,7 @@ pub fn JobScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         let v = evt.value();
                                         state
                                             .with_mut(|s| {
-                                                s.ui.project_config.atc_strategy = if v == "overwrite" {
+                                                s.project_config.atc_strategy = if v == "overwrite" {
                                                     AtcRackStrategy::Overwrite
                                                 } else if v == "reuse" {
                                                     AtcRackStrategy::Reuse

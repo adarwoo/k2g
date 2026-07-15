@@ -8,7 +8,7 @@ use super::profiles_common::{
 
 #[component]
 pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
@@ -23,177 +23,211 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 
     rsx! {
 
-        div { class: "screen single",
-            section { class: "panel grow profile-screen-panel setup-card section-block cnc-manager-shell profile-manager-shell",
-                div { class: "panel-header",
-                    div {
-                        h3 { "Fixture profile management" }
-                        p {
-                            "Fixture profiles describe holding/origin assumptions and are referenced by machining profiles."
+        div { class: "screen single stock-shell",
+            div { class: "stock-toolbar",
+                div {
+                    h3 { "Fixture profile management" }
+                    p {
+                        "Fixture profiles describe holding/origin assumptions and are referenced by machining profiles."
+                    }
+                }
+                ProfileLifecycleToolbar {
+                    profile_type_label: "Fixture".to_string(),
+                    profiles: fixture_options,
+                    selected_profile_id: snapshot.selected_fixture_id.clone(),
+                    can_export: selected_fixture.is_some(),
+                    on_select: move |id| {
+                        super::mutate_ctx(state, |s| s.selected_fixture_id = Some(id));
+                    },
+                    on_clone: move |_| {
+                        let Some(selected) = state.read().selected_fixture().cloned() else {
+                            status_message.set("No fixture profile selected".to_string());
+                            return;
+                        };
+                        dialog_is_clone.set(true);
+                        dialog_name.set(format!("Copy of {}", selected.name));
+                        show_name_dialog.set(true);
+                    },
+                    on_delete: move |_| {
+                        let Some(fixture_id) = state.read().selected_fixture_id.clone() else {
+                            status_message.set("No fixture profile selected".to_string());
+                            return;
+                        };
+                        let impact = state.read().impact_delete_fixture_profile(&fixture_id);
+                        if !impact.dependent_process_profiles.is_empty() {
+                            let description = format_impact_warning(
+                                "Cannot delete fixture profile because it is referenced by machining profiles:",
+                                &impact,
+                            );
+                            status_message.set(description);
+                            return;
+                        }
+                        let confirmed = MessageDialog::new()
+                            .set_level(MessageLevel::Warning)
+                            .set_title("Delete fixture profile")
+                            .set_description("Delete fixture profile?")
+                            .set_buttons(MessageButtons::YesNo)
+                            .show();
+                        if confirmed == rfd::MessageDialogResult::Yes {
+                            state
+                                .with_mut(|s| {
+                                    let _ = s.delete_fixture_profile_with_cascade(&fixture_id);
+                                    s.log_event("Fixture profile deleted");
+                                });
+                            status_message.set("Fixture profile deleted".to_string());
+                        }
+                    },
+                    on_export: move |_| {
+                        let Some(current) = state.read().selected_fixture().cloned() else {
+                            status_message.set("No fixture profile selected".to_string());
+                            return;
+                        };
+
+                        let default_name = format!(
+                            "{}.fixture-profile.yaml",
+                            slug_file_name(&current.name, "fixture-profile"),
+                        );
+                        let picked = FileDialog::new()
+                            .set_title("Export fixture profile")
+                            .set_file_name(&default_name)
+                            .add_filter("Fixture profile YAML", &["yaml", "yml"])
+                            .save_file();
+                        let Some(path) = picked else {
+                            return;
+                        };
+
+                        let mut output_path = path;
+                        let file_name = output_path
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        if !file_name.ends_with(".fixture-profile.yaml")
+                            && !file_name.ends_with(".fixture-profile.yml")
+                        {
+                            let stem = output_path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("fixture-profile");
+                            let new_name = format!("{}.fixture-profile.yaml", stem);
+                            output_path = output_path.with_file_name(new_name);
+                        }
+
+                        let yaml = match state.read().export_selected_fixture_yaml() {
+                            Ok(v) => v,
+                            Err(message) => {
+                                status_message.set(message);
+                                return;
+                            }
+                        };
+                        if fs::write(&output_path, yaml).is_ok() {
+                            super::mutate_ctx(state, |s| s.log_event("Fixture profile exported"));
+                            status_message.set("Fixture profile exported".to_string());
+                        } else {
+                            status_message.set("Export failed: unable to write file".to_string());
+                        }
+                    },
+                    on_add: move |_| {
+                        dialog_is_clone.set(false);
+                        dialog_name.set("My fixture profile".to_string());
+                        show_name_dialog.set(true);
+                    },
+                    on_import: move |_| {
+                        let picked = FileDialog::new()
+                            .set_title("Import fixture profile")
+                            .add_filter("Fixture profile YAML", &["yaml", "yml"])
+                            .pick_file();
+
+                        let Some(path) = picked else {
+                            return;
+                        };
+
+                        let file_name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        let valid_name = file_name.ends_with(".fixture-profile.yaml")
+                            || file_name.ends_with(".fixture-profile.yml");
+                        if !valid_name {
+                            status_message
+                                .set(
+                                    "Fixture profile import failed: file name must end with .fixture-profile.yaml or .fixture-profile.yml"
+                                        .to_string(),
+                                );
+                            return;
+                        }
+
+                        let text = match fs::read_to_string(&path) {
+                            Ok(text) => text,
+                            Err(_) => {
+                                status_message
+                                    .set("Fixture profile import failed: file not readable".to_string());
+                                return;
+                            }
+                        };
+                        let result = super::mutate_ctx(state, |s| s.import_fixture_profile_yaml(&text));
+                        match result {
+                            Ok(_) => {
+                                super::mutate_ctx(state, |s| s.log_event("Fixture profile imported"));
+                                status_message.set("Fixture profile imported and selected".to_string())
+                            }
+                            Err(message) => status_message.set(message),
+                        }
+                    },
+                }
+            }
+
+            if !status_message.read().is_empty() {
+                p { class: "diag-status", "{status_message}" }
+            }
+
+            div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
+                if let Some(fixture) = selected_fixture.as_ref() {
+                    div { class: "profile-editor-top",
+                        div { class: "field",
+                            label { "Profile name" }
+                            input {
+                                r#type: "text",
+                                value: "{fixture.name}",
+                                oninput: move |evt| {
+                                    let result = state
+                                        .with_mut(|s| { s.rename_selected_fixture_profile(&evt.value()) });
+                                    if let Err(message) = result {
+                                        status_message.set(message);
+                                    }
+                                },
+                            }
                         }
                     }
-                    ProfileLifecycleToolbar {
-                        profile_type_label: "Fixture".to_string(),
-                        profiles: fixture_options,
-                        selected_profile_id: snapshot.selected_fixture_id.clone(),
-                        can_export: selected_fixture.is_some(),
-                        on_select: move |id| {
-                            state.with_mut(|s| s.ui.selected_fixture_id = Some(id));
-                        },
-                        on_clone: move |_| {
-                            let Some(selected) = state.read().ui.selected_fixture().cloned() else {
-                                status_message.set("No fixture profile selected".to_string());
-                                return;
-                            };
-                            dialog_is_clone.set(true);
-                            dialog_name.set(format!("Copy of {}", selected.name));
-                            show_name_dialog.set(true);
-                        },
-                        on_delete: move |_| {
-                            let Some(fixture_id) = state.read().ui.selected_fixture_id.clone() else {
-                                status_message.set("No fixture profile selected".to_string());
-                                return;
-                            };
-                            let impact = state.read().ui.impact_delete_fixture_profile(&fixture_id);
-                            if !impact.dependent_process_profiles.is_empty() {
-                                let description = format_impact_warning(
-                                    "Cannot delete fixture profile because it is referenced by machining profiles:",
-                                    &impact,
-                                );
-                                status_message.set(description);
-                                return;
-                            }
-                            let confirmed = MessageDialog::new()
-                                .set_level(MessageLevel::Warning)
-                                .set_title("Delete fixture profile")
-                                .set_description("Delete fixture profile?")
-                                .set_buttons(MessageButtons::YesNo)
-                                .show();
-                            if confirmed == rfd::MessageDialogResult::Yes {
-                                state
-                                    .with_mut(|s| {
-                                        let _ = s.ui.delete_fixture_profile_with_cascade(&fixture_id);
-                                        s.ui.log_event("Fixture profile deleted");
-                                    });
-                                status_message.set("Fixture profile deleted".to_string());
-                            }
-                        },
-                        on_export: move |_| {
-                            let Some(current) = state.read().ui.selected_fixture().cloned() else {
-                                status_message.set("No fixture profile selected".to_string());
-                                return;
-                            };
 
-                            let default_name = format!(
-                                "{}.fixture-profile.yaml",
-                                slug_file_name(&current.name, "fixture-profile"),
-                            );
-                            let picked = FileDialog::new()
-                                .set_title("Export fixture profile")
-                                .set_file_name(&default_name)
-                                .add_filter("Fixture profile YAML", &["yaml", "yml"])
-                                .save_file();
-                            let Some(path) = picked else {
-                                return;
-                            };
-
-                            let mut output_path = path;
-                            let file_name = output_path
-                                .file_name()
-                                .and_then(|f| f.to_str())
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
-                            if !file_name.ends_with(".fixture-profile.yaml")
-                                && !file_name.ends_with(".fixture-profile.yml")
-                            {
-                                let stem = output_path
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("fixture-profile");
-                                let new_name = format!("{}.fixture-profile.yaml", stem);
-                                output_path = output_path.with_file_name(new_name);
-                            }
-
-                            let yaml = match state.read().ui.export_selected_fixture_yaml() {
-                                Ok(v) => v,
-                                Err(message) => {
-                                    status_message.set(message);
-                                    return;
-                                }
-                            };
-                            if fs::write(&output_path, yaml).is_ok() {
-                                state.with_mut(|s| s.ui.log_event("Fixture profile exported"));
-                                status_message.set("Fixture profile exported".to_string());
-                            } else {
-                                status_message.set("Export failed: unable to write file".to_string());
-                            }
-                        },
-                        on_add: move |_| {
-                            dialog_is_clone.set(false);
-                            dialog_name.set("My fixture profile".to_string());
-                            show_name_dialog.set(true);
-                        },
-                        on_import: move |_| {
-                            let picked = FileDialog::new()
-                                .set_title("Import fixture profile")
-                                .add_filter("Fixture profile YAML", &["yaml", "yml"])
-                                .pick_file();
-
-                            let Some(path) = picked else {
-                                return;
-                            };
-
-                            let file_name = path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or_default()
-                                .to_ascii_lowercase();
-                            let valid_name = file_name.ends_with(".fixture-profile.yaml")
-                                || file_name.ends_with(".fixture-profile.yml");
-                            if !valid_name {
-                                status_message
-                                    .set(
-                                        "Fixture profile import failed: file name must end with .fixture-profile.yaml or .fixture-profile.yml"
-                                            .to_string(),
-                                    );
-                                return;
-                            }
-
-                            let text = match fs::read_to_string(&path) {
-                                Ok(text) => text,
-                                Err(_) => {
-                                    status_message
-                                        .set("Fixture profile import failed: file not readable".to_string());
-                                    return;
-                                }
-                            };
-                            let result = state.with_mut(|s| s.ui.import_fixture_profile_yaml(&text));
-                            match result {
-                                Ok(_) => {
-                                    state.with_mut(|s| s.ui.log_event("Fixture profile imported"));
-                                    status_message.set("Fixture profile imported and selected".to_string())
-                                }
-                                Err(message) => status_message.set(message),
-                            }
-                        },
-                    }
-                }
-
-                if !status_message.read().is_empty() {
-                    p { class: "diag-status", "{status_message}" }
-                }
-
-                div { class: "setup-card cnc-profile-details-panel profile-editor-shell",
-                    if let Some(fixture) = selected_fixture.as_ref() {
-                        div { class: "profile-editor-top",
+                    div { class: "profile-editor-scroll",
+                        div { class: "edit-grid",
                             div { class: "field",
-                                label { "Profile name" }
+                                label { "Board holding method" }
                                 input {
                                     r#type: "text",
-                                    value: "{fixture.name}",
+                                    value: "{fixture.backing_board}",
                                     oninput: move |evt| {
                                         let result = state
-                                            .with_mut(|s| { s.ui.rename_selected_fixture_profile(&evt.value()) });
+                                            .with_mut(|s| { s.update_selected_fixture_backing_board(&evt.value()) });
+                                        if let Err(message) = result {
+                                            status_message.set(message);
+                                        }
+                                    },
+                                }
+                            }
+
+                            div { class: "field",
+                                label { "Work origin reference" }
+                                input {
+                                    r#type: "text",
+                                    value: "{fixture.coordinate_context}",
+                                    oninput: move |evt| {
+                                        let result = state
+                                            .with_mut(|s| {
+                                                s.update_selected_fixture_coordinate_context(&evt.value())
+                                            });
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
@@ -201,45 +235,9 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
                             }
                         }
-
-                        div { class: "profile-editor-scroll",
-                            div { class: "edit-grid",
-                                div { class: "field",
-                                    label { "Board holding method" }
-                                    input {
-                                        r#type: "text",
-                                        value: "{fixture.backing_board}",
-                                        oninput: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| { s.ui.update_selected_fixture_backing_board(&evt.value()) });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
-                                    }
-                                }
-
-                                div { class: "field",
-                                    label { "Work origin reference" }
-                                    input {
-                                        r#type: "text",
-                                        value: "{fixture.coordinate_context}",
-                                        oninput: move |evt| {
-                                            let result = state
-                                                .with_mut(|s| {
-                                                    s.ui.update_selected_fixture_coordinate_context(&evt.value())
-                                                });
-                                            if let Err(message) = result {
-                                                status_message.set(message);
-                                            }
-                                        },
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        p { class: "diag-status", "Select a fixture profile to edit details." }
                     }
+                } else {
+                    p { class: "diag-status", "Select a fixture profile to edit details." }
                 }
             }
 
@@ -262,18 +260,18 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                         let result = if *dialog_is_clone.read() {
                             state
                                 .with_mut(|s| {
-                                    let result = s.ui.clone_selected_fixture_profile();
+                                    let result = s.clone_selected_fixture_profile();
                                     if result.is_ok() {
-                                        let _ = s.ui.rename_selected_fixture_profile(&name);
-                                        s.ui.log_event("Fixture profile cloned");
+                                        let _ = s.rename_selected_fixture_profile(&name);
+                                        s.log_event("Fixture profile cloned");
                                     }
                                     result
                                 })
                         } else {
                             state
                                 .with_mut(|s| {
-                                    s.ui.add_fixture_profile(&name);
-                                    s.ui.log_event("Fixture profile added");
+                                    s.add_fixture_profile(&name);
+                                    s.log_event("Fixture profile added");
                                     Ok(String::new())
                                 })
                         };

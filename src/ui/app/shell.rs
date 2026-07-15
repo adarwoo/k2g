@@ -14,13 +14,14 @@ pub fn AppTopBar(
     error_count: usize,
     warning_count: usize,
 ) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
 
     let has_board = snapshot.board.is_some();
     let has_machine = snapshot.selected_machine().is_some();
     let has_fixture = snapshot.selected_fixture().is_some();
     let has_process_profile = snapshot.selected_process_profile().is_some();
     let has_toolset = snapshot.selected_toolset().is_some();
+    let has_machining_operation = !snapshot.project_config.selected_operations.is_empty();
 
     let machine_name = snapshot
         .selected_machine()
@@ -43,11 +44,6 @@ pub fn AppTopBar(
         .as_ref()
         .map(|board| format!("Loaded board · {} holes", board.holes.len()))
         .unwrap_or_else(|| "No board loaded".to_string());
-    let ops_label = if snapshot.project_config.selected_operations.is_empty() {
-        "No ops".to_string()
-    } else {
-        format!("{} ops", snapshot.project_config.selected_operations.len())
-    };
     let status_label = match snapshot.generation_state {
         GenerationState::Generating => "Generating".to_string(),
         GenerationState::Failed => "Generation failed".to_string(),
@@ -77,30 +73,12 @@ pub fn AppTopBar(
             }
 
             div { class: "topbar-board",
-                span { class: "topbar-label", "CNC" }
-                span { class: if has_machine { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
-                    "{machine_name}"
-                }
-            }
-
-            div { class: "topbar-board",
-                span { class: "topbar-label", "Machining" }
+                span { class: "topbar-label", "Job" }
                 span { class: if has_process_profile { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
                     "{process_profile_name}"
                 }
-            }
-
-            div { class: "topbar-board",
-                span { class: "topbar-label", "Fixture" }
-                span { class: if has_fixture { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
-                    "{fixture_name}"
-                }
-            }
-
-            div { class: "topbar-board",
-                span { class: "topbar-label", "Toolset" }
-                span { class: if has_toolset { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
-                    "{toolset_name}"
+                if !has_machining_operation {
+                    span { class: "topbar-value topbar-value-missing", "No machining operation selected" }
                 }
             }
 
@@ -128,7 +106,6 @@ pub fn AppTopBar(
                         "mil"
                     }
                 }
-                SummaryChip { label: "Job", value: ops_label }
             }
 
             div { class: "shell-spacer" }
@@ -177,16 +154,6 @@ fn app_icon_data_url() -> &'static str {
             BASE64_STANDARD.encode(icon_bytes)
         )
     })
-}
-
-#[component]
-fn SummaryChip(label: String, value: String) -> Element {
-    rsx! {
-        div { class: "summary-chip",
-            span { class: "summary-chip-label", "{label}" }
-            span { class: "summary-chip-value", "{value}" }
-        }
-    }
 }
 
 #[component]
@@ -256,7 +223,7 @@ pub fn DiagnosticsBanner(
 
 #[component]
 pub fn NavigationRail(state: Signal<crate::ctx::AppCtx>) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let nav_items = [
         Some(Screen::Job),
         None,
@@ -276,7 +243,7 @@ pub fn NavigationRail(state: Signal<crate::ctx::AppCtx>) -> Element {
                     button {
                         key: "{screen.key()}",
                         class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
-                        onclick: move |_| state.with_mut(|s| s.ui.select_screen(screen)),
+                        onclick: move |_| super::mutate_ctx(state, |s| s.select_screen(screen)),
                         span { class: "rail-button-content",
                             span { class: "rail-button-icon", {rail_icon(screen)} }
                             span { class: "rail-button-text", "{screen.label()}" }
@@ -420,7 +387,7 @@ fn rail_icon(screen: Screen) -> Element {
 
 #[component]
 pub fn EventNotifications(state: Signal<crate::ctx::AppCtx>) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let visible_events = snapshot
         .events
         .iter()
@@ -444,7 +411,7 @@ pub fn EventNotifications(state: Signal<crate::ctx::AppCtx>) -> Element {
 
 #[component]
 pub fn StatusBar(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
-    let snapshot = state.read().clone().ui;
+    let snapshot = state.read().clone();
     let board_label = snapshot
         .board
         .as_ref()
