@@ -27,7 +27,7 @@ pub fn launch(data: UiLaunchData) {
 }
 
 fn load_window_icon() -> Option<dioxus::desktop::tao::window::Icon> {
-    let icon_bytes = include_bytes!("../../resources/icons/icon.png");
+    let icon_bytes = include_bytes!("../icons/icon.png");
     let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
     let (width, height) = image.dimensions();
     dioxus::desktop::tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()

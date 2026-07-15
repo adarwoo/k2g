@@ -11,8 +11,6 @@ machine:
   max_feed_rate: "2000mm/min"
   spindle_rpm_min: "3000rpm"
   spindle_rpm_max: "24000rpm"
-  spindle_start_delay_s: 0
-  spindle_stop_delay_s: 0
   atc_slot_count: 8
   origin:
     x0: Left
@@ -20,9 +18,7 @@ machine:
   scaling:
     x: 100.0
     y: 100.0
-  line_numbering:
-    enabled: false
-    increment: 10
+  line_numbering_increment: 10
   program_units:
     length: "mm"
     feedrate: "mm/min"

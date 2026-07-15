@@ -180,15 +180,17 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         .and_then(|v| v.as_f64())
         .unwrap_or(100.0) as f32;
 
-    let line_num = machine.get("line_numbering");
-    let line_numbering_enabled = line_num
-        .and_then(|l| l.get("enabled"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let line_numbering_increment = line_num
-        .and_then(|l| l.get("increment"))
+    let line_numbering_increment: u16 = machine
+        .get("line_numbering_increment")
         .and_then(|v| v.as_i64())
-        .unwrap_or(10) as u32;
+        .or_else(|| {
+            machine
+                .get("line_numbering")
+                .and_then(|l| l.get("increment"))
+                .and_then(|v| v.as_i64())
+        })
+        .unwrap_or(10)
+        .max(0) as u16;
 
     let def = MachineProfile::default();
 
@@ -256,7 +258,6 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         origin_y0,
         scaling_x,
         scaling_y,
-        line_numbering_enabled,
         line_numbering_increment,
         gcode_header,
         gcode_footer,
@@ -406,23 +407,11 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         mark_missing(&mut pending_required_fields, "machine.scaling.y");
     }
 
-    let line_numbering = machine_node.and_then(|m| m.get("line_numbering"));
-    if let Some(enabled) = line_numbering
-        .and_then(|l| l.get("enabled"))
-        .and_then(|v| v.as_bool())
-    {
-        machine.line_numbering_enabled = enabled;
-    }
-    if let Some(increment) = line_numbering
-        .and_then(|l| l.get("increment"))
-        .and_then(|v| v.as_i64())
-    {
-        machine.line_numbering_increment = increment.max(0) as u32;
-    } else if let Some(increment) = machine_node
+    if let Some(increment) = machine_node
         .and_then(|m| m.get("line_numbering_increment"))
         .and_then(|v| v.as_i64())
     {
-        machine.line_numbering_increment = increment.max(0) as u32;
+        machine.line_numbering_increment = increment.max(0) as u16;
     } else {
         mark_missing(&mut pending_required_fields, "machine.line_numbering_increment");
     }

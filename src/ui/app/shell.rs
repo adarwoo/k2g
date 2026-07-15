@@ -148,7 +148,7 @@ fn app_icon_data_url() -> &'static str {
     static ICON_DATA_URL: OnceLock<String> = OnceLock::new();
 
     ICON_DATA_URL.get_or_init(|| {
-        let icon_bytes = include_bytes!("../../../resources/icons/icon.png");
+        let icon_bytes = include_bytes!("../../icons/icon.png");
         format!(
             "data:image/png;base64,{}",
             BASE64_STANDARD.encode(icon_bytes)

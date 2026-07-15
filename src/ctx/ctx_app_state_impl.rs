@@ -302,7 +302,7 @@ impl AppState {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or(0);
-        let id = format!("event-{}", created_ms);
+        let id = format!("event-{}", Uuid::now_v7());
         self.events.push(AppEvent {
             id,
             message: message.into(),
@@ -1838,11 +1838,8 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "scaling": {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
-            }
-        },
-        "line_numbering": {
-            "enabled": machine.line_numbering_enabled,
-            "increment": machine.line_numbering_increment,
+            },
+            "line_numbering_increment": machine.line_numbering_increment,
         },
         "templates": {
             "gcode_header": machine.gcode_header,
@@ -2045,16 +2042,11 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         origin_y0,
         scaling_x,
         scaling_y,
-        line_numbering_enabled: value
-            .pointer("/line_numbering/enabled")
-            .and_then(Value::as_bool)
-            .or_else(|| value.get("line_numbering_enabled").and_then(Value::as_bool))
-            .unwrap_or(false),
         line_numbering_increment: value
-            .pointer("/line_numbering/increment")
+            .pointer("/machine/line_numbering_increment")
             .and_then(Value::as_u64)
-            .map(|v| v as u32)
-            .or_else(|| value.get("line_numbering_increment").and_then(Value::as_u64).map(|v| v as u32))
+            .map(|v| v as u16)
+            .or_else(|| value.get("line_numbering_increment").and_then(Value::as_u64).map(|v| v as u16))
             .unwrap_or(10),
         gcode_header: value
             .pointer("/templates/gcode_header")

@@ -23,8 +23,7 @@ pub struct MachineProfile {
     pub origin_y0: String,
     pub scaling_x: f32,
     pub scaling_y: f32,
-    pub line_numbering_enabled: bool,
-    pub line_numbering_increment: u32,
+    pub line_numbering_increment: u16,
     pub gcode_header: String,
     pub gcode_footer: String,
     pub drill_first_move: String,
@@ -59,7 +58,6 @@ impl Default for MachineProfile {
             origin_y0: "Front".to_string(),
             scaling_x: 100.0,
             scaling_y: 100.0,
-            line_numbering_enabled: false,
             line_numbering_increment: 10,
             gcode_header: concat!(
                 "(Created by kicad2gcode from '{pcb_filename}' - {timestamp})\n",

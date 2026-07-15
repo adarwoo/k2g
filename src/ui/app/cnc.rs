@@ -9,7 +9,7 @@ use super::profiles_common::{
     ProfileNameDialog,
 };
 use super::setup::{
-    cnc_required_field_label, parse_machine_profile_yaml,
+    cnc_profile_library, cnc_required_field_label, parse_machine_profile_yaml,
 };
 use crate::ui::unit_service;
 use crate::units::{FeedRate, Length};
@@ -21,6 +21,12 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
     let mut dialog_name = use_signal(|| "My CNC profile".to_string());
+    let library_profiles = cnc_profile_library();
+    let default_template_key = library_profiles
+        .first()
+        .map(|profile| profile.key.clone())
+        .unwrap_or_default();
+    let mut selected_template = use_signal(|| default_template_key.clone());
 
     let selected_machine = snapshot.selected_machine().cloned();
     let has_selected_machine = selected_machine.is_some();
@@ -112,6 +118,16 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
             pending_required_labels.join(", ")
         )
     };
+    let dialog_template_options = if *dialog_is_clone.read() {
+        Vec::<(String, String)>::new()
+    } else {
+        library_profiles
+            .iter()
+            .map(|profile| (profile.key.clone(), profile.name.clone()))
+            .collect::<Vec<_>>()
+    };
+    let library_profiles_for_add = library_profiles.clone();
+    let library_profiles_for_submit = library_profiles.clone();
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -219,6 +235,11 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     on_add: move |_| {
                         dialog_is_clone.set(false);
                         dialog_name.set("My CNC profile".to_string());
+                        let first_template = library_profiles_for_add
+                            .first()
+                            .map(|profile| profile.key.clone())
+                            .unwrap_or_default();
+                        selected_template.set(first_template);
                         show_name_dialog.set(true);
                     },
                     on_import: move |_| {
@@ -286,10 +307,10 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     title: if *dialog_is_clone.read() { "Clone CNC profile".to_string() } else { "Add CNC profile".to_string() },
                     name_label: "Profile name".to_string(),
                     name_value: dialog_name.read().clone(),
-                    template_options: Vec::<(String, String)>::new(),
-                    selected_template: String::new(),
+                    template_options: dialog_template_options,
+                    selected_template: selected_template.read().clone(),
                     on_name_change: move |value| dialog_name.set(value),
-                    on_template_change: |_| {},
+                    on_template_change: move |value| selected_template.set(value),
                     on_cancel: move |_| show_name_dialog.set(false),
                     on_submit: move |_| {
                         let name = dialog_name.read().trim().to_string();
@@ -307,12 +328,31 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             super::mutate_ctx(state, |s| s.log_event("CNC profile cloned"));
                             status_message.set("CNC profile cloned".to_string());
                         } else {
-                            state
-                                .with_mut(|s| {
-                                    s.add_machine_profile_from_schema(&name);
-                                    s.log_event("CNC profile added");
-                                });
-                            status_message.set("CNC profile created".to_string());
+                            let selected_key = selected_template.read().clone();
+                            let selected_profile = library_profiles_for_submit
+                                .iter()
+                                .find(|profile| profile.key == selected_key)
+                                .cloned();
+
+                            if let Some(template) = selected_profile {
+                                state
+                                    .with_mut(|s| {
+                                        let mut machine = template.machine;
+                                        machine.id = String::new();
+                                        machine.built_in = false;
+                                        machine.name = name.clone();
+                                        s.add_machine_profile(machine);
+                                        s.log_event("CNC profile added");
+                                    });
+                                status_message.set("CNC profile created from template".to_string());
+                            } else {
+                                state
+                                    .with_mut(|s| {
+                                        s.add_machine_profile_from_schema(&name);
+                                        s.log_event("CNC profile added");
+                                    });
+                                status_message.set("CNC profile created".to_string());
+                            }
                         }
                         show_name_dialog.set(false);
                     },
@@ -1057,7 +1097,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     label { class: "checkbox-line",
                                         input {
                                             r#type: "checkbox",
-                                            checked: machine.line_numbering_enabled,
+                                            checked: machine.line_numbering_increment > 0,
                                             oninput: {
                                                 let selected_id = selected_id.clone();
                                                 move |evt| {
@@ -1069,7 +1109,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 .iter_mut()
                                                                 .find(|m| m.id == selected_id)
                                                             {
-                                                                t.line_numbering_enabled = enabled;
+                                                                t.line_numbering_increment = if enabled { 10 } else { 0 };
                                                             }
                                                         });
                                                     persist_cnc_realm_now(state);
@@ -1080,7 +1120,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     }
                                 }
 
-                                if machine.line_numbering_enabled {
+                                if machine.line_numbering_increment > 0 {
                                     div { class: if machine.pending_required_fields.contains("machine.line_numbering_increment") { "field section-subfield required-pending" } else { "field section-subfield" },
                                         label { "Increment" }
                                         input {
@@ -1091,7 +1131,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             oninput: {
                                                 let selected_id = selected_id.clone();
                                                 move |evt| {
-                                                    let value = evt.value().parse::<u32>().unwrap_or(10).max(1);
+                                                    let value = evt.value().parse::<u16>().unwrap_or(10).max(1);
                                                     state
                                                         .with_mut(|s| {
                                                             if let Some(t) = s
@@ -1381,12 +1421,6 @@ struct ExportScaling {
 }
 
 #[derive(Serialize)]
-struct ExportLineNumbering {
-    enabled: bool,
-    increment: u32,
-}
-
-#[derive(Serialize)]
 struct ExportMachine {
     fixture_plate: ExportFixture,
     max_feed_rate: String,
@@ -1395,7 +1429,7 @@ struct ExportMachine {
     atc_slot_count: u8,
     origin: ExportOrigin,
     scaling: ExportScaling,
-    line_numbering: ExportLineNumbering,
+    line_numbering_increment: u16,
 }
 
 #[derive(Serialize)]
@@ -1457,10 +1491,7 @@ fn machine_profile_to_yaml(machine: &MachineProfile) -> Result<String, serde_yam
                 x: machine.scaling_x,
                 y: machine.scaling_y,
             },
-            line_numbering: ExportLineNumbering {
-                enabled: machine.line_numbering_enabled,
-                increment: machine.line_numbering_increment,
-            },
+            line_numbering_increment: machine.line_numbering_increment,
         },
         header: machine.gcode_header.clone(),
         footer: machine.gcode_footer.clone(),

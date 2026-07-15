@@ -244,8 +244,8 @@ properties:
       # 0 disables line numbering.
       #
       # Valid examples:
-      #   line_numbering: 0
-      #   line_numbering: 10
+      #   line_numbering_increment: 0
+      #   line_numbering_increment: 10
       #
       line_numbering_increment:
         description: Program line numbering increment. 0 means none.
@@ -280,8 +280,6 @@ properties:
       - max_feed_rate
       - spindle_rpm_min
       - spindle_rpm_max
-      - spindle_start_delay_s
-      - spindle_stop_delay_s
       - atc_slot_count
       - origin
       - scaling
