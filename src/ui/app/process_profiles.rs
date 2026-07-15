@@ -19,7 +19,10 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let profile_options = snapshot
         .process_profiles
         .iter()
-        .map(|profile| (profile.id.clone(), profile.name.clone()))
+        .map(|profile| {
+            let suffix = if profile.usable { "" } else { " (not usable)" };
+            (profile.id.clone(), format!("{}{}", profile.name, suffix))
+        })
         .collect::<Vec<_>>();
 
     rsx! {
@@ -187,7 +190,7 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
             div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
                 if let Some(profile) = selected_machining_profile.as_ref() {
                     div { class: "profile-editor-top",
-                        div { class: "field",
+                        div { class: if profile.pending_required_fields.contains("name") { "field required-pending" } else { "field" },
                             label { "Profile name" }
                             input {
                                 r#type: "text",
@@ -206,9 +209,25 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                         }
                     }
 
+                    if !profile.pending_required_fields.is_empty() {
+                        p { class: "diag-status required-pending-help",
+                            {
+                                format!(
+                                    "Required schema values need input: {}",
+                                    profile
+                                        .pending_required_fields
+                                        .iter()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
+                            }
+                        }
+                    }
+
                     div { class: "profile-editor-scroll",
                         div { class: "edit-grid",
-                            div { class: "field",
+                            div { class: if profile.pending_required_fields.contains("cnc.default") { "field required-pending" } else { "field" },
                                 label { "CNC profile" }
                                 select {
                                     value: "{profile.cnc_profile_id}",
@@ -222,13 +241,17 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             status_message.set(message);
                                         }
                                     },
-                                    for machine in snapshot.machines.iter() {
-                                        option { value: "{machine.id}", "{machine.name}" }
+                                    for (idx , machine) in snapshot.machines.iter().enumerate() {
+                                        option {
+                                            key: "mach-opt-{idx}",
+                                            value: "{machine.id}",
+                                            {format!("{}{}", machine.name, if machine.usable { "" } else { " (not usable)" })}
+                                        }
                                     }
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if profile.pending_required_fields.contains("fixture.default") { "field required-pending" } else { "field" },
                                 label { "Fixture profile" }
                                 select {
                                     value: "{profile.fixture_profile_id}",
@@ -240,13 +263,17 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             status_message.set(message);
                                         }
                                     },
-                                    for fixture in snapshot.fixtures.iter() {
-                                        option { value: "{fixture.id}", "{fixture.name}" }
+                                    for (idx , fixture) in snapshot.fixtures.iter().enumerate() {
+                                        option {
+                                            key: "fix-opt-{idx}",
+                                            value: "{fixture.id}",
+                                            {format!("{}{}", fixture.name, if fixture.usable { "" } else { " (not usable)" })}
+                                        }
                                     }
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if profile.pending_required_fields.contains("toolset.default") { "field required-pending" } else { "field" },
                                 label { "Toolset profile" }
                                 select {
                                     value: "{profile.toolset_profile_id}",
@@ -258,16 +285,22 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             status_message.set(message);
                                         }
                                     },
-                                    for toolset in snapshot.toolsets.iter() {
-                                        option { value: "{toolset.id}", "{toolset.name}" }
+                                    for (idx , toolset) in snapshot.toolsets.iter().enumerate() {
+                                        option {
+                                            key: "tool-opt-{idx}",
+                                            value: "{toolset.id}",
+                                            {format!("{}{}", toolset.name, if toolset.usable { "" } else { " (not usable)" })}
+                                        }
                                     }
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if profile.pending_required_fields.contains("operations") { "field required-pending" } else { "field" },
                                 label { "Default machining steps" }
-                                for op in ProductionOperation::all().iter() {
-                                    label { class: "checkbox-line",
+                                for (idx , op) in ProductionOperation::all().iter().enumerate() {
+                                    label {
+                                        key: "op-{idx}",
+                                        class: "checkbox-line",
                                         input {
                                             r#type: "checkbox",
                                             checked: profile.default_operations.contains(op),

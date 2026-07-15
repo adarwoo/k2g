@@ -273,6 +273,7 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         tool_change_manual_prompt,
         tool_change_command,
         pending_required_fields: BTreeSet::new(),
+        usable: true,
     })
 }
 
@@ -427,6 +428,7 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
     }
 
     machine.pending_required_fields = pending_required_fields;
+    machine.usable = machine.pending_required_fields.is_empty();
 
     LibraryProfile {
         key: key.to_string(),

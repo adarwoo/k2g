@@ -69,8 +69,8 @@ pub fn ProfileLifecycleToolbar(
                     class: "stock-toolbar-select",
                     value: selected_profile_id.unwrap_or_default(),
                     onchange: move |evt| on_select.call(evt.value()),
-                    for (id , name) in profiles.into_iter() {
-                        option { value: "{id}", "{name}" }
+                    for (idx , (id , name)) in profiles.into_iter().enumerate() {
+                        option { key: "profile-opt-{idx}", value: "{id}", "{name}" }
                     }
                 }
                 button {
@@ -157,8 +157,8 @@ pub fn ProfileNameDialog(
                         select {
                             value: selected_template,
                             onchange: move |evt| on_template_change.call(evt.value()),
-                            for (id , label) in template_options.into_iter() {
-                                option { value: "{id}", "{label}" }
+                            for (idx , (id , label)) in template_options.into_iter().enumerate() {
+                                option { key: "template-opt-{idx}", value: "{id}", "{label}" }
                             }
                         }
                     }

@@ -9,7 +9,7 @@ use super::profiles_common::{
     ProfileNameDialog,
 };
 use super::setup::{
-    cnc_profile_library, cnc_required_field_label, parse_machine_profile_yaml,
+    cnc_required_field_label, parse_machine_profile_yaml,
 };
 use crate::ui::unit_service;
 use crate::units::{FeedRate, Length};
@@ -21,12 +21,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
     let mut dialog_name = use_signal(|| "My CNC profile".to_string());
-    let mut dialog_template_key = use_signal(String::new);
-    let library_profiles = cnc_profile_library();
-    let template_options = library_profiles
-        .iter()
-        .map(|profile| (profile.key.clone(), profile.name.clone()))
-        .collect::<Vec<_>>();
 
     let selected_machine = snapshot.selected_machine().cloned();
     let has_selected_machine = selected_machine.is_some();
@@ -46,9 +40,11 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 
     let machine_options = profile_rows
         .iter()
-        .map(|profile| (profile.id.clone(), profile.name.clone()))
+        .map(|profile| {
+            let suffix = if profile.usable { "" } else { " (not usable)" };
+            (profile.id.clone(), format!("{}{}", profile.name, suffix))
+        })
         .collect::<Vec<_>>();
-    let template_options_for_add = template_options.clone();
 
     let selected_id = machine.id.clone();
     let is_built_in = machine.built_in;
@@ -123,7 +119,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                 div {
                     h3 { "CNC profile management" }
                     p {
-                        "CNC profiles are editable user profiles. New profiles are created from templates."
+                        "CNC profiles are editable user profiles. New profiles are created from schema defaults."
                     }
                 }
                 ProfileLifecycleToolbar {
@@ -223,13 +219,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     on_add: move |_| {
                         dialog_is_clone.set(false);
                         dialog_name.set("My CNC profile".to_string());
-                        dialog_template_key
-                            .set(
-                                template_options_for_add
-                                    .first()
-                                    .map(|(key, _)| key.clone())
-                                    .unwrap_or_default(),
-                            );
                         show_name_dialog.set(true);
                     },
                     on_import: move |_| {
@@ -294,13 +283,13 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 
             if *show_name_dialog.read() {
                 ProfileNameDialog {
-                    title: if *dialog_is_clone.read() { "Clone CNC profile".to_string() } else { "Add CNC template profile".to_string() },
+                    title: if *dialog_is_clone.read() { "Clone CNC profile".to_string() } else { "Add CNC profile".to_string() },
                     name_label: "Profile name".to_string(),
                     name_value: dialog_name.read().clone(),
-                    template_options: if *dialog_is_clone.read() { Vec::<(String, String)>::new() } else { template_options.clone() },
-                    selected_template: dialog_template_key.read().clone(),
+                    template_options: Vec::<(String, String)>::new(),
+                    selected_template: String::new(),
                     on_name_change: move |value| dialog_name.set(value),
-                    on_template_change: move |value| dialog_template_key.set(value),
+                    on_template_change: |_| {},
                     on_cancel: move |_| show_name_dialog.set(false),
                     on_submit: move |_| {
                         let name = dialog_name.read().trim().to_string();
@@ -318,28 +307,9 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             super::mutate_ctx(state, |s| s.log_event("CNC profile cloned"));
                             status_message.set("CNC profile cloned".to_string());
                         } else {
-                            let selected_template_key = dialog_template_key.read().clone();
-                            if selected_template_key.trim().is_empty() {
-                                status_message
-                                    .set(
-                                        "Select a CNC template before creating the profile".to_string(),
-                                    );
-                                return;
-                            }
-                            let Some(template) = library_profiles
-                                .iter()
-                                .find(|profile| profile.key == selected_template_key)
-                                .map(|profile| profile.machine.clone()) else {
-                                status_message.set("Selected template was not found".to_string());
-                                return;
-                            };
                             state
                                 .with_mut(|s| {
-                                    let mut profile = template;
-                                    profile.name = name.clone();
-                                    profile.id = String::new();
-                                    profile.built_in = false;
-                                    s.add_machine_profile(profile);
+                                    s.add_machine_profile_from_schema(&name);
                                     s.log_event("CNC profile added");
                                 });
                             status_message.set("CNC profile created".to_string());

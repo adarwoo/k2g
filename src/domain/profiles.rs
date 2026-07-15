@@ -40,6 +40,7 @@ pub struct MachineProfile {
     pub tool_change_manual_prompt: String,
     pub tool_change_command: String,
     pub pending_required_fields: BTreeSet<String>,
+    pub usable: bool,
 }
 
 impl Default for MachineProfile {
@@ -83,6 +84,7 @@ impl Default for MachineProfile {
             tool_change_manual_prompt: "MSG Load {tool_name} {tool_diameter}\nM01".to_string(),
             tool_change_command: "M05\n{manual_message}\nT{slot} M06\nS{rpm}".to_string(),
             pending_required_fields: BTreeSet::new(),
+            usable: true,
         }
     }
 }
@@ -94,6 +96,8 @@ pub struct FixtureProfile {
     pub name: String,
     pub coordinate_context: String,
     pub backing_board: String,
+    pub pending_required_fields: BTreeSet<String>,
+    pub usable: bool,
 }
 
 /// Machining profile persisted with processing schema.
@@ -105,6 +109,8 @@ pub struct JobProfile {
     pub fixture_profile_id: String,
     pub toolset_profile_id: String,
     pub default_operations: Vec<ProductionOperation>,
+    pub pending_required_fields: BTreeSet<String>,
+    pub usable: bool,
 }
 
 /// Toolset generation policy persisted with toolset schema.
@@ -150,6 +156,8 @@ pub struct ToolsetProfile {
     pub description: String,
     pub generation_policy: ToolsetGenerationPolicy,
     pub slots: BTreeMap<u8, RackSlot>,
+    pub pending_required_fields: BTreeSet<String>,
+    pub usable: bool,
 }
 
 /// Generic delete-impact payload used by profile screens.

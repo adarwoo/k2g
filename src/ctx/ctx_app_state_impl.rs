@@ -10,13 +10,8 @@ impl AppState {
             theme: load_persisted_theme(),
             machines: vec![],
             selected_machine_id: None,
-            fixtures: vec![FixtureProfile {
-                id: "fixture-default".to_string(),
-                name: "Default fixture".to_string(),
-                coordinate_context: "PCB origin aligned to fixture origin".to_string(),
-                backing_board: "MDF spoilboard".to_string(),
-            }],
-            selected_fixture_id: Some("fixture-default".to_string()),
+            fixtures: vec![],
+            selected_fixture_id: None,
             process_profiles: vec![],
             selected_process_profile_id: None,
             last_edited_process_profile_id: None,
@@ -75,10 +70,7 @@ impl AppState {
             state.seed_rack_slots(8);
         }
         if state.toolsets.is_empty() {
-            let default_toolset = state.new_toolset_profile("Default toolset", 8);
-            state.rack_slots = default_toolset.slots.clone();
-            state.selected_toolset_id = Some(default_toolset.id.clone());
-            state.toolsets.push(default_toolset);
+            state.selected_toolset_id = None;
         }
         if state.selected_toolset_id.is_none() {
             if let Some(toolset) = state.toolsets.first() {
@@ -550,6 +542,8 @@ impl AppState {
 
         if let Some(target) = self.process_profiles.iter_mut().find(|profile| profile.id == selected) {
             target.name = unique.clone();
+            target.pending_required_fields.remove("name");
+            target.usable = target.pending_required_fields.is_empty();
             self.last_edited_process_profile_id = Some(selected);
             return Ok(unique);
         }
@@ -564,7 +558,7 @@ impl AppState {
 
         let clone_name_seed = format!("{} - copy", current.name.trim());
         let unique_name = self.unique_process_profile_name(&clone_name_seed, None);
-        let id = format!("machining-profile-{}", slug(&unique_name));
+        let id = Uuid::now_v7().to_string();
 
         self.process_profiles.push(JobProfile {
             id: id.clone(),
@@ -573,6 +567,8 @@ impl AppState {
             fixture_profile_id: current.fixture_profile_id,
             toolset_profile_id: current.toolset_profile_id,
             default_operations: current.default_operations,
+            pending_required_fields: current.pending_required_fields,
+            usable: current.usable,
         });
 
         self.select_process_profile_by_id(Some(id.clone()));
@@ -595,6 +591,8 @@ impl AppState {
             .find(|profile| profile.id == selected_id)
         {
             profile.cnc_profile_id = cnc_id.to_string();
+            profile.pending_required_fields.remove("cnc.default");
+            profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
@@ -618,6 +616,8 @@ impl AppState {
             .find(|profile| profile.id == selected_id)
         {
             profile.fixture_profile_id = fixture_id.to_string();
+            profile.pending_required_fields.remove("fixture.default");
+            profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
@@ -641,6 +641,8 @@ impl AppState {
             .find(|profile| profile.id == selected_id)
         {
             profile.toolset_profile_id = toolset_id.to_string();
+            profile.pending_required_fields.remove("toolset.default");
+            profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
@@ -654,12 +656,11 @@ impl AppState {
             serde_yaml::from_str(yaml).map_err(|_| "Machining profile import failed: invalid YAML".to_string())?;
         let json_value: Value = serde_json::to_value(yaml_value)
             .map_err(|_| "Machining profile import failed: invalid data".to_string())?;
-        let Some(mut profile) = process_profile_from_value(&json_value) else {
-            return Err("Machining profile import failed: missing required machining fields".to_string());
-        };
+        let mut profile = process_profile_from_value(&json_value)
+            .ok_or_else(|| "Machining profile import failed: non-UUID id/reference detected".to_string())?;
 
         profile.name = self.unique_process_profile_name(&profile.name, None);
-        profile.id = format!("machining-profile-{}", slug(&profile.name));
+        profile.id = Uuid::now_v7().to_string();
 
         if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
             profile.cnc_profile_id = self
@@ -732,52 +733,46 @@ impl AppState {
         }
     }
 
-    fn make_toolset_id(&self, base_name: &str) -> String {
-        let base = slug(base_name);
-        let mut index = 1usize;
+    fn make_toolset_id(&self, _base_name: &str) -> String {
         loop {
-            let candidate = if index == 1 {
-                format!("toolset-{}", base)
-            } else {
-                format!("toolset-{}-{}", base, index)
-            };
+            let candidate = Uuid::now_v7().to_string();
             if !self.toolsets.iter().any(|profile| profile.id == candidate) {
                 return candidate;
             }
-            index += 1;
         }
     }
 
     fn new_toolset_profile(&self, base_name: &str, slot_count: u8) -> ToolsetProfile {
         let unique_name = self.unique_toolset_name(base_name, None);
-        let mut slots = BTreeMap::new();
-        for slot in 1..=slot_count.max(1) {
-            slots.insert(
-                slot,
-                RackSlot {
-                    tool_id: None,
-                    locked: false,
-                    disabled: false,
-                },
-            );
+        let mut defaults = schema_defaults_from_text(TOOLSET_SCHEMA_TEXT);
+        if let Some(obj) = defaults.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(self.make_toolset_id(&unique_name)));
+            obj.insert("name".to_string(), Value::String(unique_name));
+            if slot_count > 0 {
+                let slots = (1..=slot_count)
+                    .map(|idx| {
+                        json!({
+                            "index": idx,
+                            "mode": "spare",
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                obj.insert("slots".to_string(), Value::Array(slots));
+            }
         }
-
-        ToolsetProfile {
-            id: self.make_toolset_id(&unique_name),
-            name: unique_name,
+        toolset_profile_from_value(&defaults).unwrap_or_else(|| ToolsetProfile {
+            id: self.make_toolset_id(base_name),
+            name: self.unique_toolset_name(base_name, None),
             description: String::new(),
             generation_policy: ToolsetGenerationPolicy::AllowHybrid,
-            slots,
-        }
+            slots: BTreeMap::new(),
+            pending_required_fields: BTreeSet::from(["slots".to_string()]),
+            usable: false,
+        })
     }
 
     pub fn add_toolset_profile(&mut self, name: &str) {
-        let slot_count = self
-            .selected_machine()
-            .map(|machine| machine.atc_slot_count)
-            .unwrap_or(8)
-            .max(1);
-        let profile = self.new_toolset_profile(name, slot_count);
+        let profile = self.new_toolset_profile(name, 0);
         let selected = profile.id.clone();
         self.rack_slots = profile.slots.clone();
         self.toolsets.push(profile);
@@ -799,6 +794,8 @@ impl AppState {
             description: current.description,
             generation_policy: current.generation_policy,
             slots: current.slots,
+            pending_required_fields: current.pending_required_fields,
+            usable: current.usable,
         });
 
         self.select_toolset_profile_by_id(Some(id.clone()));
@@ -817,6 +814,8 @@ impl AppState {
 
         if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
             target.name = unique.clone();
+            target.pending_required_fields.remove("name");
+            target.usable = target.pending_required_fields.is_empty();
             return Ok(unique);
         }
 
@@ -843,6 +842,8 @@ impl AppState {
 
         if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
             target.generation_policy = ToolsetGenerationPolicy::from_key(policy_key);
+            target.pending_required_fields.remove("generation_policy");
+            target.usable = target.pending_required_fields.is_empty();
             return Ok(());
         }
 
@@ -890,6 +891,11 @@ impl AppState {
             }
         }
 
+        if !profile.slots.is_empty() {
+            profile.pending_required_fields.remove("slots");
+        }
+        profile.usable = profile.pending_required_fields.is_empty();
+
         self.rack_slots = profile.slots.clone();
         Ok(())
     }
@@ -913,6 +919,11 @@ impl AppState {
             });
         }
 
+        if !profile.slots.is_empty() {
+            profile.pending_required_fields.remove("slots");
+        }
+        profile.usable = profile.pending_required_fields.is_empty();
+
         self.rack_slots = profile.slots.clone();
         Ok(())
     }
@@ -922,9 +933,8 @@ impl AppState {
             serde_yaml::from_str(yaml).map_err(|_| "Toolset profile import failed: invalid YAML".to_string())?;
         let json_value: Value = serde_json::to_value(yaml_value)
             .map_err(|_| "Toolset profile import failed: invalid data".to_string())?;
-        let Some(mut imported) = toolset_profile_from_value(&json_value) else {
-            return Err("Toolset profile import failed: missing required toolset fields".to_string());
-        };
+        let mut imported = toolset_profile_from_value(&json_value)
+            .ok_or_else(|| "Toolset profile import failed: non-UUID id/reference detected".to_string())?;
 
         imported.name = self.unique_toolset_name(&imported.name, None);
         imported.id = self.make_toolset_id(&imported.name);
@@ -970,6 +980,11 @@ impl AppState {
                 profile.default_operations.push(op);
             }
 
+            if !profile.default_operations.is_empty() {
+                profile.pending_required_fields.remove("operations");
+            }
+            profile.usable = profile.pending_required_fields.is_empty();
+
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
             return Ok(());
@@ -984,19 +999,12 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    fn make_machine_id(&self, base_name: &str) -> String {
-        let base = slug(base_name);
-        let mut index = 1usize;
+    fn make_machine_id(&self, _base_name: &str) -> String {
         loop {
-            let candidate = if index == 1 {
-                format!("profile-{}", base)
-            } else {
-                format!("profile-{}-{}", base, index)
-            };
+            let candidate = Uuid::now_v7().to_string();
             if !self.machines.iter().any(|m| m.id == candidate) {
                 return candidate;
             }
-            index += 1;
         }
     }
 
@@ -1064,39 +1072,25 @@ impl AppState {
         self.show_first_launch = false;
         self.select_machine_profile_by_id(Some(selected));
 
-        if self.toolsets.is_empty() {
-            self.add_toolset_profile("Default toolset");
-        }
-
-        if self.process_profiles.is_empty() {
-            let fixture_id = self
-                .selected_fixture_id
-                .clone()
-                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
-            if let Some(fixture_id) = fixture_id {
-                let process_profile = JobProfile {
-                    id: "machining-profile-default".to_string(),
-                    name: "Default machining profile".to_string(),
-                    cnc_profile_id: profile.id.clone(),
-                    fixture_profile_id: fixture_id,
-                    toolset_profile_id: self
-                        .selected_toolset_id
-                        .clone()
-                        .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
-                        .unwrap_or_else(|| "toolset-default".to_string()),
-                    default_operations: vec![ProductionOperation::DrillPth],
-                };
-                self.process_profiles.push(process_profile);
-                self.select_process_profile_by_id(Some("machining-profile-default".to_string()));
-            }
-        }
-
         self.persist_realms(&[
             PersistRealm::CncProfiles,
             PersistRealm::ProcessingProfiles,
             PersistRealm::ToolsetProfiles,
             PersistRealm::GlobalSettings,
         ]);
+    }
+
+    pub fn add_machine_profile_from_schema(&mut self, name: &str) {
+        let mut defaults = schema_defaults_from_text(CNC_SCHEMA_TEXT);
+        let unique_name = self.unique_machine_name(name, None);
+        if let Some(obj) = defaults.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(Uuid::now_v7().to_string()));
+            obj.insert("name".to_string(), Value::String(unique_name));
+        }
+
+        if let Some(profile) = machine_profile_from_value(&defaults) {
+            self.add_machine_profile(profile);
+        }
     }
 
     pub fn rename_selected_machine(&mut self, new_name: &str) -> Result<String, String> {
@@ -1152,31 +1146,17 @@ impl AppState {
     }
 
     pub fn add_fixture_profile(&mut self, name: &str) {
-        let base = if name.trim().is_empty() {
-            "Fixture profile"
-        } else {
-            name.trim()
-        };
-        let mut idx = 1usize;
-        let unique_name = loop {
-            let candidate = if idx == 1 {
-                base.to_string()
-            } else {
-                format!("{} ({})", base, idx)
-            };
-            if !self.fixtures.iter().any(|fixture| fixture.name == candidate) {
-                break candidate;
-            }
-            idx += 1;
-        };
-        let fixture_id = format!("fixture-{}", slug(&unique_name));
-        self.fixtures.push(FixtureProfile {
-            id: fixture_id.clone(),
-            name: unique_name,
-            coordinate_context: "Fixture-defined board origin".to_string(),
-            backing_board: "MDF spoilboard".to_string(),
-        });
-        self.selected_fixture_id = Some(fixture_id);
+        let unique_name = self.unique_fixture_name(name, None);
+        let fixture_id = Uuid::now_v7().to_string();
+        let mut defaults = schema_defaults_from_text(FIXTURE_SCHEMA_TEXT);
+        if let Some(obj) = defaults.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(fixture_id.clone()));
+            obj.insert("name".to_string(), Value::String(unique_name));
+        }
+        if let Some(profile) = fixture_profile_from_value(&defaults) {
+            self.fixtures.push(profile);
+            self.selected_fixture_id = Some(fixture_id);
+        }
     }
 
     fn unique_fixture_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
@@ -1214,13 +1194,15 @@ impl AppState {
 
         let clone_name_seed = format!("{} - copy", current.name.trim());
         let unique_name = self.unique_fixture_name(&clone_name_seed, None);
-        let fixture_id = format!("fixture-{}", slug(&unique_name));
+        let fixture_id = Uuid::now_v7().to_string();
 
         self.fixtures.push(FixtureProfile {
             id: fixture_id.clone(),
             name: unique_name,
             coordinate_context: current.coordinate_context,
             backing_board: current.backing_board,
+            pending_required_fields: current.pending_required_fields,
+            usable: current.usable,
         });
 
         self.selected_fixture_id = Some(fixture_id.clone());
@@ -1239,6 +1221,8 @@ impl AppState {
 
         if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
             target.name = unique.clone();
+            target.pending_required_fields.remove("name");
+            target.usable = target.pending_required_fields.is_empty();
             return Ok(unique);
         }
 
@@ -1252,6 +1236,11 @@ impl AppState {
 
         if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
             target.coordinate_context = value.to_string();
+            if !value.trim().is_empty() {
+                target.pending_required_fields.remove("work_origin_reference");
+                target.pending_required_fields.remove("work_origin_reference.z0_reference");
+            }
+            target.usable = target.pending_required_fields.is_empty();
             return Ok(());
         }
 
@@ -1265,6 +1254,10 @@ impl AppState {
 
         if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
             target.backing_board = value.to_string();
+            if !value.trim().is_empty() {
+                target.pending_required_fields.remove("board_holding_method");
+            }
+            target.usable = target.pending_required_fields.is_empty();
             return Ok(());
         }
 
@@ -1276,12 +1269,11 @@ impl AppState {
             serde_yaml::from_str(yaml).map_err(|_| "Fixture profile import failed: invalid YAML".to_string())?;
         let json_value: Value = serde_json::to_value(yaml_value)
             .map_err(|_| "Fixture profile import failed: invalid data".to_string())?;
-        let Some(mut profile) = fixture_profile_from_value(&json_value) else {
-            return Err("Fixture profile import failed: missing required fixture fields".to_string());
-        };
+        let mut profile = fixture_profile_from_value(&json_value)
+            .ok_or_else(|| "Fixture profile import failed: non-UUID id detected".to_string())?;
 
         profile.name = self.unique_fixture_name(&profile.name, None);
-        profile.id = format!("fixture-{}", slug(&profile.name));
+        profile.id = Uuid::now_v7().to_string();
         let selected = profile.id.clone();
         self.fixtures.push(profile);
         self.selected_fixture_id = Some(selected.clone());
@@ -1301,45 +1293,18 @@ impl AppState {
     }
 
     pub fn add_process_profile(&mut self, name: &str) {
-        let Some(cnc_id) = self
-            .selected_machine_id
-            .clone()
-            .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
-        else {
-            return;
-        };
-        let Some(fixture_id) = self
-            .selected_fixture_id
-            .clone()
-            .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
-        else {
-            return;
-        };
-        let Some(toolset_id) = self
-            .selected_toolset_id
-            .clone()
-            .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
-        else {
-            return;
-        };
-
         let unique_name = self.unique_process_profile_name(name, None);
+        let id = Uuid::now_v7().to_string();
+        let mut defaults = schema_defaults_from_text(PROCESSING_SCHEMA_TEXT);
+        if let Some(obj) = defaults.as_object_mut() {
+            obj.insert("id".to_string(), Value::String(id.clone()));
+            obj.insert("name".to_string(), Value::String(unique_name));
+        }
 
-        let id = format!("machining-profile-{}", slug(&unique_name));
-        let default_operations = if self.project_config.selected_operations.is_empty() {
-            vec![ProductionOperation::DrillPth]
-        } else {
-            self.project_config.selected_operations.clone()
+        let Some(profile) = process_profile_from_value(&defaults) else {
+            return;
         };
-
-        self.process_profiles.push(JobProfile {
-            id: id.clone(),
-            name: unique_name,
-            cnc_profile_id: cnc_id,
-            fixture_profile_id: fixture_id,
-            toolset_profile_id: toolset_id,
-            default_operations,
-        });
+        self.process_profiles.push(profile);
         self.select_process_profile_by_id(Some(id.clone()));
         self.last_edited_process_profile_id = Some(id);
     }
@@ -1898,9 +1863,103 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
     })
 }
 
+const CNC_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/cnc.yaml");
+const FIXTURE_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/fixture.yaml");
+const PROCESSING_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/processing.yaml");
+const TOOLSET_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/toolset.yaml");
+
+fn schema_defaults_from_text(schema_text: &str) -> Value {
+    let yaml_schema: serde_yaml::Value = serde_yaml::from_str(schema_text).unwrap_or(serde_yaml::Value::Null);
+    let json_schema: Value = serde_json::to_value(yaml_schema).unwrap_or(Value::Null);
+    crate::config::defaults::populate_defaults(&json_schema).unwrap_or_else(|| json!({}))
+}
+
+fn has_path(value: &Value, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let pointer = format!("/{}", path.replace('.', "/"));
+    value.pointer(&pointer).is_some()
+}
+
+fn machine_required_paths() -> &'static [&'static str] {
+    &[
+        "id",
+        "machine.fixture_plate.x",
+        "machine.fixture_plate.y",
+        "machine.max_feed_rate",
+        "machine.spindle_rpm_min",
+        "machine.spindle_rpm_max",
+        "machine.atc_slot_count",
+        "machine.origin.x0",
+        "machine.origin.y0",
+        "machine.scaling.x",
+        "machine.scaling.y",
+        "machine.line_numbering_increment",
+    ]
+}
+
+fn fixture_required_paths() -> &'static [&'static str] {
+    &[
+        "id",
+        "name",
+        "board_holding_method",
+        "work_origin_reference",
+    ]
+}
+
+fn process_required_paths() -> &'static [&'static str] {
+    &[
+        "id",
+        "name",
+        "cnc.default",
+        "fixture.default",
+        "toolset.default",
+        "operations",
+    ]
+}
+
+fn toolset_required_paths() -> &'static [&'static str] {
+    &[
+        "id",
+        "name",
+        "generation_policy",
+        "slots",
+    ]
+}
+
+fn collect_missing_required(value: &Value, required_paths: &[&str]) -> BTreeSet<String> {
+    required_paths
+        .iter()
+        .filter(|path| !has_path(value, path))
+        .map(|path| (*path).to_string())
+        .collect()
+}
+
+fn is_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok()
+}
+
 fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
-    let id = value.get("id")?.as_str()?.to_string();
-    let name = value.get("name")?.as_str()?.to_string();
+    let mut pending_required_fields = collect_missing_required(value, machine_required_paths());
+
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let Some(id) = id else {
+        warn!("Skipping CNC profile: missing id");
+        return None;
+    };
+    if !is_uuid(&id) {
+        warn!("Skipping CNC profile '{}': id is not a UUID", id);
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "Unnamed CNC profile".to_string());
 
     let fixture_plate_max_x = value
         .pointer("/machine/fixture_plate/x")
@@ -2081,7 +2140,8 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .or_else(|| value.get("tool_change_command").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
-        pending_required_fields: BTreeSet::new(),
+        pending_required_fields: pending_required_fields.clone(),
+        usable: pending_required_fields.is_empty(),
     })
 }
 
@@ -2101,9 +2161,28 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
 }
 
 fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
+    let mut pending_required_fields = collect_missing_required(value, fixture_required_paths());
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let Some(id) = id else {
+        warn!("Skipping fixture profile: missing id");
+        return None;
+    };
+    if !is_uuid(&id) {
+        warn!("Skipping fixture profile '{}': id is not a UUID", id);
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "Unnamed fixture profile".to_string());
+
     Some(FixtureProfile {
-        id: value.get("id")?.as_str()?.to_string(),
-        name: value.get("name")?.as_str()?.to_string(),
+        id,
+        name,
         coordinate_context: value
             .pointer("/work_origin_reference/z0_reference")
             .and_then(Value::as_str)
@@ -2116,6 +2195,8 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
             .or_else(|| value.get("backing_board").and_then(Value::as_str))
             .unwrap_or("MDF spoilboard")
             .to_string(),
+        pending_required_fields: pending_required_fields.clone(),
+        usable: pending_required_fields.is_empty(),
     })
 }
 
@@ -2145,26 +2226,45 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
 }
 
 fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
-    let id = value.get("id")?.as_str()?.to_string();
-    let name = value.get("name")?.as_str()?.to_string();
+    let mut pending_required_fields = collect_missing_required(value, process_required_paths());
+
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let Some(id) = id else {
+        warn!("Skipping machining profile: missing id");
+        return None;
+    };
+    if !is_uuid(&id) {
+        warn!("Skipping machining profile '{}': id is not a UUID", id);
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "Unnamed machining profile".to_string());
 
     let cnc_profile_id = value
         .pointer("/cnc/default")
         .and_then(Value::as_str)
-        .or_else(|| value.get("cnc_profile_id").and_then(Value::as_str))?
+        .or_else(|| value.get("cnc_profile_id").and_then(Value::as_str))
+        .unwrap_or_default()
         .to_string();
 
     let fixture_profile_id = value
         .pointer("/fixture/default")
         .and_then(Value::as_str)
-        .or_else(|| value.get("fixture_profile_id").and_then(Value::as_str))?
+        .or_else(|| value.get("fixture_profile_id").and_then(Value::as_str))
+        .unwrap_or_default()
         .to_string();
 
     let toolset_profile_id = value
         .pointer("/toolset/default")
         .and_then(Value::as_str)
         .or_else(|| value.get("toolset_profile_id").and_then(Value::as_str))
-        .unwrap_or("toolset-default")
+        .unwrap_or_default()
         .to_string();
 
     let default_operations = value
@@ -2187,8 +2287,41 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
                         .collect::<Vec<_>>()
                 })
         })
-        .filter(|ops| !ops.is_empty())
-        .unwrap_or_else(|| vec![ProductionOperation::DrillPth]);
+        .unwrap_or_default();
+
+    if cnc_profile_id.trim().is_empty() {
+        pending_required_fields.insert("cnc.default".to_string());
+    } else if !is_uuid(&cnc_profile_id) {
+        warn!(
+            "Skipping machining profile '{}': cnc.default is not a UUID ({})",
+            id,
+            cnc_profile_id
+        );
+        return None;
+    }
+    if fixture_profile_id.trim().is_empty() {
+        pending_required_fields.insert("fixture.default".to_string());
+    } else if !is_uuid(&fixture_profile_id) {
+        warn!(
+            "Skipping machining profile '{}': fixture.default is not a UUID ({})",
+            id,
+            fixture_profile_id
+        );
+        return None;
+    }
+    if toolset_profile_id.trim().is_empty() {
+        pending_required_fields.insert("toolset.default".to_string());
+    } else if !is_uuid(&toolset_profile_id) {
+        warn!(
+            "Skipping machining profile '{}': toolset.default is not a UUID ({})",
+            id,
+            toolset_profile_id
+        );
+        return None;
+    }
+    if default_operations.is_empty() {
+        pending_required_fields.insert("operations".to_string());
+    }
 
     Some(JobProfile {
         id,
@@ -2197,13 +2330,32 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         fixture_profile_id,
         toolset_profile_id,
         default_operations,
+        pending_required_fields: pending_required_fields.clone(),
+        usable: pending_required_fields.is_empty(),
     })
 }
 
 // toolset.yaml -> ToolsetProfile conversion boundary.
 fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
-    let id = value.get("id")?.as_str()?.to_string();
-    let name = value.get("name")?.as_str()?.to_string();
+    let mut pending_required_fields = collect_missing_required(value, toolset_required_paths());
+
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let Some(id) = id else {
+        warn!("Skipping toolset profile: missing id");
+        return None;
+    };
+    if !is_uuid(&id) {
+        warn!("Skipping toolset profile '{}': id is not a UUID", id);
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "Unnamed toolset profile".to_string());
     let description = value
         .get("description")
         .and_then(Value::as_str)
@@ -2217,13 +2369,30 @@ fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
     );
 
     let mut slots = BTreeMap::new();
-    for slot in value.get("slots")?.as_array()? {
-        let index = slot.get("index").and_then(Value::as_u64)? as u8;
+    for slot in value
+        .get("slots")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(index) = slot.get("index").and_then(Value::as_u64).map(|v| v as u8) else {
+            continue;
+        };
         let mode = slot.get("mode").and_then(Value::as_str).unwrap_or("spare");
         let tool_id = slot
             .get("tool_id")
             .and_then(Value::as_str)
             .map(ToString::to_string);
+        if let Some(tool_id) = tool_id.as_ref() {
+            if !is_uuid(tool_id) {
+                warn!(
+                    "Skipping toolset profile '{}': slot tool_id is not a UUID ({})",
+                    id,
+                    tool_id
+                );
+                return None;
+            }
+        }
         slots.insert(
             index,
             RackSlot {
@@ -2238,14 +2407,7 @@ fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
     }
 
     if slots.is_empty() {
-        slots.insert(
-            1,
-            RackSlot {
-                tool_id: None,
-                locked: false,
-                disabled: false,
-            },
-        );
+        pending_required_fields.insert("slots".to_string());
     }
 
     Some(ToolsetProfile {
@@ -2254,6 +2416,8 @@ fn toolset_profile_from_value(value: &Value) -> Option<ToolsetProfile> {
         description,
         generation_policy,
         slots,
+        pending_required_fields: pending_required_fields.clone(),
+        usable: pending_required_fields.is_empty(),
     })
 }
 

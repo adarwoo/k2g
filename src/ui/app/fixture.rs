@@ -18,7 +18,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let fixture_options = snapshot
         .fixtures
         .iter()
-        .map(|fixture| (fixture.id.clone(), fixture.name.clone()))
+        .map(|fixture| {
+            let suffix = if fixture.usable { "" } else { " (not usable)" };
+            (fixture.id.clone(), format!("{}{}", fixture.name, suffix))
+        })
         .collect::<Vec<_>>();
 
     rsx! {
@@ -185,7 +188,7 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
             div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
                 if let Some(fixture) = selected_fixture.as_ref() {
                     div { class: "profile-editor-top",
-                        div { class: "field",
+                        div { class: if fixture.pending_required_fields.contains("name") { "field required-pending" } else { "field" },
                             label { "Profile name" }
                             input {
                                 r#type: "text",
@@ -201,9 +204,25 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                         }
                     }
 
+                    if !fixture.pending_required_fields.is_empty() {
+                        p { class: "diag-status required-pending-help",
+                            {
+                                format!(
+                                    "Required schema values need input: {}",
+                                    fixture
+                                        .pending_required_fields
+                                        .iter()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
+                            }
+                        }
+                    }
+
                     div { class: "profile-editor-scroll",
                         div { class: "edit-grid",
-                            div { class: "field",
+                            div { class: if fixture.pending_required_fields.contains("board_holding_method") { "field required-pending" } else { "field" },
                                 label { "Board holding method" }
                                 input {
                                     r#type: "text",
@@ -218,7 +237,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if fixture.pending_required_fields.contains("work_origin_reference")
+    || fixture
+        .pending_required_fields
+        .contains("work_origin_reference.z0_reference") { "field required-pending" } else { "field" },
                                 label { "Work origin reference" }
                                 input {
                                     r#type: "text",

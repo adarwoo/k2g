@@ -18,7 +18,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let toolset_options = snapshot
         .toolsets
         .iter()
-        .map(|toolset| (toolset.id.clone(), toolset.name.clone()))
+        .map(|toolset| {
+            let suffix = if toolset.usable { "" } else { " (not usable)" };
+            (toolset.id.clone(), format!("{}{}", toolset.name, suffix))
+        })
         .collect::<Vec<_>>();
 
     rsx! {
@@ -185,7 +188,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
             div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
                 if let Some(toolset) = selected_toolset.as_ref() {
                     div { class: "profile-editor-top",
-                        div { class: "field",
+                        div { class: if toolset.pending_required_fields.contains("name") { "field required-pending" } else { "field" },
                             label { "Profile name" }
                             input {
                                 r#type: "text",
@@ -197,6 +200,22 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                         status_message.set(message);
                                     }
                                 },
+                            }
+                        }
+                    }
+
+                    if !toolset.pending_required_fields.is_empty() {
+                        p { class: "diag-status required-pending-help",
+                            {
+                                format!(
+                                    "Required schema values need input: {}",
+                                    toolset
+                                        .pending_required_fields
+                                        .iter()
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", "),
+                                )
                             }
                         }
                     }
@@ -218,7 +237,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if toolset.pending_required_fields.contains("generation_policy") { "field required-pending" } else { "field" },
                                 label { "Generation policy" }
                                 select {
                                     value: toolset.generation_policy.as_key(),
@@ -235,7 +254,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
                             }
 
-                            div { class: "field",
+                            div { class: if toolset.pending_required_fields.contains("slots") { "field required-pending" } else { "field" },
                                 label { "Slot count" }
                                 input {
                                     r#type: "number",
