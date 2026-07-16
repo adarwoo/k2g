@@ -17,28 +17,13 @@ pub fn AppTopBar(
     let snapshot = state.read().clone();
 
     let has_board = snapshot.board.is_some();
-    let has_machine = snapshot.selected_machine().is_some();
-    let has_fixture = snapshot.selected_fixture().is_some();
     let has_process_profile = snapshot.selected_process_profile().is_some();
-    let has_toolset = snapshot.selected_toolset().is_some();
     let has_machining_operation = !snapshot.project_config.selected_operations.is_empty();
 
-    let machine_name = snapshot
-        .selected_machine()
-        .map(|machine| machine.name.clone())
-        .unwrap_or_else(|| "No CNC selected".to_string());
     let process_profile_name = snapshot
         .selected_process_profile()
         .map(|profile| profile.name.clone())
         .unwrap_or_else(|| "No machining profile selected".to_string());
-    let fixture_name = snapshot
-        .selected_fixture()
-        .map(|fixture| fixture.name.clone())
-        .unwrap_or_else(|| "No fixture selected".to_string());
-    let toolset_name = snapshot
-        .selected_toolset()
-        .map(|toolset| toolset.name.clone())
-        .unwrap_or_else(|| "No toolset selected".to_string());
     let board_name = snapshot
         .board
         .as_ref()

@@ -1,6 +1,7 @@
 mod board;
 mod cli;
 mod config;
+mod app_state_impl;
 mod ctx;
 mod domain;
 mod kicad_wrapper;

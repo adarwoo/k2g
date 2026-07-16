@@ -93,7 +93,7 @@ impl StockTypeFilter {
 }
 
 #[component]
-pub fn StockScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let mut stock_persist_armed = use_signal(|| false);
     let mut last_stock_fingerprint = use_signal(String::new);
 
@@ -1939,7 +1939,7 @@ fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> St
     unit_service::format_length_display(tool.diameter, unit_system)
 }
 
-fn persist_stock_realm_now(state: Signal<crate::ctx::AppCtx>) {
+fn persist_stock_realm_now(state: Signal<crate::app_state_impl::AppCtx>) {
     // Persist from the UI signal snapshot because stock edits are applied there first.
     // Using global ctx here can miss recent in-screen edits before they are synced.
     let snapshot = state.read().clone();

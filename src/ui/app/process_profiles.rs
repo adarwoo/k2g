@@ -1,14 +1,16 @@
 use dioxus::prelude::*;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
+use serde_json::Value;
 use std::fs;
 
 use super::super::model::*;
 use super::profiles_common::{
-    format_impact_warning, slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog,
+    format_impact_warning, slug_file_name, BindingListSelector, ProfileLifecycleToolbar,
+    ProfileNameDialog,
 };
 
 #[component]
-pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
@@ -40,11 +42,13 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     selected_profile_id: snapshot.selected_process_profile_id.clone(),
                     can_export: selected_machining_profile.is_some(),
                     on_select: move |id: String| {
-                        state
-                            .with_mut(|s| {
+                        super::mutate_ctx(
+                            state,
+                            |s| {
                                 s.select_process_profile_by_id(Some(id.clone()));
                                 s.mark_last_edited_process_profile(Some(id));
-                            });
+                            },
+                        );
                     },
                     on_clone: move |_| {
                         let Some(selected) = state.read().selected_process_profile().cloned() else {
@@ -69,11 +73,13 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let _ = s.delete_process_profile_with_cascade(&profile_id);
                                     s.log_event("Machining profile deleted");
-                                });
+                                },
+                            );
                             status_message.set("Machining profile deleted".to_string());
                         }
                     },
@@ -226,98 +232,558 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     }
 
                     div { class: "profile-editor-scroll",
-                        div { class: "edit-grid",
-                            div { class: if profile.pending_required_fields.contains("cnc.default") { "field required-pending" } else { "field" },
-                                label { "CNC profile" }
-                                select {
-                                    value: "{profile.cnc_profile_id}",
-                                    onchange: move |evt| {
-                                        let value = evt.value();
+                        div { class: "edit-grid process-edit-grid",
+                            div { class: if profile.pending_required_fields.contains("cnc.default")
+    || profile.pending_required_fields.contains("cnc.choices") { "field required-pending" } else { "field" },
+                                BindingListSelector {
+                                    label: "CNC profile".to_string(),
+                                    options: snapshot
+                                        .machines
+                                        .iter()
+                                        .map(|machine| {
+                                            let suffix = if machine.usable { "" } else { " (not usable)" };
+                                            (machine.id.clone(), format!("{}{}", machine.name, suffix))
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    selected_ids: profile.cnc_profile_choices.clone(),
+                                    default_id: profile.cnc_profile_id.clone(),
+                                    on_change: move |(selected_ids, default_id): (Vec<String>, String)| {
                                         let result = super::mutate_ctx(
                                             state,
-                                            |s| s.set_selected_process_profile_cnc(&value),
+                                            |s| s.set_selected_process_profile_cnc_binding(&default_id, &selected_ids),
                                         );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
                                     },
-                                    for (idx , machine) in snapshot.machines.iter().enumerate() {
-                                        option {
-                                            key: "mach-opt-{idx}",
-                                            value: "{machine.id}",
-                                            {format!("{}{}", machine.name, if machine.usable { "" } else { " (not usable)" })}
-                                        }
-                                    }
                                 }
                             }
 
-                            div { class: if profile.pending_required_fields.contains("fixture.default") { "field required-pending" } else { "field" },
-                                label { "Fixture profile" }
-                                select {
-                                    value: "{profile.fixture_profile_id}",
-                                    onchange: move |evt| {
-                                        let value = evt.value();
-                                        let result = state
-                                            .with_mut(|s| s.set_selected_process_profile_fixture(&value));
+                            div { class: if profile.pending_required_fields.contains("fixture.default")
+    || profile.pending_required_fields.contains("fixture.choices") { "field required-pending" } else { "field" },
+                                BindingListSelector {
+                                    label: "Fixture profile".to_string(),
+                                    options: snapshot
+                                        .fixtures
+                                        .iter()
+                                        .map(|fixture| {
+                                            let suffix = if fixture.usable { "" } else { " (not usable)" };
+                                            (fixture.id.clone(), format!("{}{}", fixture.name, suffix))
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    selected_ids: profile.fixture_profile_choices.clone(),
+                                    default_id: profile.fixture_profile_id.clone(),
+                                    on_change: move |(selected_ids, default_id): (Vec<String>, String)| {
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| {
+                                                s
+                                                    .set_selected_process_profile_fixture_binding(
+                                                    &default_id,
+                                                    &selected_ids,
+                                                )
+                                            },
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
                                     },
-                                    for (idx , fixture) in snapshot.fixtures.iter().enumerate() {
-                                        option {
-                                            key: "fix-opt-{idx}",
-                                            value: "{fixture.id}",
-                                            {format!("{}{}", fixture.name, if fixture.usable { "" } else { " (not usable)" })}
-                                        }
-                                    }
                                 }
                             }
 
-                            div { class: if profile.pending_required_fields.contains("toolset.default") { "field required-pending" } else { "field" },
-                                label { "Toolset profile" }
-                                select {
-                                    value: "{profile.toolset_profile_id}",
-                                    onchange: move |evt| {
-                                        let value = evt.value();
-                                        let result = state
-                                            .with_mut(|s| s.set_selected_process_profile_toolset(&value));
+                            div { class: if profile.pending_required_fields.contains("toolset.default")
+    || profile.pending_required_fields.contains("toolset.choices") { "field required-pending" } else { "field" },
+                                BindingListSelector {
+                                    label: "Toolset profile".to_string(),
+                                    options: snapshot
+                                        .toolsets
+                                        .iter()
+                                        .map(|toolset| {
+                                            let suffix = if toolset.usable { "" } else { " (not usable)" };
+                                            (toolset.id.clone(), format!("{}{}", toolset.name, suffix))
+                                        })
+                                        .collect::<Vec<_>>(),
+                                    selected_ids: profile.toolset_profile_choices.clone(),
+                                    default_id: profile.toolset_profile_id.clone(),
+                                    on_change: move |(selected_ids, default_id): (Vec<String>, String)| {
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| {
+                                                s
+                                                    .set_selected_process_profile_toolset_binding(
+                                                    &default_id,
+                                                    &selected_ids,
+                                                )
+                                            },
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
                                     },
-                                    for (idx , toolset) in snapshot.toolsets.iter().enumerate() {
-                                        option {
-                                            key: "tool-opt-{idx}",
-                                            value: "{toolset.id}",
-                                            {format!("{}{}", toolset.name, if toolset.usable { "" } else { " (not usable)" })}
-                                        }
-                                    }
                                 }
                             }
 
                             div { class: if profile.pending_required_fields.contains("operations") { "field required-pending" } else { "field" },
-                                label { "Default machining steps" }
-                                for (idx , op) in ProductionOperation::all().iter().enumerate() {
-                                    label {
-                                        key: "op-{idx}",
-                                        class: "checkbox-line",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: profile.default_operations.contains(op),
-                                            oninput: {
-                                                let operation = *op;
-                                                move |_| {
-                                                    let result = state
-                                                        .with_mut(|s| {
-                                                            s.toggle_selected_process_profile_operation(operation)
-                                                        });
+                                label { "Operations" }
+                                p { class: "hint",
+                                    "Select enabled operations. Configuration sections appear below."
+                                }
+
+                                div { class: "operation-group",
+                                    p { class: "hint", "Drilling" }
+                                    for (idx , op) in [
+                                        ProductionOperation::DrillLocatingPins,
+                                        ProductionOperation::DrillPth,
+                                        ProductionOperation::DrillNpth,
+                                    ]
+                                        .iter()
+                                        .enumerate()
+                                    {
+                                        label {
+                                            key: "drill-op-{idx}",
+                                            class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: profile.default_operations.contains(op),
+                                                oninput: {
+                                                    let operation = *op;
+                                                    move |_| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| s.toggle_selected_process_profile_operation(operation),
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                            span { "{op.label()}" }
+                                        }
+                                    }
+                                }
+
+                                div { class: "operation-group",
+                                    p { class: "hint", "Board Edge" }
+                                    for (idx , op) in [ProductionOperation::RouteBoard, ProductionOperation::MillBoard].iter().enumerate() {
+                                        label {
+                                            key: "edge-op-{idx}",
+                                            class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: profile.default_operations.contains(op),
+                                                oninput: {
+                                                    let operation = *op;
+                                                    move |_| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| s.toggle_selected_process_profile_operation(operation),
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    }
+                                                },
+                                            }
+                                            span { "{op.label()}" }
+                                        }
+                                    }
+                                }
+                            }
+
+                            for op in selected_operations_in_order(profile) {
+                                div { class: "field operation-config-section",
+                                    h4 { "{op.label()}" }
+                                    hr {}
+
+                                    if op == ProductionOperation::DrillLocatingPins {
+                                        p { class: "hint", "No extra options for locating pins yet." }
+                                    }
+
+                                    if op == ProductionOperation::DrillPth || op == ProductionOperation::DrillNpth {
+                                        div { class: "field",
+                                            label { "Oversize allowance (relative)" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["holes", "oversize", "relative"], "8%"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["holes", "oversize", "relative"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
                                                     if let Err(message) = result {
                                                         status_message.set(message);
                                                     }
-                                                }
-                                            },
+                                                },
+                                            }
                                         }
-                                        span { "{op.label()}" }
+
+                                        div { class: "field",
+                                            label { "Oversize allowance (max)" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["holes", "oversize", "max"], "0.20mm"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["holes", "oversize", "max"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Undersize allowance (relative)" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["holes", "undersize", "relative"], "8%"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["holes", "undersize", "relative"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Undersize allowance (max)" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["holes", "undersize", "max"], "0.20mm"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["holes", "undersize", "max"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        label { class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: operation_bool(profile, op, &["holes", "route_fallback"], false),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_bool(
+                                                                op,
+                                                                &["holes", "route_fallback"],
+                                                                evt.value() == "true",
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                            span { "Route fallback for unsupported holes" }
+                                        }
+
+                                        label { class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: operation_bool(profile, op, &["holes", "drill_first"], true),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_bool(
+                                                                op,
+                                                                &["holes", "drill_first"],
+                                                                evt.value() == "true",
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                            span { "Drill before contour operations" }
+                                        }
+
+                                        label { class: "checkbox-line",
+                                            input {
+                                                r#type: "checkbox",
+                                                checked: operation_bool(profile, op, &["holes", "pilot"], false),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_bool(
+                                                                op,
+                                                                &["holes", "pilot"],
+                                                                evt.value() == "true",
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                            span { "Enable pilot drilling" }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Oblong hole strategy" }
+                                            select {
+                                                value: operation_string(profile, op, &["holes", "oblong"], "drill_ends_then_route"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["holes", "oblong"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                                option { value: "route", "Route" }
+                                                option { value: "drill_ends_then_route",
+                                                    "Drill ends then route"
+                                                }
+                                                option { value: "drill_chain", "Drill chain" }
+                                                option { value: "drill_chain_then_route",
+                                                    "Drill chain then route"
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if op == ProductionOperation::RouteBoard {
+                                        div { class: "field",
+                                            label { "Edge cut mode" }
+                                            select {
+                                                value: operation_string(profile, op, &["edge", "cut"], "route"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["edge", "cut"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                                option { value: "route", "Route" }
+                                                option { value: "mill", "Mill" }
+                                                option { value: "score", "Score" }
+                                                option { value: "vgroove", "V-groove" }
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Edge retention" }
+                                            select {
+                                                value: operation_string(profile, op, &["edge", "retention"], "tabs"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["edge", "retention"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                                option { value: "none", "None" }
+                                                option { value: "tabs", "Tabs" }
+                                                option { value: "mouse_bites", "Mouse bites" }
+                                                option { value: "tabs_with_mouse_bites",
+                                                    "Tabs with mouse bites"
+                                                }
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Tab count" }
+                                            input {
+                                                r#type: "number",
+                                                min: "0",
+                                                value: operation_u64(profile, op, &["edge", "tabs"], 4).to_string(),
+                                                oninput: move |evt| {
+                                                    let parsed = evt.value().parse::<u64>().unwrap_or(0);
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| { s.set_selected_process_operation_u64(op, &["edge", "tabs"], parsed) },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Tab width" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["edge", "tab_width"], "2.0mm"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["edge", "tab_width"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Mouse bite hole count" }
+                                            input {
+                                                r#type: "number",
+                                                min: "1",
+                                                value: operation_u64(profile, op, &["edge", "bite_holes"], 3).to_string(),
+                                                oninput: move |evt| {
+                                                    let parsed = evt.value().parse::<u64>().unwrap_or(1);
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_u64(op, &["edge", "bite_holes"], parsed)
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
+
+                                        if operation_string(profile, op, &["edge", "cut"], "route") == "vgroove" {
+                                            div { class: "field",
+                                                label { "V-groove depth" }
+                                                input {
+                                                    r#type: "text",
+                                                    value: operation_string(profile, op, &["edge", "vgroove_depth"], "80%"),
+                                                    oninput: move |evt| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| {
+                                                                s.set_selected_process_operation_string(
+                                                                    op,
+                                                                    &["edge", "vgroove_depth"],
+                                                                    evt.value(),
+                                                                )
+                                                            },
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    },
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if op == ProductionOperation::RouteBoard || op == ProductionOperation::MillBoard {
+                                        div { class: "field",
+                                            label { "Finish direction" }
+                                            select {
+                                                value: operation_string(profile, op, &["finishing", "direction"], "climb"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["finishing", "direction"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                                option { value: "conventional", "Conventional" }
+                                                option { value: "climb", "Climb" }
+                                            }
+                                        }
+
+                                        div { class: "field",
+                                            label { "Finish clearance" }
+                                            input {
+                                                r#type: "text",
+                                                value: operation_string(profile, op, &["finishing", "clearance"], "0.1mm"),
+                                                oninput: move |evt| {
+                                                    let result = super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.set_selected_process_operation_string(
+                                                                op,
+                                                                &["finishing", "clearance"],
+                                                                evt.value(),
+                                                            )
+                                                        },
+                                                    );
+                                                    if let Err(message) = result {
+                                                        status_message.set(message);
+                                                    }
+                                                },
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -345,22 +811,26 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             return;
                         }
                         let result = if *dialog_is_clone.read() {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let result = s.clone_selected_process_profile();
                                     if result.is_ok() {
                                         let _ = s.rename_selected_process_profile(&name);
                                         s.log_event("Machining profile cloned");
                                     }
                                     result
-                                })
+                                },
+                            )
                         } else {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     s.add_process_profile(&name);
                                     s.log_event("Machining profile added");
                                     Ok(String::new())
-                                })
+                                },
+                            )
                         };
                         match result {
                             Ok(_) => {
@@ -380,5 +850,49 @@ pub fn MachiningProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                 }
             }
         }
+    }
+}
+
+fn selected_operations_in_order(profile: &JobProfile) -> Vec<ProductionOperation> {
+    ProductionOperation::all()
+        .into_iter()
+        .filter(|op| profile.default_operations.contains(op))
+        .collect()
+}
+
+fn operation_value<'a>(profile: &'a JobProfile, op: ProductionOperation, path: &[&str]) -> Option<&'a Value> {
+    let mut current = profile.operation_setups.get(operation_key(op))?;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn operation_bool(profile: &JobProfile, op: ProductionOperation, path: &[&str], fallback: bool) -> bool {
+    operation_value(profile, op, path)
+        .and_then(Value::as_bool)
+        .unwrap_or(fallback)
+}
+
+fn operation_string(profile: &JobProfile, op: ProductionOperation, path: &[&str], fallback: &str) -> String {
+    operation_value(profile, op, path)
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn operation_u64(profile: &JobProfile, op: ProductionOperation, path: &[&str], fallback: u64) -> u64 {
+    operation_value(profile, op, path)
+        .and_then(Value::as_u64)
+        .unwrap_or(fallback)
+}
+
+fn operation_key(op: ProductionOperation) -> &'static str {
+    match op {
+        ProductionOperation::DrillLocatingPins => "drill_locating_pins",
+        ProductionOperation::DrillPth => "drill_pth",
+        ProductionOperation::DrillNpth => "drill_npth",
+        ProductionOperation::RouteBoard => "route_board",
+        ProductionOperation::MillBoard => "mill_board",
     }
 }

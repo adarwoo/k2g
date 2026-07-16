@@ -11,7 +11,7 @@ static BOOT_DATA: OnceLock<UiLaunchData> = OnceLock::new();
 
 pub fn launch(data: UiLaunchData) {
     let _ = BOOT_DATA.set(data);
-    crate::ctx::initialize_ctx(boot_data().clone());
+    crate::app_state_impl::initialize_ctx(boot_data().clone());
 
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("k2g - KiCAD to GCode")

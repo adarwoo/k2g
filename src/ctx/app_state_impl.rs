@@ -106,7 +106,9 @@ impl AppState {
             .collect();
         if !persisted_fixtures.is_empty() {
             self.fixtures = persisted_fixtures;
-            self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
+            self.select_fixture_profile_by_id(
+                self.fixtures.first().map(|fixture| fixture.id.clone()),
+            );
         }
 
         let persisted_process_profiles: Vec<JobProfile> = persisted
@@ -168,34 +170,33 @@ impl AppState {
         if selected_process.is_some() {
             self.select_process_profile_by_id(selected_process);
         } else {
-            if !self.board.is_some() {
-                let fallback_process = persisted
-                    .selected_process_profile_id
+            let fallback_process = persisted
+                .selected_process_profile_id
+                .clone()
+                .filter(|selected| {
+                    self.process_profiles
+                        .iter()
+                        .any(|profile| profile.id == *selected)
+                })
+                .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+            if fallback_process.is_some() {
+                self.select_process_profile_by_id(fallback_process);
+            } else {
+                let selected_machine = selected_cnc
                     .clone()
-                    .filter(|selected| {
-                        self.process_profiles
-                            .iter()
-                            .any(|profile| profile.id == *selected)
-                    })
-                    .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
-                if fallback_process.is_some() {
-                    self.select_process_profile_by_id(fallback_process);
-                    return;
+                    .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
+                self.select_machine_profile_by_id(selected_machine);
+                if let Some(toolset_id) = selected_toolset
+                    .clone()
+                    .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
+                {
+                    self.select_toolset_profile_by_id(Some(toolset_id));
                 }
+                self.select_fixture_profile_by_id(
+                    selected_fixture
+                        .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone())),
+                );
             }
-
-            let selected_machine = selected_cnc
-                .clone()
-                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
-            self.select_machine_profile_by_id(selected_machine);
-            if let Some(toolset_id) = selected_toolset
-                .clone()
-                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
-            {
-                self.select_toolset_profile_by_id(Some(toolset_id));
-            }
-            self.selected_fixture_id = selected_fixture
-                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
         }
 
         if self.machines.is_empty() {
@@ -337,6 +338,10 @@ impl AppState {
         self.log_event(message);
     }
 
+    fn clear_runtime_errors(&mut self, domain: &str) {
+        self.errors.retain(|error| error.domain != domain);
+    }
+
     pub fn mark_last_edited_process_profile(&mut self, id: Option<String>) {
         self.last_edited_process_profile_id = id;
     }
@@ -366,20 +371,47 @@ impl AppState {
     }
 
     pub fn select_toolset_profile_by_id(&mut self, id: Option<String>) {
-        self.selected_toolset_id = id.clone();
-        if let Some(selected_id) = id {
+        let resolved_id = id
+            .filter(|selected_id| self.toolsets.iter().any(|toolset| toolset.id == *selected_id))
+            .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()));
+
+        self.selected_toolset_id = resolved_id.clone();
+        if let Some(selected_id) = resolved_id {
             if let Some(toolset) = self.toolsets.iter().find(|toolset| toolset.id == selected_id) {
                 self.rack_slots = toolset.slots.clone();
             }
+        } else {
+            self.rack_slots.clear();
         }
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    pub fn select_fixture_profile_by_id(&mut self, id: Option<String>) {
+        let resolved_id = id
+            .filter(|selected_id| self.fixtures.iter().any(|fixture| fixture.id == *selected_id))
+            .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
+
+        self.selected_fixture_id = resolved_id;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
     pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
+        self.clear_runtime_errors("process-profile");
+
         let previous_profile = self.selected_process_profile().cloned();
         let previous_selected_operations = self.project_config.selected_operations.clone();
-        self.selected_process_profile_id = id.clone();
 
-        let Some(selected_id) = id else {
+        let resolved_id = id
+            .filter(|selected_id| {
+                self.process_profiles
+                    .iter()
+                    .any(|profile| profile.id == *selected_id)
+            })
+            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
+
+        self.selected_process_profile_id = resolved_id.clone();
+
+        let Some(selected_id) = resolved_id else {
             return;
         };
 
@@ -389,7 +421,6 @@ impl AppState {
             .find(|profile| profile.id == selected_id)
             .cloned()
         else {
-            self.selected_process_profile_id = None;
             return;
         };
 
@@ -500,6 +531,7 @@ impl AppState {
             .collect::<Vec<_>>();
         self.project_config.selected_operations = ordered_operations;
         self.gcode_modified = false;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
     fn unique_process_profile_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
@@ -545,6 +577,7 @@ impl AppState {
             target.pending_required_fields.remove("name");
             target.usable = target.pending_required_fields.is_empty();
             self.last_edited_process_profile_id = Some(selected);
+            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
             return Ok(unique);
         }
 
@@ -564,20 +597,34 @@ impl AppState {
             id: id.clone(),
             name: unique_name,
             cnc_profile_id: current.cnc_profile_id,
+            cnc_profile_choices: current.cnc_profile_choices,
             fixture_profile_id: current.fixture_profile_id,
+            fixture_profile_choices: current.fixture_profile_choices,
             toolset_profile_id: current.toolset_profile_id,
+            toolset_profile_choices: current.toolset_profile_choices,
             default_operations: current.default_operations,
+            operation_setups: current.operation_setups,
             pending_required_fields: current.pending_required_fields,
             usable: current.usable,
         });
 
         self.select_process_profile_by_id(Some(id.clone()));
         self.last_edited_process_profile_id = Some(id.clone());
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
         Ok(id)
     }
 
+    #[allow(dead_code)]
     pub fn set_selected_process_profile_cnc(&mut self, cnc_id: &str) -> Result<(), String> {
-        if !self.machines.iter().any(|machine| machine.id == cnc_id) {
+        self.set_selected_process_profile_cnc_binding(cnc_id, &[cnc_id.to_string()])
+    }
+
+    pub fn set_selected_process_profile_cnc_binding(
+        &mut self,
+        default_id: &str,
+        choices: &[String],
+    ) -> Result<(), String> {
+        if !default_id.trim().is_empty() && !self.machines.iter().any(|machine| machine.id == default_id) {
             return Err("Selected CNC profile was not found".to_string());
         }
 
@@ -590,19 +637,52 @@ impl AppState {
             .iter_mut()
             .find(|profile| profile.id == selected_id)
         {
-            profile.cnc_profile_id = cnc_id.to_string();
-            profile.pending_required_fields.remove("cnc.default");
+            let mut normalized = normalize_binding_choices(choices, default_id);
+            normalized.retain(|id| self.machines.iter().any(|machine| machine.id == *id));
+
+            if default_id.trim().is_empty() {
+                profile.cnc_profile_id.clear();
+            } else {
+                profile.cnc_profile_id = default_id.to_string();
+                if !normalized.iter().any(|id| id == default_id) {
+                    normalized.push(default_id.to_string());
+                }
+            }
+
+            sort_uuid_v7_ids(&mut normalized);
+            profile.cnc_profile_choices = normalized;
+
+            if profile.cnc_profile_id.trim().is_empty() {
+                profile.pending_required_fields.insert("cnc.default".to_string());
+            } else {
+                profile.pending_required_fields.remove("cnc.default");
+            }
+            if profile.cnc_profile_choices.is_empty() {
+                profile.pending_required_fields.insert("cnc.choices".to_string());
+            } else {
+                profile.pending_required_fields.remove("cnc.choices");
+            }
             profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
             return Ok(());
         }
 
         Err("Selected machining profile was not found".to_string())
     }
 
+    #[allow(dead_code)]
     pub fn set_selected_process_profile_fixture(&mut self, fixture_id: &str) -> Result<(), String> {
-        if !self.fixtures.iter().any(|fixture| fixture.id == fixture_id) {
+        self.set_selected_process_profile_fixture_binding(fixture_id, &[fixture_id.to_string()])
+    }
+
+    pub fn set_selected_process_profile_fixture_binding(
+        &mut self,
+        default_id: &str,
+        choices: &[String],
+    ) -> Result<(), String> {
+        if !default_id.trim().is_empty() && !self.fixtures.iter().any(|fixture| fixture.id == default_id) {
             return Err("Selected fixture profile was not found".to_string());
         }
 
@@ -615,19 +695,52 @@ impl AppState {
             .iter_mut()
             .find(|profile| profile.id == selected_id)
         {
-            profile.fixture_profile_id = fixture_id.to_string();
-            profile.pending_required_fields.remove("fixture.default");
+            let mut normalized = normalize_binding_choices(choices, default_id);
+            normalized.retain(|id| self.fixtures.iter().any(|fixture| fixture.id == *id));
+
+            if default_id.trim().is_empty() {
+                profile.fixture_profile_id.clear();
+            } else {
+                profile.fixture_profile_id = default_id.to_string();
+                if !normalized.iter().any(|id| id == default_id) {
+                    normalized.push(default_id.to_string());
+                }
+            }
+
+            sort_uuid_v7_ids(&mut normalized);
+            profile.fixture_profile_choices = normalized;
+
+            if profile.fixture_profile_id.trim().is_empty() {
+                profile.pending_required_fields.insert("fixture.default".to_string());
+            } else {
+                profile.pending_required_fields.remove("fixture.default");
+            }
+            if profile.fixture_profile_choices.is_empty() {
+                profile.pending_required_fields.insert("fixture.choices".to_string());
+            } else {
+                profile.pending_required_fields.remove("fixture.choices");
+            }
             profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
             return Ok(());
         }
 
         Err("Selected machining profile was not found".to_string())
     }
 
+    #[allow(dead_code)]
     pub fn set_selected_process_profile_toolset(&mut self, toolset_id: &str) -> Result<(), String> {
-        if !self.toolsets.iter().any(|toolset| toolset.id == toolset_id) {
+        self.set_selected_process_profile_toolset_binding(toolset_id, &[toolset_id.to_string()])
+    }
+
+    pub fn set_selected_process_profile_toolset_binding(
+        &mut self,
+        default_id: &str,
+        choices: &[String],
+    ) -> Result<(), String> {
+        if !default_id.trim().is_empty() && !self.toolsets.iter().any(|toolset| toolset.id == default_id) {
             return Err("Selected toolset profile was not found".to_string());
         }
 
@@ -640,11 +753,35 @@ impl AppState {
             .iter_mut()
             .find(|profile| profile.id == selected_id)
         {
-            profile.toolset_profile_id = toolset_id.to_string();
-            profile.pending_required_fields.remove("toolset.default");
+            let mut normalized = normalize_binding_choices(choices, default_id);
+            normalized.retain(|id| self.toolsets.iter().any(|toolset| toolset.id == *id));
+
+            if default_id.trim().is_empty() {
+                profile.toolset_profile_id.clear();
+            } else {
+                profile.toolset_profile_id = default_id.to_string();
+                if !normalized.iter().any(|id| id == default_id) {
+                    normalized.push(default_id.to_string());
+                }
+            }
+
+            sort_uuid_v7_ids(&mut normalized);
+            profile.toolset_profile_choices = normalized;
+
+            if profile.toolset_profile_id.trim().is_empty() {
+                profile.pending_required_fields.insert("toolset.default".to_string());
+            } else {
+                profile.pending_required_fields.remove("toolset.default");
+            }
+            if profile.toolset_profile_choices.is_empty() {
+                profile.pending_required_fields.insert("toolset.choices".to_string());
+            } else {
+                profile.pending_required_fields.remove("toolset.choices");
+            }
             profile.usable = profile.pending_required_fields.is_empty();
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
             return Ok(());
         }
 
@@ -669,6 +806,9 @@ impl AppState {
                 .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
                 .ok_or_else(|| "Machining profile import failed: no CNC profile is available".to_string())?;
         }
+        if profile.cnc_profile_choices.is_empty() {
+            profile.cnc_profile_choices = vec![profile.cnc_profile_id.clone()];
+        }
 
         if !self.fixtures.iter().any(|fixture| fixture.id == profile.fixture_profile_id) {
             profile.fixture_profile_id = self
@@ -676,6 +816,9 @@ impl AppState {
                 .clone()
                 .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
                 .ok_or_else(|| "Machining profile import failed: no fixture profile is available".to_string())?;
+        }
+        if profile.fixture_profile_choices.is_empty() {
+            profile.fixture_profile_choices = vec![profile.fixture_profile_id.clone()];
         }
 
         if !self.toolsets.iter().any(|toolset| toolset.id == profile.toolset_profile_id) {
@@ -685,11 +828,15 @@ impl AppState {
                 .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
                 .ok_or_else(|| "Machining profile import failed: no toolset profile is available".to_string())?;
         }
+        if profile.toolset_profile_choices.is_empty() {
+            profile.toolset_profile_choices = vec![profile.toolset_profile_id.clone()];
+        }
 
         let selected = profile.id.clone();
         self.process_profiles.push(profile);
         self.select_process_profile_by_id(Some(selected.clone()));
         self.last_edited_process_profile_id = Some(selected.clone());
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
         Ok(selected)
     }
 
@@ -777,6 +924,7 @@ impl AppState {
         self.rack_slots = profile.slots.clone();
         self.toolsets.push(profile);
         self.select_toolset_profile_by_id(Some(selected));
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
     }
 
     pub fn clone_selected_toolset_profile(&mut self) -> Result<String, String> {
@@ -799,6 +947,7 @@ impl AppState {
         });
 
         self.select_toolset_profile_by_id(Some(id.clone()));
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
         Ok(id)
     }
 
@@ -816,6 +965,7 @@ impl AppState {
             target.name = unique.clone();
             target.pending_required_fields.remove("name");
             target.usable = target.pending_required_fields.is_empty();
+            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
             return Ok(unique);
         }
 
@@ -829,6 +979,7 @@ impl AppState {
 
         if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
             target.description = description.to_string();
+            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
             return Ok(());
         }
 
@@ -844,6 +995,7 @@ impl AppState {
             target.generation_policy = ToolsetGenerationPolicy::from_key(policy_key);
             target.pending_required_fields.remove("generation_policy");
             target.usable = target.pending_required_fields.is_empty();
+            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
             return Ok(());
         }
 
@@ -897,6 +1049,7 @@ impl AppState {
         profile.usable = profile.pending_required_fields.is_empty();
 
         self.rack_slots = profile.slots.clone();
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
         Ok(())
     }
 
@@ -925,6 +1078,7 @@ impl AppState {
         profile.usable = profile.pending_required_fields.is_empty();
 
         self.rack_slots = profile.slots.clone();
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
         Ok(())
     }
 
@@ -942,6 +1096,7 @@ impl AppState {
         self.rack_slots = imported.slots.clone();
         self.toolsets.push(imported);
         self.select_toolset_profile_by_id(Some(selected.clone()));
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
         Ok(selected)
     }
 
@@ -976,8 +1131,20 @@ impl AppState {
                 .position(|existing| *existing == op)
             {
                 profile.default_operations.remove(index);
+                if let Some(setup) = profile.operation_setups.get_mut(operation_to_key(op)) {
+                    if let Some(obj) = setup.as_object_mut() {
+                        obj.insert("enabled".to_string(), Value::Bool(false));
+                    }
+                }
             } else {
                 profile.default_operations.push(op);
+                let entry = profile
+                    .operation_setups
+                    .entry(operation_to_key(op).to_string())
+                    .or_insert_with(|| default_operation_setup_value(op));
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("enabled".to_string(), Value::Bool(true));
+                }
             }
 
             if !profile.default_operations.is_empty() {
@@ -987,10 +1154,86 @@ impl AppState {
 
             self.select_process_profile_by_id(Some(selected_id));
             self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
             return Ok(());
         }
 
         Err("Selected machining profile was not found".to_string())
+    }
+
+    pub fn set_selected_process_operation_bool(
+        &mut self,
+        op: ProductionOperation,
+        path: &[&str],
+        value: bool,
+    ) -> Result<(), String> {
+        self.set_selected_process_operation_value(op, path, Value::Bool(value))
+    }
+
+    pub fn set_selected_process_operation_string(
+        &mut self,
+        op: ProductionOperation,
+        path: &[&str],
+        value: String,
+    ) -> Result<(), String> {
+        self.set_selected_process_operation_value(op, path, Value::String(value))
+    }
+
+    pub fn set_selected_process_operation_u64(
+        &mut self,
+        op: ProductionOperation,
+        path: &[&str],
+        value: u64,
+    ) -> Result<(), String> {
+        self.set_selected_process_operation_value(op, path, Value::Number(value.into()))
+    }
+
+    fn set_selected_process_operation_value(
+        &mut self,
+        op: ProductionOperation,
+        path: &[&str],
+        value: Value,
+    ) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("Operation config path is empty".to_string());
+        }
+
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No machining profile selected".to_string());
+        };
+
+        let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        else {
+            return Err("Selected machining profile was not found".to_string());
+        };
+
+        let setup = profile
+            .operation_setups
+            .entry(operation_to_key(op).to_string())
+            .or_insert_with(|| default_operation_setup_value(op));
+
+        set_nested_value(setup, path, value);
+
+        if !profile.default_operations.iter().any(|existing| *existing == op) {
+            profile.default_operations.push(op);
+        }
+
+        if let Some(obj) = setup.as_object_mut() {
+            obj.insert("enabled".to_string(), Value::Bool(true));
+        }
+
+        if !profile.default_operations.is_empty() {
+            profile.pending_required_fields.remove("operations");
+        }
+        profile.usable = profile.pending_required_fields.is_empty();
+
+        self.select_process_profile_by_id(Some(selected_id));
+        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
+        Ok(())
     }
 
     pub fn selected_machine_has_atc(&self) -> bool {
@@ -1156,6 +1399,7 @@ impl AppState {
         if let Some(profile) = fixture_profile_from_value(&defaults) {
             self.fixtures.push(profile);
             self.selected_fixture_id = Some(fixture_id);
+            self.persist_realms(&[PersistRealm::FixtureProfiles]);
         }
     }
 
@@ -1206,6 +1450,7 @@ impl AppState {
         });
 
         self.selected_fixture_id = Some(fixture_id.clone());
+        self.persist_realms(&[PersistRealm::FixtureProfiles]);
         Ok(fixture_id)
     }
 
@@ -1223,6 +1468,7 @@ impl AppState {
             target.name = unique.clone();
             target.pending_required_fields.remove("name");
             target.usable = target.pending_required_fields.is_empty();
+            self.persist_realms(&[PersistRealm::FixtureProfiles]);
             return Ok(unique);
         }
 
@@ -1241,6 +1487,7 @@ impl AppState {
                 target.pending_required_fields.remove("work_origin_reference.z0_reference");
             }
             target.usable = target.pending_required_fields.is_empty();
+            self.persist_realms(&[PersistRealm::FixtureProfiles]);
             return Ok(());
         }
 
@@ -1258,6 +1505,7 @@ impl AppState {
                 target.pending_required_fields.remove("board_holding_method");
             }
             target.usable = target.pending_required_fields.is_empty();
+            self.persist_realms(&[PersistRealm::FixtureProfiles]);
             return Ok(());
         }
 
@@ -1277,6 +1525,7 @@ impl AppState {
         let selected = profile.id.clone();
         self.fixtures.push(profile);
         self.selected_fixture_id = Some(selected.clone());
+        self.persist_realms(&[PersistRealm::FixtureProfiles]);
         Ok(selected)
     }
 
@@ -1307,6 +1556,7 @@ impl AppState {
         self.process_profiles.push(profile);
         self.select_process_profile_by_id(Some(id.clone()));
         self.last_edited_process_profile_id = Some(id);
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
     }
 
     pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {
@@ -1511,6 +1761,8 @@ impl AppState {
             self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
         }
 
+        self.persist_realms(&[PersistRealm::FixtureProfiles]);
+
         impact
     }
 
@@ -1524,6 +1776,7 @@ impl AppState {
             .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
 
         self.select_process_profile_by_id(next_processing_id);
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
         impact
     }
 
@@ -1554,6 +1807,8 @@ impl AppState {
                 self.select_toolset_profile_by_id(Some(next_toolset));
             }
         }
+
+        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
 
         impact
     }
@@ -1910,8 +2165,11 @@ fn process_required_paths() -> &'static [&'static str] {
         "id",
         "name",
         "cnc.default",
+        "cnc.choices",
         "fixture.default",
+        "fixture.choices",
         "toolset.default",
+        "toolset.choices",
         "operations",
     ]
 }
@@ -1938,7 +2196,7 @@ fn is_uuid(value: &str) -> bool {
 }
 
 fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
-    let mut pending_required_fields = collect_missing_required(value, machine_required_paths());
+    let pending_required_fields = collect_missing_required(value, machine_required_paths());
 
     let id = value
         .get("id")
@@ -2153,7 +2411,7 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
 }
 
 fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
-    let mut pending_required_fields = collect_missing_required(value, fixture_required_paths());
+    let pending_required_fields = collect_missing_required(value, fixture_required_paths());
     let id = value
         .get("id")
         .and_then(Value::as_str)
@@ -2193,28 +2451,58 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
 }
 
 fn process_profile_to_value(profile: &JobProfile) -> Value {
-    json!({
+    let cnc_choices = if profile.cnc_profile_choices.is_empty() {
+        vec![profile.cnc_profile_id.clone()]
+    } else {
+        profile.cnc_profile_choices.clone()
+    };
+    let fixture_choices = if profile.fixture_profile_choices.is_empty() {
+        vec![profile.fixture_profile_id.clone()]
+    } else {
+        profile.fixture_profile_choices.clone()
+    };
+    let toolset_choices = if profile.toolset_profile_choices.is_empty() {
+        vec![profile.toolset_profile_id.clone()]
+    } else {
+        profile.toolset_profile_choices.clone()
+    };
+
+    let mut value = json!({
         "schema_version": 1,
         "id": profile.id,
         "name": profile.name,
         "cnc": {
             "default": profile.cnc_profile_id,
-            "choices": [profile.cnc_profile_id],
+            "choices": cnc_choices,
         },
         "fixture": {
             "default": profile.fixture_profile_id,
-            "choices": [profile.fixture_profile_id],
+            "choices": fixture_choices,
         },
         "toolset": {
             "default": profile.toolset_profile_id,
-            "choices": [profile.toolset_profile_id],
+            "choices": toolset_choices,
         },
         "operations": profile
             .default_operations
             .iter()
             .map(|op| operation_to_key(*op))
             .collect::<Vec<_>>(),
-    })
+    });
+
+    if let Some(root) = value.as_object_mut() {
+        for op in ProductionOperation::all().iter().copied() {
+            let key = operation_to_key(op);
+            let op_value = profile
+                .operation_setups
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| default_operation_setup_value(op));
+            root.insert(key.to_string(), op_value);
+        }
+    }
+
+    value
 }
 
 fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
@@ -2259,7 +2547,11 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         .unwrap_or_default()
         .to_string();
 
-    let default_operations = value
+    let mut cnc_profile_choices = extract_binding_choices(value, "cnc", &cnc_profile_id);
+    let mut fixture_profile_choices = extract_binding_choices(value, "fixture", &fixture_profile_id);
+    let mut toolset_profile_choices = extract_binding_choices(value, "toolset", &toolset_profile_id);
+
+    let mut default_operations = value
         .get("operations")
         .and_then(Value::as_array)
         .map(|ops| {
@@ -2281,8 +2573,37 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         })
         .unwrap_or_default();
 
+    if default_operations.is_empty() {
+        default_operations = ProductionOperation::all()
+            .into_iter()
+            .filter(|op| {
+                value
+                    .pointer(&format!("/{}/enabled", operation_to_key(*op)))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .collect();
+    }
+
+    let mut operation_setups = extract_operation_setups(value);
+    for op in ProductionOperation::all().iter().copied() {
+        let key = operation_to_key(op).to_string();
+        let default_setup = default_operation_setup_value(op);
+        let setup = operation_setups
+            .entry(key)
+            .or_insert_with(|| default_setup.clone());
+        merge_object_defaults(setup, &default_setup);
+        if let Some(obj) = setup.as_object_mut() {
+            obj.insert(
+                "enabled".to_string(),
+                Value::Bool(default_operations.contains(&op)),
+            );
+        }
+    }
+
     if cnc_profile_id.trim().is_empty() {
         pending_required_fields.insert("cnc.default".to_string());
+        pending_required_fields.insert("cnc.choices".to_string());
     } else if !is_uuid(&cnc_profile_id) {
         warn!(
             "Skipping machining profile '{}': cnc.default is not a UUID ({})",
@@ -2290,9 +2611,20 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
             cnc_profile_id
         );
         return None;
+    } else {
+        if !cnc_profile_choices.iter().any(|existing| existing == &cnc_profile_id) {
+            cnc_profile_choices.push(cnc_profile_id.clone());
+        }
+        sort_uuid_v7_ids(&mut cnc_profile_choices);
+        if cnc_profile_choices.is_empty() {
+            pending_required_fields.insert("cnc.choices".to_string());
+        } else {
+            pending_required_fields.remove("cnc.choices");
+        }
     }
     if fixture_profile_id.trim().is_empty() {
         pending_required_fields.insert("fixture.default".to_string());
+        pending_required_fields.insert("fixture.choices".to_string());
     } else if !is_uuid(&fixture_profile_id) {
         warn!(
             "Skipping machining profile '{}': fixture.default is not a UUID ({})",
@@ -2300,9 +2632,23 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
             fixture_profile_id
         );
         return None;
+    } else {
+        if !fixture_profile_choices
+            .iter()
+            .any(|existing| existing == &fixture_profile_id)
+        {
+            fixture_profile_choices.push(fixture_profile_id.clone());
+        }
+        sort_uuid_v7_ids(&mut fixture_profile_choices);
+        if fixture_profile_choices.is_empty() {
+            pending_required_fields.insert("fixture.choices".to_string());
+        } else {
+            pending_required_fields.remove("fixture.choices");
+        }
     }
     if toolset_profile_id.trim().is_empty() {
         pending_required_fields.insert("toolset.default".to_string());
+        pending_required_fields.insert("toolset.choices".to_string());
     } else if !is_uuid(&toolset_profile_id) {
         warn!(
             "Skipping machining profile '{}': toolset.default is not a UUID ({})",
@@ -2310,6 +2656,19 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
             toolset_profile_id
         );
         return None;
+    } else {
+        if !toolset_profile_choices
+            .iter()
+            .any(|existing| existing == &toolset_profile_id)
+        {
+            toolset_profile_choices.push(toolset_profile_id.clone());
+        }
+        sort_uuid_v7_ids(&mut toolset_profile_choices);
+        if toolset_profile_choices.is_empty() {
+            pending_required_fields.insert("toolset.choices".to_string());
+        } else {
+            pending_required_fields.remove("toolset.choices");
+        }
     }
     if default_operations.is_empty() {
         pending_required_fields.insert("operations".to_string());
@@ -2319,12 +2678,170 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         id,
         name,
         cnc_profile_id,
+        cnc_profile_choices,
         fixture_profile_id,
+        fixture_profile_choices,
         toolset_profile_id,
+        toolset_profile_choices,
         default_operations,
+        operation_setups,
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
     })
+}
+
+fn extract_operation_setups(value: &Value) -> BTreeMap<String, Value> {
+    let mut setups = BTreeMap::new();
+    for op in ProductionOperation::all().iter().copied() {
+        let key = operation_to_key(op);
+        if let Some(v) = value.get(key) {
+            setups.insert(key.to_string(), v.clone());
+        }
+    }
+    setups
+}
+
+fn default_operation_setup_value(op: ProductionOperation) -> Value {
+    match op {
+        ProductionOperation::DrillLocatingPins => json!({
+            "enabled": false,
+        }),
+        ProductionOperation::DrillPth | ProductionOperation::DrillNpth => json!({
+            "enabled": false,
+            "holes": {
+                "oversize": {
+                    "relative": "8%",
+                    "max": "0.20mm",
+                },
+                "undersize": {
+                    "relative": "8%",
+                    "max": "0.20mm",
+                },
+                "route_fallback": false,
+                "drill_first": true,
+                "pilot": false,
+                "oblong": "drill_ends_then_route",
+            }
+        }),
+        ProductionOperation::RouteBoard => json!({
+            "enabled": false,
+            "edge": {
+                "cut": "route",
+                "retention": "tabs",
+                "tabs": 4,
+                "tab_width": "2.0mm",
+                "bite_holes": 3,
+                "vgroove_depth": "80%",
+            },
+            "finishing": {
+                "clearance": "0.1mm",
+                "direction": "climb",
+            }
+        }),
+        ProductionOperation::MillBoard => json!({
+            "enabled": false,
+            "finishing": {
+                "clearance": "0.1mm",
+                "direction": "climb",
+            }
+        }),
+    }
+}
+
+fn set_nested_value(root: &mut Value, path: &[&str], value: Value) {
+    if path.is_empty() {
+        return;
+    }
+
+    if !root.is_object() {
+        *root = json!({});
+    }
+
+    let mut current = root;
+    for key in &path[..path.len() - 1] {
+        if !current.is_object() {
+            *current = json!({});
+        }
+        let obj = current.as_object_mut().expect("object expected");
+        current = obj
+            .entry((*key).to_string())
+            .or_insert_with(|| json!({}));
+    }
+
+    if let Some(obj) = current.as_object_mut() {
+        obj.insert(path[path.len() - 1].to_string(), value);
+    }
+}
+
+fn merge_object_defaults(target: &mut Value, defaults: &Value) {
+    let Some(default_obj) = defaults.as_object() else {
+        return;
+    };
+
+    if !target.is_object() {
+        *target = json!({});
+    }
+
+    let Some(target_obj) = target.as_object_mut() else {
+        return;
+    };
+
+    for (key, default_value) in default_obj {
+        if let Some(existing) = target_obj.get_mut(key) {
+            if existing.is_object() && default_value.is_object() {
+                merge_object_defaults(existing, default_value);
+            }
+        } else {
+            target_obj.insert(key.clone(), default_value.clone());
+        }
+    }
+}
+
+fn extract_binding_choices(value: &Value, domain: &str, default_id: &str) -> Vec<String> {
+    let mut choices = value
+        .pointer(&format!("/{domain}/choices"))
+        .and_then(|v| {
+            if let Some(arr) = v.as_array() {
+                Some(
+                    arr.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|candidate| is_uuid(candidate))
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                )
+            } else if v.as_str() == Some("any") {
+                Some(Vec::new())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    if !default_id.trim().is_empty() && !choices.iter().any(|existing| existing == default_id) {
+        choices.push(default_id.to_string());
+    }
+    sort_uuid_v7_ids(&mut choices);
+    choices
+}
+
+fn sort_uuid_v7_ids(ids: &mut Vec<String>) {
+    ids.sort();
+    ids.dedup();
+}
+
+fn normalize_binding_choices(choices: &[String], default_id: &str) -> Vec<String> {
+    let mut normalized = choices
+        .iter()
+        .filter(|id| is_uuid(id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if is_uuid(default_id) && !normalized.iter().any(|id| id == default_id) {
+        normalized.push(default_id.to_string());
+    }
+
+    sort_uuid_v7_ids(&mut normalized);
+    normalized
 }
 
 // toolset.yaml -> ToolsetProfile conversion boundary.

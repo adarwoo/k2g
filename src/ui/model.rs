@@ -15,7 +15,7 @@ pub use job::{
     AtcRackStrategy, BoardOrientation, BoardThicknessMode, CutDepthStrategy, JobConfig,
     ProductionOperation, RotationMode, Side, TouchProbeSource, Z0DeterminationMode,
 };
-pub use crate::ctx::AppError;
+pub use crate::app_state_impl::AppError;
 
 // =============================================================================
 // MODEL HIERARCHY MAP
@@ -44,15 +44,4 @@ pub enum PersistRealm {
     ProcessingProfiles,
     ToolsetProfiles,
     Stock,
-}
-
-impl PersistRealm {
-    pub const ALL: [PersistRealm; 6] = [
-        PersistRealm::GlobalSettings,
-        PersistRealm::CncProfiles,
-        PersistRealm::FixtureProfiles,
-        PersistRealm::ProcessingProfiles,
-        PersistRealm::ToolsetProfiles,
-        PersistRealm::Stock,
-    ];
 }

@@ -7,7 +7,7 @@ use super::profiles_common::{
 };
 
 #[component]
-pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+pub fn FixtureProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
@@ -40,7 +40,7 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                     selected_profile_id: snapshot.selected_fixture_id.clone(),
                     can_export: selected_fixture.is_some(),
                     on_select: move |id| {
-                        super::mutate_ctx(state, |s| s.selected_fixture_id = Some(id));
+                        super::mutate_ctx(state, |s| s.select_fixture_profile_by_id(Some(id)));
                     },
                     on_clone: move |_| {
                         let Some(selected) = state.read().selected_fixture().cloned() else {
@@ -72,11 +72,13 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let _ = s.delete_fixture_profile_with_cascade(&fixture_id);
                                     s.log_event("Fixture profile deleted");
-                                });
+                                },
+                            );
                             status_message.set("Fixture profile deleted".to_string());
                         }
                     },
@@ -194,8 +196,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 r#type: "text",
                                 value: "{fixture.name}",
                                 oninput: move |evt| {
-                                    let result = state
-                                        .with_mut(|s| { s.rename_selected_fixture_profile(&evt.value()) });
+                                    let result = super::mutate_ctx(
+                                        state,
+                                        |s| s.rename_selected_fixture_profile(&evt.value()),
+                                    );
                                     if let Err(message) = result {
                                         status_message.set(message);
                                     }
@@ -228,8 +232,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     r#type: "text",
                                     value: "{fixture.backing_board}",
                                     oninput: move |evt| {
-                                        let result = state
-                                            .with_mut(|s| { s.update_selected_fixture_backing_board(&evt.value()) });
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| s.update_selected_fixture_backing_board(&evt.value()),
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
@@ -246,10 +252,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     r#type: "text",
                                     value: "{fixture.coordinate_context}",
                                     oninput: move |evt| {
-                                        let result = state
-                                            .with_mut(|s| {
-                                                s.update_selected_fixture_coordinate_context(&evt.value())
-                                            });
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| { s.update_selected_fixture_coordinate_context(&evt.value()) },
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
@@ -280,22 +286,26 @@ pub fn FixtureProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             return;
                         }
                         let result = if *dialog_is_clone.read() {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let result = s.clone_selected_fixture_profile();
                                     if result.is_ok() {
                                         let _ = s.rename_selected_fixture_profile(&name);
                                         s.log_event("Fixture profile cloned");
                                     }
                                     result
-                                })
+                                },
+                            )
                         } else {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     s.add_fixture_profile(&name);
                                     s.log_event("Fixture profile added");
                                     Ok(String::new())
-                                })
+                                },
+                            )
                         };
                         match result {
                             Ok(_) => {

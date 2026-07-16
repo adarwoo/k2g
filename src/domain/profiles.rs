@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use serde_json::Value;
 
 use super::job::ProductionOperation;
 use super::state::RackSlot;
@@ -104,9 +105,13 @@ pub struct JobProfile {
     pub id: String,
     pub name: String,
     pub cnc_profile_id: String,
+    pub cnc_profile_choices: Vec<String>,
     pub fixture_profile_id: String,
+    pub fixture_profile_choices: Vec<String>,
     pub toolset_profile_id: String,
+    pub toolset_profile_choices: Vec<String>,
     pub default_operations: Vec<ProductionOperation>,
+    pub operation_setups: BTreeMap<String, Value>,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,
 }

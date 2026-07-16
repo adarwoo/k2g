@@ -87,6 +87,7 @@ pub enum UnitSystem {
 }
 
 impl UnitSystem {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Metric => "metric",
@@ -103,6 +104,7 @@ impl UnitSystem {
         }
     }
 
+    #[allow(dead_code)]
     pub fn length_unit_label(self) -> &'static str {
         match self {
             Self::Metric => "mm",
@@ -111,6 +113,7 @@ impl UnitSystem {
         }
     }
 
+    #[allow(dead_code)]
     pub fn feed_unit_label(self) -> &'static str {
         match self {
             Self::Metric => "mm/min",
@@ -127,6 +130,7 @@ pub enum Theme {
 }
 
 impl Theme {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Light => "light",
@@ -134,6 +138,7 @@ impl Theme {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_str(value: &str) -> Self {
         match value {
             "light" => Self::Light,

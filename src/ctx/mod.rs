@@ -121,7 +121,7 @@ pub struct AppState {
     pub board: Option<BoardSnapshot>,
 }
 
-include!("ctx_app_state_impl.rs");
+include!("app_state_impl.rs");
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -198,10 +198,6 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
         .write()
         .expect("Global ctx write lock should not be poisoned");
     f(&mut guard)
-}
-
-pub fn persist_ctx_realms(realms: &[PersistRealm]) {
-    with_ctx(|ctx| ctx.app.persist_realms(realms));
 }
 
 pub fn apply_ui_command(command: UiCommand) {

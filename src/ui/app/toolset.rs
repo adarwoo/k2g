@@ -7,7 +7,7 @@ use super::profiles_common::{
 };
 
 #[component]
-pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
+pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
@@ -71,11 +71,13 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let _ = s.delete_toolset_profile_with_cascade(&toolset_id);
                                     s.log_event("Toolset profile deleted");
-                                });
+                                },
+                            );
                             status_message.set("Toolset profile deleted".to_string());
                         }
                     },
@@ -194,8 +196,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 r#type: "text",
                                 value: "{toolset.name}",
                                 oninput: move |evt| {
-                                    let result = state
-                                        .with_mut(|s| { s.rename_selected_toolset_profile(&evt.value()) });
+                                    let result = super::mutate_ctx(
+                                        state,
+                                        |s| s.rename_selected_toolset_profile(&evt.value()),
+                                    );
                                     if let Err(message) = result {
                                         status_message.set(message);
                                     }
@@ -228,8 +232,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     r#type: "text",
                                     value: "{toolset.description}",
                                     oninput: move |evt| {
-                                        let result = state
-                                            .with_mut(|s| { s.update_selected_toolset_description(&evt.value()) });
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| s.update_selected_toolset_description(&evt.value()),
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
@@ -242,8 +248,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 select {
                                     value: toolset.generation_policy.as_key(),
                                     onchange: move |evt| {
-                                        let result = state
-                                            .with_mut(|s| { s.set_selected_toolset_generation_policy(&evt.value()) });
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| s.set_selected_toolset_generation_policy(&evt.value()),
+                                        );
                                         if let Err(message) = result {
                                             status_message.set(message);
                                         }
@@ -308,8 +316,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             } else {
                                                                 None
                                                             };
-                                                            let result = state
-                                                                .with_mut(|s| { s.set_selected_toolset_slot_mode(idx, &mode, tool_id) });
+                                                            let result = super::mutate_ctx(
+                                                                state,
+                                                                |s| s.set_selected_toolset_slot_mode(idx, &mode, tool_id),
+                                                            );
                                                             if let Err(message) = result {
                                                                 status_message.set(message);
                                                             }
@@ -328,10 +338,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                             move |evt| {
                                                                 let tool_id = evt.value();
                                                                 let selected = if tool_id.trim().is_empty() { None } else { Some(tool_id) };
-                                                                let result = state
-                                                                    .with_mut(|s| {
-                                                                        s.set_selected_toolset_slot_mode(idx, "fixed", selected)
-                                                                    });
+                                                                let result = super::mutate_ctx(
+                                                                    state,
+                                                                    |s| s.set_selected_toolset_slot_mode(idx, "fixed", selected),
+                                                                );
                                                                 if let Err(message) = result {
                                                                     status_message.set(message);
                                                                 }
@@ -373,22 +383,26 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 return;
                             }
                             let result = if *dialog_is_clone.read() {
-                                state
-                                    .with_mut(|s| {
+                                super::mutate_ctx(
+                                    state,
+                                    |s| {
                                         let result = s.clone_selected_toolset_profile();
                                         if result.is_ok() {
                                             let _ = s.rename_selected_toolset_profile(&name);
                                             s.log_event("Toolset profile cloned");
                                         }
                                         result
-                                    })
+                                    },
+                                )
                             } else {
-                                state
-                                    .with_mut(|s| {
+                                super::mutate_ctx(
+                                    state,
+                                    |s| {
                                         s.add_toolset_profile(&name);
                                         s.log_event("Toolset profile added");
                                         Ok(String::new())
-                                    })
+                                    },
+                                )
                             };
                             match result {
                                 Ok(_) => {

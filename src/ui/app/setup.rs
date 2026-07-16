@@ -76,7 +76,7 @@ const MASSO_G3_NO_ATC_TEMPLATE: &str = include_str!("../../../resources/cnc_temp
 const MASSO_G3_WITH_ATC_TEMPLATE: &str = include_str!("../../../resources/cnc_templates/masso_g3_with_atc.yaml");
 
 #[component]
-pub fn SetupScreen(state: Signal<crate::ctx::AppCtx>, boot: UiLaunchData) -> Element {
+pub fn SetupScreen(state: Signal<crate::app_state_impl::AppCtx>, boot: UiLaunchData) -> Element {
     let snapshot = state.read().clone();
     let library_profiles = cnc_profile_library();
     let selected_library_profile = use_signal(|| {

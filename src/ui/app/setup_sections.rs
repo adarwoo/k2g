@@ -58,7 +58,7 @@ pub fn SetupSidebar(active_tab: Signal<SetupTab>) -> Element {
 
 #[component]
 pub fn GeneralSettingsPanel(
-    state: Signal<crate::ctx::AppCtx>,
+    state: Signal<crate::app_state_impl::AppCtx>,
     kicad_status: String,
     board_snapshot_summary: Option<String>,
 ) -> Element {
@@ -107,7 +107,7 @@ pub fn GeneralSettingsPanel(
 
 #[component]
 pub fn MachineProfilesPanel(
-    state: Signal<crate::ctx::AppCtx>,
+    state: Signal<crate::app_state_impl::AppCtx>,
     selected_library_profile: Signal<String>,
     import_feedback: Signal<String>,
 ) -> Element {
@@ -242,10 +242,10 @@ pub fn MachineProfilesPanel(
                                     onclick: {
                                         let machine_id = machine.id.clone();
                                         move |_| {
-                                            state
-                                                .with_mut(|s| {
-                                                    s.select_machine_profile_by_id(Some(machine_id.clone()))
-                                                })
+                                            super::mutate_ctx(
+                                                state,
+                                                |s| s.select_machine_profile_by_id(Some(machine_id.clone())),
+                                            )
                                         }
                                     },
                                     "Select"
@@ -260,7 +260,7 @@ pub fn MachineProfilesPanel(
 }
 
 #[component]
-pub fn CatalogManagementPanel(state: Signal<crate::ctx::AppCtx>, import_feedback: Signal<String>) -> Element {
+pub fn CatalogManagementPanel(state: Signal<crate::app_state_impl::AppCtx>, import_feedback: Signal<String>) -> Element {
     use_effect(move || {
         super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });

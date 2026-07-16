@@ -4,7 +4,7 @@ use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
 use crate::board::collect_board_snapshot_for_board;
-use crate::ctx::{ctx_snapshot, with_ctx_mut};
+use crate::app_state_impl::{ctx_snapshot, with_ctx_mut};
 use crate::kicad_wrapper::KiCadClientBlocking;
 use kicad_ipc_rs::DocumentType;
 
@@ -31,7 +31,7 @@ use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, St
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;
 
-pub fn mutate_ctx<R>(mut state: Signal<crate::ctx::AppCtx>, f: impl FnOnce(&mut crate::ctx::AppCtx) -> R) -> R {
+pub fn mutate_ctx<R>(mut state: Signal<crate::app_state_impl::AppCtx>, f: impl FnOnce(&mut crate::app_state_impl::AppCtx) -> R) -> R {
     let result = with_ctx_mut(f);
     state.set(ctx_snapshot());
     result

@@ -1257,6 +1257,10 @@ body {
     overflow: visible;
 }
 
+.profile-editor-scroll .edit-grid.process-edit-grid {
+    grid-template-columns: minmax(0, 1fr);
+}
+
 .panel-header {
     display: flex;
     align-items: center;
@@ -1291,6 +1295,141 @@ p {
     flex-direction: column;
     gap: 8px;
     margin-top: 12px;
+}
+
+.binding-selector {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.binding-selector.open {
+    z-index: 60;
+}
+
+.binding-selector-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: transparent;
+}
+
+.binding-selector-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.binding-selector-body {
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--bg-elev) 70%, transparent);
+    min-height: 42px;
+    padding: 6px 8px;
+}
+
+.binding-selector-body.open {
+    position: relative;
+    z-index: 61;
+    outline: 1px solid color-mix(in srgb, var(--accent) 60%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.binding-selector-body.pending {
+    background: color-mix(in srgb, var(--warn) 18%, var(--bg-elev));
+}
+
+.binding-selector-body.open.pending {
+    outline-color: color-mix(in srgb, var(--warn) 70%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 24%, transparent);
+}
+
+.binding-selector-empty {
+    font-size: 12px;
+    color: var(--text-subtle);
+}
+
+.binding-selector-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.binding-list-row {
+    display: grid;
+    grid-template-columns: 16px 1fr;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+    font-size: 12px;
+    color: var(--text);
+}
+
+.binding-list-row.default {
+    color: var(--accent);
+}
+
+.binding-list-row-tick {
+    font-size: 12px;
+    color: transparent;
+}
+
+.binding-list-row-tick.default {
+    color: var(--accent);
+}
+
+.binding-list-row-label.default {
+    font-weight: 700;
+}
+
+.binding-selector-editor {
+    margin-top: 2px;
+    padding-top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.binding-edit-row {
+    display: grid;
+    grid-template-columns: 16px 16px 1fr;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+}
+
+.binding-edit-row.selected {
+    background: transparent;
+}
+
+.binding-edit-row.default {
+    box-shadow: none;
+}
+
+.binding-edit-row-label {
+    font-size: 12px;
+    color: var(--text-subtle);
+    font-weight: 500;
+}
+
+.binding-edit-row-label.selected {
+    color: var(--text);
+    font-weight: 700;
+}
+
+.binding-edit-row-label.default {
+    font-weight: 700;
+}
+
+.binding-edit-row-default-tick {
+    font-size: 12px;
+    color: transparent;
+}
+
+.binding-edit-row-default-tick.default {
+    color: var(--accent);
+    font-weight: 700;
 }
 
 .field label {
