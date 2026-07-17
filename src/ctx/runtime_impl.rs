@@ -35,6 +35,7 @@ impl AppCtx {
 
     fn sync_from_app_state(&mut self, state: &AppState) {
         let mut next_app = state.clone();
+        let board_changed = self.app.board != next_app.board;
 
         // Keep context as the source of truth for lazily-loaded catalogs.
         if self.catalogs_loaded && !self.app.catalogs.is_empty() && next_app.catalogs.is_empty() {
@@ -43,14 +44,16 @@ impl AppCtx {
 
         self.app = next_app;
 
-        self.stitched_board_data = self.app.board.as_ref().map(|board| {
-            let stitched = stitch_edge_shapes(&board.edge_shapes);
-            StitchedBoardData {
-                contour_count: stitched.contours.len(),
-                error_count: stitched.errors.len(),
-                errors: stitched.errors,
-            }
-        });
+        if board_changed {
+            self.stitched_board_data = self.app.board.as_ref().map(|board| {
+                let stitched = stitch_edge_shapes(&board.edge_shapes);
+                StitchedBoardData {
+                    contour_count: stitched.contours.len(),
+                    error_count: stitched.errors.len(),
+                    errors: stitched.errors,
+                }
+            });
+        }
 
         if !self.app.catalogs.is_empty() {
             self.catalogs_loaded = true;

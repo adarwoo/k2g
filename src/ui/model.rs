@@ -12,8 +12,7 @@ pub use stock::{
     CatalogStockCatalog, CatalogStockSection, CatalogStockTool, Tool, ToolPreference, ToolStatus,
 };
 pub use job::{
-    AtcRackStrategy, BoardOrientation, BoardThicknessMode, CutDepthStrategy, JobConfig,
-    ProductionOperation, RotationMode, Side, TouchProbeSource, Z0DeterminationMode,
+    CutDepthStrategy, JobConfig, ProductionOperation, Side,
 };
 pub use crate::app_state_impl::AppError;
 

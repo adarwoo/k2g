@@ -135,7 +135,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                 div {
                     h3 { "CNC profile management" }
                     p {
-                        "CNC profiles are editable user profiles. New profiles are created from schema defaults."
+                        "CNC profiles are editable user profiles. New profiles are created from built-in templates."
                     }
                 }
                 ProfileLifecycleToolbar {
@@ -176,11 +176,13 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
-                            state
-                                .with_mut(|s| {
+                            super::mutate_ctx(
+                                state,
+                                |s| {
                                     let _ = s.delete_cnc_profile_with_cascade(&cnc_id);
                                     s.log_event("CNC profile deleted");
-                                });
+                                },
+                            );
                             status_message.set("CNC profile deleted".to_string());
                         }
                     },
@@ -288,11 +290,13 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                         if parsed.name.trim().is_empty() {
                             parsed.name = "Imported CNC profile".to_string();
                         }
-                        state
-                            .with_mut(|s| {
+                        super::mutate_ctx(
+                            state,
+                            |s| {
                                 s.add_machine_profile(parsed);
                                 s.log_event("CNC profile imported");
-                            });
+                            },
+                        );
                         status_message.set("CNC profile imported and selected".to_string());
                     },
                 }
@@ -335,22 +339,26 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 .cloned();
 
                             if let Some(template) = selected_profile {
-                                state
-                                    .with_mut(|s| {
+                                super::mutate_ctx(
+                                    state,
+                                    |s| {
                                         let mut machine = template.machine;
                                         machine.id = String::new();
                                         machine.built_in = false;
                                         machine.name = name.clone();
                                         s.add_machine_profile(machine);
                                         s.log_event("CNC profile added");
-                                    });
+                                    },
+                                );
                                 status_message.set("CNC profile created from template".to_string());
                             } else {
-                                state
-                                    .with_mut(|s| {
+                                super::mutate_ctx(
+                                    state,
+                                    |s| {
                                         s.add_machine_profile_from_schema(&name);
                                         s.log_event("CNC profile added");
-                                    });
+                                    },
+                                );
                                 status_message.set("CNC profile created".to_string());
                             }
                         }
@@ -398,8 +406,9 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                             autofocus: snapshot.focus_profile_name_editor,
                                             oninput: move |evt| {
                                                 let proposed = evt.value();
-                                                state
-                                                    .with_mut(|s| {
+                                                super::mutate_ctx(
+                                                    state,
+                                                    |s| {
                                                         match s.rename_selected_machine(&proposed) {
                                                             Ok(_) => {
                                                                 s.focus_profile_name_editor = false;
@@ -409,7 +418,8 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                 status_message.set(msg);
                                                             }
                                                         }
-                                                    });
+                                                    },
+                                                );
                                             },
                                         }
                                     }

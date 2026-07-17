@@ -3,8 +3,9 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 
 use super::profiles_common::{
-    format_impact_warning, slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog,
+    slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog,
 };
+use crate::ui::model::ToolStatus;
 
 #[component]
 pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
@@ -55,19 +56,37 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                             status_message.set("No toolset profile selected".to_string());
                             return;
                         };
-                        let impact = state.read().impact_delete_toolset_profile(&toolset_id);
-                        if !impact.dependent_process_profiles.is_empty() {
-                            let description = format_impact_warning(
-                                "Cannot delete toolset profile because it is referenced by machining profiles:",
-                                &impact,
-                            );
-                            status_message.set(description);
-                            return;
-                        }
+                        let snapshot = state.read().clone();
+                        let toolset_name = snapshot
+                            .toolsets
+                            .iter()
+                            .find(|toolset| toolset.id == toolset_id)
+                            .map(|toolset| toolset.name.clone())
+                            .unwrap_or_else(|| "toolset".to_string());
+                        let referenced_by = snapshot.toolset_referencing_process_profiles(&toolset_id);
+                        let description = if referenced_by.is_empty() {
+                            "Delete toolset profile?".to_string()
+                        } else {
+                            let refs = referenced_by
+                                .iter()
+                                .map(|name| {
+                                    format!(
+                                        "This Toolset {} is referenced in the Machining {}.",
+                                        toolset_name,
+                                        name,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            format!(
+                                "{}\n\nDelete anyway? Active references will be kept as broken; non-active references will be cleaned.",
+                                refs,
+                            )
+                        };
                         let confirmed = MessageDialog::new()
                             .set_level(MessageLevel::Warning)
                             .set_title("Delete toolset profile")
-                            .set_description("Delete toolset profile?")
+                            .set_description(&description)
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
@@ -286,7 +305,9 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                                 label { "Slots" }
                                 div { class: "profile-list",
                                     for (slot_index , slot) in toolset.slots.iter() {
-                                        div { class: "profile-list-item editable",
+                                        div {
+                                            key: "toolset-slot-{slot_index}",
+                                            class: "profile-list-item editable",
                                             div {
                                                 div { class: "profile-list-title", "T{slot_index}" }
                                                 div { class: "profile-list-meta",
@@ -301,57 +322,71 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                                             }
                                             div { class: "actions",
                                                 select {
-                                                    value: if slot.disabled { "do_not_use" } else if slot.locked { "fixed" } else { "spare" },
+                                                    class: if slot.disabled { "toolset-slot-select state-do-not-use" } else if slot.locked { "toolset-slot-select state-fixed" } else { "toolset-slot-select state-spare" },
+                                                    value: if slot.disabled { "do_not_use".to_string() } else if slot.locked { slot
+                                                                                                                                                                                                                        .tool_id
+                                                        .as_ref()
+                                                        .map(|tool_id| format!("tool:{tool_id}"))
+                                                        .unwrap_or_else(|| "spare".to_string()) } else { "spare".to_string() },
                                                     onchange: {
                                                         let idx = *slot_index;
-                                                        let current_tool = slot.tool_id.clone();
                                                         move |evt| {
-                                                            let mode = evt.value();
-                                                            let tool_id = if mode == "fixed" {
-                                                                current_tool
-                                                                    .clone()
-                                                                    .or_else(|| {
-                                                                        state.read().tools.first().map(|tool| tool.id.clone())
-                                                                    })
+                                                            let selected = evt.value();
+                                                            let result = if selected == "spare" {
+                                                                super::mutate_ctx(
+                                                                    state,
+                                                                    |s| s.set_selected_toolset_slot_mode(idx, "spare", None),
+                                                                )
+                                                            } else if selected == "do_not_use" {
+                                                                super::mutate_ctx(
+                                                                    state,
+                                                                    |s| s.set_selected_toolset_slot_mode(idx, "do_not_use", None),
+                                                                )
                                                             } else {
-                                                                None
+                                                                let tool_id = selected.strip_prefix("tool:").map(|v| v.to_string());
+                                                                super::mutate_ctx(
+                                                                    state,
+                                                                    |s| s.set_selected_toolset_slot_mode(idx, "fixed", tool_id),
+                                                                )
                                                             };
-                                                            let result = super::mutate_ctx(
-                                                                state,
-                                                                |s| s.set_selected_toolset_slot_mode(idx, &mode, tool_id),
-                                                            );
                                                             if let Err(message) = result {
                                                                 status_message.set(message);
                                                             }
                                                         }
                                                     },
-                                                    option { value: "spare", "spare" }
-                                                    option { value: "fixed", "fixed" }
-                                                    option { value: "do_not_use", "do_not_use" }
-                                                }
-                                                if !slot.disabled {
-                                                    select {
-                                                        disabled: !slot.locked,
-                                                        value: slot.tool_id.clone().unwrap_or_default(),
-                                                        onchange: {
-                                                            let idx = *slot_index;
-                                                            move |evt| {
-                                                                let tool_id = evt.value();
-                                                                let selected = if tool_id.trim().is_empty() { None } else { Some(tool_id) };
-                                                                let result = super::mutate_ctx(
-                                                                    state,
-                                                                    |s| s.set_selected_toolset_slot_mode(idx, "fixed", selected),
-                                                                );
-                                                                if let Err(message) = result {
-                                                                    status_message.set(message);
-                                                                }
-                                                            }
-                                                        },
-                                                        option { value: "", "Select tool" }
-                                                        for tool in snapshot.tools.iter() {
-                                                            option { value: "{tool.id}",
-                                                                "{tool.display_name()}"
-                                                            }
+                                                    option {
+                                                        class: "toolset-slot-option-spare",
+                                                        value: "spare",
+                                                        selected: !slot.disabled && (!slot.locked || slot.tool_id.is_none()),
+                                                        "spare"
+                                                    }
+                                                    option {
+                                                        class: "toolset-slot-option-do-not-use",
+                                                        value: "do_not_use",
+                                                        selected: slot.disabled,
+                                                        "do_not_use"
+                                                    }
+                                                    if slot.tool_id.is_some()
+                                                        && !snapshot
+                                                            .tools
+                                                            .iter()
+                                                            .filter(|tool| tool.status == ToolStatus::InStock)
+                                                            .any(|tool| Some(tool.id.as_str()) == slot.tool_id.as_deref())
+                                                    {
+                                                        option {
+                                                            value: "tool:{slot.tool_id.clone().unwrap_or_default()}",
+                                                            selected: slot.locked && !slot.disabled,
+                                                            "Missing tool ({slot.tool_id.clone().unwrap_or_default()})"
+                                                        }
+                                                    }
+                                                    for tool in snapshot.tools.iter().filter(|tool| tool.status == ToolStatus::InStock) {
+                                                        option {
+                                                            key: "tool-option-{slot_index}-{tool.id}",
+                                                            value: "tool:{tool.id}",
+                                                            selected: !slot.disabled
+                                                                                                                                                                                                                                                    && slot.locked
+                                                                                                                                                                                                                                                    && Some(tool.id.as_str()) == slot.tool_id.as_deref(),
+                                                            "{tool.display_name()}"
                                                         }
                                                     }
                                                 }

@@ -391,6 +391,132 @@ pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> 
                                 }
                             }
 
+                            div { class: "field",
+                                label { "Side to machine" }
+                                select {
+                                    value: profile.side.as_str(),
+                                    oninput: move |evt| {
+                                        let next_side = if evt.value() == "bottom" { Side::Bottom } else { Side::Top };
+                                        let result = super::mutate_ctx(
+                                            state,
+                                            |s| s.set_selected_process_profile_side(next_side),
+                                        );
+                                        if let Err(message) = result {
+                                            status_message.set(message);
+                                        }
+                                    },
+                                    option { value: "top", "Top (Component side)" }
+                                    option { value: "bottom", "Bottom (Solder side)" }
+                                }
+                            }
+
+                            if profile.default_operations.contains(&ProductionOperation::RouteBoard)
+                                || profile.default_operations.contains(&ProductionOperation::MillBoard)
+                            {
+                                div { class: "field",
+                                    label { "Routing cut depth strategy" }
+                                    div { class: "radio-group vertical",
+                                        div { class: "radio-option",
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "process_cut_depth_strategy",
+                                                    value: "automatic",
+                                                    checked: profile.cut_depth_strategy == CutDepthStrategy::Automatic,
+                                                    onchange: move |_| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| {
+                                                                s
+                                                                    .set_selected_process_profile_cut_depth_strategy(
+                                                                        CutDepthStrategy::Automatic,
+                                                                    )
+                                                            },
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    },
+                                                }
+                                                span { "Automatic (recommended)" }
+                                            }
+                                        }
+                                        div { class: "radio-option",
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "process_cut_depth_strategy",
+                                                    value: "single_pass",
+                                                    checked: profile.cut_depth_strategy == CutDepthStrategy::SinglePass,
+                                                    onchange: move |_| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| {
+                                                                s
+                                                                    .set_selected_process_profile_cut_depth_strategy(
+                                                                        CutDepthStrategy::SinglePass,
+                                                                    )
+                                                            },
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    },
+                                                }
+                                                span { "Single Pass" }
+                                            }
+                                        }
+                                        div { class: "radio-option",
+                                            label {
+                                                input {
+                                                    r#type: "radio",
+                                                    name: "process_cut_depth_strategy",
+                                                    value: "multi_pass",
+                                                    checked: profile.cut_depth_strategy == CutDepthStrategy::MultiPass,
+                                                    onchange: move |_| {
+                                                        let result = super::mutate_ctx(
+                                                            state,
+                                                            |s| {
+                                                                s
+                                                                    .set_selected_process_profile_cut_depth_strategy(
+                                                                        CutDepthStrategy::MultiPass,
+                                                                    )
+                                                            },
+                                                        );
+                                                        if let Err(message) = result {
+                                                            status_message.set(message);
+                                                        }
+                                                    },
+                                                }
+                                                span { "Multi-pass" }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if profile.cut_depth_strategy == CutDepthStrategy::MultiPass {
+                                    div { class: "field",
+                                        label { "Max depth per pass (mm)" }
+                                        input {
+                                            r#type: "number",
+                                            step: "0.01",
+                                            min: "0.01",
+                                            value: "{profile.multi_pass_max_depth_mm}",
+                                            oninput: move |evt| {
+                                                let value = evt.value().parse::<f32>().unwrap_or(1.0);
+                                                let result = super::mutate_ctx(
+                                                    state,
+                                                    |s| s.set_selected_process_profile_multi_pass_max_depth_mm(value),
+                                                );
+                                                if let Err(message) = result {
+                                                    status_message.set(message);
+                                                }
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+
                             for op in selected_operations_in_order(profile) {
                                 div { class: "field operation-config-section",
                                     h4 { "{op.label()}" }

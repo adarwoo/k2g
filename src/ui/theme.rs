@@ -1161,6 +1161,32 @@ body {
     background: color-mix(in srgb, var(--err) 14%, var(--bg-elev));
 }
 
+.toolset-slot-select.state-spare {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+    background: color-mix(in srgb, var(--ok) 14%, var(--bg-elev));
+}
+
+.toolset-slot-select.state-do-not-use {
+    color: #7a1f3d;
+    border-color: color-mix(in srgb, #7a1f3d 45%, var(--border));
+    background: color-mix(in srgb, #7a1f3d 14%, var(--bg-elev));
+}
+
+.toolset-slot-select option.toolset-slot-option-spare {
+    color: var(--ok);
+}
+
+.toolset-slot-select option.toolset-slot-option-do-not-use {
+    color: #7a1f3d;
+}
+
+.project-ref-select.broken-ref-select {
+    color: #c56a10;
+    border-color: color-mix(in srgb, #c56a10 55%, var(--border));
+    background: color-mix(in srgb, #c56a10 16%, var(--bg-elev));
+}
+
 .project-layout {
     height: 100%;
     display: grid;
@@ -1857,6 +1883,50 @@ th {
     cursor: grabbing;
 }
 
+.board-preview-layout {
+    display: grid;
+    grid-template-columns: minmax(420px, 1fr) 260px;
+    gap: 12px;
+    width: min(1040px, 98%);
+    align-items: start;
+}
+
+.board-drill-legend-panel {
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+}
+
+.board-drill-legend-panel h4 {
+    margin: 0;
+    font-size: 13px;
+}
+
+.board-drill-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-subtle);
+}
+
+.board-drill-legend-icon {
+    width: 22px;
+    height: 22px;
+    display: block;
+    flex: 0 0 22px;
+}
+
+.board-drill-legend-note {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
 .board-svg {
     width: 100%;
     height: auto;
@@ -1870,22 +1940,27 @@ th {
 }
 
 .board-hole-cross {
-    stroke: var(--accent);
+    stroke: currentColor;
     stroke-width: 2;
     stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
     opacity: 0.95;
 }
 
 .board-hole-via {
-    stroke: color-mix(in srgb, var(--accent) 85%, white);
+    color: color-mix(in srgb, var(--accent) 85%, white);
 }
 
 .board-hole-pth {
-    stroke: color-mix(in srgb, var(--ok) 78%, var(--text));
+    color: color-mix(in srgb, var(--ok) 78%, var(--text));
 }
 
 .board-hole-npth {
-    stroke: color-mix(in srgb, var(--warn) 85%, var(--text));
+    color: color-mix(in srgb, var(--warn) 85%, var(--text));
+}
+
+.board-hole-legend {
+    color: #111111;
 }
 
 .board-hole-other {
@@ -1915,6 +1990,7 @@ th {
     stroke-linecap: butt;
     stroke-linejoin: miter;
     stroke-miterlimit: 10;
+    vector-effect: non-scaling-stroke;
     opacity: 0.85;
 }
 
@@ -1942,6 +2018,12 @@ th {
     width: 16px;
     height: 16px;
     display: block;
+}
+
+@media (max-width: 1100px) {
+    .board-preview-layout {
+        grid-template-columns: 1fr;
+    }
 }
 
 .preview-box,

@@ -24,6 +24,81 @@ enum SvgShape {
     Circle { cx: f64, cy: f64, r: f64 },
 }
 
+#[derive(Clone, Copy)]
+enum DrillBaseShape {
+    Circle,
+    Square,
+    Diamond,
+    Triangle,
+    Hexagon,
+}
+
+#[derive(Clone, Copy)]
+enum DrillModifier {
+    None,
+    Filled,
+    Dot,
+    Plus,
+    X,
+    Bullseye,
+    HalfFill,
+    QuarterFill,
+}
+
+#[derive(Clone)]
+struct BoardHoleMarker {
+    x: f64,
+    y: f64,
+    marker_radius: f64,
+    rotation_deg: f64,
+    kind: HoleKind,
+    base: DrillBaseShape,
+    modifier: DrillModifier,
+}
+
+#[derive(Clone)]
+struct DrillLegendEntry {
+    diameter_mm: f64,
+    base: DrillBaseShape,
+    modifier: DrillModifier,
+    rotation_deg: f64,
+}
+
+fn drill_symbol_from_index(index: usize) -> (DrillBaseShape, DrillModifier, f64) {
+    const BASE_SHAPES: [DrillBaseShape; 5] = [
+        DrillBaseShape::Circle,
+        DrillBaseShape::Square,
+        DrillBaseShape::Diamond,
+        DrillBaseShape::Triangle,
+        DrillBaseShape::Hexagon,
+    ];
+    const MODIFIERS: [DrillModifier; 8] = [
+        DrillModifier::None,
+        DrillModifier::Filled,
+        DrillModifier::Dot,
+        DrillModifier::Plus,
+        DrillModifier::X,
+        DrillModifier::Bullseye,
+        DrillModifier::HalfFill,
+        DrillModifier::QuarterFill,
+    ];
+    const ROTATIONS: [f64; 3] = [0.0, 45.0, 90.0];
+
+    let base = BASE_SHAPES[index % BASE_SHAPES.len()];
+    let modifier = MODIFIERS[(index / BASE_SHAPES.len()) % MODIFIERS.len()];
+    let rotation = ROTATIONS[(index / (BASE_SHAPES.len() * MODIFIERS.len())) % ROTATIONS.len()];
+
+    (base, modifier, rotation)
+}
+
+fn hole_marker_class(kind: &HoleKind) -> &'static str {
+    match kind {
+        HoleKind::Via => "board-hole-cross board-hole-via",
+        HoleKind::PadPth => "board-hole-cross board-hole-pth",
+        HoleKind::PadNpth => "board-hole-cross board-hole-npth",
+    }
+}
+
 /// Given three points (start, mid, end) that lie on a circular arc, return
 /// an SVG path string `M ... A ... ` for that arc.  Falls back to a straight
 /// line if the points are collinear.
@@ -80,54 +155,14 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let mut board_is_panning = use_signal(|| false);
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let has_atc = snapshot.selected_machine_has_atc();
-    let board_thickness_is_probe = snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe;
-    let board_thickness_is_automatic =
-        snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic;
-    let board_thickness_is_entered = matches!(
-        snapshot.project_config.board_thickness_mode,
-        BoardThicknessMode::Automatic | BoardThicknessMode::Preset | BoardThicknessMode::UserDefined
-    );
-    let board_thickness_uses_touch_probe = if board_thickness_is_probe {
-        true
-    } else {
-        snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe
-    };
-    let board_thickness_uses_atc_probe = board_thickness_uses_touch_probe
-        && snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot;
-    let board_thickness_step = unit_service::length_input_step(snapshot.unit_system);
     let board_thickness_auto_mm = snapshot
         .board
         .as_ref()
         .and_then(|board| board.thickness.as_ref())
         .map(|thickness| thickness.as_mm() as f32);
-    let board_thickness_actual_label = board_thickness_auto_mm.map(|thickness_mm| {
+    let board_thickness_pcb_label = board_thickness_auto_mm.map(|thickness_mm| {
         unit_service::format_length_display(Length::from_mm(thickness_mm as f64), snapshot.unit_system)
     });
-    let board_thickness_value_mm = match snapshot.project_config.board_thickness_mode {
-        BoardThicknessMode::Automatic => board_thickness_auto_mm,
-        BoardThicknessMode::Preset => Some(snapshot.project_config.board_thickness_preset_mm),
-        BoardThicknessMode::UserDefined => Some(snapshot.project_config.board_thickness_user_value),
-        BoardThicknessMode::Probe => None,
-    };
-    let board_thickness_stats_value = board_thickness_value_mm.map(|thickness_mm| {
-        unit_service::format_length_display(Length::from_mm(thickness_mm as f64), snapshot.unit_system)
-    });
-    let board_thickness_stats_label = match snapshot.project_config.board_thickness_mode {
-        BoardThicknessMode::Automatic => board_thickness_stats_value
-            .as_ref()
-            .map(|v| format!("Board thickness: Auto from KiCad ({v})"))
-            .unwrap_or_else(|| "Board thickness: Auto from KiCad (unavailable)".to_string()),
-        BoardThicknessMode::Preset => board_thickness_stats_value
-            .as_ref()
-            .map(|v| format!("Board thickness: Preset ({v})"))
-            .unwrap_or_else(|| "Board thickness: Preset".to_string()),
-        BoardThicknessMode::UserDefined => board_thickness_stats_value
-            .as_ref()
-            .map(|v| format!("Board thickness: User defined ({v})"))
-            .unwrap_or_else(|| "Board thickness: User defined".to_string()),
-        BoardThicknessMode::Probe => "Board thickness: Probe at runtime".to_string(),
-    };
-    let atc_slot_count = snapshot.selected_machine().map(|m| m.atc_slot_count).unwrap_or(0);
     let milling_outline_enabled = snapshot
         .project_config
         .selected_operations
@@ -146,10 +181,6 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     );
     let mouse_bite_pitch_display_label = unit_service::format_length_display(
         Length::from_mm(snapshot.project_config.mouse_bite_pitch_mm as f64),
-        snapshot.unit_system,
-    );
-    let board_thickness_user_display_label = unit_service::format_length_display(
-        Length::from_mm(snapshot.project_config.board_thickness_user_value as f64),
         snapshot.unit_system,
     );
     let tab_width_hint = match snapshot.unit_system {
@@ -210,6 +241,18 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
             }
         })
         .collect();
+    let router_ref_is_broken = snapshot
+        .project_config
+        .outline_router_tool_id
+        .as_ref()
+        .map(|id| !eligible_router_tools.iter().any(|tool| tool.id == *id))
+        .unwrap_or(false);
+    let drill_ref_is_broken = snapshot
+        .project_config
+        .mouse_bite_drill_tool_id
+        .as_ref()
+        .map(|id| !eligible_mouse_bite_drills.iter().any(|tool| tool.id == *id))
+        .unwrap_or(false);
 
     // Board coordinate space: width is always 1000 SVG units; height is scaled
     // proportionally so the aspect ratio matches the real board dimensions.
@@ -235,7 +278,7 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let view_y = pan_y_value.clamp(0.0, max_pan_y);
     let board_view_box = format!("{view_x} {view_y} {viewport_w} {viewport_h}");
     let zoom_percent = (zoom_value * 100.0).round() as i32;
-    let board_hole_markers: Vec<(f64, f64, f64, HoleKind)> = if let Some(board) = snapshot.board.as_ref() {
+    let (board_hole_markers, drill_size_legend): (Vec<BoardHoleMarker>, Vec<DrillLegendEntry>) = if let Some(board) = snapshot.board.as_ref() {
         if let Some(bbox) = board.bounding_box.as_ref() {
             let min_x = bbox.x.as_mm();
             let min_y = bbox.y.as_mm();
@@ -243,7 +286,30 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
             let height = bbox.height.as_mm();
 
             if width > 0.0 && height > 0.0 {
-                board
+                let mut drill_size_classes = board
+                    .holes
+                    .iter()
+                    .filter_map(|hole| hole.drill_x.as_ref().or(hole.drill_y.as_ref()))
+                    .map(|d| d.as_mm())
+                    .collect::<Vec<_>>();
+                drill_size_classes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                drill_size_classes.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+                let legend_entries = drill_size_classes
+                    .iter()
+                    .enumerate()
+                    .map(|(class_idx, diameter_mm)| {
+                        let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
+                        DrillLegendEntry {
+                            diameter_mm: *diameter_mm,
+                            base,
+                            modifier,
+                            rotation_deg,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                (board
                     .holes
                     .iter()
                     .map(|hole| {
@@ -251,23 +317,45 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                             * board_view_width;
                         let y = ((hole.position.y.as_mm() - min_y) / height).clamp(0.0, 1.0)
                             * board_view_height;
-                        let cross_half = hole
+                        let hole_diameter = hole
                             .drill_x
                             .as_ref()
-                            .map(|d| (d.as_mm() / width) * board_view_width * 1.5)
-                            .unwrap_or(6.0)
-                            .clamp(4.0, 20.0);
-                        (x, y, cross_half, hole.kind.clone())
+                            .or(hole.drill_y.as_ref())
+                            .map(|d| d.as_mm())
+                            .unwrap_or(0.1)
+                            .max(0.05);
+
+                        let min_marker_radius = ((2.0 / width) * board_view_width * 0.5)
+                            / zoom_value.max(1.0);
+                        let marker_radius = ((hole_diameter / width) * board_view_width * 0.5)
+                            .max(min_marker_radius)
+                            .clamp((1.5 / zoom_value).max(0.5), 28.0);
+
+                        let class_idx = drill_size_classes
+                            .iter()
+                            .position(|d| (*d - hole_diameter).abs() < 1e-6)
+                            .unwrap_or(0);
+                        let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
+                        BoardHoleMarker {
+                            x,
+                            y,
+                            marker_radius,
+                            rotation_deg,
+                            kind: hole.kind.clone(),
+                            base,
+                            modifier,
+                        }
                     })
-                    .collect()
+                    .collect::<Vec<_>>(),
+                legend_entries)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let board_edge_shapes_svg: Vec<SvgShape> = if let Some(board) = snapshot.board.as_ref() {
@@ -434,229 +522,463 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                             }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
                                         }
-                                        div {
-                                            class: if *board_is_panning.read() { "board-canvas is-panning" } else { "board-canvas" },
-                                            onmousedown: move |evt| {
-                                                board_is_panning.set(true);
-                                                let p = evt.element_coordinates();
-                                                board_last_pointer.set((p.x, p.y));
-                                            },
-                                            onmouseup: move |_| {
-                                                board_is_panning.set(false);
-                                            },
-                                            onmouseleave: move |_| {
-                                                board_is_panning.set(false);
-                                            },
-                                            onmousemove: move |evt| {
-                                                if !*board_is_panning.read() {
-                                                    return;
-                                                }
-                                                let p = evt.element_coordinates();
-                                                let (last_x, last_y) = *board_last_pointer.read();
-                                                board_last_pointer.set((p.x, p.y));
-
-                                                let dx = p.x - last_x;
-                                                let dy = p.y - last_y;
-                                                let unit_per_px_x = viewport_w / board_view_width;
-                                                let unit_per_px_y = viewport_h / board_view_height;
-
-                                                let next_x = (*board_pan_x.read() - dx * unit_per_px_x).clamp(0.0, max_pan_x);
-                                                let next_y = (*board_pan_y.read() - dy * unit_per_px_y).clamp(0.0, max_pan_y);
-                                                board_pan_x.set(next_x);
-                                                board_pan_y.set(next_y);
-                                            },
-                                            onwheel: move |evt| {
-                                                let wheel_y = evt.delta().strip_units().y;
-                                                let old_zoom = *board_zoom.read();
-                                                let zoom_factor = if wheel_y < 0.0 { 1.12 } else { 1.0 / 1.12 };
-                                                let new_zoom = (old_zoom * zoom_factor).clamp(1.0, 20.0);
-                                                if (new_zoom - old_zoom).abs() < f64::EPSILON {
-                                                    return;
-                                                }
-
-                                                let old_vw = (board_view_width / old_zoom).clamp(10.0, board_view_width);
-                                                let old_vh = (board_view_height / old_zoom).clamp(10.0, board_view_height);
-                                                let new_vw = (board_view_width / new_zoom).clamp(10.0, board_view_width);
-                                                let new_vh = (board_view_height / new_zoom).clamp(10.0, board_view_height);
-                                                let center_x = view_x + old_vw * 0.5;
-                                                let center_y = view_y + old_vh * 0.5;
-                                                let new_max_pan_x = (board_view_width - new_vw).max(0.0);
-                                                let new_max_pan_y = (board_view_height - new_vh).max(0.0);
-                                                board_zoom.set(new_zoom);
-                                                board_pan_x.set((center_x - new_vw * 0.5).clamp(0.0, new_max_pan_x));
-                                                board_pan_y.set((center_y - new_vh * 0.5).clamp(0.0, new_max_pan_y));
-                                            },
-                                            svg {
-                                                class: "board-svg",
-                                                view_box: "{board_view_box}",
-                                                preserve_aspect_ratio: "xMidYMid meet",
-
-                                                rect {
-                                                    x: "0",
-                                                    y: "0",
-                                                    width: "{board_view_width}",
-                                                    height: "{board_view_height}",
-                                                    class: "board-svg-frame",
-                                                }
-
-                                                for shape in board_edge_shapes_svg.iter() {
-                                                    match shape {
-                                                        SvgShape::Line { x1, y1, x2, y2 } => rsx! {
-                                                            line {
-                                                                x1: "{x1}",
-                                                                y1: "{y1}",
-                                                                x2: "{x2}",
-                                                                y2: "{y2}",
-                                                                class: "board-edge-shape",
-                                                            }
-                                                        },
-                                                        SvgShape::Path(d) => rsx! {
-                                                            path { d: "{d}", class: "board-edge-shape" }
-                                                        },
-                                                        SvgShape::Rect { x, y, w, h, rx } => rsx! {
-                                                            rect {
-                                                                x: "{x}",
-                                                                y: "{y}",
-                                                                width: "{w}",
-                                                                height: "{h}",
-                                                                rx: "{rx}",
-                                                                class: "board-edge-shape",
-                                                            }
-                                                        },
-                                                        SvgShape::Circle { cx, cy, r } => rsx! {
-                                                            circle {
-                                                                cx: "{cx}",
-                                                                cy: "{cy}",
-                                                                r: "{r}",
-                                                                class: "board-edge-shape",
-                                                            }
-                                                        },
+                                        div { class: "board-preview-layout",
+                                            div {
+                                                class: if *board_is_panning.read() { "board-canvas is-panning" } else { "board-canvas" },
+                                                onmousedown: move |evt| {
+                                                    board_is_panning.set(true);
+                                                    let p = evt.element_coordinates();
+                                                    board_last_pointer.set((p.x, p.y));
+                                                },
+                                                onmouseup: move |_| {
+                                                    board_is_panning.set(false);
+                                                },
+                                                onmouseleave: move |_| {
+                                                    board_is_panning.set(false);
+                                                },
+                                                onmousemove: move |evt| {
+                                                    if !*board_is_panning.read() {
+                                                        return;
                                                     }
-                                                }
+                                                    let p = evt.element_coordinates();
+                                                    let (last_x, last_y) = *board_last_pointer.read();
+                                                    board_last_pointer.set((p.x, p.y));
 
-                                                for (x , y , half , kind) in board_hole_markers.iter() {
-                                                    line {
-                                                        x1: "{x - half}",
-                                                        y1: "{y - half}",
-                                                        x2: "{x + half}",
-                                                        y2: "{y + half}",
-                                                        class: match kind {
-                                                            HoleKind::Via => "board-hole-cross board-hole-via",
-                                                            HoleKind::PadPth => "board-hole-cross board-hole-pth",
-                                                            HoleKind::PadNpth => "board-hole-cross board-hole-npth",
-                                                        },
-                                                    }
-                                                    line {
-                                                        x1: "{x - half}",
-                                                        y1: "{y + half}",
-                                                        x2: "{x + half}",
-                                                        y2: "{y - half}",
-                                                        class: match kind {
-                                                            HoleKind::Via => "board-hole-cross board-hole-via",
-                                                            HoleKind::PadPth => "board-hole-cross board-hole-pth",
-                                                            HoleKind::PadNpth => "board-hole-cross board-hole-npth",
-                                                        },
+                                                    let dx = p.x - last_x;
+                                                    let dy = p.y - last_y;
+                                                    let unit_per_px_x = viewport_w / board_view_width;
+                                                    let unit_per_px_y = viewport_h / board_view_height;
+
+                                                    let next_x = (*board_pan_x.read() - dx * unit_per_px_x).clamp(0.0, max_pan_x);
+                                                    let next_y = (*board_pan_y.read() - dy * unit_per_px_y).clamp(0.0, max_pan_y);
+                                                    board_pan_x.set(next_x);
+                                                    board_pan_y.set(next_y);
+                                                },
+                                                onwheel: move |evt| {
+                                                    let wheel_y = evt.delta().strip_units().y;
+                                                    let old_zoom = *board_zoom.read();
+                                                    let zoom_factor = if wheel_y < 0.0 { 1.12 } else { 1.0 / 1.12 };
+                                                    let new_zoom = (old_zoom * zoom_factor).clamp(1.0, 20.0);
+                                                    if (new_zoom - old_zoom).abs() < f64::EPSILON {
+                                                        return;
                                                     }
 
-                                                    if matches!(kind, HoleKind::PadPth) {
-                                                        rect {
-                                                            x: "{x - half * 1.15}",
-                                                            y: "{y - half * 1.15}",
-                                                            width: "{half * 2.3}",
-                                                            height: "{half * 2.3}",
-                                                            class: "board-hole-outline board-hole-pth-box",
+                                                    let old_vw = (board_view_width / old_zoom).clamp(10.0, board_view_width);
+                                                    let old_vh = (board_view_height / old_zoom).clamp(10.0, board_view_height);
+                                                    let new_vw = (board_view_width / new_zoom).clamp(10.0, board_view_width);
+                                                    let new_vh = (board_view_height / new_zoom).clamp(10.0, board_view_height);
+                                                    let center_x = view_x + old_vw * 0.5;
+                                                    let center_y = view_y + old_vh * 0.5;
+                                                    let new_max_pan_x = (board_view_width - new_vw).max(0.0);
+                                                    let new_max_pan_y = (board_view_height - new_vh).max(0.0);
+                                                    board_zoom.set(new_zoom);
+                                                    board_pan_x.set((center_x - new_vw * 0.5).clamp(0.0, new_max_pan_x));
+                                                    board_pan_y.set((center_y - new_vh * 0.5).clamp(0.0, new_max_pan_y));
+                                                },
+                                                svg {
+                                                    class: "board-svg",
+                                                    view_box: "{board_view_box}",
+                                                    preserve_aspect_ratio: "xMidYMid meet",
+
+                                                    rect {
+                                                        x: "0",
+                                                        y: "0",
+                                                        width: "{board_view_width}",
+                                                        height: "{board_view_height}",
+                                                        class: "board-svg-frame",
+                                                    }
+
+                                                    for shape in board_edge_shapes_svg.iter() {
+                                                        match shape {
+                                                            SvgShape::Line { x1, y1, x2, y2 } => rsx! {
+                                                                line {
+                                                                    x1: "{x1}",
+                                                                    y1: "{y1}",
+                                                                    x2: "{x2}",
+                                                                    y2: "{y2}",
+                                                                    class: "board-edge-shape",
+                                                                }
+                                                            },
+                                                            SvgShape::Path(d) => rsx! {
+                                                                path { d: "{d}", class: "board-edge-shape" }
+                                                            },
+                                                            SvgShape::Rect { x, y, w, h, rx } => rsx! {
+                                                                rect {
+                                                                    x: "{x}",
+                                                                    y: "{y}",
+                                                                    width: "{w}",
+                                                                    height: "{h}",
+                                                                    rx: "{rx}",
+                                                                    class: "board-edge-shape",
+                                                                }
+                                                            },
+                                                            SvgShape::Circle { cx, cy, r } => rsx! {
+                                                                circle {
+                                                                    cx: "{cx}",
+                                                                    cy: "{cy}",
+                                                                    r: "{r}",
+                                                                    class: "board-edge-shape",
+                                                                }
+                                                            },
                                                         }
                                                     }
 
-                                                    if matches!(kind, HoleKind::PadNpth) {
+                                                    for (idx , marker) in board_hole_markers.iter().enumerate() {
+                                                        {
+                                                            let r = marker.marker_radius;
+                                                            let stroke_width = 1.8_f64;
+                                                            let symbol_class = hole_marker_class(&marker.kind);
+                                                            let half_fill_w = r;
+                                                            let quarter_fill_w = r;
+                                                            let quarter_fill_h = r;
+                                                            rsx! {
+                                                                g {
+                                                                    key: "hole-marker-{idx}",
+                                                                    transform: "translate({marker.x} {marker.y}) rotate({marker.rotation_deg})",
+
+                                                                    // Base outline.
+                                                                    if matches!(marker.base, DrillBaseShape::Circle) {
+                                                                        circle {
+                                                                            cx: "0",
+                                                                            cy: "0",
+                                                                            r: "{r}",
+                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.base, DrillBaseShape::Square) {
+                                                                        rect {
+                                                                            x: "{-r * 0.95}",
+                                                                            y: "{-r * 0.95}",
+                                                                            width: "{r * 1.9}",
+                                                                            height: "{r * 1.9}",
+                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.base, DrillBaseShape::Diamond) {
+                                                                        polygon {
+                                                                            points: "0 {-r}, {r} 0, 0 {r}, {-r} 0",
+                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.base, DrillBaseShape::Triangle) {
+                                                                        polygon {
+                                                                            points: "0 {-r}, {r} {r * 0.85}, {-r} {r * 0.85}",
+                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.base, DrillBaseShape::Hexagon) {
+                                                                        polygon {
+                                                                            points: "0 {-r}, {r * 0.83} {-r * 0.48}, {r * 0.83} {r * 0.48}, 0 {r}, {-r * 0.83} {r * 0.48}, {-r * 0.83} {-r * 0.48}",
+                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+
+                                                                    // Interior modifier.
+                                                                    if matches!(marker.modifier, DrillModifier::Dot) {
+                                                                        circle {
+                                                                            cx: "0",
+                                                                            cy: "0",
+                                                                            r: "{r * (10.0 / 42.0)}",
+                                                                            class: "{symbol_class}",
+                                                                            fill: "currentColor",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.modifier, DrillModifier::Plus) {
+                                                                        line {
+                                                                            x1: "0",
+                                                                            y1: "{-r * 0.75}",
+                                                                            x2: "0",
+                                                                            y2: "{r * 0.75}",
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                        line {
+                                                                            x1: "{-r * 0.75}",
+                                                                            y1: "0",
+                                                                            x2: "{r * 0.75}",
+                                                                            y2: "0",
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.modifier, DrillModifier::X) {
+                                                                        line {
+                                                                            x1: "{-r * 0.66}",
+                                                                            y1: "{-r * 0.66}",
+                                                                            x2: "{r * 0.66}",
+                                                                            y2: "{r * 0.66}",
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                        line {
+                                                                            x1: "{-r * 0.66}",
+                                                                            y1: "{r * 0.66}",
+                                                                            x2: "{r * 0.66}",
+                                                                            y2: "{-r * 0.66}",
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.modifier, DrillModifier::Bullseye) {
+                                                                        circle {
+                                                                            cx: "0",
+                                                                            cy: "0",
+                                                                            r: "{r * (16.0 / 42.0)}",
+                                                                            fill: "none",
+                                                                            class: "{symbol_class}",
+                                                                            stroke_width: "{stroke_width}",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.modifier, DrillModifier::HalfFill) {
+                                                                        rect {
+                                                                            x: "{-half_fill_w}",
+                                                                            y: "{-r}",
+                                                                            width: "{half_fill_w}",
+                                                                            height: "{2.0 * r}",
+                                                                            class: "{symbol_class}",
+                                                                            fill: "currentColor",
+                                                                            fill_opacity: "0.75",
+                                                                        }
+                                                                    }
+                                                                    if matches!(marker.modifier, DrillModifier::QuarterFill) {
+                                                                        rect {
+                                                                            x: "{-quarter_fill_w}",
+                                                                            y: "{-r}",
+                                                                            width: "{quarter_fill_w}",
+                                                                            height: "{quarter_fill_h}",
+                                                                            class: "{symbol_class}",
+                                                                            fill: "currentColor",
+                                                                            fill_opacity: "0.75",
+                                                                        }
+                                                                    }
+
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            aside { class: "board-drill-legend-panel",
+                                                h4 { "Drill size legend" }
+                                                if drill_size_legend.is_empty() {
+                                                    p { class: "diag-status", "No drilled holes detected" }
+                                                } else {
+                                                    for (legend_idx , entry) in drill_size_legend.iter().enumerate() {
+                                                        {
+                                                            let r = 8.0_f64;
+                                                            let sw = 1.2_f64;
+                                                            rsx! {
+                                                                div { key: "drill-legend-entry-{legend_idx}", class: "board-drill-legend-item",
+                                                                    svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                                        g { transform: "translate(12 12) rotate({entry.rotation_deg})",
+                                                                            if matches!(entry.base, DrillBaseShape::Circle) {
+                                                                                circle {
+                                                                                    cx: "0",
+                                                                                    cy: "0",
+                                                                                    r: "{r}",
+                                                                                    fill: if matches!(entry.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.base, DrillBaseShape::Square) {
+                                                                                rect {
+                                                                                    x: "{-r * 0.95}",
+                                                                                    y: "{-r * 0.95}",
+                                                                                    width: "{r * 1.9}",
+                                                                                    height: "{r * 1.9}",
+                                                                                    fill: if matches!(entry.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.base, DrillBaseShape::Diamond) {
+                                                                                polygon {
+                                                                                    points: "0 {-r}, {r} 0, 0 {r}, {-r} 0",
+                                                                                    fill: if matches!(entry.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.base, DrillBaseShape::Triangle) {
+                                                                                polygon {
+                                                                                    points: "0 {-r}, {r} {r * 0.85}, {-r} {r * 0.85}",
+                                                                                    fill: if matches!(entry.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.base, DrillBaseShape::Hexagon) {
+                                                                                polygon {
+                                                                                    points: "0 {-r}, {r * 0.83} {-r * 0.48}, {r * 0.83} {r * 0.48}, 0 {r}, {-r * 0.83} {r * 0.48}, {-r * 0.83} {-r * 0.48}",
+                                                                                    fill: if matches!(entry.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::Dot) {
+                                                                                circle {
+                                                                                    cx: "0",
+                                                                                    cy: "0",
+                                                                                    r: "{r * (10.0 / 42.0)}",
+                                                                                    class: "board-hole-legend",
+                                                                                    fill: "currentColor",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::Plus) {
+                                                                                line {
+                                                                                    x1: "0",
+                                                                                    y1: "{-r * 0.75}",
+                                                                                    x2: "0",
+                                                                                    y2: "{r * 0.75}",
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                                line {
+                                                                                    x1: "{-r * 0.75}",
+                                                                                    y1: "0",
+                                                                                    x2: "{r * 0.75}",
+                                                                                    y2: "0",
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::X) {
+                                                                                line {
+                                                                                    x1: "{-r * 0.66}",
+                                                                                    y1: "{-r * 0.66}",
+                                                                                    x2: "{r * 0.66}",
+                                                                                    y2: "{r * 0.66}",
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                                line {
+                                                                                    x1: "{-r * 0.66}",
+                                                                                    y1: "{r * 0.66}",
+                                                                                    x2: "{r * 0.66}",
+                                                                                    y2: "{-r * 0.66}",
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::Bullseye) {
+                                                                                circle {
+                                                                                    cx: "0",
+                                                                                    cy: "0",
+                                                                                    r: "{r * (16.0 / 42.0)}",
+                                                                                    fill: "none",
+                                                                                    class: "board-hole-cross board-hole-legend",
+                                                                                    stroke_width: "{sw}",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::HalfFill) {
+                                                                                rect {
+                                                                                    x: "{-r}",
+                                                                                    y: "{-r}",
+                                                                                    width: "{r}",
+                                                                                    height: "{2.0 * r}",
+                                                                                    class: "board-hole-legend",
+                                                                                    fill: "currentColor",
+                                                                                    fill_opacity: "0.75",
+                                                                                }
+                                                                            }
+                                                                            if matches!(entry.modifier, DrillModifier::QuarterFill) {
+                                                                                rect {
+                                                                                    x: "{-r}",
+                                                                                    y: "{-r}",
+                                                                                    width: "{r}",
+                                                                                    height: "{r}",
+                                                                                    class: "board-hole-legend",
+                                                                                    fill: "currentColor",
+                                                                                    fill_opacity: "0.75",
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    span {
+                                                                        {
+                                                                            unit_service::format_length_display(
+                                                                                Length::from_mm(entry.diameter_mm),
+                                                                                snapshot.unit_system,
+                                                                            )
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "board-drill-legend-note",
+                                                    "Size classes are ordered by drill diameter and reuse symbol patterns after 120 combinations."
+                                                }
+                                                div { class: "board-drill-legend-note", "Hole type colors" }
+                                                div { class: "board-drill-legend-item",
+                                                    svg {
+                                                        class: "board-drill-legend-icon",
+                                                        view_box: "0 0 24 24",
+                                                        circle {
+                                                            cx: "12",
+                                                            cy: "12",
+                                                            r: "8",
+                                                            fill: "none",
+                                                            class: "board-hole-cross board-hole-via",
+                                                            stroke_width: "1.8",
+                                                        }
+                                                    }
+                                                    span { "Via" }
+                                                }
+                                                div { class: "board-drill-legend-item",
+                                                    svg {
+                                                        class: "board-drill-legend-icon",
+                                                        view_box: "0 0 24 24",
+                                                        circle {
+                                                            cx: "12",
+                                                            cy: "12",
+                                                            r: "8",
+                                                            fill: "none",
+                                                            class: "board-hole-cross board-hole-pth",
+                                                            stroke_width: "1.8",
+                                                        }
+                                                    }
+                                                    span { "PTH" }
+                                                }
+                                                div { class: "board-drill-legend-item",
+                                                    svg {
+                                                        class: "board-drill-legend-icon",
+                                                        view_box: "0 0 24 24",
+                                                        circle {
+                                                            cx: "12",
+                                                            cy: "12",
+                                                            r: "8",
+                                                            fill: "none",
+                                                            class: "board-hole-cross board-hole-npth",
+                                                            stroke_width: "1.8",
+                                                        }
+                                                    }
+                                                    span { "NPTH" }
+                                                }
+                                                div { class: "board-drill-legend-item",
+                                                    svg { class: "board-legend-icon", view_box: "0 0 24 24",
                                                         path {
-                                                            d: "M {x - half * 1.2} {y + half * 1.2} L {x - half * 1.2} {y - half * 1.2} L {x + half * 1.2} {y - half * 1.2}",
-                                                            class: "board-hole-outline board-hole-npth-halfbox",
+                                                            d: "M 3 12 L 9 4 L 21 4 L 21 20 L 3 20 Z",
+                                                            class: "board-edge-shape",
                                                         }
                                                     }
+                                                    span { "Edge cuts" }
                                                 }
                                             }
                                         }
                                         p { "Board edge shapes: {board.edge_shapes.len()} · Holes: {board.holes.len()}" }
-                                        div { class: "board-legend",
-                                            div { class: "board-legend-item",
-                                                svg { class: "board-legend-icon", view_box: "0 0 24 24",
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "5",
-                                                        x2: "19",
-                                                        y2: "19",
-                                                        class: "board-hole-cross board-hole-via",
-                                                    }
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "19",
-                                                        x2: "19",
-                                                        y2: "5",
-                                                        class: "board-hole-cross board-hole-via",
-                                                    }
-                                                }
-                                                span { "Via" }
-                                            }
-                                            div { class: "board-legend-item",
-                                                svg { class: "board-legend-icon", view_box: "0 0 24 24",
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "5",
-                                                        x2: "19",
-                                                        y2: "19",
-                                                        class: "board-hole-cross board-hole-pth",
-                                                    }
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "19",
-                                                        x2: "19",
-                                                        y2: "5",
-                                                        class: "board-hole-cross board-hole-pth",
-                                                    }
-                                                    rect {
-                                                        x: "3.5",
-                                                        y: "3.5",
-                                                        width: "17",
-                                                        height: "17",
-                                                        class: "board-hole-outline board-hole-pth-box",
-                                                    }
-                                                }
-                                                span { "PTH" }
-                                            }
-                                            div { class: "board-legend-item",
-                                                svg { class: "board-legend-icon", view_box: "0 0 24 24",
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "5",
-                                                        x2: "19",
-                                                        y2: "19",
-                                                        class: "board-hole-cross board-hole-npth",
-                                                    }
-                                                    line {
-                                                        x1: "5",
-                                                        y1: "19",
-                                                        x2: "19",
-                                                        y2: "5",
-                                                        class: "board-hole-cross board-hole-npth",
-                                                    }
-                                                    path {
-                                                        d: "M 4 20 L 4 4 L 20 4",
-                                                        class: "board-hole-outline board-hole-npth-halfbox",
-                                                    }
-                                                }
-                                                span { "NPTH" }
-                                            }
-                                            div { class: "board-legend-item",
-                                                svg { class: "board-legend-icon", view_box: "0 0 24 24",
-                                                    path {
-                                                        d: "M 3 12 L 9 4 L 21 4 L 21 20 L 3 20 Z",
-                                                        class: "board-edge-shape",
-                                                    }
-                                                }
-                                                span { "Edge cuts" }
-                                            }
-                                        }
                                     } else {
                                         div { class: "canvas-mock", "Board bounding box unavailable" }
                                         p { "Open a board in KiCad to render the board graph." }
@@ -705,7 +1027,13 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                     span { "Save target: {snapshot.save_filename}" }
                                     span { "Lines: {snapshot.gcode.lines().count()}" }
                                     span { "Characters: {snapshot.gcode.len()}" }
-                                    span { "{board_thickness_stats_label}" }
+                                    span {
+                                        if let Some(v) = board_thickness_pcb_label.as_ref() {
+                                            "Board thickness (PCB): {v}"
+                                        } else {
+                                            "Board thickness (PCB): unavailable"
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -765,7 +1093,25 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                         }
                         if let Some(active_profile) = snapshot.selected_process_profile() {
                             p { class: "diag-status",
-                                "Using CNC profile '{active_profile.cnc_profile_id}' and fixture '{active_profile.fixture_profile_id}'."
+                                {
+                                    let cnc_name = snapshot
+                                        .machines
+                                        .iter()
+                                        .find(|profile| profile.id == active_profile.cnc_profile_id)
+                                        .map(|profile| profile.name.clone())
+                                        .unwrap_or_else(|| {
+                                            format!("Broken reference ({})", active_profile.cnc_profile_id)
+                                        });
+                                    let fixture_name = snapshot
+                                        .fixtures
+                                        .iter()
+                                        .find(|profile| profile.id == active_profile.fixture_profile_id)
+                                        .map(|profile| profile.name.clone())
+                                        .unwrap_or_else(|| {
+                                            format!("Broken reference ({})", active_profile.fixture_profile_id)
+                                        });
+                                    format!("Using CNC profile '{cnc_name}' and fixture '{fixture_name}'.")
+                                }
                             }
                         }
                     }
@@ -777,110 +1123,85 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                     }
 
                     if snapshot.selected_process_profile_id.is_some() {
-                        div { class: "field",
-                            label { "Machining steps" }
-                            for op in ProductionOperation::all().iter() {
-                                button {
-                                    key: "{op.label()}",
-                                    class: if snapshot.project_config.selected_operations.contains(op) { "btn-op active" } else { "btn-op" },
-                                    onclick: {
-                                        let operation = *op;
-                                        move |_| super::mutate_ctx(state, |s| s.toggle_operation(operation))
-                                    },
-                                    "{op.label()}"
+                        if let Some(active_profile) = snapshot.selected_process_profile() {
+                            div { class: "field",
+                                label { "Job summary" }
+                                p { class: "diag-status", "Machining profile: {active_profile.name}" }
+                                p { class: "diag-status",
+                                    {
+                                        let cnc_name = snapshot
+                                            .machines
+                                            .iter()
+                                            .find(|profile| profile.id == active_profile.cnc_profile_id)
+                                            .map(|profile| profile.name.clone())
+                                            .unwrap_or_else(|| {
+                                                format!("Broken reference ({})", active_profile.cnc_profile_id)
+                                            });
+                                        let fixture_name = snapshot
+                                            .fixtures
+                                            .iter()
+                                            .find(|profile| profile.id == active_profile.fixture_profile_id)
+                                            .map(|profile| profile.name.clone())
+                                            .unwrap_or_else(|| {
+                                                format!("Broken reference ({})", active_profile.fixture_profile_id)
+                                            });
+                                        let toolset_name = snapshot
+                                            .toolsets
+                                            .iter()
+                                            .find(|profile| profile.id == active_profile.toolset_profile_id)
+                                            .map(|profile| profile.name.clone())
+                                            .unwrap_or_else(|| {
+                                                format!("Broken reference ({})", active_profile.toolset_profile_id)
+                                            });
+                                        format!("CNC: {cnc_name} · Fixture: {fixture_name} · Toolset: {toolset_name}")
+                                    }
                                 }
-                            }
-                        }
-
-                        div { class: "field",
-                            label { "Side to machine" }
-                            select {
-                                value: snapshot.project_config.side.as_str(),
-                                onchange: move |evt| {
-                                    let v = evt.value();
-                                    state
-                                        .with_mut(|s| {
-                                            s.project_config.side = if v == "bottom" {
-                                                Side::Bottom
+                                p { class: "diag-status",
+                                    {
+                                        format!(
+                                            "Side to machine: {}",
+                                            if active_profile.side == Side::Bottom {
+                                                "Bottom (Solder side)"
                                             } else {
-                                                Side::Top
-                                            };
-                                        });
-                                },
-                                option { value: "top", "Top (Component side)" }
-                                option { value: "bottom", "Bottom (Solder side)" }
+                                                "Top (Component side)"
+                                            },
+                                        )
+                                    }
+                                }
+                                p { class: "diag-status",
+                                    "Operations: {snapshot.project_config.selected_operations.iter().map(|op| op.label()).collect::<Vec<_>>().join(\", \")}"
+                                }
+                                p { class: "diag-status",
+                                    "Cut depth: {active_profile.cut_depth_strategy.label()}"
+                                }
+                                if active_profile.cut_depth_strategy == CutDepthStrategy::MultiPass {
+                                    p { class: "diag-status",
+                                        "Max depth/pass: {unit_service::format_length_display(Length::from_mm(active_profile.multi_pass_max_depth_mm as f64), snapshot.unit_system)}"
+                                    }
+                                }
+                                p { class: "diag-status",
+                                    if let Some(v) = board_thickness_pcb_label.as_ref() {
+                                        "Board thickness (PCB): {v}"
+                                    } else {
+                                        "Board thickness (PCB): unavailable"
+                                    }
+                                }
                             }
                         }
 
                         div { class: "field",
-                            label { "Cut depth strategy" }
-                            div { class: "radio-group vertical",
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "cut_depth_strategy",
-                                            value: "automatic",
-                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::Automatic,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::Automatic;
-                                                    });
-                                            },
-                                        }
-                                        span { "Automatic (recommended)" }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "cut_depth_strategy",
-                                            value: "single_pass",
-                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::SinglePass,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::SinglePass;
-                                                    });
-                                            },
-                                        }
-                                        span { "Single Pass" }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "cut_depth_strategy",
-                                            value: "multi_pass",
-                                            checked: snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.cut_depth_strategy = CutDepthStrategy::MultiPass;
-                                                    });
-                                            },
-                                        }
-                                        span { "Multi-pass" }
-                                    }
-                                    if snapshot.project_config.cut_depth_strategy == CutDepthStrategy::MultiPass {
-                                        div { class: "sub-field",
-                                            span { "Max depth per pass: " }
-                                            input {
-                                                r#type: "number",
-                                                step: "0.1",
-                                                value: "{snapshot.project_config.multi_pass_max_depth_mm}",
-                                                oninput: move |evt| {
-                                                    let value = evt.value().parse::<f32>().unwrap_or(1.0);
-                                                    super::mutate_ctx(state, |s| s.project_config.multi_pass_max_depth_mm = value);
-                                                },
-                                            }
-                                            span { " mm" }
-                                        }
-                                    }
-                                }
+                            label { "Board orientation angle" }
+                            p { class: "diag-status", "Angle in degrees. 0 is default." }
+                            input {
+                                r#type: "number",
+                                min: "-180",
+                                max: "180",
+                                step: "0.1",
+                                value: "{snapshot.project_config.rotation_angle}",
+                                oninput: move |evt| {
+                                    let value = evt.value().parse::<i32>().unwrap_or(0).clamp(-180, 180);
+                                    super::mutate_ctx(state, |s| s.project_config.rotation_angle = value);
+                                },
                             }
                         }
 
@@ -892,11 +1213,12 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                     label { "Router tool selection" }
                                     p { class: "diag-status", "Must be a router, diameter 0.8-2.5mm" }
                                     select {
+                                        class: if router_ref_is_broken { "project-ref-select broken-ref-select" } else { "project-ref-select" },
                                         value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .outline_router_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .outline_router_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
                                         onchange: move |evt| {
                                             let value = evt.value();
                                             state
@@ -935,9 +1257,17 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                                             s.project_config.mouse_bite_drill_tool_id = None;
                                                         }
                                                     }
+                                                    s.validate_current_job_references();
                                                 });
                                         },
                                         option { value: "", "Select router tool" }
+                                        if router_ref_is_broken {
+                                            option {
+                                                value: "{snapshot.project_config.outline_router_tool_id.clone().unwrap_or_default()}",
+                                                selected: true,
+                                                "Broken reference ({snapshot.project_config.outline_router_tool_id.clone().unwrap_or_default()})"
+                                            }
+                                        }
                                         for tool in eligible_router_tools.iter() {
                                             option { value: "{tool.id}",
                                                 "{tool.display_name()} ({tool.diameter})"
@@ -1056,12 +1386,13 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                                 "Only drill bits 0.5-1.5mm, and not larger than selected router diameter"
                                             }
                                             select {
+                                                class: if drill_ref_is_broken { "project-ref-select broken-ref-select" } else { "project-ref-select" },
                                                 disabled: snapshot.project_config.outline_router_tool_id.is_none(),
                                                 value: snapshot
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .project_config
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .mouse_bite_drill_tool_id
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .clone()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        .unwrap_or_default(),
                                                 onchange: move |evt| {
                                                     let value = evt.value();
                                                     state
@@ -1072,9 +1403,17 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                                             } else {
                                                                 Some(value)
                                                             };
+                                                            s.validate_current_job_references();
                                                         });
                                                 },
                                                 option { value: "", "Select drill tool" }
+                                                if drill_ref_is_broken {
+                                                    option {
+                                                        value: "{snapshot.project_config.mouse_bite_drill_tool_id.clone().unwrap_or_default()}",
+                                                        selected: true,
+                                                        "Broken reference ({snapshot.project_config.mouse_bite_drill_tool_id.clone().unwrap_or_default()})"
+                                                    }
+                                                }
                                                 for tool in eligible_mouse_bite_drills.iter() {
                                                     option { value: "{tool.id}",
                                                         "{tool.display_name()} ({tool.diameter})"
@@ -1083,405 +1422,6 @@ pub fn JobScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                             }
                                         }
                                     }
-                                }
-                            }
-                        }
-
-                        div { class: "field",
-                            label { "Board thickness" }
-                            p { class: "diag-status",
-                                if let Some(actual_label) = board_thickness_actual_label.as_ref() {
-                                    "Actual board thickness (KiCad board data): {actual_label}"
-                                } else {
-                                    "Actual board thickness (KiCad board data): unavailable"
-                                }
-                            }
-                            div { class: "radio-group vertical",
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_thickness_mode",
-                                            value: "automatic",
-                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Automatic,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Automatic;
-                                                    });
-                                            },
-                                        }
-                                        span { "Automatic (from KiCad board data)" }
-                                    }
-                                    if board_thickness_is_automatic {
-                                        p { class: "diag-status",
-                                            if let Some(thickness_label) = board_thickness_stats_value.as_ref() {
-                                                "Detected thickness: {thickness_label}"
-                                            } else {
-                                                "Detected thickness: unavailable (refresh board snapshot with board open in KiCad)"
-                                            }
-                                        }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_thickness_mode",
-                                            value: "preset",
-                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Preset,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Preset;
-                                                    });
-                                            },
-                                        }
-                                        span { "Preset values" }
-                                    }
-                                    select {
-                                        disabled: snapshot.project_config.board_thickness_mode != BoardThicknessMode::Preset,
-                                        value: "{snapshot.project_config.board_thickness_preset_mm}",
-                                        onchange: move |evt| {
-                                            let value = evt.value().parse::<f32>().unwrap_or(1.6);
-                                            super::mutate_ctx(state, |s| s.project_config.board_thickness_preset_mm = value);
-                                        },
-                                        option { value: "0.8", "0.8 mm" }
-                                        option { value: "1.0", "1.0 mm" }
-                                        option { value: "1.2", "1.2 mm" }
-                                        option { value: "1.6", "1.6 mm" }
-                                        option { value: "2.0", "2.0 mm" }
-                                        option { value: "2.4", "2.4 mm" }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_thickness_mode",
-                                            value: "user_defined",
-                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_thickness_mode = BoardThicknessMode::UserDefined;
-                                                    });
-                                            },
-                                        }
-                                        span { "User-defined value" }
-                                    }
-                                    if snapshot.project_config.board_thickness_mode == BoardThicknessMode::UserDefined {
-                                        div { class: "sub-field",
-                                            input {
-                                                r#type: "number",
-                                                step: "{board_thickness_step}",
-                                                value: "{unit_service::format_length_input_value_from_mm(snapshot.project_config.board_thickness_user_value as f64, snapshot.unit_system)}",
-                                                oninput: move |evt| {
-                                                    let value = evt.value().parse::<f32>().unwrap_or(1.6).max(0.0);
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.board_thickness_user_value = unit_service::mm_from_display_length(
-                                                                value as f64,
-                                                                s.unit_system,
-                                                            ) as f32;
-                                                        });
-                                                },
-                                            }
-                                        }
-                                        p { class: "diag-status",
-                                            "{board_thickness_user_display_label}"
-                                        }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_thickness_mode",
-                                            value: "probe",
-                                            checked: snapshot.project_config.board_thickness_mode == BoardThicknessMode::Probe,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_thickness_mode = BoardThicknessMode::Probe;
-                                                    });
-                                            },
-                                        }
-                                        span { "Probe" }
-                                    }
-                                }
-                            }
-
-                            if board_thickness_is_entered {
-                                div { class: "field section-subfield",
-                                    label { "Z0 determination" }
-                                    div { class: "nested-radio-group",
-                                        label {
-                                            input {
-                                                r#type: "radio",
-                                                name: "z0_determination_mode",
-                                                value: "manual_adjust_z0",
-                                                checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::ManualAdjustZ0,
-                                                onchange: move |_| {
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.z0_determination_mode = Z0DeterminationMode::ManualAdjustZ0;
-                                                        });
-                                                },
-                                            }
-                                            span { "Manually adjust Z0" }
-                                        }
-                                        label {
-                                            input {
-                                                r#type: "radio",
-                                                name: "z0_determination_mode",
-                                                value: "touch_probe",
-                                                checked: snapshot.project_config.z0_determination_mode == Z0DeterminationMode::TouchProbe,
-                                                onchange: move |_| {
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.z0_determination_mode = Z0DeterminationMode::TouchProbe;
-                                                        });
-                                                },
-                                            }
-                                            span { "Use touch probe" }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if board_thickness_is_probe || board_thickness_uses_touch_probe {
-                                div { class: "field section-subfield",
-                                    label { "Touch probe setup" }
-                                    div { class: "nested-radio-group",
-                                        label {
-                                            input {
-                                                r#type: "radio",
-                                                name: "touch_probe_source",
-                                                value: "manual_installation",
-                                                checked: snapshot.project_config.touch_probe_source == TouchProbeSource::ManualInstallation,
-                                                onchange: move |_| {
-                                                    state
-                                                        .with_mut(|s| {
-                                                            s.project_config.touch_probe_source = TouchProbeSource::ManualInstallation;
-                                                        });
-                                                },
-                                            }
-                                            span { "Manual installation of the touch probe" }
-                                        }
-                                        if has_atc {
-                                            label {
-                                                input {
-                                                    r#type: "radio",
-                                                    name: "touch_probe_source",
-                                                    value: "atc_slot",
-                                                    checked: snapshot.project_config.touch_probe_source == TouchProbeSource::AtcSlot,
-                                                    onchange: move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.project_config.touch_probe_source = TouchProbeSource::AtcSlot;
-                                                            });
-                                                    },
-                                                }
-                                                span { "Load touch probe from slot" }
-                                            }
-                                        }
-                                        if has_atc && board_thickness_uses_atc_probe {
-                                            div { class: "sub-field",
-                                                span { "Slot" }
-                                                input {
-                                                    r#type: "number",
-                                                    min: "0",
-                                                    max: "{atc_slot_count}",
-                                                    step: "1",
-                                                    value: "{snapshot.project_config.touch_probe_atc_slot}",
-                                                    oninput: move |evt| {
-                                                        let value = evt.value().parse::<u8>().unwrap_or(0).min(atc_slot_count);
-                                                        super::mutate_ctx(state, |s| s.project_config.touch_probe_atc_slot = value);
-                                                    },
-                                                }
-                                                span { " / 0-{atc_slot_count}" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        div { class: "field",
-                            label { "Board orientation" }
-                            div { class: "radio-group vertical",
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_orientation",
-                                            value: "automatic",
-                                            checked: snapshot.project_config.board_orientation == BoardOrientation::Automatic,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_orientation = BoardOrientation::Automatic;
-                                                    });
-                                            },
-                                        }
-                                        span { "Automatic" }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_orientation",
-                                            value: "no_rotation",
-                                            checked: snapshot.project_config.board_orientation == BoardOrientation::NoRotation,
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_orientation = BoardOrientation::NoRotation;
-                                                    });
-                                            },
-                                        }
-                                        span { "No rotation" }
-                                    }
-                                }
-                                div { class: "radio-option",
-                                    label {
-                                        input {
-                                            r#type: "radio",
-                                            name: "board_orientation",
-                                            value: "rotate_group",
-                                            checked: matches!(
-                                                snapshot.project_config.board_orientation,
-                                                BoardOrientation::Rotate90
-                                                | BoardOrientation::Rotate180
-                                                | BoardOrientation::Rotate270
-                                                | BoardOrientation::RotateCustom
-                                            ),
-                                            onchange: move |_| {
-                                                state
-                                                    .with_mut(|s| {
-                                                        s.project_config.board_orientation = BoardOrientation::Rotate90;
-                                                    });
-                                            },
-                                        }
-                                        span { "Rotate" }
-                                    }
-                                    if matches!(
-                                        snapshot.project_config.board_orientation,
-                                        BoardOrientation::Rotate90
-                                        | BoardOrientation::Rotate180
-                                        | BoardOrientation::Rotate270
-                                        | BoardOrientation::RotateCustom
-                                    )
-                                    {
-                                        div { class: "nested-radio-group",
-                                            label {
-                                                input {
-                                                    r#type: "radio",
-                                                    name: "board_rotation_angle",
-                                                    value: "90",
-                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate90,
-                                                    onchange: move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.project_config.board_orientation = BoardOrientation::Rotate90;
-                                                            });
-                                                    },
-                                                }
-                                                span { "90°" }
-                                            }
-                                            label {
-                                                input {
-                                                    r#type: "radio",
-                                                    name: "board_rotation_angle",
-                                                    value: "180",
-                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate180,
-                                                    onchange: move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.project_config.board_orientation = BoardOrientation::Rotate180;
-                                                            });
-                                                    },
-                                                }
-                                                span { "180°" }
-                                            }
-                                            label {
-                                                input {
-                                                    r#type: "radio",
-                                                    name: "board_rotation_angle",
-                                                    value: "270",
-                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::Rotate270,
-                                                    onchange: move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.project_config.board_orientation = BoardOrientation::Rotate270;
-                                                            });
-                                                    },
-                                                }
-                                                span { "270°" }
-                                            }
-                                            label {
-                                                input {
-                                                    r#type: "radio",
-                                                    name: "board_rotation_angle",
-                                                    value: "custom",
-                                                    checked: snapshot.project_config.board_orientation == BoardOrientation::RotateCustom,
-                                                    onchange: move |_| {
-                                                        state
-                                                            .with_mut(|s| {
-                                                                s.project_config.board_orientation = BoardOrientation::RotateCustom;
-                                                            });
-                                                    },
-                                                }
-                                                span { "Custom" }
-                                            }
-                                            if snapshot.project_config.board_orientation == BoardOrientation::RotateCustom {
-                                                div { class: "custom-angle-input",
-                                                    input {
-                                                        r#type: "number",
-                                                        min: "0",
-                                                        max: "360",
-                                                        step: "0.1",
-                                                        value: "{snapshot.project_config.board_orientation_custom_degrees}",
-                                                        oninput: move |evt| {
-                                                            let value = evt.value().parse::<f32>().unwrap_or(0.0).clamp(0.0, 360.0);
-                                                            super::mutate_ctx(
-                                                                state,
-                                                                |s| s.project_config.board_orientation_custom_degrees = value,
-                                                            );
-                                                        },
-                                                    }
-                                                    span { "Custom angle" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if has_atc {
-                            div { class: "field",
-                                label { "Automatic tool change" }
-                                select {
-                                    value: snapshot.project_config.atc_strategy.as_str(),
-                                    onchange: move |evt| {
-                                        let v = evt.value();
-                                        state
-                                            .with_mut(|s| {
-                                                s.project_config.atc_strategy = if v == "overwrite" {
-                                                    AtcRackStrategy::Overwrite
-                                                } else if v == "reuse" {
-                                                    AtcRackStrategy::Reuse
-                                                } else {
-                                                    AtcRackStrategy::Off
-                                                };
-                                            });
-                                    },
-                                    option { value: "off", "Manual tool change" }
-                                    option { value: "reuse", "Reuse rack" }
-                                    option { value: "overwrite", "Overwrite rack" }
                                 }
                             }
                         }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use serde_json::Value;
 
-use super::job::ProductionOperation;
+use super::job::{CutDepthStrategy, ProductionOperation, Side};
 use super::state::RackSlot;
 
 /// CNC profile persisted with the CNC schema.
@@ -110,7 +110,10 @@ pub struct JobProfile {
     pub fixture_profile_choices: Vec<String>,
     pub toolset_profile_id: String,
     pub toolset_profile_choices: Vec<String>,
+    pub side: Side,
     pub default_operations: Vec<ProductionOperation>,
+    pub cut_depth_strategy: CutDepthStrategy,
+    pub multi_pass_max_depth_mm: f32,
     pub operation_setups: BTreeMap<String, Value>,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,

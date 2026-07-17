@@ -13,7 +13,10 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use super::manager::{queue_persist_document, YamlConfigManager};
+use super::manager::{
+    begin_persist_session, end_persist_session, queue_persist_document,
+    queue_persist_document_in_session, YamlConfigManager,
+};
 use super::ConfigError;
 
 /// Encapsulates all persisted configuration state
@@ -408,6 +411,25 @@ pub fn save_toolset_profiles(
     save_profile_map(&app_dirs.toolset_profiles, profiles)
 }
 
+pub fn save_processing_and_toolset_profiles_session(
+    app_dirs: &AppDirs,
+    processing_profiles: &BTreeMap<String, Value>,
+    toolset_profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    let mut session = begin_persist_session();
+    enqueue_profile_map_requests_in_session(
+        &mut session,
+        &app_dirs.processing_profiles,
+        processing_profiles,
+    )?;
+    enqueue_profile_map_requests_in_session(
+        &mut session,
+        &app_dirs.toolset_profiles,
+        toolset_profiles,
+    )?;
+    end_persist_session(session)
+}
+
 /// Generic helper to save a config file as YAML
 #[allow(dead_code)]
 fn save_config_file(
@@ -427,6 +449,16 @@ fn save_config_file(
 }
 
 fn save_profile_map(
+    dir: &Path,
+    profiles: &BTreeMap<String, Value>,
+) -> Result<(), ConfigError> {
+    let mut session = begin_persist_session();
+    enqueue_profile_map_requests_in_session(&mut session, dir, profiles)?;
+    end_persist_session(session)
+}
+
+fn enqueue_profile_map_requests_in_session(
+    session: &mut super::manager::PersistSession,
     dir: &Path,
     profiles: &BTreeMap<String, Value>,
 ) -> Result<(), ConfigError> {
@@ -472,7 +504,7 @@ fn save_profile_map(
             format!("profile:{}:{}:{}", dir.display(), id, stem),
             profile_data.clone(),
         );
-        queue_persist_document(file_path, item_values, profile_data.clone())?;
+        queue_persist_document_in_session(session, file_path, item_values, profile_data.clone());
     }
 
     Ok(())

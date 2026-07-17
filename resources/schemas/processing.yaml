@@ -129,12 +129,32 @@ properties:
     minLength: 1
     default: My machining profile
 
+  side_to_machine:
+    type: string
+    enum: [top, bottom]
+    default: top
+
   operations:
     type: array
     items: { $ref: "#/$defs/operation_key" }
     uniqueItems: true
     minItems: 1
     default: [drill_pth]
+
+  routing:
+    type: object
+    default:
+      cut_depth_strategy: automatic
+      multi_pass_max_depth: 1.0mm
+    properties:
+      cut_depth_strategy:
+        type: string
+        enum: [automatic, single_pass, multi_pass]
+        default: automatic
+      multi_pass_max_depth:
+        $ref: "units.yaml#/$defs/size"
+        default: 1.0mm
+    additionalProperties: false
 
   drill_locating_pins:
     type: object

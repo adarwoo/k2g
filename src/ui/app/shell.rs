@@ -6,7 +6,7 @@ use base64::Engine;
 
 use super::super::model::*;
 use super::super::UiLaunchData;
-use crate::ctx::{UiCommand, apply_ui_command, ctx_snapshot};
+use crate::ctx::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
 
 #[component]
 pub fn AppTopBar(
@@ -125,6 +125,11 @@ pub fn AppTopBar(
 }
 
 fn dispatch_ui_command(mut state: Signal<crate::ctx::AppCtx>, command: UiCommand) {
+    // Stock and other screens may mutate the local signal directly. Ensure
+    // the global context is up to date before applying global UI commands.
+    let latest_snapshot = state.read().clone();
+    with_ctx_mut(|ctx| *ctx = latest_snapshot);
+
     apply_ui_command(command);
     state.set(ctx_snapshot());
 }

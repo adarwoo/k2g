@@ -159,6 +159,18 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
 
     let selected_catalog_count = selected_catalog_tool_keys.read().len();
     let selected_stock_count = selected_stock_tool_ids.read().len();
+    let selected_stock_tool_ids_vec = selected_stock_tool_ids
+        .read()
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_has_any_reference = selected_stock_tool_ids_vec
+        .iter()
+        .any(|tool_id| snapshot.is_uuid_referenced(tool_id));
+    let delete_current_job_reference_warnings = selected_stock_tool_ids_vec
+        .iter()
+        .flat_map(|tool_id| snapshot.current_job_reference_locations_for_uuid(tool_id))
+        .collect::<Vec<_>>();
     let filter_value = stock_filter.read().clone();
     let filter_lower = filter_value.to_ascii_lowercase();
     let type_filter = *stock_type_filter.read();
@@ -513,7 +525,22 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                     div { class: "wizard-dialog",
                         h3 { "Delete tools" }
                         p {
-                            "Delete {selected_stock_count} selected tool(s)? This also clears any rack assignment and project tool references."
+                            "Delete {selected_stock_count} selected tool(s)? Broken references are allowed and must be repaired in the active job."
+                        }
+                        if selected_has_any_reference {
+                            p { class: "diag-status",
+                                "Warning: one or more selected tools are referenced by existing profiles or job settings."
+                            }
+                        }
+                        if !delete_current_job_reference_warnings.is_empty() {
+                            p { class: "diag-status",
+                                "Warning: one or more selected tools are used by the current job:"
+                            }
+                            ul { class: "diag-status",
+                                for (idx , location) in delete_current_job_reference_warnings.iter().enumerate() {
+                                    li { key: "delete-warning-{idx}", "{location}" }
+                                }
+                            }
                         }
                         div { class: "wizard-actions",
                             button {

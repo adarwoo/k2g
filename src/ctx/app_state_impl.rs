@@ -26,30 +26,17 @@ impl AppState {
             generation_state: GenerationState::Idle,
             project_config: JobConfig {
                 selected_operations: vec![ProductionOperation::DrillPth],
-                side: Side::Top,
-                rotation_mode: RotationMode::Auto,
                 rotation_angle: 0,
-                atc_strategy: AtcRackStrategy::Reuse,
                 tab_count: 4,
                 tab_width_mm: 3.0,
                 tab_width_baseline_mm: 3.0,
                 allow_routing_holes: true,
                 drill_then_route: false,
                 pilot_hole_fallback: true,
-                cut_depth_strategy: CutDepthStrategy::Automatic,
-                multi_pass_max_depth_mm: 1.0,
                 outline_router_tool_id: None,
-                board_thickness_mode: BoardThicknessMode::Automatic,
-                board_thickness_preset_mm: 1.6,
-                board_thickness_user_value: 1.6,
-                z0_determination_mode: Z0DeterminationMode::ManualAdjustZ0,
-                touch_probe_source: TouchProbeSource::ManualInstallation,
-                touch_probe_atc_slot: 0,
                 mouse_bites_enabled: false,
                 mouse_bite_pitch_mm: 0.8,
                 mouse_bite_drill_tool_id: None,
-                board_orientation: BoardOrientation::Automatic,
-                board_orientation_custom_degrees: 0.0,
             },
             gcode: sample_gcode(),
             save_filename: save_filename_override.unwrap_or_else(|| "output.nc".to_string()),
@@ -209,6 +196,27 @@ impl AppState {
             return;
         };
 
+        let persist_processing = realms
+            .iter()
+            .any(|realm| matches!(realm, PersistRealm::ProcessingProfiles));
+        let persist_toolset = realms
+            .iter()
+            .any(|realm| matches!(realm, PersistRealm::ToolsetProfiles));
+
+        if persist_processing && persist_toolset {
+            let processing_profiles = self
+                .process_profiles
+                .iter()
+                .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
+                .collect::<BTreeMap<_, _>>();
+            let toolset_profiles = build_toolset_profiles(&self.toolsets);
+            let _ = save_processing_and_toolset_profiles_session(
+                &app_dirs,
+                &processing_profiles,
+                &toolset_profiles,
+            );
+        }
+
         for realm in realms {
             match realm {
                 PersistRealm::GlobalSettings => self.persist_global_settings(&app_dirs),
@@ -231,6 +239,9 @@ impl AppState {
                     );
                 }
                 PersistRealm::ProcessingProfiles => {
+                    if persist_processing && persist_toolset {
+                        continue;
+                    }
                     self.persist_profile_map_realm(
                         &app_dirs,
                         &self.process_profiles,
@@ -239,7 +250,12 @@ impl AppState {
                         save_processing_profiles,
                     );
                 }
-                PersistRealm::ToolsetProfiles => self.persist_toolset_profiles(&app_dirs),
+                PersistRealm::ToolsetProfiles => {
+                    if persist_processing && persist_toolset {
+                        continue;
+                    }
+                    self.persist_toolset_profiles(&app_dirs)
+                }
                 PersistRealm::Stock => self.persist_stock(&app_dirs),
             }
         }
@@ -397,9 +413,7 @@ impl AppState {
 
     pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
         self.clear_runtime_errors("process-profile");
-
-        let previous_profile = self.selected_process_profile().cloned();
-        let previous_selected_operations = self.project_config.selected_operations.clone();
+        self.clear_runtime_errors("current-job-ref");
 
         let resolved_id = id
             .filter(|selected_id| {
@@ -424,114 +438,227 @@ impl AppState {
             return;
         };
 
-        let resolved_machine_id = if self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id)
-        {
-            profile.cnc_profile_id.clone()
-        } else {
-            let fallback = self
-                .selected_machine_id
-                .clone()
-                .filter(|id| self.machines.iter().any(|machine| machine.id == *id))
-                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
-            self.push_runtime_error(
-                "process-profile",
-                format!(
-                    "Machining profile '{}' references an unavailable CNC profile; using default.",
-                    profile.name
-                ),
-                Some(format!("Missing CNC profile id: {}", profile.cnc_profile_id)),
-            );
-            fallback.unwrap_or(profile.cnc_profile_id.clone())
-        };
-        self.select_machine_profile_by_id(Some(resolved_machine_id));
-
-        let resolved_fixture_id = if self
-            .fixtures
-            .iter()
-            .any(|fixture| fixture.id == profile.fixture_profile_id)
-        {
-            profile.fixture_profile_id.clone()
-        } else {
-            let fallback = self
-                .selected_fixture_id
-                .clone()
-                .filter(|id| self.fixtures.iter().any(|fixture| fixture.id == *id))
-                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()));
-            self.push_runtime_error(
-                "process-profile",
-                format!(
-                    "Machining profile '{}' references an unavailable fixture profile; using default.",
-                    profile.name
-                ),
-                Some(format!("Missing fixture profile id: {}", profile.fixture_profile_id)),
-            );
-            fallback.unwrap_or(profile.fixture_profile_id.clone())
-        };
-        self.selected_fixture_id = Some(resolved_fixture_id);
-
-        let resolved_toolset_id = if self
+        self.select_machine_profile_by_id(Some(profile.cnc_profile_id.clone()));
+        self.selected_fixture_id = Some(profile.fixture_profile_id.clone());
+        self.selected_toolset_id = Some(profile.toolset_profile_id.clone());
+        if let Some(toolset) = self
             .toolsets
             .iter()
-            .any(|toolset| toolset.id == profile.toolset_profile_id)
+            .find(|toolset| toolset.id == profile.toolset_profile_id)
         {
-            profile.toolset_profile_id.clone()
+            self.rack_slots = toolset.slots.clone();
         } else {
-            let fallback = self
-                .selected_toolset_id
-                .clone()
-                .filter(|id| self.toolsets.iter().any(|toolset| toolset.id == *id))
-                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()));
-            self.push_runtime_error(
-                "process-profile",
-                format!(
-                    "Machining profile '{}' references an unavailable toolset profile; using default.",
-                    profile.name
-                ),
-                Some(format!("Missing toolset profile id: {}", profile.toolset_profile_id)),
-            );
-            fallback.unwrap_or(profile.toolset_profile_id.clone())
-        };
-        self.select_toolset_profile_by_id(Some(resolved_toolset_id));
-
-        let mut next_operations = profile.default_operations.clone();
-        if let Some(previous) = previous_profile.filter(|p| p.id != profile.id) {
-            for op in ProductionOperation::all().iter().copied() {
-                let previous_default = previous.default_operations.contains(&op);
-                let previous_value = previous_selected_operations.contains(&op);
-                if previous_default == previous_value {
-                    continue;
-                }
-
-                if previous_value {
-                    if profile.default_operations.contains(&op) {
-                        if !next_operations.contains(&op) {
-                            next_operations.push(op);
-                        }
-                    } else {
-                        self.push_runtime_error(
-                            "process-profile",
-                            format!(
-                                "Operation override '{}' is not allowed by machining profile '{}'; using profile default.",
-                                op.label(),
-                                profile.name
-                            ),
-                            None,
-                        );
-                    }
-                } else if profile.default_operations.contains(&op) {
-                    next_operations.retain(|existing| *existing != op);
-                }
-            }
+            self.rack_slots.clear();
         }
 
         let ordered_operations = ProductionOperation::all()
             .iter()
             .copied()
-            .filter(|op| next_operations.contains(op))
+            .filter(|op| profile.default_operations.contains(op))
             .collect::<Vec<_>>();
         self.project_config.selected_operations = ordered_operations;
         self.gcode_modified = false;
+        self.validate_current_job_references();
         self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    pub fn validate_current_job_references(&mut self) {
+        self.clear_runtime_errors("current-job-ref");
+
+        let Some(profile) = self.selected_process_profile().cloned() else {
+            return;
+        };
+
+        if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
+            self.push_runtime_error(
+                "current-job-ref",
+                format!(
+                    "Current job cannot execute: broken CNC reference in machining profile '{}'.",
+                    profile.name
+                ),
+                Some(format!(
+                    "Location: machining profile '{}' -> cnc.default (missing id: {})",
+                    profile.name, profile.cnc_profile_id
+                )),
+            );
+        }
+
+        if !self
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.id == profile.fixture_profile_id)
+        {
+            self.push_runtime_error(
+                "current-job-ref",
+                format!(
+                    "Current job cannot execute: broken fixture reference in machining profile '{}'.",
+                    profile.name
+                ),
+                Some(format!(
+                    "Location: machining profile '{}' -> fixture.default (missing id: {})",
+                    profile.name, profile.fixture_profile_id
+                )),
+            );
+        }
+
+        if !self
+            .toolsets
+            .iter()
+            .any(|toolset| toolset.id == profile.toolset_profile_id)
+        {
+            self.push_runtime_error(
+                "current-job-ref",
+                format!(
+                    "Current job cannot execute: broken toolset reference in machining profile '{}'.",
+                    profile.name
+                ),
+                Some(format!(
+                    "Location: machining profile '{}' -> toolset.default (missing id: {})",
+                    profile.name, profile.toolset_profile_id
+                )),
+            );
+        }
+
+        if let Some(router_id) = self.project_config.outline_router_tool_id.clone() {
+            if !self.tools.iter().any(|tool| tool.id == router_id) {
+                self.push_runtime_error(
+                    "current-job-ref",
+                    "Current job cannot execute: broken router tool reference.".to_string(),
+                    Some(format!(
+                        "Location: project.outline_router_tool_id (missing id: {})",
+                        router_id
+                    )),
+                );
+            }
+        }
+
+        if let Some(drill_id) = self.project_config.mouse_bite_drill_tool_id.clone() {
+            if !self.tools.iter().any(|tool| tool.id == drill_id) {
+                self.push_runtime_error(
+                    "current-job-ref",
+                    "Current job cannot execute: broken mouse-bite drill tool reference."
+                        .to_string(),
+                    Some(format!(
+                        "Location: project.mouse_bite_drill_tool_id (missing id: {})",
+                        drill_id
+                    )),
+                );
+            }
+        }
+
+        if let Some(toolset) = self
+            .toolsets
+            .iter()
+            .find(|toolset| toolset.id == profile.toolset_profile_id)
+        {
+            let toolset_name = toolset.name.clone();
+            let missing_slots = toolset
+                .slots
+                .iter()
+                .filter_map(|(slot_index, slot)| {
+                    if !slot.locked || slot.disabled {
+                        return None;
+                    }
+                    let tool_id = slot.tool_id.clone()?;
+                    if self.tools.iter().any(|tool| tool.id == tool_id) {
+                        None
+                    } else {
+                        Some((*slot_index, tool_id))
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            for (slot_index, tool_id) in missing_slots {
+                self.push_runtime_error(
+                    "current-job-ref",
+                    format!(
+                        "Current job cannot execute: broken toolset slot reference in '{}'.",
+                        toolset_name
+                    ),
+                    Some(format!(
+                        "Location: toolset '{}' -> slots.T{} (missing tool id: {})",
+                        toolset_name, slot_index, tool_id
+                    )),
+                );
+            }
+        }
+    }
+
+    pub fn is_uuid_referenced(&self, uuid: &str) -> bool {
+        self.process_profiles.iter().any(|profile| {
+            profile.cnc_profile_id == uuid
+                || profile.fixture_profile_id == uuid
+                || profile.toolset_profile_id == uuid
+                || profile.cnc_profile_choices.iter().any(|id| id == uuid)
+                || profile.fixture_profile_choices.iter().any(|id| id == uuid)
+                || profile.toolset_profile_choices.iter().any(|id| id == uuid)
+        }) || self
+            .toolsets
+            .iter()
+            .flat_map(|toolset| toolset.slots.values())
+            .any(|slot| slot.tool_id.as_deref() == Some(uuid))
+            || self
+                .rack_slots
+                .values()
+                .any(|slot| slot.tool_id.as_deref() == Some(uuid))
+            || self
+                .project_config
+                .outline_router_tool_id
+                .as_deref()
+                == Some(uuid)
+            || self
+                .project_config
+                .mouse_bite_drill_tool_id
+                .as_deref()
+                == Some(uuid)
+    }
+
+    pub fn current_job_reference_locations_for_uuid(&self, uuid: &str) -> Vec<String> {
+        let mut locations = Vec::new();
+        let Some(profile) = self.selected_process_profile() else {
+            return locations;
+        };
+
+        if profile.cnc_profile_id == uuid {
+            locations.push(format!(
+                "Machining '{}' -> cnc.default",
+                profile.name
+            ));
+        }
+        if profile.fixture_profile_id == uuid {
+            locations.push(format!(
+                "Machining '{}' -> fixture.default",
+                profile.name
+            ));
+        }
+        if profile.toolset_profile_id == uuid {
+            locations.push(format!(
+                "Machining '{}' -> toolset.default",
+                profile.name
+            ));
+        }
+        if self.project_config.outline_router_tool_id.as_deref() == Some(uuid) {
+            locations.push("Project -> outline router tool".to_string());
+        }
+        if self.project_config.mouse_bite_drill_tool_id.as_deref() == Some(uuid) {
+            locations.push("Project -> mouse-bite drill tool".to_string());
+        }
+        if let Some(toolset) = self
+            .toolsets
+            .iter()
+            .find(|toolset| toolset.id == profile.toolset_profile_id)
+        {
+            for (slot_idx, slot) in toolset.slots.iter() {
+                if slot.tool_id.as_deref() == Some(uuid) {
+                    locations.push(format!(
+                        "Toolset '{}' -> slots.T{}",
+                        toolset.name, slot_idx
+                    ));
+                }
+            }
+        }
+
+        locations
     }
 
     fn unique_process_profile_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
@@ -602,7 +729,10 @@ impl AppState {
             fixture_profile_choices: current.fixture_profile_choices,
             toolset_profile_id: current.toolset_profile_id,
             toolset_profile_choices: current.toolset_profile_choices,
+            side: current.side,
             default_operations: current.default_operations,
+            cut_depth_strategy: current.cut_depth_strategy,
+            multi_pass_max_depth_mm: current.multi_pass_max_depth_mm,
             operation_setups: current.operation_setups,
             pending_required_fields: current.pending_required_fields,
             usable: current.usable,
@@ -1159,6 +1289,72 @@ impl AppState {
         }
 
         Err("Selected machining profile was not found".to_string())
+    }
+
+    pub fn set_selected_process_profile_side(&mut self, side: Side) -> Result<(), String> {
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No machining profile selected".to_string());
+        };
+
+        let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        else {
+            return Err("Selected machining profile was not found".to_string());
+        };
+
+        profile.side = side;
+        self.select_process_profile_by_id(Some(selected_id));
+        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
+        Ok(())
+    }
+
+    pub fn set_selected_process_profile_cut_depth_strategy(
+        &mut self,
+        strategy: CutDepthStrategy,
+    ) -> Result<(), String> {
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No machining profile selected".to_string());
+        };
+
+        let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        else {
+            return Err("Selected machining profile was not found".to_string());
+        };
+
+        profile.cut_depth_strategy = strategy;
+        self.select_process_profile_by_id(Some(selected_id));
+        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
+        Ok(())
+    }
+
+    pub fn set_selected_process_profile_multi_pass_max_depth_mm(
+        &mut self,
+        depth_mm: f32,
+    ) -> Result<(), String> {
+        let Some(selected_id) = self.selected_process_profile_id.clone() else {
+            return Err("No machining profile selected".to_string());
+        };
+
+        let Some(profile) = self
+            .process_profiles
+            .iter_mut()
+            .find(|profile| profile.id == selected_id)
+        else {
+            return Err("Selected machining profile was not found".to_string());
+        };
+
+        profile.multi_pass_max_depth_mm = depth_mm.max(0.01);
+        self.select_process_profile_by_id(Some(selected_id));
+        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
+        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
+        Ok(())
     }
 
     pub fn set_selected_process_operation_bool(
@@ -1783,11 +1979,31 @@ impl AppState {
     pub fn delete_toolset_profile_with_cascade(&mut self, toolset_id: &str) -> CascadeDeleteImpact {
         let impact = self.impact_delete_toolset_profile(toolset_id);
 
-        if !impact.dependent_process_profiles.is_empty() {
-            return impact;
-        }
-
         self.toolsets.retain(|toolset| toolset.id != toolset_id);
+
+        for profile in self.process_profiles.iter_mut() {
+            if profile.toolset_profile_id == toolset_id {
+                // Keep active/default reference as broken so users can repair explicitly.
+                profile.toolset_profile_choices = vec![toolset_id.to_string()];
+            } else {
+                // Clean non-active references from the allowed set.
+                profile
+                    .toolset_profile_choices
+                    .retain(|id| id != toolset_id);
+            }
+
+            if profile.toolset_profile_id.trim().is_empty() {
+                profile.pending_required_fields.insert("toolset.default".to_string());
+            } else {
+                profile.pending_required_fields.remove("toolset.default");
+            }
+            if profile.toolset_profile_choices.is_empty() {
+                profile.pending_required_fields.insert("toolset.choices".to_string());
+            } else {
+                profile.pending_required_fields.remove("toolset.choices");
+            }
+            profile.usable = profile.pending_required_fields.is_empty();
+        }
 
         let next_processing_id = self
             .selected_process_profile_id
@@ -1797,18 +2013,17 @@ impl AppState {
 
         self.select_process_profile_by_id(next_processing_id);
 
-        if self
-            .selected_toolset_id
-            .as_ref()
-            .map(|id| !self.toolsets.iter().any(|toolset| &toolset.id == id))
-            .unwrap_or(false)
-        {
-            if let Some(next_toolset) = self.toolsets.first().map(|toolset| toolset.id.clone()) {
-                self.select_toolset_profile_by_id(Some(next_toolset));
-            }
+        if self.selected_toolset_id.as_deref() == Some(toolset_id) {
+            self.selected_toolset_id = Some(toolset_id.to_string());
+            self.rack_slots.clear();
         }
 
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        self.validate_current_job_references();
+        self.persist_realms(&[
+            PersistRealm::ToolsetProfiles,
+            PersistRealm::ProcessingProfiles,
+            PersistRealm::GlobalSettings,
+        ]);
 
         impact
     }
@@ -1967,73 +2182,30 @@ impl AppState {
 
         self.tools.retain(|tool| !to_remove.contains(tool.id.as_str()));
 
-        for slot in self.rack_slots.values_mut() {
-            if slot
-                .tool_id
-                .as_deref()
-                .map(|tool_id| to_remove.contains(tool_id))
-                .unwrap_or(false)
-            {
-                slot.tool_id = None;
-            }
-        }
-
-        for toolset in self.toolsets.iter_mut() {
-            for slot in toolset.slots.values_mut() {
-                if slot
-                    .tool_id
-                    .as_deref()
-                    .map(|tool_id| to_remove.contains(tool_id))
-                    .unwrap_or(false)
-                {
-                    slot.tool_id = None;
-                }
-            }
-        }
-
-        if self
-            .project_config
-            .outline_router_tool_id
-            .as_deref()
-            .map(|tool_id| to_remove.contains(tool_id))
-            .unwrap_or(false)
-        {
-            self.project_config.outline_router_tool_id = None;
-        }
-
-        if self
-            .project_config
-            .mouse_bite_drill_tool_id
-            .as_deref()
-            .map(|tool_id| to_remove.contains(tool_id))
-            .unwrap_or(false)
-        {
-            self.project_config.mouse_bite_drill_tool_id = None;
-        }
-
         let removed = before.saturating_sub(self.tools.len());
         if removed > 0 {
             self.persist_stock_snapshot();
+            self.validate_current_job_references();
         }
         removed
     }
 
-    pub fn select_screen(&mut self, screen: Screen) {
-        self.selected_screen = screen;
+    pub fn toolset_referencing_process_profiles(&self, toolset_id: &str) -> Vec<String> {
+        self.process_profiles
+            .iter()
+            .filter(|profile| {
+                profile.toolset_profile_id == toolset_id
+                    || profile
+                        .toolset_profile_choices
+                        .iter()
+                        .any(|choice| choice == toolset_id)
+            })
+            .map(|profile| profile.name.clone())
+            .collect()
     }
 
-    pub fn toggle_operation(&mut self, op: ProductionOperation) {
-        if let Some(index) = self
-            .project_config
-            .selected_operations
-            .iter()
-            .position(|x| *x == op)
-        {
-            self.project_config.selected_operations.remove(index);
-        } else {
-            self.project_config.selected_operations.push(op);
-        }
-        self.gcode_modified = false;
+    pub fn select_screen(&mut self, screen: Screen) {
+        self.selected_screen = screen;
     }
 
     #[allow(dead_code)]
@@ -2468,9 +2640,10 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
     };
 
     let mut value = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "id": profile.id,
         "name": profile.name,
+        "side_to_machine": profile.side.as_str(),
         "cnc": {
             "default": profile.cnc_profile_id,
             "choices": cnc_choices,
@@ -2488,6 +2661,10 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
             .iter()
             .map(|op| operation_to_key(*op))
             .collect::<Vec<_>>(),
+        "routing": {
+            "cut_depth_strategy": profile.cut_depth_strategy.as_str(),
+            "multi_pass_max_depth": format!("{}mm", profile.multi_pass_max_depth_mm),
+        },
     });
 
     if let Some(root) = value.as_object_mut() {
@@ -2525,6 +2702,29 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .unwrap_or_else(|| "Unnamed machining profile".to_string());
+
+    let side = match value
+        .get("side_to_machine")
+        .and_then(Value::as_str)
+        .unwrap_or("top")
+    {
+        "bottom" => Side::Bottom,
+        _ => Side::Top,
+    };
+
+    let cut_depth_strategy = match value
+        .pointer("/routing/cut_depth_strategy")
+        .and_then(Value::as_str)
+        .unwrap_or("automatic")
+    {
+        "single_pass" => CutDepthStrategy::SinglePass,
+        "multi_pass" => CutDepthStrategy::MultiPass,
+        _ => CutDepthStrategy::Automatic,
+    };
+    let multi_pass_max_depth_mm = value
+        .pointer("/routing/multi_pass_max_depth")
+        .and_then(value_to_length_mm)
+        .unwrap_or(1.0) as f32;
 
     let cnc_profile_id = value
         .pointer("/cnc/default")
@@ -2683,7 +2883,10 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         fixture_profile_choices,
         toolset_profile_id,
         toolset_profile_choices,
+        side,
         default_operations,
+        cut_depth_strategy,
+        multi_pass_max_depth_mm,
         operation_setups,
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),

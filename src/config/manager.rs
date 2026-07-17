@@ -44,6 +44,17 @@ pub struct PersistenceWriteManager {
     inner: Arc<WriteQueueInner>,
 }
 
+#[derive(Clone)]
+pub struct PersistWriteRequest {
+    pub target_path: PathBuf,
+    pub item_values: BTreeMap<String, Value>,
+    pub full_payload: Value,
+}
+
+pub struct PersistSession {
+    requests: Vec<PersistWriteRequest>,
+}
+
 impl PersistenceWriteManager {
     fn global() -> &'static Self {
         static INSTANCE: OnceLock<PersistenceWriteManager> = OnceLock::new();
@@ -64,25 +75,9 @@ impl PersistenceWriteManager {
         })
     }
 
-    fn enqueue(
-        &self,
-        target_path: PathBuf,
-        item_values: BTreeMap<String, Value>,
-        full_payload: Value,
-    ) -> Result<bool, ConfigError> {
-        let yaml_payload = value_to_yaml_string(&full_payload)?;
-
-        let mut item_hashes = item_values
-            .iter()
-            .map(|(key, value)| (key.clone(), canonical_value_hash(value)))
-            .collect::<BTreeMap<_, _>>();
-
-        if item_hashes.is_empty() {
-            // Fallback key for non-collection documents.
-            item_hashes.insert(
-                format!("file:{}", target_path.to_string_lossy()),
-                canonical_value_hash(&full_payload),
-            );
+    fn enqueue_batch(&self, requests: Vec<PersistWriteRequest>) -> Result<usize, ConfigError> {
+        if requests.is_empty() {
+            return Ok(0);
         }
 
         let mut guard = self
@@ -91,59 +86,118 @@ impl PersistenceWriteManager {
             .lock()
             .expect("config writer mutex poisoned");
 
-        // Bootstrap persisted hashes from disk if this target already matches.
-        let has_unseen_item = item_hashes
-            .keys()
-            .any(|item_key| !guard.persisted_hashes.contains_key(item_key));
-        let target_already_queued = guard.queue.iter().any(|q| q.target_path == target_path);
-        if has_unseen_item
-            && !target_already_queued
-            && file_payload_matches(&target_path, &full_payload)
-        {
-            for (item_key, hash) in &item_hashes {
-                guard.persisted_hashes.insert(item_key.clone(), hash.clone());
+        let mut enqueued = 0usize;
+        for request in requests {
+            if let Some(queued) = prepare_queued_write(&mut guard, request)? {
+                guard.queue.push_back(queued);
+                enqueued += 1;
             }
-            return Ok(false);
         }
 
-        let has_change = item_hashes.iter().any(|(item_key, new_hash)| {
-            let persisted = guard.persisted_hashes.get(item_key);
-            let pending = guard.pending_hashes.get(item_key);
-            persisted != Some(new_hash) && pending != Some(new_hash)
-        });
-
-        if !has_change {
-            return Ok(false);
+        if enqueued > 0 {
+            self.inner.wake.notify_one();
         }
 
-        // If the same file already has a queued write, drop the oldest one.
-        if let Some(idx) = guard
-            .queue
-            .iter()
-            .position(|queued| queued.target_path == target_path)
-        {
-            if let Some(oldest) = guard.queue.remove(idx) {
-                for (item_key, hash) in &oldest.item_hashes {
-                    if guard.pending_hashes.get(item_key) == Some(hash) {
-                        guard.pending_hashes.remove(item_key);
-                    }
+        Ok(enqueued)
+    }
+}
+
+fn prepare_queued_write(
+    guard: &mut QueueState,
+    request: PersistWriteRequest,
+) -> Result<Option<QueuedWrite>, ConfigError> {
+    let PersistWriteRequest {
+        target_path,
+        item_values,
+        full_payload,
+    } = request;
+
+    let yaml_payload = value_to_yaml_string(&full_payload)?;
+
+    let mut item_hashes = item_values
+        .iter()
+        .map(|(key, value)| (key.clone(), canonical_value_hash(value)))
+        .collect::<BTreeMap<_, _>>();
+
+    if item_hashes.is_empty() {
+        // Fallback key for non-collection documents.
+        item_hashes.insert(
+            format!("file:{}", target_path.to_string_lossy()),
+            canonical_value_hash(&full_payload),
+        );
+    }
+
+    // Bootstrap persisted hashes from disk if this target already matches.
+    let has_unseen_item = item_hashes
+        .keys()
+        .any(|item_key| !guard.persisted_hashes.contains_key(item_key));
+    let target_already_queued = guard.queue.iter().any(|q| q.target_path == target_path);
+    if has_unseen_item && !target_already_queued && file_payload_matches(&target_path, &full_payload)
+    {
+        for (item_key, hash) in &item_hashes {
+            guard.persisted_hashes.insert(item_key.clone(), hash.clone());
+        }
+        return Ok(None);
+    }
+
+    let has_change = item_hashes.iter().any(|(item_key, new_hash)| {
+        let persisted = guard.persisted_hashes.get(item_key);
+        let pending = guard.pending_hashes.get(item_key);
+        persisted != Some(new_hash) && pending != Some(new_hash)
+    });
+
+    if !has_change {
+        return Ok(None);
+    }
+
+    // If the same file already has a queued write, drop the oldest one.
+    if let Some(idx) = guard
+        .queue
+        .iter()
+        .position(|queued| queued.target_path == target_path)
+    {
+        if let Some(oldest) = guard.queue.remove(idx) {
+            for (item_key, hash) in &oldest.item_hashes {
+                if guard.pending_hashes.get(item_key) == Some(hash) {
+                    guard.pending_hashes.remove(item_key);
                 }
             }
         }
-
-        for (item_key, hash) in &item_hashes {
-            guard.pending_hashes.insert(item_key.clone(), hash.clone());
-        }
-
-        guard.queue.push_back(QueuedWrite {
-            target_path,
-            item_hashes,
-            yaml_payload,
-        });
-
-        self.inner.wake.notify_one();
-        Ok(true)
     }
+
+    for (item_key, hash) in &item_hashes {
+        guard.pending_hashes.insert(item_key.clone(), hash.clone());
+    }
+
+    Ok(Some(QueuedWrite {
+        target_path,
+        item_hashes,
+        yaml_payload,
+    }))
+}
+
+pub fn begin_persist_session() -> PersistSession {
+    PersistSession {
+        requests: Vec::new(),
+    }
+}
+
+pub fn queue_persist_document_in_session(
+    session: &mut PersistSession,
+    target_path: PathBuf,
+    item_values: BTreeMap<String, Value>,
+    full_payload: Value,
+) {
+    session.requests.push(PersistWriteRequest {
+        target_path,
+        item_values,
+        full_payload,
+    });
+}
+
+pub fn end_persist_session(session: PersistSession) -> Result<(), ConfigError> {
+    let _ = PersistenceWriteManager::global().enqueue_batch(session.requests)?;
+    Ok(())
 }
 
 pub fn queue_persist_document(
@@ -151,8 +205,9 @@ pub fn queue_persist_document(
     item_values: BTreeMap<String, Value>,
     full_payload: Value,
 ) -> Result<(), ConfigError> {
-    let _ = PersistenceWriteManager::global().enqueue(target_path, item_values, full_payload)?;
-    Ok(())
+    let mut session = begin_persist_session();
+    queue_persist_document_in_session(&mut session, target_path, item_values, full_payload);
+    end_persist_session(session)
 }
 
 fn run_write_worker(inner: Arc<WriteQueueInner>) {
