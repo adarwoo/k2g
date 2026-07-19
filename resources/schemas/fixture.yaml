@@ -400,6 +400,49 @@ properties:
 
     additionalProperties: true
 
+
+      # -----------------------------------------------------------------------
+      # origin
+      # -----------------------------------------------------------------------
+      # Machine coordinate origin orientation.
+      #
+      origin:
+        description: Machine coordinate origin orientation.
+        type: object
+        properties:
+
+          # X axis zero orientation.
+          #
+          # Valid examples:
+          #   x0: left
+          #   x0: right
+          #   x0: front
+          #   x0: back
+          #
+          x0:
+            description: X axis zero orientation.
+            type: string
+            enum: [left, right, front, back]
+            default: Left
+
+          # Y axis zero orientation.
+          #
+          # Valid examples:
+          #   y0: front
+          #   y0: back
+          #   y0: left
+          #   y0: right
+          #
+          y0:
+            description: Y axis zero orientation.
+            type: string
+            enum: [front, back, left, right]
+            default: Front
+
+        required: [x0, y0]
+        additionalProperties: false
+
+
 bed_clearance:
   description: >
     Minimum clearance to the machining bed from the tip of any tool to prevent damage to the machine bed

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use log::warn;
 use rhai::{Array, Dynamic, Map};
 
-use crate::board::BoardSnapshot;
+use pcb::BoardSnapshot;
 use crate::config::{
     ConfigError,
     backfill_catalog_fields, ensure_default_files, load_all_configs, normalize_catalog_fields,
@@ -26,12 +26,12 @@ use crate::ui::model::{
     ToolPreference, ToolStatus, ToolsetGenerationPolicy, ToolsetProfile, UiLaunchData,
     UnitSystem,
 };
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+use units::{Angle, Length};
 use crate::user_path::{
     AppDirs,
     ensure_app_dirs,
 };
-use crate::stitching::stitch_edge_shapes;
+use pcb::stitch_edge_shapes;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -39,6 +39,10 @@ pub const STATUS_KEY_REGENERATION: &str = "regeneration.status";
 pub const STATUS_KEY_KICAD: &str = "kicad.status";
 pub const STATUS_KEY_PROJECT_HAS_BOARD: &str = "project.has_board";
 pub const STATUS_KEY_PROJECT_SELECTED_PROCESS: &str = "project.selected_process_profile";
+pub const STATUS_KEY_GENERATION_READINESS: &str = "generation.readiness_gate";
+pub const STATUS_KEY_GENERATION_NOGO_REASONS: &str = "generation.nogo_reasons";
+pub const STATUS_KEY_GENERATION_LAST_TRIGGER: &str = "generation.last_trigger_cause";
+pub const STATUS_KEY_GENERATION_MODIFIED_UUIDS: &str = "generation.modified_uuids";
 
 #[derive(Clone, Copy)]
 pub enum UiCommand {
@@ -51,6 +55,7 @@ pub enum UiCommand {
 pub struct CtxIssue {
     pub id: String,
     pub domain: String,
+    pub owner_tag: Option<String>,
     pub is_error: bool,
     pub message: String,
     pub details: Option<String>,
@@ -63,6 +68,7 @@ pub struct CtxIssue {
 pub struct AppError {
     pub id: String,
     pub domain: String,
+    pub owner_tag: Option<String>,
     pub is_error: bool,
     pub message: String,
     pub details: Option<String>,
@@ -113,6 +119,7 @@ pub struct AppState {
     pub gcode: String,
     pub save_filename: String,
     pub gcode_modified: bool,
+    pub suppress_persistence: bool,
     pub show_first_launch: bool,
     pub rack_slots: BTreeMap<u8, RackSlot>,
     #[allow(dead_code)]
@@ -130,6 +137,17 @@ pub struct StitchedBoardData {
     pub errors: Vec<String>,
 }
 
+/// Resolved references used by the active job.
+#[allow(dead_code)]
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct JobReferences {
+    pub process_profile_id: Option<String>,
+    pub cnc_profile_id: Option<String>,
+    pub fixture_profile_id: Option<String>,
+    pub toolset_profile_id: Option<String>,
+    pub referenced_tool_ids: BTreeSet<String>,
+}
+
 /// Canonical application state owned by context.
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -137,6 +155,7 @@ pub struct AppCtx {
     pub app: AppState,
     pub cli_args: Vec<String>,
     pub stitched_board_data: Option<StitchedBoardData>,
+    pub job_references: JobReferences,
     pub kicad_status: String,
     pub issues: Vec<CtxIssue>,
     pub status: BTreeMap<String, String>,
@@ -196,7 +215,10 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
     let mut guard = lock
         .write()
         .expect("Global ctx write lock should not be poisoned");
-    f(&mut guard)
+    let result = f(&mut guard);
+    let updated_state = guard.app.clone();
+    guard.sync_from_app_state(&updated_state);
+    result
 }
 
 pub fn apply_ui_command(command: UiCommand) {
@@ -214,9 +236,7 @@ pub fn apply_ui_command(command: UiCommand) {
             }
         }
 
-        let updated_ui = ctx.app.clone();
-        updated_ui.persist_realms(&[PersistRealm::GlobalSettings]);
-        ctx.sync_from_app_state(&updated_ui);
+        ctx.app.persist_realms(&[PersistRealm::GlobalSettings]);
     });
 }
 

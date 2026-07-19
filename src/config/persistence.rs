@@ -4,11 +4,11 @@
 use crate::user_path::{AppDirs, GLOBAL_SETTINGS_SECTION, STOCK_SECTION};
 use log::{error, info, warn};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -17,7 +17,40 @@ use super::manager::{
     begin_persist_session, end_persist_session, queue_persist_document,
     queue_persist_document_in_session, YamlConfigManager,
 };
+use super::validator::SchemaValidator;
 use super::ConfigError;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct DomainLoadStats {
+    pub scanned_files: usize,
+    pub loaded_docs: usize,
+    pub skipped_non_yaml: usize,
+    pub skipped_non_uuid_filename: usize,
+    pub parse_errors: usize,
+    pub validation_errors: usize,
+    pub missing_id_errors: usize,
+    pub duplicate_id_errors: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct UuidResolutionReport {
+    pub process_missing_cnc_refs: usize,
+    pub process_missing_fixture_refs: usize,
+    pub process_missing_toolset_refs: usize,
+    pub toolset_missing_tool_refs: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct PersistenceBootReport {
+    pub cnc_profiles: DomainLoadStats,
+    pub fixture_profiles: DomainLoadStats,
+    pub processing_profiles: DomainLoadStats,
+    pub toolset_profiles: DomainLoadStats,
+    pub uuid_resolution: UuidResolutionReport,
+}
 
 /// Encapsulates all persisted configuration state
 #[allow(dead_code)]
@@ -45,6 +78,8 @@ pub struct PersistenceState {
     pub selected_fixture_profile_id: Option<String>,
     /// ID of currently selected toolset profile (from global settings)
     pub selected_toolset_profile_id: Option<String>,
+    /// Startup diagnostics for configuration loading and UUID resolution.
+    pub boot_report: PersistenceBootReport,
 }
 
 /// Load all persisted configuration files at application startup
@@ -83,11 +118,33 @@ pub fn load_all_configs(
     let stock_mgr = YamlConfigManager::new(STOCK_SECTION, schema_dir, &app_dirs.configs)?;
     let stock = stock_mgr.get_content().clone();
 
-    // Load all profile domains from their subdirectories.
-    let cnc_profiles = load_cnc_profiles(&app_dirs.cnc_profiles, schema_dir)?;
-    let fixture_profiles = load_profiles_from_dir(&app_dirs.fixture_profiles)?;
-    let processing_profiles = load_profiles_from_dir(&app_dirs.processing_profiles)?;
-    let toolset_profiles = load_profiles_from_dir(&app_dirs.toolset_profiles)?;
+    // Load all profile domains from their subdirectories via the shared
+    // schema-validated loader.
+    let (cnc_profiles, cnc_stats) =
+        load_validated_profiles_from_dir(&app_dirs.cnc_profiles, schema_dir, "cnc")?;
+    let (fixture_profiles, fixture_stats) =
+        load_validated_profiles_from_dir(&app_dirs.fixture_profiles, schema_dir, "fixture")?;
+    let (processing_profiles, processing_stats) = load_validated_profiles_from_dir(
+        &app_dirs.processing_profiles,
+        schema_dir,
+        "processing",
+    )?;
+    let (toolset_profiles, toolset_stats) =
+        load_validated_profiles_from_dir(&app_dirs.toolset_profiles, schema_dir, "toolset")?;
+
+    let boot_report = PersistenceBootReport {
+        cnc_profiles: cnc_stats,
+        fixture_profiles: fixture_stats,
+        processing_profiles: processing_stats,
+        toolset_profiles: toolset_stats,
+        uuid_resolution: build_uuid_resolution_report(
+            &processing_profiles,
+            &cnc_profiles,
+            &fixture_profiles,
+            &toolset_profiles,
+            &stock,
+        ),
+    };
 
     Ok(PersistenceState {
         global_settings,
@@ -101,6 +158,7 @@ pub fn load_all_configs(
         selected_cnc_profile_id,
         selected_fixture_profile_id,
         selected_toolset_profile_id,
+        boot_report,
     })
 }
 
@@ -137,33 +195,63 @@ pub fn load_all_configs_best_effort(app_dirs: &AppDirs, schema_dir: &Path) -> Pe
         }
     };
 
-    let cnc_profiles = match load_cnc_profiles(&app_dirs.cnc_profiles, schema_dir) {
+    let (cnc_profiles, cnc_stats) = match load_validated_profiles_from_dir(
+        &app_dirs.cnc_profiles,
+        schema_dir,
+        "cnc",
+    ) {
         Ok(v) => v,
         Err(err) => {
             warn!("Failed to load CNC profiles: {}", err);
-            BTreeMap::new()
+            (BTreeMap::new(), DomainLoadStats::default())
         }
     };
-    let fixture_profiles = match load_profiles_from_dir(&app_dirs.fixture_profiles) {
+    let (fixture_profiles, fixture_stats) = match load_validated_profiles_from_dir(
+        &app_dirs.fixture_profiles,
+        schema_dir,
+        "fixture",
+    ) {
         Ok(v) => v,
         Err(err) => {
             warn!("Failed to load fixture profiles: {}", err);
-            BTreeMap::new()
+            (BTreeMap::new(), DomainLoadStats::default())
         }
     };
-    let processing_profiles = match load_profiles_from_dir(&app_dirs.processing_profiles) {
+    let (processing_profiles, processing_stats) = match load_validated_profiles_from_dir(
+        &app_dirs.processing_profiles,
+        schema_dir,
+        "processing",
+    ) {
         Ok(v) => v,
         Err(err) => {
             warn!("Failed to load processing profiles: {}", err);
-            BTreeMap::new()
+            (BTreeMap::new(), DomainLoadStats::default())
         }
     };
-    let toolset_profiles = match load_profiles_from_dir(&app_dirs.toolset_profiles) {
+    let (toolset_profiles, toolset_stats) = match load_validated_profiles_from_dir(
+        &app_dirs.toolset_profiles,
+        schema_dir,
+        "toolset",
+    ) {
         Ok(v) => v,
         Err(err) => {
             warn!("Failed to load toolset profiles: {}", err);
-            BTreeMap::new()
+            (BTreeMap::new(), DomainLoadStats::default())
         }
+    };
+
+    let boot_report = PersistenceBootReport {
+        cnc_profiles: cnc_stats,
+        fixture_profiles: fixture_stats,
+        processing_profiles: processing_stats,
+        toolset_profiles: toolset_stats,
+        uuid_resolution: build_uuid_resolution_report(
+            &processing_profiles,
+            &cnc_profiles,
+            &fixture_profiles,
+            &toolset_profiles,
+            &stock,
+        ),
     };
 
     PersistenceState {
@@ -193,82 +281,108 @@ pub fn load_all_configs_best_effort(app_dirs: &AppDirs, schema_dir: &Path) -> Pe
         fixture_profiles,
         processing_profiles,
         toolset_profiles,
+        boot_report,
     }
 }
 
-/// Load all CNC profile YAML files from the cnc_profiles directory
-fn load_cnc_profiles(
-    cnc_profiles_dir: &Path,
-    schema_dir: &Path,
-) -> Result<BTreeMap<String, Value>, ConfigError> {
-    let mut profiles = BTreeMap::new();
+fn build_uuid_resolution_report(
+    processing_profiles: &BTreeMap<String, Value>,
+    cnc_profiles: &BTreeMap<String, Value>,
+    fixture_profiles: &BTreeMap<String, Value>,
+    toolset_profiles: &BTreeMap<String, Value>,
+    stock: &Value,
+) -> UuidResolutionReport {
+    let mut report = UuidResolutionReport::default();
+    let stock_tool_ids = stock
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.get("id").and_then(Value::as_str).map(ToString::to_string))
+        .collect::<BTreeSet<_>>();
 
-    if !cnc_profiles_dir.exists() {
-        info!("CNC profiles directory not found; skipping");
-        return Ok(profiles);
+    for profile in processing_profiles.values() {
+        if let Some(cnc_id) = profile.pointer("/cnc/default").and_then(Value::as_str) {
+            if !cnc_profiles.contains_key(cnc_id) {
+                report.process_missing_cnc_refs += 1;
+            }
+        }
+        if let Some(fixture_id) = profile.pointer("/fixture/default").and_then(Value::as_str) {
+            if !fixture_profiles.contains_key(fixture_id) {
+                report.process_missing_fixture_refs += 1;
+            }
+        }
+        if let Some(toolset_id) = profile.pointer("/toolset/default").and_then(Value::as_str) {
+            if !toolset_profiles.contains_key(toolset_id) {
+                report.process_missing_toolset_refs += 1;
+            }
+        }
     }
 
-    let entries = match fs::read_dir(cnc_profiles_dir) {
-        Ok(e) => e,
-        Err(err) => {
-            warn!(
-                "Failed to read CNC profiles directory: {}",
-                err
-            );
-            return Ok(profiles);
-        }
-    };
-
-    for entry in entries {
-        if let Ok(entry) = entry {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("yaml")
-                || path.extension().and_then(|s| s.to_str()) == Some("yml")
-            {
-                if !has_uuid_file_stem(&path) {
-                    warn!(
-                        "Skipping CNC profile '{}': filename stem is not a UUID",
-                        path.display()
-                    );
-                    continue;
-                }
-
-                if let Ok(profile_data) = load_cnc_profile(&path, schema_dir) {
-                    if let Some(id) = profile_data.get("id").and_then(Value::as_str) {
-                        profiles.insert(id.to_string(), profile_data);
-                    }
+    for toolset in toolset_profiles.values() {
+        if let Some(slots) = toolset.get("slots").and_then(Value::as_array) {
+            for slot in slots {
+                let has_tool = slot
+                    .get("tool_id")
+                    .and_then(Value::as_str)
+                    .map(|tool_id| !stock_tool_ids.contains(tool_id))
+                    .unwrap_or(false);
+                if has_tool {
+                    report.toolset_missing_tool_refs += 1;
                 }
             }
         }
     }
 
-    info!("Loaded {} CNC profiles", profiles.len());
-    Ok(profiles)
+    report
 }
 
-fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>, ConfigError> {
+fn resolve_schema_path(schema_dir: &Path, schema_section: &str) -> PathBuf {
+    schema_dir.join(format!("{schema_section}.yaml"))
+}
+
+fn load_schema_value(path: &Path) -> Result<Value, ConfigError> {
+    let text = fs::read_to_string(path).map_err(ConfigError::Io)?;
+    let yaml_value: serde_yaml::Value =
+        serde_yaml::from_str(&text).map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
+    serde_json::to_value(yaml_value).map_err(|e| ConfigError::SchemaParse(e.to_string()))
+}
+
+fn load_validated_profiles_from_dir(
+    profiles_dir: &Path,
+    schema_dir: &Path,
+    schema_section: &str,
+) -> Result<(BTreeMap<String, Value>, DomainLoadStats), ConfigError> {
+    let mut stats = DomainLoadStats::default();
     let mut profiles = BTreeMap::new();
 
     if !profiles_dir.exists() {
-        return Ok(profiles);
+        return Ok((profiles, stats));
     }
+
+    let schema_path = resolve_schema_path(schema_dir, schema_section);
+    let schema = load_schema_value(&schema_path)?;
+    let validator = SchemaValidator::new(&schema, schema_dir)?;
 
     let entries = match fs::read_dir(profiles_dir) {
         Ok(e) => e,
         Err(err) => {
             warn!("Failed to read profiles directory '{}': {}", profiles_dir.display(), err);
-            return Ok(profiles);
+            return Ok((profiles, stats));
         }
     };
 
     for entry in entries.flatten() {
+        stats.scanned_files += 1;
         let path = entry.path();
         let ext = path.extension().and_then(|s| s.to_str());
         if ext != Some("yaml") && ext != Some("yml") {
+            stats.skipped_non_yaml += 1;
             continue;
         }
 
         if !has_uuid_file_stem(&path) {
+            stats.skipped_non_uuid_filename += 1;
             warn!(
                 "Skipping profile '{}': filename stem is not a UUID",
                 path.display()
@@ -279,6 +393,7 @@ fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>
         let text = match fs::read_to_string(&path) {
             Ok(v) => v,
             Err(err) => {
+                stats.parse_errors += 1;
                 warn!("Could not read profile '{}': {}", path.display(), err);
                 continue;
             }
@@ -287,6 +402,7 @@ fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>
         let yaml_value: serde_yaml::Value = match serde_yaml::from_str(&text) {
             Ok(v) => v,
             Err(err) => {
+                stats.parse_errors += 1;
                 warn!("Could not parse profile '{}': {}", path.display(), err);
                 continue;
             }
@@ -295,32 +411,41 @@ fn load_profiles_from_dir(profiles_dir: &Path) -> Result<BTreeMap<String, Value>
         let json_value: Value = match serde_json::to_value(yaml_value) {
             Ok(v) => v,
             Err(err) => {
+                stats.parse_errors += 1;
                 warn!("Could not convert profile '{}' to json: {}", path.display(), err);
                 continue;
             }
         };
 
+        if validator.validate(&json_value).is_err() {
+            stats.validation_errors += 1;
+            warn!(
+                "Skipping profile '{}': failed schema '{}' validation",
+                path.display(),
+                schema_section
+            );
+            continue;
+        }
+
         if let Some(id) = json_value.get("id").and_then(Value::as_str) {
+            if profiles.contains_key(id) {
+                stats.duplicate_id_errors += 1;
+                warn!(
+                    "Skipping duplicate profile id '{}' from '{}'",
+                    id,
+                    path.display()
+                );
+                continue;
+            }
             profiles.insert(id.to_string(), json_value);
+            stats.loaded_docs += 1;
+        } else {
+            stats.missing_id_errors += 1;
+            warn!("Skipping profile '{}': missing id field", path.display());
         }
     }
 
-    Ok(profiles)
-}
-
-/// Load a single CNC profile YAML file and validate against schema
-fn load_cnc_profile(path: &Path, _schema_dir: &Path) -> Result<Value, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|e| {
-        ConfigError::Io(e)
-    })?;
-
-    let yaml_value: serde_yaml::Value = serde_yaml::from_str(&text)
-        .map_err(|e| ConfigError::ConfigParse(e.to_string()))?;
-
-    let json_value: Value = serde_json::to_value(yaml_value)
-        .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
-
-    Ok(json_value)
+    Ok((profiles, stats))
 }
 
 /// Save global settings to global.setting.yaml

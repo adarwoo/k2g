@@ -1,3 +1,10 @@
+struct RuntimeIssueDraft {
+    domain: String,
+    owner_tag: Option<String>,
+    message: String,
+    details: Option<String>,
+}
+
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(save_filename_override: Option<String>, board_snapshot: Option<BoardSnapshot>) -> Self {
@@ -41,6 +48,7 @@ impl AppState {
             gcode: sample_gcode(),
             save_filename: save_filename_override.unwrap_or_else(|| "output.nc".to_string()),
             gcode_modified: false,
+            suppress_persistence: false,
             show_first_launch: true,
             rack_slots: BTreeMap::new(),
             board_layers: BoardLayers {
@@ -70,7 +78,10 @@ impl AppState {
 
     // Loads persisted domains and resolves cross-domain selections.
     pub fn hydrate_from_persistence(&mut self) {
+        self.suppress_persistence = true;
+
         let Some(persisted) = persistence_state() else {
+            self.suppress_persistence = false;
             return;
         };
 
@@ -189,9 +200,19 @@ impl AppState {
         if self.machines.is_empty() {
             self.show_first_launch = true;
         }
+
+        self.suppress_persistence = false;
     }
 
     pub fn persist_realms(&self, realms: &[PersistRealm]) {
+        if self.suppress_persistence {
+            log::debug!(
+                "Skipping persistence during startup hydration for realms={:?}",
+                realms
+            );
+            return;
+        }
+
         let Ok(app_dirs) = ensure_app_dirs() else {
             return;
         };
@@ -210,11 +231,20 @@ impl AppState {
                 .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
                 .collect::<BTreeMap<_, _>>();
             let toolset_profiles = build_toolset_profiles(&self.toolsets);
-            let _ = save_processing_and_toolset_profiles_session(
+            match save_processing_and_toolset_profiles_session(
                 &app_dirs,
                 &processing_profiles,
                 &toolset_profiles,
-            );
+            ) {
+                Ok(()) => log::info!(
+                    "Persisted processing+toolset session: processing_count={} toolset_count={}",
+                    processing_profiles.len(),
+                    toolset_profiles.len()
+                ),
+                Err(err) => log::warn!(
+                    "Failed to persist processing+toolset session: {err}"
+                ),
+            }
         }
 
         for realm in realms {
@@ -222,6 +252,7 @@ impl AppState {
                 PersistRealm::GlobalSettings => self.persist_global_settings(&app_dirs),
                 PersistRealm::CncProfiles => {
                     self.persist_profile_map_realm(
+                        "cnc_profiles",
                         &app_dirs,
                         &self.machines,
                         |machine| machine.id.clone(),
@@ -231,6 +262,7 @@ impl AppState {
                 }
                 PersistRealm::FixtureProfiles => {
                     self.persist_profile_map_realm(
+                        "fixture_profiles",
                         &app_dirs,
                         &self.fixtures,
                         |fixture| fixture.id.clone(),
@@ -243,6 +275,7 @@ impl AppState {
                         continue;
                     }
                     self.persist_profile_map_realm(
+                        "processing_profiles",
                         &app_dirs,
                         &self.process_profiles,
                         |profile| profile.id.clone(),
@@ -263,7 +296,16 @@ impl AppState {
 
     fn persist_global_settings(&self, app_dirs: &AppDirs) {
         let global_settings = self.make_global_settings_payload();
-        let _ = save_global_settings(&app_dirs, &global_settings);
+        match save_global_settings(&app_dirs, &global_settings) {
+            Ok(()) => log::info!(
+                "Persisted global settings: process={} cnc={} fixture={} toolset={}",
+                self.selected_process_profile_id.clone().unwrap_or_default(),
+                self.selected_machine_id.clone().unwrap_or_default(),
+                self.selected_fixture_id.clone().unwrap_or_default(),
+                self.selected_toolset_id.clone().unwrap_or_default(),
+            ),
+            Err(err) => log::warn!("Failed to persist global settings: {err}"),
+        }
     }
 
     fn make_global_settings_payload(&self) -> Value {
@@ -286,7 +328,10 @@ impl AppState {
 
     fn persist_stock(&self, app_dirs: &AppDirs) {
         let stock = stock_value_from_tools(&self.tools);
-        let _ = save_stock(&app_dirs, &stock);
+        match save_stock(&app_dirs, &stock) {
+            Ok(()) => log::info!("Persisted stock: tool_count={}", self.tools.len()),
+            Err(err) => log::warn!("Failed to persist stock: {err}"),
+        }
     }
 
     fn persist_stock_snapshot(&self) {
@@ -295,11 +340,19 @@ impl AppState {
 
     fn persist_toolset_profiles(&self, app_dirs: &AppDirs) {
         let toolset_profiles = build_toolset_profiles(&self.toolsets);
-        let _ = save_toolset_profiles(&app_dirs, &toolset_profiles);
+        match save_toolset_profiles(&app_dirs, &toolset_profiles) {
+            Ok(()) => log::info!(
+                "Persisted toolset profiles: count={} selected={}",
+                toolset_profiles.len(),
+                self.selected_toolset_id.clone().unwrap_or_default(),
+            ),
+            Err(err) => log::warn!("Failed to persist toolset profiles: {err}"),
+        }
     }
 
     fn persist_profile_map_realm<T>(
         &self,
+        realm_label: &str,
         app_dirs: &AppDirs,
         items: &[T],
         id_of: impl Fn(&T) -> String,
@@ -310,7 +363,22 @@ impl AppState {
             .iter()
             .map(|item| (id_of(item), to_value(item)))
             .collect::<BTreeMap<_, _>>();
-        let _ = save_fn(app_dirs, &values);
+        let ids = values.keys().cloned().collect::<Vec<_>>().join(",");
+        match save_fn(app_dirs, &values) {
+            Ok(()) => log::info!(
+                "Persisted realm={} count={} ids=[{}]",
+                realm_label,
+                values.len(),
+                ids
+            ),
+            Err(err) => log::warn!(
+                "Failed to persist realm={} count={} ids=[{}] err={}",
+                realm_label,
+                values.len(),
+                ids,
+                err
+            ),
+        }
     }
 
     // Runtime event log helper for UI notifications.
@@ -333,8 +401,13 @@ impl AppState {
         }
     }
 
-    // Runtime error helper for domain-tagged diagnostics.
-    fn push_runtime_error(&mut self, domain: &str, message: String, details: Option<String>) {
+    fn push_runtime_error_owned(
+        &mut self,
+        domain: &str,
+        owner_tag: Option<String>,
+        message: String,
+        details: Option<String>,
+    ) {
         let created_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
@@ -342,6 +415,7 @@ impl AppState {
         self.errors.push(AppError {
             id: format!("err-{}", created_ms),
             domain: domain.to_string(),
+            owner_tag,
             is_error: true,
             message: message.clone(),
             details,
@@ -356,6 +430,32 @@ impl AppState {
 
     fn clear_runtime_errors(&mut self, domain: &str) {
         self.errors.retain(|error| error.domain != domain);
+    }
+
+    fn clear_runtime_errors_for_owner(&mut self, domain: &str, owner_tag: &str) {
+        self.errors.retain(|error| {
+            !(error.domain == domain && error.owner_tag.as_deref() == Some(owner_tag))
+        });
+    }
+
+    fn profile_owner_tag(kind: &str, id: &str) -> String {
+        format!("{kind}:{id}")
+    }
+
+    pub fn revalidate_current_job_references_for_owner(&mut self, owner_tag: &str) {
+        self.clear_runtime_errors_for_owner("current-job-ref", owner_tag);
+        for issue in self
+            .current_job_reference_errors()
+            .into_iter()
+            .filter(|issue| issue.owner_tag.as_deref() == Some(owner_tag))
+        {
+            self.push_runtime_error_owned(
+                &issue.domain,
+                issue.owner_tag,
+                issue.message,
+                issue.details,
+            );
+        }
     }
 
     pub fn mark_last_edited_process_profile(&mut self, id: Option<String>) {
@@ -465,22 +565,38 @@ impl AppState {
     pub fn validate_current_job_references(&mut self) {
         self.clear_runtime_errors("current-job-ref");
 
+        for issue in self.current_job_reference_errors() {
+            self.push_runtime_error_owned(
+                &issue.domain,
+                issue.owner_tag,
+                issue.message,
+                issue.details,
+            );
+        }
+    }
+
+    fn current_job_reference_errors(&self) -> Vec<RuntimeIssueDraft> {
+        let mut issues = Vec::new();
+
         let Some(profile) = self.selected_process_profile().cloned() else {
-            return;
+            return issues;
         };
 
+        let process_owner = Some(Self::profile_owner_tag("process", &profile.id));
+
         if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
-            self.push_runtime_error(
-                "current-job-ref",
-                format!(
+            issues.push(RuntimeIssueDraft {
+                domain: "current-job-ref".to_string(),
+                owner_tag: process_owner.clone(),
+                message: format!(
                     "Current job cannot execute: broken CNC reference in machining profile '{}'.",
                     profile.name
                 ),
-                Some(format!(
+                details: Some(format!(
                     "Location: machining profile '{}' -> cnc.default (missing id: {})",
                     profile.name, profile.cnc_profile_id
                 )),
-            );
+            });
         }
 
         if !self
@@ -488,17 +604,18 @@ impl AppState {
             .iter()
             .any(|fixture| fixture.id == profile.fixture_profile_id)
         {
-            self.push_runtime_error(
-                "current-job-ref",
-                format!(
+            issues.push(RuntimeIssueDraft {
+                domain: "current-job-ref".to_string(),
+                owner_tag: process_owner.clone(),
+                message: format!(
                     "Current job cannot execute: broken fixture reference in machining profile '{}'.",
                     profile.name
                 ),
-                Some(format!(
+                details: Some(format!(
                     "Location: machining profile '{}' -> fixture.default (missing id: {})",
                     profile.name, profile.fixture_profile_id
                 )),
-            );
+            });
         }
 
         if !self
@@ -506,43 +623,46 @@ impl AppState {
             .iter()
             .any(|toolset| toolset.id == profile.toolset_profile_id)
         {
-            self.push_runtime_error(
-                "current-job-ref",
-                format!(
+            issues.push(RuntimeIssueDraft {
+                domain: "current-job-ref".to_string(),
+                owner_tag: process_owner.clone(),
+                message: format!(
                     "Current job cannot execute: broken toolset reference in machining profile '{}'.",
                     profile.name
                 ),
-                Some(format!(
+                details: Some(format!(
                     "Location: machining profile '{}' -> toolset.default (missing id: {})",
                     profile.name, profile.toolset_profile_id
                 )),
-            );
+            });
         }
 
         if let Some(router_id) = self.project_config.outline_router_tool_id.clone() {
             if !self.tools.iter().any(|tool| tool.id == router_id) {
-                self.push_runtime_error(
-                    "current-job-ref",
-                    "Current job cannot execute: broken router tool reference.".to_string(),
-                    Some(format!(
+                issues.push(RuntimeIssueDraft {
+                    domain: "current-job-ref".to_string(),
+                    owner_tag: Some("project:current".to_string()),
+                    message: "Current job cannot execute: broken router tool reference.".to_string(),
+                    details: Some(format!(
                         "Location: project.outline_router_tool_id (missing id: {})",
                         router_id
                     )),
-                );
+                });
             }
         }
 
         if let Some(drill_id) = self.project_config.mouse_bite_drill_tool_id.clone() {
             if !self.tools.iter().any(|tool| tool.id == drill_id) {
-                self.push_runtime_error(
-                    "current-job-ref",
-                    "Current job cannot execute: broken mouse-bite drill tool reference."
+                issues.push(RuntimeIssueDraft {
+                    domain: "current-job-ref".to_string(),
+                    owner_tag: Some("project:current".to_string()),
+                    message: "Current job cannot execute: broken mouse-bite drill tool reference."
                         .to_string(),
-                    Some(format!(
+                    details: Some(format!(
                         "Location: project.mouse_bite_drill_tool_id (missing id: {})",
                         drill_id
                     )),
-                );
+                });
             }
         }
 
@@ -552,6 +672,7 @@ impl AppState {
             .find(|toolset| toolset.id == profile.toolset_profile_id)
         {
             let toolset_name = toolset.name.clone();
+            let toolset_owner = Some(Self::profile_owner_tag("toolset", &toolset.id));
             let missing_slots = toolset
                 .slots
                 .iter()
@@ -569,19 +690,22 @@ impl AppState {
                 .collect::<Vec<_>>();
 
             for (slot_index, tool_id) in missing_slots {
-                self.push_runtime_error(
-                    "current-job-ref",
-                    format!(
+                issues.push(RuntimeIssueDraft {
+                    domain: "current-job-ref".to_string(),
+                    owner_tag: toolset_owner.clone(),
+                    message: format!(
                         "Current job cannot execute: broken toolset slot reference in '{}'.",
                         toolset_name
                     ),
-                    Some(format!(
+                    details: Some(format!(
                         "Location: toolset '{}' -> slots.T{} (missing tool id: {})",
                         toolset_name, slot_index, tool_id
                     )),
-                );
+                });
             }
         }
+
+        issues
     }
 
     pub fn is_uuid_referenced(&self, uuid: &str) -> bool {
@@ -732,7 +856,7 @@ impl AppState {
             side: current.side,
             default_operations: current.default_operations,
             cut_depth_strategy: current.cut_depth_strategy,
-            multi_pass_max_depth_mm: current.multi_pass_max_depth_mm,
+            multi_pass_max_depth: current.multi_pass_max_depth,
             operation_setups: current.operation_setups,
             pending_required_fields: current.pending_required_fields,
             usable: current.usable,
@@ -1055,6 +1179,10 @@ impl AppState {
         self.toolsets.push(profile);
         self.select_toolset_profile_by_id(Some(selected));
         self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        if let Some(toolset_id) = self.selected_toolset_id.clone() {
+            let owner_tag = Self::profile_owner_tag("toolset", &toolset_id);
+            self.revalidate_current_job_references_for_owner(&owner_tag);
+        }
     }
 
     pub fn clone_selected_toolset_profile(&mut self) -> Result<String, String> {
@@ -1078,6 +1206,8 @@ impl AppState {
 
         self.select_toolset_profile_by_id(Some(id.clone()));
         self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        let owner_tag = Self::profile_owner_tag("toolset", &id);
+        self.revalidate_current_job_references_for_owner(&owner_tag);
         Ok(id)
     }
 
@@ -1096,6 +1226,8 @@ impl AppState {
             target.pending_required_fields.remove("name");
             target.usable = target.pending_required_fields.is_empty();
             self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+            let owner_tag = Self::profile_owner_tag("toolset", &selected);
+            self.revalidate_current_job_references_for_owner(&owner_tag);
             return Ok(unique);
         }
 
@@ -1110,6 +1242,8 @@ impl AppState {
         if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
             target.description = description.to_string();
             self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+            let owner_tag = Self::profile_owner_tag("toolset", &selected);
+            self.revalidate_current_job_references_for_owner(&owner_tag);
             return Ok(());
         }
 
@@ -1126,6 +1260,8 @@ impl AppState {
             target.pending_required_fields.remove("generation_policy");
             target.usable = target.pending_required_fields.is_empty();
             self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+            let owner_tag = Self::profile_owner_tag("toolset", &selected);
+            self.revalidate_current_job_references_for_owner(&owner_tag);
             return Ok(());
         }
 
@@ -1180,6 +1316,8 @@ impl AppState {
 
         self.rack_slots = profile.slots.clone();
         self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        let owner_tag = Self::profile_owner_tag("toolset", &selected);
+        self.revalidate_current_job_references_for_owner(&owner_tag);
         Ok(())
     }
 
@@ -1209,6 +1347,8 @@ impl AppState {
 
         self.rack_slots = profile.slots.clone();
         self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        let owner_tag = Self::profile_owner_tag("toolset", &selected);
+        self.revalidate_current_job_references_for_owner(&owner_tag);
         Ok(())
     }
 
@@ -1227,6 +1367,8 @@ impl AppState {
         self.toolsets.push(imported);
         self.select_toolset_profile_by_id(Some(selected.clone()));
         self.persist_realms(&[PersistRealm::ToolsetProfiles]);
+        let owner_tag = Self::profile_owner_tag("toolset", &selected);
+        self.revalidate_current_job_references_for_owner(&owner_tag);
         Ok(selected)
     }
 
@@ -1350,7 +1492,7 @@ impl AppState {
             return Err("Selected machining profile was not found".to_string());
         };
 
-        profile.multi_pass_max_depth_mm = depth_mm.max(0.01);
+        profile.multi_pass_max_depth = units::Length::from_mm(depth_mm.max(0.01) as f64);
         self.select_process_profile_by_id(Some(selected_id));
         self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
         self.persist_realms(&[PersistRealm::ProcessingProfiles]);
@@ -1556,10 +1698,9 @@ impl AppState {
     pub fn add_demo_machine(&mut self) {
         let machine = MachineProfile {
             name: format!("Demo CNC profile {}", self.machines.len() + 1),
-            fixture_plate_max_x: 300,
-            fixture_plate_max_y: 200,
-            spindle_min_rpm: 5000,
-            spindle_max_rpm: 24000,
+            max_feed_rate: units::FeedRate::from_mm_per_min(2000.0),
+            spindle_rpm_min: units::RotationalSpeed::from_rpm(5000.0),
+            spindle_rpm_max: units::RotationalSpeed::from_rpm(24000.0),
             atc_slot_count: 8,
             ..MachineProfile::default()
         };
@@ -2248,41 +2389,33 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
     json!({
         "schema_version": 1,
         "id": machine.id,
-        "name": machine.name,
         "machine": {
-            "fixture_plate": {
-                "x": format!("{}mm", machine.fixture_plate_max_x),
-                "y": format!("{}mm", machine.fixture_plate_max_y),
-            },
-            "max_feed_rate": format!("{}mm/min", machine.max_feed_rate_mm_per_min),
-            "spindle_rpm_min": format!("{}rpm", machine.spindle_min_rpm),
-            "spindle_rpm_max": format!("{}rpm", machine.spindle_max_rpm),
+            "max_feed_rate": machine.max_feed_rate.to_string(),
+            "spindle_rpm_min": machine.spindle_rpm_min.to_string(),
+            "spindle_rpm_max": machine.spindle_rpm_max.to_string(),
             "atc_slot_count": machine.atc_slot_count,
-            "origin": {
-                "x0": machine.origin_x0.to_lowercase(),
-                "y0": machine.origin_y0.to_lowercase(),
-            },
             "scaling": {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
             },
             "line_numbering_increment": machine.line_numbering_increment,
         },
-        "templates": {
-            "gcode_header": machine.gcode_header,
-            "gcode_footer": machine.gcode_footer,
-            "drill_first_move": machine.drill_first_move,
-            "drill_cycle_mode_last": machine.drill_cycle_mode_last,
-            "drill_cycle_mode_series": machine.drill_cycle_mode_series,
-            "drill_cycle_start": machine.drill_cycle_start,
-            "drill_next_hole": machine.drill_next_hole,
-            "drill_cycle_cancel": machine.drill_cycle_cancel,
-            "route_plunge_and_offset": machine.route_plunge_and_offset,
-            "route_arc_up": machine.route_arc_up,
-            "route_arc_down": machine.route_arc_down,
-            "route_retract": machine.route_retract,
-            "tool_change_manual_prompt": machine.tool_change_manual_prompt,
-            "tool_change_command": machine.tool_change_command,
+        "primitives": {
+            "use_metric": "{set_precision(3)}G21",
+            "use_imperial": "{set_precision(5)}G20",
+            "initialise": machine.gcode_header,
+            "rapid_move": machine.drill_first_move,
+            "linear_cut": machine.drill_cycle_mode_series,
+            "start_spindle": machine.drill_cycle_start,
+            "stop_spindle": machine.drill_cycle_cancel,
+            "drill": machine.drill_next_hole,
+            "peck_drill": machine.drill_cycle_mode_last,
+            "cut_arc": machine.route_plunge_and_offset,
+            "cut_bezier": machine.route_arc_up,
+            "change_tool": machine.tool_change_command,
+            "conclude": machine.gcode_footer,
+            "pause": machine.route_arc_down,
+            "banner": machine.route_retract,
         }
     })
 }
@@ -2309,17 +2442,24 @@ fn has_path(value: &Value, path: &str) -> bool {
 fn machine_required_paths() -> &'static [&'static str] {
     &[
         "id",
-        "machine.fixture_plate.x",
-        "machine.fixture_plate.y",
         "machine.max_feed_rate",
         "machine.spindle_rpm_min",
         "machine.spindle_rpm_max",
         "machine.atc_slot_count",
-        "machine.origin.x0",
-        "machine.origin.y0",
         "machine.scaling.x",
         "machine.scaling.y",
         "machine.line_numbering_increment",
+        "primitives.initialise",
+        "primitives.rapid_move",
+        "primitives.linear_cut",
+        "primitives.start_spindle",
+        "primitives.stop_spindle",
+        "primitives.drill",
+        "primitives.peck_drill",
+        "primitives.cut_arc",
+        "primitives.cut_bezier",
+        "primitives.change_tool",
+        "primitives.conclude",
     ]
 }
 
@@ -2388,40 +2528,26 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         .map(ToString::to_string)
         .unwrap_or_else(|| "Unnamed CNC profile".to_string());
 
-    let fixture_plate_max_x = value
-        .pointer("/machine/fixture_plate/x")
-        .and_then(value_to_length_mm)
-        .map(|mm| mm.round() as u32)
-        .or_else(|| value.get("fixture_plate_max_x").and_then(Value::as_u64).map(|v| v as u32))
-        .unwrap_or(300);
-
-    let fixture_plate_max_y = value
-        .pointer("/machine/fixture_plate/y")
-        .and_then(value_to_length_mm)
-        .map(|mm| mm.round() as u32)
-        .or_else(|| value.get("fixture_plate_max_y").and_then(Value::as_u64).map(|v| v as u32))
-        .unwrap_or(200);
-
-    let max_feed_rate_mm_per_min = value
+    let max_feed_rate = value
         .pointer("/machine/max_feed_rate")
-        .and_then(value_to_feed_mm_per_min)
-        .map(|rate| rate.round() as u32)
-        .or_else(|| value.get("max_feed_rate_mm_per_min").and_then(Value::as_u64).map(|v| v as u32))
-        .unwrap_or(2000);
+        .and_then(Value::as_str)
+        .and_then(|raw| units::FeedRate::from_string(raw, Some(units::FeedRateUnit::MmPerMin)).ok())
+        .or_else(|| value.get("max_feed_rate_mm_per_min").and_then(Value::as_u64).map(|v| units::FeedRate::from_mm_per_min(v as f64)))
+        .unwrap_or_else(|| units::FeedRate::from_mm_per_min(2000.0));
 
-    let spindle_min_rpm = value
+    let spindle_rpm_min = value
         .pointer("/machine/spindle_rpm_min")
-        .and_then(value_to_rpm)
-        .map(|rpm| rpm.round() as u32)
-        .or_else(|| value.get("spindle_min_rpm").and_then(Value::as_u64).map(|v| v as u32))
-        .unwrap_or(3000);
+        .and_then(Value::as_str)
+        .and_then(|raw| units::RotationalSpeed::from_string(raw, Some(units::RotationalSpeedUnit::Rpm)).ok())
+        .or_else(|| value.get("spindle_min_rpm").and_then(Value::as_u64).map(|v| units::RotationalSpeed::from_rpm(v as f64)))
+        .unwrap_or_else(|| units::RotationalSpeed::from_rpm(3000.0));
 
-    let spindle_max_rpm = value
+    let spindle_rpm_max = value
         .pointer("/machine/spindle_rpm_max")
-        .and_then(value_to_rpm)
-        .map(|rpm| rpm.round() as u32)
-        .or_else(|| value.get("spindle_max_rpm").and_then(Value::as_u64).map(|v| v as u32))
-        .unwrap_or(24000);
+        .and_then(Value::as_str)
+        .and_then(|raw| units::RotationalSpeed::from_string(raw, Some(units::RotationalSpeedUnit::Rpm)).ok())
+        .or_else(|| value.get("spindle_max_rpm").and_then(Value::as_u64).map(|v| units::RotationalSpeed::from_rpm(v as f64)))
+        .unwrap_or_else(|| units::RotationalSpeed::from_rpm(24000.0));
 
     let atc_slot_count = value
         .pointer("/machine/atc_slot_count")
@@ -2429,20 +2555,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         .map(|v| v as u8)
         .or_else(|| value.get("atc_slot_count").and_then(Value::as_u64).map(|v| v as u8))
         .unwrap_or(0);
-
-    let origin_x0 = value
-        .pointer("/machine/origin/x0")
-        .and_then(Value::as_str)
-        .map(capitalize_ascii)
-        .or_else(|| value.get("origin_x0").and_then(Value::as_str).map(ToString::to_string))
-        .unwrap_or_else(|| "Left".to_string());
-
-    let origin_y0 = value
-        .pointer("/machine/origin/y0")
-        .and_then(Value::as_str)
-        .map(capitalize_ascii)
-        .or_else(|| value.get("origin_y0").and_then(Value::as_str).map(ToString::to_string))
-        .unwrap_or_else(|| "Front".to_string());
 
     let scaling_x = value
         .pointer("/machine/scaling/x")
@@ -2462,14 +2574,10 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         id,
         name,
         built_in: false,
-        fixture_plate_max_x,
-        fixture_plate_max_y,
-        max_feed_rate_mm_per_min,
-        spindle_min_rpm,
-        spindle_max_rpm,
+        max_feed_rate,
+        spindle_rpm_min,
+        spindle_rpm_max,
         atc_slot_count,
-        origin_x0,
-        origin_y0,
         scaling_x,
         scaling_y,
         line_numbering_increment: value
@@ -2479,86 +2587,106 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .or_else(|| value.get("line_numbering_increment").and_then(Value::as_u64).map(|v| v as u16))
             .unwrap_or(10),
         gcode_header: value
-            .pointer("/templates/gcode_header")
+            .pointer("/primitives/initialise")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/gcode_header").and_then(Value::as_str))
+            .or_else(|| value.get("header").and_then(Value::as_str))
             .or_else(|| value.get("gcode_header").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         gcode_footer: value
-            .pointer("/templates/gcode_footer")
+            .pointer("/primitives/conclude")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/gcode_footer").and_then(Value::as_str))
+            .or_else(|| value.get("footer").and_then(Value::as_str))
             .or_else(|| value.get("gcode_footer").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_first_move: value
-            .pointer("/templates/drill_first_move")
+            .pointer("/primitives/rapid_move")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_first_move").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/first_move").and_then(Value::as_str))
             .or_else(|| value.get("drill_first_move").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_cycle_mode_last: value
-            .pointer("/templates/drill_cycle_mode_last")
+            .pointer("/primitives/peck_drill")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_cycle_mode_last").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/cycle_mode_last").and_then(Value::as_str))
             .or_else(|| value.get("drill_cycle_mode_last").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_cycle_mode_series: value
-            .pointer("/templates/drill_cycle_mode_series")
+            .pointer("/primitives/linear_cut")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_cycle_mode_series").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/cycle_mode_series").and_then(Value::as_str))
             .or_else(|| value.get("drill_cycle_mode_series").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_cycle_start: value
-            .pointer("/templates/drill_cycle_start")
+            .pointer("/primitives/start_spindle")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_cycle_start").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/cycle_start").and_then(Value::as_str))
             .or_else(|| value.get("drill_cycle_start").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_next_hole: value
-            .pointer("/templates/drill_next_hole")
+            .pointer("/primitives/drill")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_next_hole").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/next_hole").and_then(Value::as_str))
             .or_else(|| value.get("drill_next_hole").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_cycle_cancel: value
-            .pointer("/templates/drill_cycle_cancel")
+            .pointer("/primitives/stop_spindle")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/drill_cycle_cancel").and_then(Value::as_str))
+            .or_else(|| value.pointer("/drill/cycle_cancel").and_then(Value::as_str))
             .or_else(|| value.get("drill_cycle_cancel").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         route_plunge_and_offset: value
-            .pointer("/templates/route_plunge_and_offset")
+            .pointer("/primitives/cut_arc")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/route_plunge_and_offset").and_then(Value::as_str))
+            .or_else(|| value.pointer("/route/plunge_and_offset").and_then(Value::as_str))
             .or_else(|| value.get("route_plunge_and_offset").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         route_arc_up: value
-            .pointer("/templates/route_arc_up")
+            .pointer("/primitives/cut_bezier")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/route_arc_up").and_then(Value::as_str))
+            .or_else(|| value.pointer("/route/arc_up").and_then(Value::as_str))
             .or_else(|| value.get("route_arc_up").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         route_arc_down: value
-            .pointer("/templates/route_arc_down")
+            .pointer("/primitives/pause")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/route_arc_down").and_then(Value::as_str))
+            .or_else(|| value.pointer("/route/arc_down").and_then(Value::as_str))
             .or_else(|| value.get("route_arc_down").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         route_retract: value
-            .pointer("/templates/route_retract")
+            .pointer("/primitives/banner")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/route_retract").and_then(Value::as_str))
+            .or_else(|| value.pointer("/route/retract").and_then(Value::as_str))
             .or_else(|| value.get("route_retract").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
-        tool_change_manual_prompt: value
-            .pointer("/templates/tool_change_manual_prompt")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("tool_change_manual_prompt").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
         tool_change_command: value
-            .pointer("/templates/tool_change_command")
+            .pointer("/primitives/change_tool")
             .and_then(Value::as_str)
+            .or_else(|| value.pointer("/templates/tool_change_command").and_then(Value::as_str))
+            .or_else(|| value.pointer("/tool_change/command").and_then(Value::as_str))
             .or_else(|| value.get("tool_change_command").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
@@ -2663,7 +2791,7 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
             .collect::<Vec<_>>(),
         "routing": {
             "cut_depth_strategy": profile.cut_depth_strategy.as_str(),
-            "multi_pass_max_depth": format!("{}mm", profile.multi_pass_max_depth_mm),
+            "multi_pass_max_depth": profile.multi_pass_max_depth.to_string(),
         },
     });
 
@@ -2721,10 +2849,12 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         "multi_pass" => CutDepthStrategy::MultiPass,
         _ => CutDepthStrategy::Automatic,
     };
-    let multi_pass_max_depth_mm = value
+    let multi_pass_max_depth = value
         .pointer("/routing/multi_pass_max_depth")
-        .and_then(value_to_length_mm)
-        .unwrap_or(1.0) as f32;
+        .and_then(Value::as_str)
+        .and_then(|raw| units::Length::from_string(raw, Some(units::LengthUnit::Mm)).ok())
+        .or_else(|| value.pointer("/routing/multi_pass_max_depth").and_then(value_to_length_mm).map(units::Length::from_mm))
+        .unwrap_or_else(|| units::Length::from_mm(1.0));
 
     let cnc_profile_id = value
         .pointer("/cnc/default")
@@ -2886,7 +3016,7 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         side,
         default_operations,
         cut_depth_strategy,
-        multi_pass_max_depth_mm,
+        multi_pass_max_depth,
         operation_setups,
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
@@ -3177,14 +3307,6 @@ fn build_toolset_profiles(toolsets: &[ToolsetProfile]) -> BTreeMap<String, Value
         .collect()
 }
 
-fn capitalize_ascii(value: &str) -> String {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return String::new();
-    };
-    format!("{}{}", first.to_ascii_uppercase(), chars.as_str())
-}
-
 fn operation_to_key(operation: ProductionOperation) -> &'static str {
     match operation {
         ProductionOperation::DrillLocatingPins => "drill_locating_pins",
@@ -3216,30 +3338,6 @@ fn value_to_length(value: &Value) -> Option<Length> {
 
 fn value_to_length_mm(value: &Value) -> Option<f64> {
     value_to_length(value).map(Length::as_mm)
-}
-
-fn value_to_feed(value: &Value) -> Option<FeedRate> {
-    match value {
-        Value::String(v) => FeedRate::from_string(v, None).ok(),
-        Value::Number(v) => v.as_f64().map(FeedRate::from_mm_per_min),
-        _ => None,
-    }
-}
-
-fn value_to_feed_mm_per_min(value: &Value) -> Option<f64> {
-    value_to_feed(value).map(FeedRate::as_mm_per_min)
-}
-
-fn value_to_rpm_speed(value: &Value) -> Option<RotationalSpeed> {
-    match value {
-        Value::String(v) => RotationalSpeed::from_string(v, None).ok(),
-        Value::Number(v) => v.as_f64().map(RotationalSpeed::from_rpm),
-        _ => None,
-    }
-}
-
-fn value_to_rpm(value: &Value) -> Option<f64> {
-    value_to_rpm_speed(value).map(RotationalSpeed::as_rpm)
 }
 
 fn load_persisted_unit_system() -> UnitSystem {

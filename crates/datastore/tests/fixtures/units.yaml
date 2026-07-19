@@ -1,0 +1,16 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "units.yaml"
+
+$defs:
+  size:
+    type: string
+  feed:
+    type: string
+  rpm:
+    anyOf:
+      - type: number
+      - type: string
+  angle:
+    anyOf:
+      - type: number
+      - type: string

@@ -22,48 +22,55 @@ K2G is a portable desktop application and KiCad plugin that generates CNC GCode 
 
 Primary navigation areas:
 
-- Project
-----------------
-- Processing profiles
-- CNC profiles
-- Fixture profiles
-- Toolset profiles
-- Stock management
-- Catalog (opened as overlay from Stock)
 
-The project is the machining workspace for a selected board.
-Within a project, the user can switch between:
+A job describes the machining operations, applyied to the currently fetched board data from KiCad - or reloaded from file.
+
+The Job has many views:
 
 - Board View
+  View of the board data as loaded from KiCad
 - Program View
-- Split View
+  View of the generated GCode
 - Tooling plan
-
-The product should support rapid switching between:
-
-- Board visualization mode
-- Program text mode
+  Review to stock tools used for the machining and which tools do what
+  Creates machinists notes about the job
 
 ## 4. Global Layout Direction
 
-The UI should follow a slicer-style workstation layout (PrusaSlicer/Bambu-like structure, not branding):
+The UI has 4 navifation area.
 
-- Top bar: board/project context, active profile summary, defaults cog, global status
+1 - Top bar
+  - board/project context, active profile summary, defaults cog, global status
   - Includes a persistent unit system quick-toggle (mm/in/mil)
   - Allow toggling theme (dark/light)
   - PCB Name or Project Name
-  - Process Profile
-  - CNC Profile
-  - Fixture Profile
-  - Toolset Profile
-
-- Main body:
+  - Machining Profile/CNC Profile/Fixture Profile/Toolset Profile
+2 - Status bar
+  - Reports connectivity status, version etc.
+  - generation status
+  - action feedback
+3 - Left navigation
+  Primary navigation - allow to user to switch the active area
+  The choices are:
+   - Job
+   ----------------
+   - Machining profiles
+   - CNC profiles
+   - Fixture profiles
+   - Toolset profiles
+   - Stock management
+   - Catalogs
+   ----------------
+   - Log
+   ----------------
+   - About
+4 - Active area
+  Depends on the context.
+  For profiles, a single context is selected.
   - Left: primary navigation and section navigation for the active area
   - Center: board/machining viewport or program editor
   - Right: context settings, diagnostics, and editable parameters
 - Utility area (bottom or side):
-  - generation status
-  - action feedback
 
 When the user opens K2G from KiCad, the default landing area is the project view.
 Note: The project view starts with selecting the Process profile. If no profile exist, an Error is diplayed, prompting the user to create a process profile.
@@ -376,7 +383,7 @@ Compatibility and fallback requirements:
 - `primitives.cut_bezier` may resolve to a native bezier command or an arc-approximation sequence; fallback behavior must be deterministic.
 - Primitive templates may reference custom attributes and active project properties through the RHAI scope.
 
-### 6.7 Processing Profile Management
+### 6.7 Machining Profile Management
 
 Project profiles define machining defaults and constraints for a family of machining operations on given machining hardware.
 Each process profile predefines all relevant machining defaults and constraints, including CNC profile selection and constraints for fixture and toolset selection

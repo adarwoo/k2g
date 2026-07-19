@@ -1,5 +1,5 @@
-use crate::board::BoardSnapshot;
-use crate::units::UserUnitSystem;
+use pcb::BoardSnapshot;
+use units::UserUnitSystem;
 
 /// Boot payload received when launching the UI layer.
 #[derive(Clone, PartialEq)]

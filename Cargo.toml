@@ -7,11 +7,15 @@ description = "GCode generator"
 [workspace]
 members = [
     ".",
+    "crates/datastore",
+    "crates/pcb",
+    "crates/units",
     "xtask",
 ]
 
 [dependencies]
-kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
+units = { path = "crates/units" }
+pcb = { path = "crates/pcb" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 dioxus = { version = "0.7", features = ["desktop"] }
@@ -25,8 +29,11 @@ log = "0.4"
 image = "0.24"
 base64 = "0.22"
 rfd = "0.15"
-clipper2-rust = "1.0"
 uuid = { version = "1", features = ["v5", "v7"] }
+dioxus-logger = "0.7.9"
+tracing = "0.1.44"
+tracing-subscriber = { version="0.3.23", features = ["env-filter"] }
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,33 +1,39 @@
-mod board;
 mod cli;
 mod config;
 mod app_state_impl;
 mod ctx;
 mod domain;
-mod kicad_wrapper;
-mod stitching;
+mod expression_parser;
 mod ui;
-mod units;
 mod user_path;
 
 use cli::CliArgs;
-use kicad_wrapper::KiCadClientBlocking;
-use stitching::stitch_edge_shapes;
+use pcb::{stitch_edge_shapes, KiCad};
 use ui::UiLaunchData;
+use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() {
     let cli_args: Vec<String> = std::env::args().collect();
-
     let args = CliArgs::parse_args();
-
     let vars = collect_env_vars();
 
-    let (kicad_status, board_snapshot) = match KiCadClientBlocking::connect() {
-        Ok(client) => match client.get_version() {
-            Ok(v) => {
-                let status = format!("Connected - KiCad {}", v.full_version);
-                let snapshot = match board::collect_board_snapshot(&client) {
-                    Ok(s) => {
+    fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    dioxus_logger::initialize_default();
+
+    log::info!("Starting k2g with args: {:?}", cli_args);
+
+    let (kicad_status, board_snapshot) = match KiCad::connect() {
+        Ok(client) => match client.version() {
+            Ok(full_version) => {
+                let status = format!("Connected - KiCad {}", full_version);
+                let snapshot = match client.collect_first_snapshot() {
+                    Ok(Some(s)) => {
                         let stitch_result = stitch_edge_shapes(&s.edge_shapes);
                         if stitch_result.errors.is_empty() {
                             println!(
@@ -46,6 +52,7 @@ fn main() {
                         }
                         Some(s)
                     }
+                    Ok(None) => None,
                     Err(err) => {
                         eprintln!("warning: could not collect board snapshot: {err}");
                         None

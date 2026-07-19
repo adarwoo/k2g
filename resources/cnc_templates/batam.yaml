@@ -1,0 +1,72 @@
+# The Bantam Tools machines are popular and specifically designed for PCB prototyping.
+# They use a TinyG motion controller and have some specific G-code requirements and limitations
+
+# Important Notes for Bantam Tools:
+# The controller (TinyG) does not support canned cycles like G81 and G83.
+# For this profile to work, the application generating the G-code would need
+#  to expand these cycles into individual G0/G1 moves or the user would need to handle this limitation.
+# The machine defaults to the G55 coordinate system, which is a key difference from many other machines that use G54 .
+
+name: "Bantam Tools Desktop PCB Milling Machine"
+
+machine:
+  max_feed_rate: "1000mm/min"  # Conservative for PCB milling in FR-1
+  spindle_rpm_min: "10000rpm"
+  spindle_rpm_max: "28000rpm"
+  atc_slot_count: 0  # Manual tool change required
+  scaling:
+    x: 1.0
+    y: 1.0
+  line_numbering_increment: 10
+
+primitives:
+  use_metric: |
+    {set_precision(3)}G21
+  use_imperial: |
+    {set_precision(5)}G20
+  initialise: |
+    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    G17 G90 G21 G40 G49 G80 G94
+    G55  # Bantam Tools uses G55 as its default work coordinate system [citation:8]
+    G0 Z{z_safe}
+  rapid_move: "G0 X{x} Y{y} Z{z}"
+  linear_cut: "G1 X{x} Y{y} Z{z} S{s}"
+  start_spindle: |
+    S{rpm}
+    M3
+  stop_spindle: "M5"
+  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"  # Note: G81 is not supported by TinyG [citation:4]
+
+  # Bantam/TinyG doesn't support G83, so expand to pecking sequence
+  peck_drill: |
+    {let out = "";
+     let current_z = unit(z_retract);
+     let target_z = unit(z_bottom);
+     let peck_depth = unit(peck);
+
+     out += "G0 X" + unit(x).to_string() + " Y" + unit(y).to_string() + "\n";
+     out += "G0 Z" + current_z.to_string() + "\n";
+
+     while current_z > target_z {
+       let next_z = (current_z - peck_depth).max(target_z);
+       out += "G1 Z" + next_z.to_string() + " F" + unit(z_feedrate).to_string() + "\n";
+       out += "G0 Z" + unit(z_retract).to_string() + "\n";
+       current_z = next_z;
+     }
+     out}
+
+  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"  # TinyG uses IJK for arcs [citation:4]
+  cut_bezier: |
+    ; cut_bezier fallback
+  change_tool: |
+    M5
+    {manual_message}
+    T{slot} M6
+    S{rpm}
+  conclude: |
+    (end of file)
+    G0 X0 Y0 Z{z_safe}  # Return to a safe position
+  pause: |
+    MSG {message}
+    M1
+  banner: "( {text} )"

@@ -234,7 +234,7 @@ pub fn MachineProfilesPanel(
                                 div {
                                     div { class: "profile-list-title", "{machine.name}" }
                                     div { class: "profile-list-meta",
-                                        "Fixture {machine.fixture_plate_max_x} x {machine.fixture_plate_max_y} mm · ATC {machine.atc_slot_count}"
+                                        "Max feed {machine.max_feed_rate} · ATC {machine.atc_slot_count}"
                                     }
                                 }
                                 button {

@@ -1,5 +1,5 @@
 use super::model::UnitSystem;
-use crate::units::{
+use units::{
     Angle, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, ScalarValue,
     UnitParseError,
 };
@@ -325,11 +325,11 @@ pub fn parse_feed_with_preference(
 }
 
 pub fn parse_angle(value: &str) -> Result<Angle, UnitParseError> {
-    Angle::from_string(value, Some(crate::units::AngleUnit::Degree))
+    Angle::from_string(value, Some(units::AngleUnit::Degree))
 }
 
 pub fn parse_rotational_speed(value: &str) -> Result<RotationalSpeed, UnitParseError> {
-    RotationalSpeed::from_string(value, Some(crate::units::RotationalSpeedUnit::Rpm))
+    RotationalSpeed::from_string(value, Some(units::RotationalSpeedUnit::Rpm))
 }
 
 pub fn parse_percentage(value: &str) -> Result<f64, UnitParseError> {

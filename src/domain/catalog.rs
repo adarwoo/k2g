@@ -10,7 +10,7 @@ use crate::config::normalize_catalog_fields;
 use crate::config::yaml_service::load_yaml_dir_with_schema_pointer;
 use crate::config::SchemaValidator;
 use crate::domain::tool_core::{ToolCore, ToolKind};
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+use units::{Angle, FeedRate, Length, RotationalSpeed};
 use crate::user_path::{ensure_app_dirs, UserPathError};
 
 const CATALOGS: &[(&str, &str)] = &[
@@ -157,7 +157,7 @@ pub struct CatalogManager {
 impl CatalogManager {
     pub fn new() -> Result<Self, CatalogError> {
         let schema = compile_schema(CATALOG_SCHEMA)?;
-        let validator = SchemaValidator::new(&schema)
+        let validator = SchemaValidator::new(&schema, Path::new("resources/schemas"))
             .map_err(|e| CatalogError::SchemaCompile(e.to_string()))?;
         Ok(Self {
             validator,

@@ -59,29 +59,6 @@ Manages the configured tool catalog and provide function to select the correct t
 
 The K2G project integrates multiple Rust crates, internal modules, and frontend frameworks. Three complementary D2 diagrams provide different views of the dependency structure:
 
-### Dependency Diagrams
-
-1. **[package-dependencies.d2](package-dependencies.d2)** — Comprehensive dependency graph
-   - External crates (Tokio, Serde, Dioxus, etc.)
-   - Internal Rust crates (k2g, kicad-ipc-rs)
-   - K2G internal modules (CLI, Board, Catalog, Config, Stitching, UI, etc.)
-   - Frontend applications (Dioxus Desktop, Next.js Web)
-   - Specific module-to-crate relationships
-
-2. **[package-architecture-high-level.d2](package-architecture-high-level.d2)** — Logical grouping of dependencies
-   - Async Runtime (Tokio)
-   - Serialization & Schema (Serde, JSON Schema, Protobuf)
-   - Validation & Error Handling
-   - UI Frameworks (Dioxus, Next.js)
-   - Scripting & Processing (Rhai, Clipper2)
-   - Tools & Utilities (Clap, Log, RFD, NNG)
-
-3. **[module-dependencies.d2](module-dependencies.d2)** — Internal K2G module relationships
-   - Main entry point orchestration
-   - Inter-module communication flow
-   - External crate usage per module
-   - Module ownership and lifecycle
-
 ### Key Dependencies Summary
 
 **External Crates:**
@@ -104,8 +81,12 @@ The K2G project integrates multiple Rust crates, internal modules, and frontend 
 # Operations
 
 ## Application initialisation
- * Load all configuration items
+ * Load all persisted files, parse the files, resolve the files internal dependencies
+   Note: The catalog is only loaded on demand
  * Load PCB data if possible and create a board object
+ * Apply the stiching algorithm to the board
+ * Chech for an existing machining profile
+ * Generate the GCode
 
 ### Configuration parsing
 When the application starts it first parses all configuration files.
@@ -114,6 +95,7 @@ When the application starts it first parses all configuration files.
 - If the errored file is internal (bundled), a diagnostic is displayed and the application terminates after the user acknowledges.
 - External errored files are renamed by appending `.error` to the filename. If a `.error` file already exists it is deleted first.
 - If the rename or delete fails, a transient error is added to the log.
+- All errors are reported in the error log - which the user can view
 
 ### Loading the board
 All items of interests are loaded into memory:
@@ -148,6 +130,68 @@ When done, they re-integrate with the generation object using the ID.
 If the ID is in the past, the outcome is discarted.
 When the generation completes, the UI is updated.
 When an new generation starts, the UI is updated. Generated items are grayed to indicate a refresh is in progress.
+
+### Generation start model: gated edge-triggered execution
+
+Generation is not continuous polling.
+Generation starts only when both conditions are true:
+
+1. Stars aligned (readiness gate is true)
+2. A new triggering factor (transient event edge) is observed
+
+StartGeneration = ReadinessGate AND TriggerEdge
+
+A generation cycle may be superseded by a newer trigger edge.
+If superseded, in-flight work is canceled when possible or allowed to complete and then discarded by generation ID comparison.
+
+### Stars aligned (go/no-go gate)
+
+All items below must be true before generation may start:
+
+1. PCB data loaded successfully.
+2. No open contours in stitched edge data.
+3. No floating island in stitched contour hierarchy.
+4. Job has a selected machining profile.
+5. All required configuration attributes are set and valid.
+6. No blocking runtime errors remain in context diagnostics.
+
+Go decision:
+- Gate is true and a trigger edge exists.
+
+No-go decision:
+- Gate is false regardless of trigger edges.
+- System records readiness diagnostics and waits for the next trigger edge after gate becomes true.
+
+### Triggering factors (transient edges)
+
+A trigger edge is emitted for events that can change generation output:
+
+1. PCB loaded or PCB reloaded.
+2. Active machining profile selection changed.
+3. Job configuration changed (including board orientation angle).
+4. Change to a profile, toolset, machine, fixture, or tool ultimately referenced by the active job.
+5. Any stock mutation (add, remove, or change tool configuration).
+
+Notes:
+- Triggering factors are events, not state.
+- Repeated identical state without a new event does not restart generation.
+
+### Mutation ordering rule (trigger emitted last)
+
+For any user or system mutation that may impact generation, ordering must be:
+
+1. Apply mutation to context state.
+2. Recompute derived state and dependency links.
+3. Run validation/readiness evaluation and refresh diagnostics.
+4. Emit trigger edge as the final step of the transaction.
+
+This guarantees generation sees fully committed state and avoids races where generation starts before the change is fully registered.
+
+### Current implementation phase
+
+Current implementation starts trigger orchestration and readiness evaluation in context.
+When stars are aligned and a trigger edge is detected, the system reports generation start using runtime events.
+Actual GCode generation execution is deferred to a subsequent phase.
 
 ### Program algorithm structure
 

@@ -429,8 +429,8 @@ pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> 
                                                             |s| {
                                                                 s
                                                                     .set_selected_process_profile_cut_depth_strategy(
-                                                                        CutDepthStrategy::Automatic,
-                                                                    )
+                                                                    CutDepthStrategy::Automatic,
+                                                                )
                                                             },
                                                         );
                                                         if let Err(message) = result {
@@ -454,8 +454,8 @@ pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> 
                                                             |s| {
                                                                 s
                                                                     .set_selected_process_profile_cut_depth_strategy(
-                                                                        CutDepthStrategy::SinglePass,
-                                                                    )
+                                                                    CutDepthStrategy::SinglePass,
+                                                                )
                                                             },
                                                         );
                                                         if let Err(message) = result {
@@ -479,8 +479,8 @@ pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> 
                                                             |s| {
                                                                 s
                                                                     .set_selected_process_profile_cut_depth_strategy(
-                                                                        CutDepthStrategy::MultiPass,
-                                                                    )
+                                                                    CutDepthStrategy::MultiPass,
+                                                                )
                                                             },
                                                         );
                                                         if let Err(message) = result {
@@ -501,7 +501,7 @@ pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> 
                                             r#type: "number",
                                             step: "0.01",
                                             min: "0.01",
-                                            value: "{profile.multi_pass_max_depth_mm}",
+                                            value: "{profile.multi_pass_max_depth.as_mm()}",
                                             oninput: move |evt| {
                                                 let value = evt.value().parse::<f32>().unwrap_or(1.0);
                                                 let result = super::mutate_ctx(

@@ -11,6 +11,30 @@ use log::{error, info, warn};
 use serde_json::Value;
 use uuid::Uuid;
 
+fn migrate_legacy_stock_overrides(value: &mut Value) -> bool {
+    let Some(items) = value.get_mut("tools").and_then(Value::as_array_mut) else {
+        return false;
+    };
+
+    let mut changed = false;
+    for item in items {
+        let Some(overrides) = item.get_mut("overrides").and_then(Value::as_object_mut) else {
+            continue;
+        };
+
+        let remove_name = overrides
+            .get("name")
+            .map(|name| name.is_null() || name.as_str().map(|s| s.trim().is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+
+        if remove_name {
+            overrides.remove("name");
+            changed = true;
+        }
+    }
+
+    changed
+}
 use super::{
     defaults::{populate_defaults, synchronize},
     error::ConfigError,
@@ -446,7 +470,7 @@ impl YamlConfigManager {
 
         // --- Load & compile schema ---
         let schema = Self::load_schema(&schema_path)?;
-        let validator = SchemaValidator::new(&schema)?;
+        let validator = SchemaValidator::new(&schema, schema_dir)?;
 
         let mut manager = Self {
             section_name: section_name.to_string(),
@@ -528,11 +552,11 @@ impl YamlConfigManager {
                         let mut migrated_stock = false;
                         if self.section_name == "stock" {
                             let mut migrated = parsed.clone();
-                            if migrate_legacy_stock_ids(&mut migrated)
-                                && self.validator.validate(&migrated).is_ok()
-                            {
+                            let migrated_any = migrate_legacy_stock_ids(&mut migrated)
+                                || migrate_legacy_stock_overrides(&mut migrated);
+                            if migrated_any && self.validator.validate(&migrated).is_ok() {
                                 warn!(
-                                    "Migrated legacy stock IDs in '{}' to UUIDv7.",
+                                    "Migrated legacy stock format in '{}' to current schema.",
                                     self.config_path.display()
                                 );
                                 self.content = migrated;

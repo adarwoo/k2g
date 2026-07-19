@@ -3,10 +3,8 @@ use dioxus::prelude::*;
 use super::boot_data;
 use super::model::*;
 use super::theme::APP_STYLE;
-use crate::board::collect_board_snapshot_for_board;
 use crate::app_state_impl::{ctx_snapshot, with_ctx_mut};
-use crate::kicad_wrapper::KiCadClientBlocking;
-use kicad_ipc_rs::DocumentType;
+use pcb::KiCad;
 
 mod cnc;
 mod catalog;
@@ -48,17 +46,11 @@ pub fn AppRoot() -> Element {
     use_effect(move || {
         if !*startup_board_sync_done.read() {
             startup_board_sync_done.set(true);
-            match KiCadClientBlocking::connect() {
+            match KiCad::connect() {
                 Ok(client) => {
-                    if let Ok(docs) = client.get_open_documents(DocumentType::Pcb) {
-                        let mut boards: Vec<String> = docs
-                            .into_iter()
-                            .filter_map(|doc| doc.board_filename)
-                            .collect();
-                        boards.sort();
-                        boards.dedup();
-                        if !boards.is_empty() {
-                            if let Ok(board_snapshot) = collect_board_snapshot_for_board(&client, Some(&boards[0])) {
+                    if let Ok(pcbs) = client.enumerate_pcbs() {
+                        if let Some(pcb) = pcbs.first() {
+                            if let Ok(board_snapshot) = client.collect_snapshot(pcb) {
                                 mutate_ctx(state, |s| s.board = Some(board_snapshot));
                             }
                         }

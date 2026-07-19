@@ -1,0 +1,48 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "toolset.yaml"
+x-schema-version: 2
+
+title: Toolset
+description: A per-file dataset (root has an identity) used for factory/version tests.
+type: object
+required: [id, name]
+additionalProperties: false
+
+properties:
+  schema_version:
+    type: integer
+    const: 2
+    description: Data format version.
+
+  id:
+    description: Toolset identity.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  name:
+    type: string
+    description: Toolset name (required, no default — a new set is incomplete until named).
+
+  gadget_ref:
+    description: An external gadget this set references.
+    x-ref: "gadget.yaml"
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  items:
+    type: array
+    default: []
+    description: Tools in this set.
+    items:
+      type: object
+      required: [id, label]
+      additionalProperties: false
+      properties:
+        id:
+          description: Tool identity.
+          $ref: "id.yaml#/$defs/uuid_v7"
+        label:
+          type: string
+          description: Tool label.
+        width:
+          description: Nominal width, defaulted.
+          default: "1mm"
+          $ref: "units.yaml#/$defs/size"

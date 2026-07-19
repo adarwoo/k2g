@@ -262,7 +262,6 @@ properties:
         - base
         - availability
         - preference
-        - rack
       additionalProperties: false
 
 required:

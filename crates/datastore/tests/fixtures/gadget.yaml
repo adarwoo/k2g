@@ -1,0 +1,22 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "gadget.yaml"
+
+title: Gadget Catalog
+description: A collection of gadgets that widgets may reference.
+type: object
+required: [gadgets]
+
+properties:
+  gadgets:
+    type: array
+    description: The gadgets available to reference.
+    items:
+      type: object
+      required: [id, name]
+      properties:
+        id:
+          description: Stable gadget identity.
+          $ref: "id.yaml#/$defs/uuid_v7"
+        name:
+          type: string
+          description: Human-readable gadget name.

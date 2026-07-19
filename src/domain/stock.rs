@@ -1,4 +1,4 @@
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+use units::{Angle, FeedRate, Length, RotationalSpeed};
 use serde_json::{json, Value};
 
 use super::tool_core::ToolKind;
@@ -97,6 +97,11 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
         .iter()
         .enumerate()
         .map(|(index, tool)| {
+            let mut overrides = serde_json::Map::new();
+            if !tool.name.trim().is_empty() {
+                overrides.insert("name".to_string(), Value::String(tool.name.clone()));
+            }
+
             json!({
                 "id": tool.id,
                 "summary": tool.display_name(),
@@ -120,9 +125,7 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                     "z_feed": tool.feed_rate,
                     "table_feed": tool.feed_rate,
                 },
-                "overrides": {
-                    "name": if tool.name.trim().is_empty() { Value::Null } else { Value::String(tool.name.clone()) },
-                }
+                "overrides": Value::Object(overrides)
             })
         })
         .collect::<Vec<_>>();

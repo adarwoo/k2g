@@ -1,4 +1,4 @@
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed};
+use units::{Angle, FeedRate, Length, RotationalSpeed};
 
 // Compatibility facade while domain ownership is moved out of UI.
 pub use crate::domain::stock::{Tool, ToolPreference, ToolStatus};

@@ -4,52 +4,48 @@
 
 name: "Masso G3 - With ATC"
 
+name: "MASSO G3 Controller"
+
 machine:
-  fixture_plate:
-    x: "300mm"
-    y: "200mm"
-  max_feed_rate: "2000mm/min"
-  spindle_rpm_min: "3000rpm"
+  max_feed_rate: "2500mm/min"
+  spindle_rpm_min: "5000rpm"
   spindle_rpm_max: "24000rpm"
-  atc_slot_count: 8
-  origin:
-    x0: Left
-    y0: Front
+  atc_slot_count: 0
   scaling:
-    x: 100.0
-    y: 100.0
+    x: 1.0
+    y: 1.0
   line_numbering_increment: 10
-  program_units:
-    length: "mm"
-    feedrate: "mm/min"
 
 primitives:
+  use_metric: |
+    {set_precision(3)}G21
+  use_imperial: |
+    {set_precision(5)}G20
   initialise: |
     (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    (Reset all back to safe defaults)
     G17 G54 G40 G49 G80 G90
-    G21
-    G10 P0
-    (Establish the Z-Safe)
+    {use_metric}
     G0 Z{z_safe}
-  move_slow: "G0 X{x} Y{y}"
+  rapid_move: "G0 X{x} Y{y} Z{z}"
+  linear_cut: "G1 X{x} Y{y} Z{z} S{s}"
   start_spindle: |
     S{rpm}
-    M03
-  stop_spindle: "M05"
+    M3
+  stop_spindle: "M5"
   drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
   peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
   cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
     ; cut_bezier fallback
-    ; implementation may expand into one or more arc segments
   change_tool: |
     M05
     T{slot} M06
     S{rpm}
   conclude: |
     (end of file)
+    G0 Z{z_safe}
+    G0 X0 Y0
   pause: |
     MSG {message}
-    M01
+    M1
   banner: "( {text} )"

@@ -1,4 +1,4 @@
-use crate::units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
+use units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
 
 /// Canonical tool kinds shared across catalog and stock conversion flows.
 #[derive(Clone, Copy, PartialEq, Eq)]

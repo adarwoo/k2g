@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
-use crate::units::{FeedRate, Length, RotationalSpeed};
+use crate::ctx::{ctx_snapshot, with_ctx_mut};
+use units::{FeedRate, Length, RotationalSpeed};
 use crate::ui::unit_service;
 
 use super::super::model::*;
@@ -505,10 +506,12 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                         .cloned()
                                         .collect();
                                     let mut added = 0usize;
-                                    state
-                                        .with_mut(|s| {
+                                    super::mutate_ctx(
+                                        state,
+                                        |s| {
                                             added = s.add_tools_from_catalog_selection(&selected);
-                                        });
+                                        },
+                                    );
                                     stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
                                     show_catalog_picker.set(false);
@@ -558,10 +561,12 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                         .collect();
                                     let active_detail_tool_id = detail_tool_id.read().clone();
                                     let mut removed = 0usize;
-                                    state
-                                        .with_mut(|s| {
+                                    super::mutate_ctx(
+                                        state,
+                                        |s| {
                                             removed = s.remove_tools(&selected);
-                                        });
+                                        },
+                                    );
                                     if active_detail_tool_id
                                         .as_ref()
                                         .map(|tool_id| selected.iter().any(|selected_id| selected_id == tool_id))
@@ -616,17 +621,18 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                         let tool_id = tool.id.clone();
                                         move |_| {
                                             let mut cloned_tool = None::<Tool>;
-                                            state
-                                                .with_mut(|s| {
+                                            super::mutate_ctx(
+                                                state,
+                                                |s| {
                                                     if let Some(new_id) = s.clone_tool(&tool_id) {
                                                         cloned_tool = s
-
                                                             .tools
                                                             .iter()
                                                             .find(|entry| entry.id == new_id)
                                                             .cloned();
                                                     }
-                                                });
+                                                },
+                                            );
                                             if let Some(clone) = cloned_tool {
                                                 load_tool_editor(
                                                     &clone,
@@ -1966,11 +1972,15 @@ fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> St
     unit_service::format_length_display(tool.diameter, unit_system)
 }
 
-fn persist_stock_realm_now(state: Signal<crate::app_state_impl::AppCtx>) {
-    // Persist from the UI signal snapshot because stock edits are applied there first.
-    // Using global ctx here can miss recent in-screen edits before they are synced.
-    let snapshot = state.read().clone();
-    snapshot.persist_realms(&[PersistRealm::Stock]);
+fn persist_stock_realm_now(mut state: Signal<crate::app_state_impl::AppCtx>) {
+    // Stock edits are applied to the local UI signal first. Sync local -> global
+    // before persisting so navigation cannot revert to stale global state.
+    let local_snapshot = state.read().clone();
+    with_ctx_mut(|ctx| *ctx = local_snapshot);
+
+    let synced_snapshot = ctx_snapshot();
+    synced_snapshot.persist_realms(&[PersistRealm::Stock]);
+    state.set(synced_snapshot);
 }
 
 fn stock_fingerprint(tools: &[Tool]) -> String {

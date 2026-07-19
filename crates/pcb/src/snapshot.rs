@@ -1,11 +1,26 @@
+//! The **PCB record**: the subset of a board's geometry that k2g actually needs.
+//!
+//! A [`BoardSnapshot`] is collected once from an open KiCad PCB and then handed
+//! to the UI (to draw the board) and to the GCode generator (to iterate holes
+//! and boundaries). It intentionally keeps only items of interest — edge cuts,
+//! drilled holes (vias and plated/non-plated pads), the bounding box, and the
+//! board thickness — rather than the full KiCad object graph.
+//!
+//! All coordinates are decoded into typed [`Length`]s (KiCad IPC reports
+//! nanometres) so downstream code never juggles raw `i64` nm.
+
 use kicad_ipc_rs::{
-    BoardStackupLayerType, PcbGraphicShapeGeometry, PcbItem, PcbPadStack,
-    PcbPadType, Vector2Nm,
+    BoardStackupLayerType, DocumentType, KiCadClientBlocking, PcbGraphicShapeGeometry, PcbItem,
+    PcbPadStack, PcbPadType, Vector2Nm,
 };
-use crate::kicad_wrapper::KiCadClientBlocking;
 
-use crate::units::Length;
+use units::Length;
 
+/// The raw KiCad blocking client. Kept crate-private: callers go through
+/// [`crate::KiCad`], which owns instance discovery and routing.
+pub(crate) type Client = KiCadClientBlocking;
+
+/// Everything k2g keeps about one PCB, collected from a KiCad document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardSnapshot {
     pub thickness: Option<Length>,
@@ -95,10 +110,16 @@ pub struct BoardHole {
     pub plated: Option<bool>,
 }
 
-pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnapshot, String> {
-    let has_board = client
-        .has_open_board()
-        .map_err(|e| format!("failed to query open board state: {e}"))?;
+/// Collect a [`BoardSnapshot`] from one KiCad instance client.
+///
+/// The client must already be pointed at the intended instance (see
+/// [`crate::KiCad::collect_snapshot`]). Returns an empty snapshot when the
+/// instance has no open board rather than erroring.
+pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
+    let has_board = !client
+        .get_open_documents(DocumentType::Pcb)
+        .map_err(|e| format!("failed to query open board state: {e}"))?
+        .is_empty();
     if !has_board {
         return Ok(BoardSnapshot {
             thickness: None,
@@ -169,10 +190,9 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
         if let PcbItem::Track(track) = item {
             let layer_name = track.layer.name.as_str();
 
-            if ! layers_id.contains(&layer_name.to_string()) {
+            if !layers_id.contains(&layer_name.to_string()) {
                 layers_id.push(layer_name.to_string());
             }
-
 
             if track.layer.name == "BL_Edge_Cuts" {
                 if let (Some(start), Some(end)) = (track.start_nm, track.end_nm) {
@@ -298,24 +318,18 @@ pub fn collect_board_snapshot(client: &KiCadClientBlocking) -> Result<BoardSnaps
     })
 }
 
-pub fn collect_board_snapshot_for_board(
-    client: &KiCadClientBlocking,
-    board_filename: Option<&str>,
-) -> Result<BoardSnapshot, String> {
-    let preferred = board_filename.map(str::to_string);
-    client
-        .set_preferred_board_filename(preferred)
-        .map_err(|e| format!("failed to select board context: {e}"))?;
-    collect_board_snapshot(client)
-}
-
-fn collect_board_thickness_from_stackup(client: &KiCadClientBlocking) -> Option<Length> {
+fn collect_board_thickness_from_stackup(client: &Client) -> Option<Length> {
     let stackup = client.get_board_stackup().ok()?;
 
     let sum_nm: i64 = stackup
         .layers
         .iter()
-        .filter(|layer| matches!(layer.layer_type, BoardStackupLayerType::Copper | BoardStackupLayerType::Dielectric))
+        .filter(|layer| {
+            matches!(
+                layer.layer_type,
+                BoardStackupLayerType::Copper | BoardStackupLayerType::Dielectric
+            )
+        })
         .filter_map(|layer| layer.thickness_nm)
         .filter(|thickness_nm| *thickness_nm > 0)
         .sum();
@@ -327,7 +341,7 @@ fn collect_board_thickness_from_stackup(client: &KiCadClientBlocking) -> Option<
     None
 }
 
-fn safe_get_items_by_type_codes(client: &KiCadClientBlocking, type_codes: Vec<i32>) -> Vec<PcbItem> {
+fn safe_get_items_by_type_codes(client: &Client, type_codes: Vec<i32>) -> Vec<PcbItem> {
     client
         .get_items_by_type_codes(type_codes)
         .unwrap_or_else(|_| Vec::new())
@@ -355,11 +369,13 @@ fn edge_shape_from_graphic(
 ) -> Option<BoardEdgeShape> {
     let geometry = geometry.as_ref()?;
     match geometry {
-        PcbGraphicShapeGeometry::Segment { start_nm, end_nm } => Some(BoardEdgeShape::GraphicSegment {
-            id: id.clone(),
-            start: point_from_nm(start_nm.to_owned()?),
-            end: point_from_nm(end_nm.to_owned()?),
-        }),
+        PcbGraphicShapeGeometry::Segment { start_nm, end_nm } => {
+            Some(BoardEdgeShape::GraphicSegment {
+                id: id.clone(),
+                start: point_from_nm(start_nm.to_owned()?),
+                end: point_from_nm(end_nm.to_owned()?),
+            })
+        }
         PcbGraphicShapeGeometry::Rectangle {
             top_left_nm,
             bottom_right_nm,
@@ -400,9 +416,11 @@ fn edge_shape_from_graphic(
             control2: point_from_nm(control2_nm.to_owned()?),
             end: point_from_nm(end_nm.to_owned()?),
         }),
-        PcbGraphicShapeGeometry::Polygon { polygon_count } => Some(BoardEdgeShape::GraphicPolygon {
-            id: id.clone(),
-            polygon_count: *polygon_count,
-        }),
+        PcbGraphicShapeGeometry::Polygon { polygon_count } => {
+            Some(BoardEdgeShape::GraphicPolygon {
+                id: id.clone(),
+                polygon_count: *polygon_count,
+            })
+        }
     }
 }

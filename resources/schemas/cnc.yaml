@@ -49,44 +49,6 @@ properties:
     properties:
 
       # -----------------------------------------------------------------------
-      # fixture_plate
-      # -----------------------------------------------------------------------
-      # Maximum usable fixture plate size.
-      #
-      fixture_plate:
-        description: Maximum usable fixture plate size.
-        type: object
-        properties:
-
-          # Maximum usable X travel / fixture plate width.
-          #
-          # Valid examples:
-          #   x: "300 mm"
-          #   x: "300mm"
-          #   x: "11.81 in"
-          #   x: "11 3/4\""
-          #
-          x:
-            description: Maximum X axis travel.
-            default: "300mm"
-            $ref: "units.yaml#/$defs/size"
-
-          # Maximum usable Y travel / fixture plate height.
-          #
-          # Valid examples:
-          #   y: "200 mm"
-          #   y: "200mm"
-          #   y: "7.87 in"
-          #
-          y:
-            description: Maximum Y axis travel.
-            default: "200mm"
-            $ref: "units.yaml#/$defs/size"
-
-        required: [x, y]
-        additionalProperties: false
-
-      # -----------------------------------------------------------------------
       # max_feed_rate
       # -----------------------------------------------------------------------
       # Maximum configured feed rate.
@@ -156,47 +118,6 @@ properties:
         default: 0
 
       # -----------------------------------------------------------------------
-      # origin
-      # -----------------------------------------------------------------------
-      # Machine coordinate origin orientation.
-      #
-      origin:
-        description: Machine coordinate origin orientation.
-        type: object
-        properties:
-
-          # X axis zero orientation.
-          #
-          # Valid examples:
-          #   x0: left
-          #   x0: right
-          #   x0: front
-          #   x0: back
-          #
-          x0:
-            description: X axis zero orientation.
-            type: string
-            enum: [left, right, front, back]
-            default: Left
-
-          # Y axis zero orientation.
-          #
-          # Valid examples:
-          #   y0: front
-          #   y0: back
-          #   y0: left
-          #   y0: right
-          #
-          y0:
-            description: Y axis zero orientation.
-            type: string
-            enum: [front, back, left, right]
-            default: Front
-
-        required: [x0, y0]
-        additionalProperties: false
-
-      # -----------------------------------------------------------------------
       # scaling
       # -----------------------------------------------------------------------
       # Axis scaling factors.
@@ -253,38 +174,13 @@ properties:
         minimum: 0
         default: 10
 
-      # -----------------------------------------------------------------------
-      # resolution
-      # -----------------------------------------------------------------------
-      # Best achievable numerical resolution on the CNC.
-      #
-      # All emitted coordinates can be rounded to this resolution going forward.
-      # Uses the shared size validator from units.yaml; typical values are in um.
-      #
-      # Valid examples:
-      #   resolution: "1 um"
-      #   resolution: "1um"
-      #   resolution: "0.001 mm"
-      #   resolution: "0.0001 in"
-      #   resolution: "0.1 thou"
-      #
-      resolution:
-        description: >
-          Best achievable resolution on the CNC. All coordinates can be rounded
-          to this resolution going forward.
-        default: "1um"
-        $ref: "units.yaml#/$defs/size"
-
     required:
-      - fixture_plate
       - max_feed_rate
       - spindle_rpm_min
       - spindle_rpm_max
       - atc_slot_count
-      - origin
       - scaling
       - line_numbering_increment
-      - resolution
 
     additionalProperties: false
 
@@ -359,7 +255,7 @@ properties:
         description: Special function which switches value rendering to metric.
         type: string
         default: |
-          G21
+          {set_precision(3)}G21
 
       # Switch output rendering to imperial units.
       #
@@ -369,7 +265,7 @@ properties:
         description: Special function which switches value rendering to imperial.
         type: string
         default: |
-          G20
+          {set_precision(5)}G20
 
       # Program initialization block.
       #

@@ -12,7 +12,6 @@ use super::setup::{
     cnc_profile_library, cnc_required_field_label, parse_machine_profile_yaml,
 };
 use crate::ui::unit_service;
-use crate::units::{FeedRate, Length};
 
 #[component]
 pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
@@ -58,10 +57,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let unit_system = snapshot.unit_system;
 
     let mut field_error_message = use_signal(|| None::<String>);
-    let mut fixture_x_is_editing = use_signal(|| false);
-    let mut fixture_x_draft = use_signal(String::new);
-    let mut fixture_y_is_editing = use_signal(|| false);
-    let mut fixture_y_draft = use_signal(String::new);
     let mut feed_is_editing = use_signal(|| false);
     let mut feed_draft = use_signal(String::new);
     let mut spindle_min_is_editing = use_signal(|| false);
@@ -74,26 +69,16 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let mut scaling_y_is_editing = use_signal(|| false);
     let mut scaling_y_draft = use_signal(String::new);
 
-    let fixture_x_value = Length::from_mm(machine.fixture_plate_max_x as f64);
-    let fixture_y_value = Length::from_mm(machine.fixture_plate_max_y as f64);
-    let feed_value = FeedRate::from_mm_per_min(machine.max_feed_rate_mm_per_min as f64);
-    let spindle_min_value = crate::units::RotationalSpeed::from_rpm(machine.spindle_min_rpm as f64);
-    let spindle_max_value = crate::units::RotationalSpeed::from_rpm(machine.spindle_max_rpm as f64);
+    let feed_value = machine.max_feed_rate;
+    let spindle_min_value = machine.spindle_rpm_min;
+    let spindle_max_value = machine.spindle_rpm_max;
 
-    let fixture_x_edit_seed =
-        unit_service::format_length_edit_display(fixture_x_value, snapshot.unit_system);
-    let fixture_y_edit_seed =
-        unit_service::format_length_edit_display(fixture_y_value, snapshot.unit_system);
     let feed_edit_seed = unit_service::format_feed_edit_display(feed_value, snapshot.unit_system);
     let spindle_min_edit_seed = unit_service::format_rotational_speed_edit_display(spindle_min_value);
     let spindle_max_edit_seed = unit_service::format_rotational_speed_edit_display(spindle_max_value);
     let scaling_x_edit_seed = unit_service::format_percentage_edit_display(machine.scaling_x as f64);
     let scaling_y_edit_seed = unit_service::format_percentage_edit_display(machine.scaling_y as f64);
 
-    let fixture_x_display =
-        unit_service::format_length_display(fixture_x_value, snapshot.unit_system);
-    let fixture_y_display =
-        unit_service::format_length_display(fixture_y_value, snapshot.unit_system);
     let feed_display = unit_service::format_feed_display(feed_value, snapshot.unit_system);
     let spindle_min_display = unit_service::format_rotational_speed_display(spindle_min_value);
     let spindle_max_display = unit_service::format_rotational_speed_display(spindle_max_value);
@@ -103,7 +88,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     let header_rows = rows_for_template(&default_machine.gcode_header, 6, 18);
     let footer_rows = rows_for_template(&default_machine.gcode_footer, 2, 8);
     let route_plunge_rows = rows_for_template(&default_machine.route_plunge_and_offset, 3, 12);
-    let manual_prompt_rows = rows_for_template(&default_machine.tool_change_manual_prompt, 2, 8);
     let tool_change_rows = rows_for_template(&default_machine.tool_change_command, 4, 12);
     let pending_required_labels = machine
         .pending_required_fields
@@ -128,6 +112,38 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
     };
     let library_profiles_for_add = library_profiles.clone();
     let library_profiles_for_submit = library_profiles.clone();
+    let mut cnc_persist_tracking = use_signal(|| None::<(String, String)>);
+
+    // Auto-persist selected CNC profile edits. This covers attribute updates that
+    // currently mutate the local UI signal directly.
+    use_effect(move || {
+        let snapshot = state.read().clone();
+        let Some(selected_machine) = snapshot.selected_machine().cloned() else {
+            cnc_persist_tracking.set(None);
+            return;
+        };
+
+        if selected_machine.built_in {
+            cnc_persist_tracking.set(None);
+            return;
+        }
+
+        let selected_id = selected_machine.id.clone();
+        let fingerprint = cnc_machine_fingerprint(&selected_machine);
+        let tracked = cnc_persist_tracking.read().clone();
+
+        match tracked {
+            Some((tracked_id, tracked_fingerprint)) if tracked_id == selected_id => {
+                if tracked_fingerprint != fingerprint {
+                    persist_cnc_realm_now(state);
+                    cnc_persist_tracking.set(Some((selected_id, fingerprint)));
+                }
+            }
+            _ => {
+                cnc_persist_tracking.set(Some((selected_id, fingerprint)));
+            }
+        }
+    });
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -457,174 +473,8 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             }
 
                             div { class: "field section-block",
-                                h4 { "Fixture plate" }
-
                                 if let Some(message) = field_error_message.read().clone() {
                                     p { class: "diag-status", "{message}" }
-                                }
-
-                                div { class: if machine.pending_required_fields.contains("machine.fixture_plate.x") { "field section-subfield required-pending" } else { "field section-subfield" },
-                                    label { "Fixture X" }
-                                    div { class: "sub-field",
-                                        if *fixture_x_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: fixture_x_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    fixture_x_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = fixture_x_draft.read().trim().to_string();
-                                                            match unit_service::parse_length_with_preference(&raw, unit_system) {
-                                                                Ok(length) if length.as_mm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.fixture_plate_max_x = length.as_mm().round().max(0.0)
-                                                                                    as u32;
-                                                                                t.pending_required_fields.remove("machine.fixture_plate.x");
-                                                                            }
-                                                                        });
-                                                                    fixture_x_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Fixture X must be a valid non-negative length".to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                            fixture_x_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                        fixture_x_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let fixture_x_edit_seed = fixture_x_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_x_is_editing.set(true);
-                                                        fixture_x_draft.set(fixture_x_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{fixture_x_display}"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div { class: if machine.pending_required_fields.contains("machine.fixture_plate.y") { "field section-subfield required-pending" } else { "field section-subfield" },
-                                    label { "Fixture Y" }
-                                    div { class: "sub-field",
-                                        if *fixture_y_is_editing.read() {
-                                            input {
-                                                class: "stock-detail-input",
-                                                value: fixture_y_draft.read().clone(),
-                                                autofocus: true,
-                                                onmounted: move |evt| async move {
-                                                    let _ = evt.set_focus(true).await;
-                                                },
-                                                oninput: move |evt| {
-                                                    fixture_y_draft.set(evt.value());
-                                                },
-                                                onkeydown: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    let selected_id = selected_id.clone();
-                                                    move |evt| {
-                                                        let key = evt.key().to_string().to_ascii_lowercase();
-                                                        if key == "enter" || key == "numpadenter" {
-                                                            let raw = fixture_y_draft.read().trim().to_string();
-                                                            match unit_service::parse_length_with_preference(&raw, unit_system) {
-                                                                Ok(length) if length.as_mm() >= 0.0 => {
-                                                                    state
-                                                                        .with_mut(|s| {
-                                                                            if let Some(t) = s
-
-                                                                                .machines
-                                                                                .iter_mut()
-                                                                                .find(|m| m.id == selected_id)
-                                                                            {
-                                                                                t.fixture_plate_max_y = length.as_mm().round().max(0.0)
-                                                                                    as u32;
-                                                                                t.pending_required_fields.remove("machine.fixture_plate.y");
-                                                                            }
-                                                                        });
-                                                                    fixture_y_is_editing.set(false);
-                                                                    field_error_message.set(None);
-                                                                }
-                                                                _ => {
-                                                                    field_error_message
-                                                                        .set(
-                                                                            Some(
-                                                                                "Fixture Y must be a valid non-negative length".to_string(),
-                                                                            ),
-                                                                        );
-                                                                }
-                                                            }
-                                                        } else if key == "escape" || key == "esc" {
-                                                            evt.stop_propagation();
-                                                            fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                            fixture_y_is_editing.set(false);
-                                                            field_error_message.set(None);
-                                                        }
-                                                    }
-                                                },
-                                                onfocusout: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                        fixture_y_is_editing.set(false);
-                                                    }
-                                                },
-                                            }
-                                        } else {
-                                            button {
-                                                r#type: "button",
-                                                class: "stock-detail-input stock-detail-trigger",
-                                                onclick: {
-                                                    let fixture_y_edit_seed = fixture_y_edit_seed.clone();
-                                                    move |_| {
-                                                        fixture_y_is_editing.set(true);
-                                                        fixture_y_draft.set(fixture_y_edit_seed.clone());
-                                                        field_error_message.set(None);
-                                                    }
-                                                },
-                                                "{fixture_y_display}"
-                                            }
-                                        }
-                                    }
                                 }
 
                                 div { class: if machine.pending_required_fields.contains("machine.max_feed_rate") { "field section-subfield required-pending" } else { "field section-subfield" },
@@ -658,10 +508,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                                 .iter_mut()
                                                                                 .find(|m| m.id == selected_id)
                                                                             {
-                                                                                t.max_feed_rate_mm_per_min = feed_rate
-                                                                                    .as_mm_per_min()
-                                                                                    .round()
-                                                                                    .max(0.0) as u32;
+                                                                                t.max_feed_rate = feed_rate;
                                                                                 t.pending_required_fields
                                                                                     .remove("machine.max_feed_rate");
                                                                             }
@@ -689,8 +536,33 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 },
                                                 onfocusout: {
                                                     let feed_edit_seed = feed_edit_seed.clone();
+                                                    let selected_id = selected_id.clone();
                                                     move |_| {
-                                                        feed_draft.set(feed_edit_seed.clone());
+                                                        let raw = feed_draft.read().trim().to_string();
+                                                        if let Ok(feed_rate) = unit_service::parse_feed_with_preference(
+                                                            &raw,
+                                                            unit_system,
+                                                        ) {
+                                                            if feed_rate.as_mm_per_min() >= 0.0 {
+                                                                state
+                                                                    .with_mut(|s| {
+                                                                        if let Some(t) = s
+                                                                            .machines
+                                                                            .iter_mut()
+                                                                            .find(|m| m.id == selected_id)
+                                                                        {
+                                                                            t.max_feed_rate = feed_rate;
+                                                                            t.pending_required_fields.remove("machine.max_feed_rate");
+                                                                        }
+                                                                    });
+                                                                persist_cnc_realm_now(state);
+                                                                field_error_message.set(None);
+                                                            } else {
+                                                                feed_draft.set(feed_edit_seed.clone());
+                                                            }
+                                                        } else {
+                                                            feed_draft.set(feed_edit_seed.clone());
+                                                        }
                                                         feed_is_editing.set(false);
                                                     }
                                                 },
@@ -748,7 +620,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                                 .iter_mut()
                                                                                 .find(|m| m.id == selected_id)
                                                                             {
-                                                                                t.spindle_min_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                                t.spindle_rpm_min = speed;
                                                                                 t.pending_required_fields.remove("machine.spindle_rpm_min");
                                                                             }
                                                                         });
@@ -830,7 +702,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                                                 .iter_mut()
                                                                                 .find(|m| m.id == selected_id)
                                                                             {
-                                                                                t.spindle_max_rpm = speed.as_rpm().round().max(0.0) as u32;
+                                                                                t.spindle_rpm_max = speed;
                                                                                 t.pending_required_fields.remove("machine.spindle_rpm_max");
                                                                             }
                                                                         });
@@ -878,66 +750,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                                 "{spindle_max_display}"
                                             }
                                         }
-                                    }
-                                }
-                            }
-
-                            div { class: "field section-block",
-                                h4 { "Coordinate origin" }
-
-                                div { class: if machine.pending_required_fields.contains("machine.origin.x0") { "field section-subfield required-pending" } else { "field section-subfield" },
-                                    label { "X axis origin" }
-                                    select {
-                                        value: "{machine.origin_x0}",
-                                        onchange: {
-                                            let selected_id = selected_id.clone();
-                                            move |evt| {
-                                                let value = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        if let Some(t) = s
-                                                            .machines
-                                                            .iter_mut()
-                                                            .find(|m| m.id == selected_id)
-                                                        {
-                                                            t.origin_x0 = value;
-                                                            t.pending_required_fields.remove("machine.origin.x0");
-                                                        }
-                                                    });
-                                            }
-                                        },
-                                        option { value: "Left", "Left" }
-                                        option { value: "Right", "Right" }
-                                        option { value: "Front", "Front" }
-                                        option { value: "Back", "Back" }
-                                    }
-                                }
-
-                                div { class: if machine.pending_required_fields.contains("machine.origin.y0") { "field section-subfield required-pending" } else { "field section-subfield" },
-                                    label { "Y axis origin" }
-                                    select {
-                                        value: "{machine.origin_y0}",
-                                        onchange: {
-                                            let selected_id = selected_id.clone();
-                                            move |evt| {
-                                                let value = evt.value();
-                                                state
-                                                    .with_mut(|s| {
-                                                        if let Some(t) = s
-                                                            .machines
-                                                            .iter_mut()
-                                                            .find(|m| m.id == selected_id)
-                                                        {
-                                                            t.origin_y0 = value;
-                                                            t.pending_required_fields.remove("machine.origin.y0");
-                                                        }
-                                                    });
-                                            }
-                                        },
-                                        option { value: "Front", "Front" }
-                                        option { value: "Back", "Back" }
-                                        option { value: "Left", "Left" }
-                                        option { value: "Right", "Right" }
                                     }
                                 }
                             }
@@ -1163,17 +975,17 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                             }
 
                             div { class: "field section-block full-width",
-                                h4 { "G-code templates" }
+                                h4 { "Primitives (schema)" }
 
                                 p { class: "diag-status",
                                     "Use {{placeholders}} where documented. Unknown placeholders are preserved as-is."
                                 }
 
                                 div { class: "field section-subfield section-block",
-                                    h4 { "Header / Footer" }
+                                    h4 { "Program lifecycle primitives" }
 
                                     div { class: "field section-subfield",
-                                        label { "Header" }
+                                        label { "initialise" }
                                         textarea {
                                             class: "gcode-editor cnc-template-editor",
                                             rows: "{header_rows}",
@@ -1198,7 +1010,7 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     }
 
                                     div { class: "field section-subfield",
-                                        label { "Footer" }
+                                        label { "conclude" }
                                         textarea {
                                             class: "gcode-editor cnc-template-editor",
                                             rows: "{footer_rows}",
@@ -1224,23 +1036,19 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
 
                                 div { class: "field section-subfield section-block",
-                                    h4 { "Drill cycle" }
+                                    h4 { "Motion / spindle / drilling primitives" }
 
                                     for (lbl , getter , setter) in [
-                                        ("First move", machine.drill_first_move.clone(), "drill_first_move"),
+                                        ("rapid_move", machine.drill_first_move.clone(), "drill_first_move"),
+                                        ("peck_drill", machine.drill_cycle_mode_last.clone(), "drill_cycle_mode_last"),
                                         (
-                                            "Cycle mode (last)",
-                                            machine.drill_cycle_mode_last.clone(),
-                                            "drill_cycle_mode_last",
-                                        ),
-                                        (
-                                            "Cycle mode (series)",
+                                            "linear_cut",
                                             machine.drill_cycle_mode_series.clone(),
                                             "drill_cycle_mode_series",
                                         ),
-                                        ("Cycle start", machine.drill_cycle_start.clone(), "drill_cycle_start"),
-                                        ("Next hole", machine.drill_next_hole.clone(), "drill_next_hole"),
-                                        ("Cycle cancel", machine.drill_cycle_cancel.clone(), "drill_cycle_cancel"),
+                                        ("start_spindle", machine.drill_cycle_start.clone(), "drill_cycle_start"),
+                                        ("drill", machine.drill_next_hole.clone(), "drill_next_hole"),
+                                        ("stop_spindle", machine.drill_cycle_cancel.clone(), "drill_cycle_cancel"),
                                     ]
                                     {
                                         div { class: "field section-subfield",
@@ -1281,10 +1089,10 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
 
                                 div { class: "field section-subfield section-block",
-                                    h4 { "Routing" }
+                                    h4 { "Arc / bezier and optional primitives" }
 
                                     div { class: "field section-subfield",
-                                        label { "Plunge and offset" }
+                                        label { "cut_arc" }
                                         textarea {
                                             class: "gcode-editor cnc-template-editor",
                                             rows: "{route_plunge_rows}",
@@ -1309,9 +1117,9 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                     }
 
                                     for (lbl , getter , setter) in [
-                                        ("Arc UP", machine.route_arc_up.clone(), "route_arc_up"),
-                                        ("Arc DOWN", machine.route_arc_down.clone(), "route_arc_down"),
-                                        ("Retract", machine.route_retract.clone(), "route_retract"),
+                                        ("cut_bezier", machine.route_arc_up.clone(), "route_arc_up"),
+                                        ("pause (optional)", machine.route_arc_down.clone(), "route_arc_down"),
+                                        ("banner (optional)", machine.route_retract.clone(), "route_retract"),
                                     ]
                                     {
                                         div { class: "field section-subfield",
@@ -1347,38 +1155,10 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
                                 }
 
                                 div { class: "field section-subfield section-block",
-                                    h4 { "Tool change" }
+                                    h4 { "Tool change primitives" }
 
                                     div { class: "field section-subfield",
-                                        label { "Manual prompt" }
-                                        p { class: "diag-status",
-                                            "Only emitted when ATC is disabled."
-                                        }
-                                        textarea {
-                                            class: "gcode-editor cnc-template-editor",
-                                            rows: "{manual_prompt_rows}",
-                                            value: "{machine.tool_change_manual_prompt}",
-                                            oninput: {
-                                                let selected_id = selected_id.clone();
-                                                move |evt| {
-                                                    let value = evt.value();
-                                                    state
-                                                        .with_mut(|s| {
-                                                            if let Some(t) = s
-                                                                .machines
-                                                                .iter_mut()
-                                                                .find(|m| m.id == selected_id)
-                                                            {
-                                                                t.tool_change_manual_prompt = value;
-                                                            }
-                                                        });
-                                                }
-                                            },
-                                        }
-                                    }
-
-                                    div { class: "field section-subfield",
-                                        label { "Command" }
+                                        label { "change_tool" }
                                         textarea {
                                             class: "gcode-editor cnc-template-editor",
                                             rows: "{tool_change_rows}",
@@ -1413,18 +1193,6 @@ pub fn CncScreen(state: Signal<crate::ctx::AppCtx>) -> Element {
 }
 
 #[derive(Serialize)]
-struct ExportFixture {
-    x: String,
-    y: String,
-}
-
-#[derive(Serialize)]
-struct ExportOrigin {
-    x0: String,
-    y0: String,
-}
-
-#[derive(Serialize)]
 struct ExportScaling {
     x: f32,
     y: f32,
@@ -1432,96 +1200,72 @@ struct ExportScaling {
 
 #[derive(Serialize)]
 struct ExportMachine {
-    fixture_plate: ExportFixture,
     max_feed_rate: String,
     spindle_rpm_min: String,
     spindle_rpm_max: String,
     atc_slot_count: u8,
-    origin: ExportOrigin,
     scaling: ExportScaling,
     line_numbering_increment: u16,
 }
 
 #[derive(Serialize)]
-struct ExportDrill {
-    first_move: String,
-    cycle_mode_last: String,
-    cycle_mode_series: String,
-    cycle_start: String,
-    next_hole: String,
-    cycle_cancel: String,
-}
-
-#[derive(Serialize)]
-struct ExportRoute {
-    plunge_and_offset: String,
-    arc_up: String,
-    arc_down: String,
-    retract: String,
-}
-
-#[derive(Serialize)]
-struct ExportToolChange {
-    manual_prompt: String,
-    command: String,
+struct ExportPrimitives {
+    use_metric: String,
+    use_imperial: String,
+    initialise: String,
+    rapid_move: String,
+    linear_cut: String,
+    start_spindle: String,
+    stop_spindle: String,
+    drill: String,
+    peck_drill: String,
+    cut_arc: String,
+    cut_bezier: String,
+    change_tool: String,
+    conclude: String,
+    pause: String,
+    banner: String,
 }
 
 #[derive(Serialize)]
 struct ExportProfile {
-    name: String,
+    schema_version: u8,
+    id: String,
     machine: ExportMachine,
-    header: String,
-    footer: String,
-    drill: ExportDrill,
-    route: ExportRoute,
-    tool_change: ExportToolChange,
+    primitives: ExportPrimitives,
 }
 
 fn machine_profile_to_yaml(machine: &MachineProfile) -> Result<String, serde_yaml::Error> {
     let profile = ExportProfile {
-        name: machine.name.clone(),
+        schema_version: 1,
+        id: machine.id.clone(),
         machine: ExportMachine {
-            fixture_plate: ExportFixture {
-                x: format!("{}mm", machine.fixture_plate_max_x),
-                y: format!("{}mm", machine.fixture_plate_max_y),
-            },
-            max_feed_rate: format!("{}mm/min", machine.max_feed_rate_mm_per_min),
-            spindle_rpm_min: unit_service::format_rotational_speed_display(
-                crate::units::RotationalSpeed::from_rpm(machine.spindle_min_rpm as f64),
-            ),
-            spindle_rpm_max: unit_service::format_rotational_speed_display(
-                crate::units::RotationalSpeed::from_rpm(machine.spindle_max_rpm as f64),
-            ),
+            max_feed_rate: machine.max_feed_rate.to_string(),
+            spindle_rpm_min: machine.spindle_rpm_min.to_string(),
+            spindle_rpm_max: machine.spindle_rpm_max.to_string(),
             atc_slot_count: machine.atc_slot_count,
-            origin: ExportOrigin {
-                x0: machine.origin_x0.clone(),
-                y0: machine.origin_y0.clone(),
-            },
             scaling: ExportScaling {
                 x: machine.scaling_x,
                 y: machine.scaling_y,
             },
             line_numbering_increment: machine.line_numbering_increment,
         },
-        header: machine.gcode_header.clone(),
-        footer: machine.gcode_footer.clone(),
-        drill: ExportDrill {
-            first_move: machine.drill_first_move.clone(),
-            cycle_mode_last: machine.drill_cycle_mode_last.clone(),
-            cycle_mode_series: machine.drill_cycle_mode_series.clone(),
-            cycle_start: machine.drill_cycle_start.clone(),
-            next_hole: machine.drill_next_hole.clone(),
-            cycle_cancel: machine.drill_cycle_cancel.clone(),
-        },
-        route: ExportRoute {
-            plunge_and_offset: machine.route_plunge_and_offset.clone(),
-            arc_up: machine.route_arc_up.clone(),
-            arc_down: machine.route_arc_down.clone(),
-            retract: machine.route_retract.clone(),
-        },
-        tool_change: ExportToolChange {
-            manual_prompt: machine.tool_change_manual_prompt.clone(),
-            command: machine.tool_change_command.clone(),
+        primitives: ExportPrimitives {
+            use_metric: "{set_precision(3)}G21".to_string(),
+            use_imperial: "{set_precision(5)}G20".to_string(),
+            initialise: machine.gcode_header.clone(),
+            rapid_move: machine.drill_first_move.clone(),
+            linear_cut: machine.drill_cycle_mode_series.clone(),
+            start_spindle: machine.drill_cycle_start.clone(),
+            stop_spindle: machine.drill_cycle_cancel.clone(),
+            drill: machine.drill_next_hole.clone(),
+            peck_drill: machine.drill_cycle_mode_last.clone(),
+            cut_arc: machine.route_plunge_and_offset.clone(),
+            cut_bezier: machine.route_arc_up.clone(),
+            change_tool: machine.tool_change_command.clone(),
+            conclude: machine.gcode_footer.clone(),
+            pause: machine.route_arc_down.clone(),
+            banner: machine.route_retract.clone(),
         },
     };
 
@@ -1531,6 +1275,44 @@ fn machine_profile_to_yaml(machine: &MachineProfile) -> Result<String, serde_yam
 fn persist_cnc_realm_now(state: Signal<crate::ctx::AppCtx>) {
     let snapshot = state.read().clone();
     snapshot.persist_realms(&[PersistRealm::CncProfiles]);
+}
+
+fn cnc_machine_fingerprint(machine: &MachineProfile) -> String {
+    let pending_required = machine
+        .pending_required_fields
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("|");
+
+    format!(
+        "id={};name={};usable={};built_in={};max_feed={};spindle_min={};spindle_max={};atc={};scaling_x={};scaling_y={};line_inc={};hdr={};ftr={};dfm={};dcml={};dcms={};dcs={};dnh={};dcc={};rpo={};rau={};rad={};rr={};tcc={};pending={}",
+        machine.id,
+        machine.name,
+        machine.usable,
+        machine.built_in,
+        machine.max_feed_rate,
+        machine.spindle_rpm_min,
+        machine.spindle_rpm_max,
+        machine.atc_slot_count,
+        machine.scaling_x,
+        machine.scaling_y,
+        machine.line_numbering_increment,
+        machine.gcode_header,
+        machine.gcode_footer,
+        machine.drill_first_move,
+        machine.drill_cycle_mode_last,
+        machine.drill_cycle_mode_series,
+        machine.drill_cycle_start,
+        machine.drill_next_hole,
+        machine.drill_cycle_cancel,
+        machine.route_plunge_and_offset,
+        machine.route_arc_up,
+        machine.route_arc_down,
+        machine.route_retract,
+        machine.tool_change_command,
+        pending_required,
+    )
 }
 
 fn rows_for_template(text: &str, min_rows: usize, max_rows: usize) -> usize {

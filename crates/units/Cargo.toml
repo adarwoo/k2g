@@ -1,0 +1,11 @@
+[package]
+name = "units"
+version = "0.1.0"
+edition = "2021"
+description = "Strongly-typed CNC unit primitives (length, feed rate, angle, spindle speed) with parsing, display, and serde persistence."
+
+[dependencies]
+serde = "1"
+
+[dev-dependencies]
+serde_json = "1"

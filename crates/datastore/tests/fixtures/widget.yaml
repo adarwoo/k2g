@@ -1,0 +1,51 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "widget.yaml"
+
+title: Widget
+description: A widget with an identity, a gadget reference, units, and defaults.
+type: object
+required: [id, kind]
+additionalProperties: false
+
+properties:
+  id:
+    description: Widget identity.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  gadget_ref:
+    description: The gadget this widget uses.
+    x-ref: "gadget.yaml"
+    $ref: "id.yaml#/$defs/uuid_v7"
+
+  kind:
+    title: Kind
+    description: Widget kind.
+    type: string
+    enum: [alpha, beta, gamma]
+
+  width:
+    description: Nominal width.
+    $ref: "units.yaml#/$defs/size"
+
+  spindle:
+    description: Optional spindle speed.
+    anyOf:
+      - $ref: "units.yaml#/$defs/rpm"
+      - type: "null"
+
+  settings:
+    description: Nested settings with their own defaults.
+    type: object
+    additionalProperties: false
+    properties:
+      speed:
+        description: Default working speed.
+        default: "1000rpm"
+        $ref: "units.yaml#/$defs/rpm"
+      label:
+        type: string
+        default: "unnamed"
+
+  note:
+    type: string
+    default: "n/a"

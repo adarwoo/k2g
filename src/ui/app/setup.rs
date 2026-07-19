@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use crate::units::{FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, RotationalSpeedUnit};
+use units::{FeedRate, FeedRateUnit, RotationalSpeed, RotationalSpeedUnit};
 use super::super::model::*;
 use super::setup_sections::{CatalogManagementPanel, GeneralSettingsPanel, MachineProfilesPanel, SetupSidebar, SetupTab};
 
@@ -16,17 +16,24 @@ pub(super) fn cnc_schema_required_paths() -> &'static BTreeSet<String> {
 
 pub(super) fn cnc_required_field_label(key: &str) -> Option<&'static str> {
     match key {
-        "machine.fixture_plate.x" => Some("Fixture X"),
-        "machine.fixture_plate.y" => Some("Fixture Y"),
         "machine.max_feed_rate" => Some("Max feed rate"),
         "machine.spindle_rpm_min" => Some("Spindle min"),
         "machine.spindle_rpm_max" => Some("Spindle max"),
         "machine.atc_slot_count" => Some("ATC slots"),
-        "machine.origin.x0" => Some("X axis origin"),
-        "machine.origin.y0" => Some("Y axis origin"),
         "machine.scaling.x" => Some("X scale"),
         "machine.scaling.y" => Some("Y scale"),
         "machine.line_numbering_increment" => Some("Line numbering increment"),
+        "primitives.initialise" => Some("Initialise primitive"),
+        "primitives.rapid_move" => Some("Rapid move primitive"),
+        "primitives.linear_cut" => Some("Linear cut primitive"),
+        "primitives.start_spindle" => Some("Start spindle primitive"),
+        "primitives.stop_spindle" => Some("Stop spindle primitive"),
+        "primitives.drill" => Some("Drill primitive"),
+        "primitives.peck_drill" => Some("Peck drill primitive"),
+        "primitives.cut_arc" => Some("Cut arc primitive"),
+        "primitives.cut_bezier" => Some("Cut bezier primitive"),
+        "primitives.change_tool" => Some("Change tool primitive"),
+        "primitives.conclude" => Some("Conclude primitive"),
         _ => None,
     }
 }
@@ -129,46 +136,23 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
     let root: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
     let machine = root.get("machine")?;
 
-    let fixture = machine.get("fixture_plate")?;
-    let x = Length::from_string(fixture.get("x")?.as_str()?, Some(LengthUnit::Mm))
-        .ok()?
-        .as_mm() as u32;
-    let y = Length::from_string(fixture.get("y")?.as_str()?, Some(LengthUnit::Mm))
-        .ok()?
-        .as_mm() as u32;
-
-    let max_feed_rate_mm_per_min = machine
+    let max_feed_rate = machine
         .get("max_feed_rate")
         .and_then(|v| v.as_str())
         .and_then(|s| FeedRate::from_string(s, Some(FeedRateUnit::MmPerMin)).ok())
-        .map(|f| f.as_mm_per_min() as u32)
-        .unwrap_or(2000);
+        .unwrap_or_else(|| FeedRate::from_mm_per_min(2000.0));
 
-    let spindle_min_rpm = RotationalSpeed::from_string(
+    let spindle_rpm_min = RotationalSpeed::from_string(
         machine.get("spindle_rpm_min")?.as_str()?,
         Some(RotationalSpeedUnit::Rpm),
     )
-    .ok()?
-    .as_rpm() as u32;
-    let spindle_max_rpm = RotationalSpeed::from_string(
+    .ok()?;
+    let spindle_rpm_max = RotationalSpeed::from_string(
         machine.get("spindle_rpm_max")?.as_str()?,
         Some(RotationalSpeedUnit::Rpm),
     )
-    .ok()?
-    .as_rpm() as u32;
+    .ok()?;
     let atc_slot_count = machine.get("atc_slot_count")?.as_i64()? as u8;
-
-    let origin = machine.get("origin");
-    let origin_x0 = origin
-        .and_then(|o| o.get("x0"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("Left")
-        .to_string();
-    let origin_y0 = origin
-        .and_then(|o| o.get("y0"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("Front")
-        .to_string();
 
     let scaling = machine.get("scaling");
     let scaling_x = scaling
@@ -196,41 +180,28 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
 
     let trim_nl = |s: &str| s.trim_end_matches('\n').to_string();
 
-    let gcode_header = root
-        .get("header")
-        .and_then(|v| v.as_str())
-        .map(trim_nl)
-        .unwrap_or(def.gcode_header.clone());
-    let gcode_footer = root
-        .get("footer")
-        .and_then(|v| v.as_str())
-        .map(trim_nl)
-        .unwrap_or(def.gcode_footer.clone());
-
-    let drill = root.get("drill");
-    let str_field = |section: Option<&serde_yaml::Value>, key: &str, fallback: &str| -> String {
-        section
-            .and_then(|s| s.get(key))
+    let primitives = root.get("primitives");
+    let primitive_field = |key: &str, fallback: &str| {
+        primitives
+            .and_then(|p| p.get(key))
             .and_then(|v| v.as_str())
-            .map(|s| s.trim_end_matches('\n').to_string())
+            .map(trim_nl)
             .unwrap_or_else(|| fallback.to_string())
     };
-    let drill_first_move      = str_field(drill, "first_move",      &def.drill_first_move);
-    let drill_cycle_mode_last = str_field(drill, "cycle_mode_last", &def.drill_cycle_mode_last);
-    let drill_cycle_mode_series = str_field(drill, "cycle_mode_series", &def.drill_cycle_mode_series);
-    let drill_cycle_start     = str_field(drill, "cycle_start",     &def.drill_cycle_start);
-    let drill_next_hole       = str_field(drill, "next_hole",       &def.drill_next_hole);
-    let drill_cycle_cancel    = str_field(drill, "cycle_cancel",    &def.drill_cycle_cancel);
 
-    let route = root.get("route");
-    let route_plunge_and_offset = str_field(route, "plunge_and_offset", &def.route_plunge_and_offset);
-    let route_arc_up   = str_field(route, "arc_up",  &def.route_arc_up);
-    let route_arc_down = str_field(route, "arc_down", &def.route_arc_down);
-    let route_retract  = str_field(route, "retract",  &def.route_retract);
-
-    let tc = root.get("tool_change");
-    let tool_change_manual_prompt = str_field(tc, "manual_prompt", &def.tool_change_manual_prompt);
-    let tool_change_command       = str_field(tc, "command",       &def.tool_change_command);
+    let gcode_header = primitive_field("initialise", &def.gcode_header);
+    let gcode_footer = primitive_field("conclude", &def.gcode_footer);
+    let drill_first_move = primitive_field("rapid_move", &def.drill_first_move);
+    let drill_cycle_mode_last = primitive_field("peck_drill", &def.drill_cycle_mode_last);
+    let drill_cycle_mode_series = primitive_field("linear_cut", &def.drill_cycle_mode_series);
+    let drill_cycle_start = primitive_field("start_spindle", &def.drill_cycle_start);
+    let drill_next_hole = primitive_field("drill", &def.drill_next_hole);
+    let drill_cycle_cancel = primitive_field("stop_spindle", &def.drill_cycle_cancel);
+    let route_plunge_and_offset = primitive_field("cut_arc", &def.route_plunge_and_offset);
+    let route_arc_up = primitive_field("cut_bezier", &def.route_arc_up);
+    let route_arc_down = primitive_field("pause", &def.route_arc_down);
+    let route_retract = primitive_field("banner", &def.route_retract);
+    let tool_change_command = primitive_field("change_tool", &def.tool_change_command);
 
     let id_stem = Path::new(source_path)
         .file_stem()
@@ -248,14 +219,10 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         id: format!("import-{}", slug(&id_stem)),
         name: display_name,
         built_in: false,
-        fixture_plate_max_x: x,
-        fixture_plate_max_y: y,
-        max_feed_rate_mm_per_min,
-        spindle_min_rpm,
-        spindle_max_rpm,
+        max_feed_rate,
+        spindle_rpm_min,
+        spindle_rpm_max,
         atc_slot_count,
-        origin_x0,
-        origin_y0,
         scaling_x,
         scaling_y,
         line_numbering_increment,
@@ -271,7 +238,6 @@ pub(super) fn parse_machine_profile_yaml(text: &str, source_path: &str) -> Optio
         route_arc_up,
         route_arc_down,
         route_retract,
-        tool_change_manual_prompt,
         tool_change_command,
         pending_required_fields: BTreeSet::new(),
         usable: true,
@@ -322,31 +288,12 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
 
     let machine_node = root.get("machine");
 
-    let fixture = machine_node.and_then(|m| m.get("fixture_plate"));
-    let fx = fixture.and_then(|f| f.get("x")).and_then(|v| v.as_str());
-    if let Some(raw) = fx {
-        if let Ok(length) = Length::from_string(raw, Some(LengthUnit::Mm)) {
-            machine.fixture_plate_max_x = length.as_mm().round().max(0.0) as u32;
-        }
-    } else {
-        mark_missing(&mut pending_required_fields, "machine.fixture_plate.x");
-    }
-
-    let fy = fixture.and_then(|f| f.get("y")).and_then(|v| v.as_str());
-    if let Some(raw) = fy {
-        if let Ok(length) = Length::from_string(raw, Some(LengthUnit::Mm)) {
-            machine.fixture_plate_max_y = length.as_mm().round().max(0.0) as u32;
-        }
-    } else {
-        mark_missing(&mut pending_required_fields, "machine.fixture_plate.y");
-    }
-
     let max_feed = machine_node
         .and_then(|m| m.get("max_feed_rate"))
         .and_then(|v| v.as_str());
     if let Some(raw) = max_feed {
         if let Ok(rate) = FeedRate::from_string(raw, Some(FeedRateUnit::MmPerMin)) {
-            machine.max_feed_rate_mm_per_min = rate.as_mm_per_min().round().max(0.0) as u32;
+            machine.max_feed_rate = rate;
         }
     } else {
         mark_missing(&mut pending_required_fields, "machine.max_feed_rate");
@@ -357,7 +304,7 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         .and_then(|v| v.as_str());
     if let Some(raw) = spindle_min {
         if let Ok(value) = RotationalSpeed::from_string(raw, Some(RotationalSpeedUnit::Rpm)) {
-            machine.spindle_min_rpm = value.as_rpm().round().max(0.0) as u32;
+            machine.spindle_rpm_min = value;
         }
     } else {
         mark_missing(&mut pending_required_fields, "machine.spindle_rpm_min");
@@ -368,7 +315,7 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         .and_then(|v| v.as_str());
     if let Some(raw) = spindle_max {
         if let Ok(value) = RotationalSpeed::from_string(raw, Some(RotationalSpeedUnit::Rpm)) {
-            machine.spindle_max_rpm = value.as_rpm().round().max(0.0) as u32;
+            machine.spindle_rpm_max = value;
         }
     } else {
         mark_missing(&mut pending_required_fields, "machine.spindle_rpm_max");
@@ -381,18 +328,6 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         machine.atc_slot_count = atc.clamp(0, u8::MAX as i64) as u8;
     } else {
         mark_missing(&mut pending_required_fields, "machine.atc_slot_count");
-    }
-
-    let origin = machine_node.and_then(|m| m.get("origin"));
-    if let Some(x0) = origin.and_then(|o| o.get("x0")).and_then(|v| v.as_str()) {
-        machine.origin_x0 = capitalize_axis_origin(x0, "Left");
-    } else {
-        mark_missing(&mut pending_required_fields, "machine.origin.x0");
-    }
-    if let Some(y0) = origin.and_then(|o| o.get("y0")).and_then(|v| v.as_str()) {
-        machine.origin_y0 = capitalize_axis_origin(y0, "Front");
-    } else {
-        mark_missing(&mut pending_required_fields, "machine.origin.y0");
     }
 
     let scaling = machine_node.and_then(|m| m.get("scaling"));
@@ -416,6 +351,51 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         mark_missing(&mut pending_required_fields, "machine.line_numbering_increment");
     }
 
+    let trim_nl = |s: &str| s.trim_end_matches('\n').to_string();
+    let primitives = root.get("primitives");
+    let primitive_field = |key: &str, fallback: &str| {
+        primitives
+            .and_then(|p| p.get(key))
+            .and_then(|v| v.as_str())
+            .map(trim_nl)
+            .unwrap_or_else(|| fallback.to_string())
+    };
+
+    machine.gcode_header = primitive_field("initialise", &machine.gcode_header);
+    machine.gcode_footer = primitive_field("conclude", &machine.gcode_footer);
+    machine.drill_first_move = primitive_field("rapid_move", &machine.drill_first_move);
+    machine.drill_cycle_mode_last = primitive_field("peck_drill", &machine.drill_cycle_mode_last);
+    machine.drill_cycle_mode_series = primitive_field("linear_cut", &machine.drill_cycle_mode_series);
+    machine.drill_cycle_start = primitive_field("start_spindle", &machine.drill_cycle_start);
+    machine.drill_next_hole = primitive_field("drill", &machine.drill_next_hole);
+    machine.drill_cycle_cancel = primitive_field("stop_spindle", &machine.drill_cycle_cancel);
+    machine.route_plunge_and_offset = primitive_field("cut_arc", &machine.route_plunge_and_offset);
+    machine.route_arc_up = primitive_field("cut_bezier", &machine.route_arc_up);
+    machine.route_arc_down = primitive_field("pause", &machine.route_arc_down);
+    machine.route_retract = primitive_field("banner", &machine.route_retract);
+    machine.tool_change_command = primitive_field("change_tool", &machine.tool_change_command);
+
+    for required_primitive in [
+        "initialise",
+        "rapid_move",
+        "linear_cut",
+        "start_spindle",
+        "stop_spindle",
+        "drill",
+        "peck_drill",
+        "cut_arc",
+        "cut_bezier",
+        "change_tool",
+        "conclude",
+    ] {
+        if primitives.and_then(|p| p.get(required_primitive)).is_none() {
+            mark_missing(
+                &mut pending_required_fields,
+                &format!("primitives.{required_primitive}"),
+            );
+        }
+    }
+
     machine.pending_required_fields = pending_required_fields;
     machine.usable = machine.pending_required_fields.is_empty();
 
@@ -424,20 +404,6 @@ fn parse_machine_template_yaml(text: &str, key: &str, fallback_name: &str) -> Li
         name: machine.name.clone(),
         machine,
     }
-}
-
-fn capitalize_axis_origin(value: &str, fallback: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return fallback.to_string();
-    }
-    let mut chars = trimmed.chars();
-    let first = chars
-        .next()
-        .map(|c| c.to_ascii_uppercase().to_string())
-        .unwrap_or_default();
-    let rest = chars.as_str().to_ascii_lowercase();
-    format!("{}{}", first, rest)
 }
 
 fn slug(input: &str) -> String {

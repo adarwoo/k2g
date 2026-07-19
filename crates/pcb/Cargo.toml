@@ -1,0 +1,11 @@
+[package]
+name = "pcb"
+version = "0.1.0"
+edition = "2021"
+description = "PCB acquisition from KiCad — multi-instance discovery, document enumeration, snapshot collection, and edge-cut stitching."
+
+[dependencies]
+units = { path = "../units" }
+kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
+clipper2-rust = "1.0"
+thiserror = "2"
