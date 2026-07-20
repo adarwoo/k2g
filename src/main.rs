@@ -1,12 +1,10 @@
 mod cli;
-mod config;
-mod app_state_impl;
-mod ctx;
+mod catalog_io;
+mod runtime;
 mod data;
-mod expression_parser;
-mod domain;
+mod gcode;
 mod ui;
-mod user_path;
+mod paths;
 
 use cli::CliArgs;
 use pcb::{stitch_edge_shapes, KiCad};

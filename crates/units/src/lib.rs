@@ -19,7 +19,7 @@
 //!    and rounded numbers for a chosen [`UserUnitSystem`].
 //! 3. `persistence` — **load and save.** serde implementations that read and
 //!    write the quantities as they appear in configuration files, mirroring
-//!    `resources/schemas/units.yaml`.
+//!    `schemas/units.yaml`.
 //!
 //! `display` and `persistence` depend on `types`, never on each other.
 //!

@@ -5,7 +5,7 @@
 //! persists everything as YAML, but these implementations are format-agnostic
 //! (they work equally with `serde_json`, used by the tests).
 //!
-//! # Relationship to `resources/schemas/units.yaml`
+//! # Relationship to `schemas/units.yaml`
 //!
 //! The YAML schema validates the *textual* form of each field before it ever
 //! reaches this code; these implementations then turn that text (or a bare

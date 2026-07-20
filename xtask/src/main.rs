@@ -9,7 +9,7 @@ fn main() -> Result<()> {
         .expect("xtask should be inside workspace root")
         .to_path_buf();
 
-    let schema_dir = root.join("resources").join("schemas");
+    let schema_dir = root.join("schemas");
     let output_file = root.join("docs").join("SCHEMAS.md");
 
     schema_doc::generate_schema_docs(&schema_dir, &output_file)?;
