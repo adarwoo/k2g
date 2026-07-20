@@ -508,51 +508,11 @@ pub fn save_cnc_profile(
     queue_persist_document(file_path, item_values, profile_data.clone())
 }
 
-pub fn save_cnc_profiles(
-    app_dirs: &AppDirs,
-    profiles: &BTreeMap<String, Value>,
-) -> Result<(), ConfigError> {
-    save_profile_map(&app_dirs.cnc_profiles, profiles)
-}
-
-pub fn save_fixture_profiles(
-    app_dirs: &AppDirs,
-    profiles: &BTreeMap<String, Value>,
-) -> Result<(), ConfigError> {
-    save_profile_map(&app_dirs.fixture_profiles, profiles)
-}
-
 pub fn save_processing_profiles(
     app_dirs: &AppDirs,
     profiles: &BTreeMap<String, Value>,
 ) -> Result<(), ConfigError> {
     save_profile_map(&app_dirs.processing_profiles, profiles)
-}
-
-pub fn save_toolset_profiles(
-    app_dirs: &AppDirs,
-    profiles: &BTreeMap<String, Value>,
-) -> Result<(), ConfigError> {
-    save_profile_map(&app_dirs.toolset_profiles, profiles)
-}
-
-pub fn save_processing_and_toolset_profiles_session(
-    app_dirs: &AppDirs,
-    processing_profiles: &BTreeMap<String, Value>,
-    toolset_profiles: &BTreeMap<String, Value>,
-) -> Result<(), ConfigError> {
-    let mut session = begin_persist_session();
-    enqueue_profile_map_requests_in_session(
-        &mut session,
-        &app_dirs.processing_profiles,
-        processing_profiles,
-    )?;
-    enqueue_profile_map_requests_in_session(
-        &mut session,
-        &app_dirs.toolset_profiles,
-        toolset_profiles,
-    )?;
-    end_persist_session(session)
 }
 
 /// Generic helper to save a config file as YAML

@@ -252,3 +252,39 @@ fn compile_schema(yaml_text: &str) -> Result<Value, CatalogError> {
 
     serde_json::to_value(yaml_val).map_err(|e| CatalogError::SchemaCompile(e.to_string()))
 }
+// -----------------------------------------------------------------------------
+// Runtime catalog projections shown in the stock "add from catalog" UI.
+// (Relocated out of the former `ui::model` facade.)
+// -----------------------------------------------------------------------------
+
+/// Runtime catalog tool item shown in stock import UI.
+#[derive(Clone)]
+pub struct CatalogStockTool {
+    pub key: String,
+    pub catalog_name: String,
+    pub section_name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub diameter: Length,
+    pub point_angle: Angle,
+    pub feed_rate: Option<FeedRate>,
+    pub spindle_speed: Option<RotationalSpeed>,
+    pub sku: Option<String>,
+}
+
+/// Runtime catalog section shown in stock import UI.
+#[derive(Clone)]
+pub struct CatalogStockSection {
+    pub key: String,
+    pub name: String,
+    pub tools: Vec<CatalogStockTool>,
+}
+
+/// Runtime catalog index node shown in stock import UI.
+#[derive(Clone)]
+pub struct CatalogStockCatalog {
+    pub key: String,
+    pub name: String,
+    pub built_in: bool,
+    pub sections: Vec<CatalogStockSection>,
+}

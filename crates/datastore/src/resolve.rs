@@ -206,6 +206,35 @@ impl ResolvedStore {
         errors
     }
 
+    /// Parses pre-read `(source, text)` items for `schema_id`, registering `dir`
+    /// as that schema's collection (so new/cloned files of that schema land in
+    /// `dir`) and re-resolving references. Like [`Self::parse_directory`], but for
+    /// content the caller has already read from disk and possibly transformed —
+    /// e.g. normalizing a legacy on-disk shape into schema form before load.
+    /// Loaded documents are not marked dirty; they are written only on later edit.
+    pub fn parse_texts(
+        &mut self,
+        schema_id: &str,
+        dir: &Path,
+        items: &[(PathBuf, String)],
+    ) -> Vec<DataError> {
+        self.collections.insert(schema_id.to_string(), dir.to_path_buf());
+        let mut errors = Vec::new();
+        for (path, text) in items {
+            if let Some(doc) = crate::parse::parse_document(
+                &self.schemas,
+                schema_id,
+                Some(path.clone()),
+                text,
+                &mut errors,
+            ) {
+                self.documents.push(doc);
+            }
+        }
+        self.resolve_all();
+        errors
+    }
+
     /// Loads the collection for `schema_id` from its associated directory
     /// (explicitly registered, or `<data_dir>/<stem>`). Errors only if no
     /// directory is known.
@@ -243,6 +272,39 @@ impl ResolvedStore {
         Some(result)
     }
 
+    /// Replaces the value at `pointer` in the document loaded from `source` by
+    /// decoding `raw` against the field's schema (units, integer/number/boolean,
+    /// enums), then schedules the write. Returns `Some(true)` if set,
+    /// `Some(false)` if `raw` could not be decoded for that field, `None` if the
+    /// source or pointer is unknown. The UI's string-input write path.
+    pub fn set_value_str(&mut self, source: &Path, pointer: &str, raw: &str) -> Option<bool> {
+        let schema_id = self
+            .documents
+            .iter()
+            .find(|doc| doc.source.as_deref() == Some(source))?
+            .schema_id
+            .clone();
+        match crate::parse::decode_str(&self.schemas, &schema_id, pointer, raw) {
+            Some(value) => self.set_value(source, pointer, value),
+            None => Some(false),
+        }
+    }
+
+    /// Path-free counterpart to [`Self::set_value_str`], keyed by the document's
+    /// root identity `id`.
+    pub fn set_value_str_by_id(&mut self, id: Uuid, pointer: &str, raw: &str) -> Option<bool> {
+        let schema_id = self
+            .documents
+            .iter()
+            .find(|doc| doc.root.identity() == Some(id))?
+            .schema_id
+            .clone();
+        match crate::parse::decode_str(&self.schemas, &schema_id, pointer, raw) {
+            Some(value) => self.set_value_by_id(id, pointer, value),
+            None => Some(false),
+        }
+    }
+
     /// Path-free convenience: replaces the value at `pointer` in the document
     /// identified by `id`, scheduling its write.
     pub fn set_value_by_id(&mut self, id: Uuid, pointer: &str, value: NodeValue) -> Option<bool> {
@@ -273,6 +335,88 @@ impl ResolvedStore {
             status: Status::Complete,
         });
         Ok(id)
+    }
+
+    /// Creates a fresh instance of `schema_id` seeded from a *source document*
+    /// `source` (schema defaults/consts, then `source` deep-overlaid, then fresh
+    /// identities), stores it one file per instance at
+    /// `<collection-dir>/<uuid>.yaml`, and schedules the write. Returns the new
+    /// instance's id.
+    ///
+    /// The *from a source document* counterpart to [`Self::create_document`] —
+    /// e.g. materialising a new CNC profile from a bundled template. Any `id` in
+    /// `source` is ignored; a fresh one is generated. As with
+    /// [`Self::create_document`], the schema's root must have an identity and a
+    /// collection directory must be known.
+    pub fn create_document_from(
+        &mut self,
+        schema_id: &str,
+        source: &Value,
+    ) -> Result<Uuid, FactoryError> {
+        let root = crate::parse::instantiate_from(&self.schemas, schema_id, source)
+            .ok_or_else(|| FactoryError::UnknownSchema(schema_id.to_string()))?;
+        let (id, path) = self.placement(schema_id, &root)?;
+        self.insert_document(Document {
+            schema_id: schema_id.to_string(),
+            source: Some(path),
+            root,
+            status: Status::Complete,
+        });
+        Ok(id)
+    }
+
+    /// Replaces the entire content of the document identified by `id` by
+    /// re-parsing `value` against the document's own schema — applying defaults,
+    /// decoding units/ids, and re-validating — while preserving its source file,
+    /// then schedules the write and re-resolves references. `value` must carry the
+    /// same id. Returns the non-fatal parse problems, or `None` if `id` is unknown
+    /// or the re-parse produced no document.
+    ///
+    /// This is the structural-edit path for complex documents: the caller mutates
+    /// the plain [`Document::to_value`] (adding/removing object properties or array
+    /// items) and hands it back, rather than composing node trees by hand. Re-parse
+    /// re-applies schema defaults and re-marks completeness, so the tree stays
+    /// consistent after structural change.
+    pub fn replace_document_from_value(
+        &mut self,
+        id: Uuid,
+        value: &Value,
+    ) -> Option<Vec<DataError>> {
+        let index = self
+            .documents
+            .iter()
+            .position(|doc| doc.root.identity() == Some(id))?;
+        self.replace_document_at(index, value)
+    }
+
+    /// Path-addressed twin of [`Self::replace_document_from_value`], for
+    /// singleton documents (e.g. stock, settings) that have no root identity and
+    /// are located by their source file. Re-parses `value` against the document's
+    /// schema, swaps it in, schedules the write, and re-resolves references.
+    /// Returns `None` if no loaded document has that source path.
+    pub fn replace_document_from_value_at(
+        &mut self,
+        source: &Path,
+        value: &Value,
+    ) -> Option<Vec<DataError>> {
+        let index = self.index_of(source)?;
+        self.replace_document_at(index, value)
+    }
+
+    /// Shared core of the value-level structural-edit path: re-parse `value`
+    /// against document `index`'s schema, swap the tree in, schedule its write,
+    /// and re-resolve references. Re-parse re-applies schema defaults and
+    /// re-marks completeness so the tree stays consistent after structural change.
+    fn replace_document_at(&mut self, index: usize, value: &Value) -> Option<Vec<DataError>> {
+        let schema_id = self.documents[index].schema_id.clone();
+        let source = self.documents[index].source.clone();
+        let text = serde_json::to_string(value).ok()?;
+        let mut errors = Vec::new();
+        let doc = crate::parse::parse_document(&self.schemas, &schema_id, source, &text, &mut errors)?;
+        self.documents[index] = doc;
+        self.schedule_write(index);
+        self.resolve_all();
+        Some(errors)
     }
 
     /// Appends a fresh item to the array at `array_pointer` in the document

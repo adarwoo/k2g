@@ -2,8 +2,9 @@ mod cli;
 mod config;
 mod app_state_impl;
 mod ctx;
-mod domain;
+mod data;
 mod expression_parser;
+mod domain;
 mod ui;
 mod user_path;
 

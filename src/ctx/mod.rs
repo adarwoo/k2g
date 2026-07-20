@@ -12,14 +12,13 @@ use crate::config::{
     ConfigError,
     backfill_catalog_fields, ensure_default_files, load_all_configs, normalize_catalog_fields,
     write_embedded_schemas, PersistenceState, load_all_configs_best_effort,
-    save_cnc_profiles, save_fixture_profiles, save_global_settings, save_processing_profiles,
-    save_processing_and_toolset_profiles_session, save_stock, save_toolset_profiles,
+    save_global_settings, save_processing_profiles,
 };
 use crate::config::yaml_service::parse_yaml_with_schema;
 use crate::domain::catalog::{catalog_dir, default_catalogs, Catalog, CatalogManager};
 use crate::domain::state::RackSlot;
 use crate::domain::stock::{stock_value_from_tools, tools_from_stock_value};
-use crate::ui::model::{
+use crate::domain::{
     CascadeDeleteImpact, CatalogStockCatalog, CatalogStockSection, CatalogStockTool,
     CutDepthStrategy, FixtureProfile, GenerationState, JobCenterView, JobConfig, JobProfile,
     MachineProfile, PersistRealm, ProductionOperation, Screen, Side, Theme, Tool,
@@ -109,7 +108,6 @@ pub struct AppState {
     pub toolsets: Vec<ToolsetProfile>,
     pub selected_toolset_id: Option<String>,
     pub machine_mru: Vec<String>,
-    pub focus_profile_name_editor: bool,
     pub catalogs: Vec<CatalogStockCatalog>,
     pub tools: Vec<Tool>,
     pub errors: Vec<AppError>,

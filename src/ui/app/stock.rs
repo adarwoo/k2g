@@ -1,11 +1,11 @@
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
-use crate::ctx::{ctx_snapshot, with_ctx_mut};
-use units::{FeedRate, Length, RotationalSpeed};
+use crate::ctx::ctx_snapshot;
+use crate::ui::data_bind::{StockField, StockForm};
 use crate::ui::unit_service;
 
-use super::super::model::*;
+use crate::domain::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StockSortMode {
@@ -53,14 +53,6 @@ enum StockTypeFilter {
     Engraving,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StockDetailField {
-    Diameter,
-    PointAngle,
-    FeedRate,
-    SpindleSpeed,
-}
-
 impl StockTypeFilter {
     fn from_value(value: &str) -> Self {
         match value {
@@ -95,30 +87,20 @@ impl StockTypeFilter {
 
 #[component]
 pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
-    let mut stock_persist_armed = use_signal(|| false);
-    let mut last_stock_fingerprint = use_signal(String::new);
-
     use_effect(move || {
         super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });
 
-    // Persist stock when tool content changes (skip initial mount snapshot).
+    // AppData owns stock.yaml. The detail editor writes tool fields directly into
+    // the datastore singleton via StockField/StockForm, bumping the store
+    // revision; mirror those changes back into the legacy in-memory `tools` (the
+    // table's source) so table and detail stay coherent. Structural ops
+    // (add/clone/remove) persist through their own AppData path and update the
+    // local signal directly, so no fingerprint watcher is needed.
     use_effect(move || {
-        let tools = state.read().tools.clone();
-        let fingerprint = stock_fingerprint(&tools);
-
-        if !*stock_persist_armed.read() {
-            stock_persist_armed.set(true);
-            last_stock_fingerprint.set(fingerprint);
-            return;
-        }
-
-        if *last_stock_fingerprint.read() == fingerprint {
-            return;
-        }
-
-        last_stock_fingerprint.set(fingerprint);
-        persist_stock_realm_now(state);
+        let _ = crate::ui::data_bind::data_revision();
+        crate::ui::data_bind::refresh_legacy_stock();
+        state.set(ctx_snapshot());
     });
 
     let snapshot = state.read().clone();
@@ -134,29 +116,10 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     let mut stock_type_filter = use_signal(|| StockTypeFilter::All);
     let mut stock_sort_mode = use_signal(|| StockSortMode::RecentFirst);
 
+    // The stock detail panel edits the AppData singleton directly (StockForm /
+    // StockField over `/tools/{i}/…`), so it needs only the selected tool's id;
+    // the old ~15 buffered editing signals are gone.
     let mut detail_tool_id = use_signal(|| None::<String>);
-    let detail_composite_name = use_signal(String::new);
-    let mut detail_custom_name = use_signal(String::new);
-    let detail_kind = use_signal(String::new);
-    let mut detail_diameter_mm = use_signal(String::new);
-    let mut detail_diameter_is_editing = use_signal(|| false);
-    let mut detail_diameter_draft = use_signal(String::new);
-    let mut detail_point_angle_degrees = use_signal(String::new);
-    let mut detail_point_angle_is_editing = use_signal(|| false);
-    let mut detail_point_angle_draft = use_signal(String::new);
-    let mut detail_feed_rate_mm_per_min = use_signal(String::new);
-    let mut detail_feed_rate_is_editing = use_signal(|| false);
-    let mut detail_feed_rate_draft = use_signal(String::new);
-    let mut detail_spindle_speed_rpm = use_signal(String::new);
-    let mut detail_spindle_speed_is_editing = use_signal(|| false);
-    let mut detail_spindle_speed_draft = use_signal(String::new);
-    let mut detail_pending_focus_field = use_signal(|| None::<StockDetailField>);
-    let detail_source_catalog = use_signal(String::new);
-    let detail_manufacturer = use_signal(String::new);
-    let detail_sku = use_signal(String::new);
-    let mut detail_status = use_signal(|| tool_status_value(ToolStatus::InStock).to_string());
-    let mut detail_preference = use_signal(|| tool_preference_value(ToolPreference::Neutral).to_string());
-    let mut detail_field_popup_message = use_signal(|| None::<String>);
 
     let selected_catalog_count = selected_catalog_tool_keys.read().len();
     let selected_stock_count = selected_stock_tool_ids.read().len();
@@ -247,94 +210,14 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
         .count();
     let all_visible_selected = !visible_tool_ids.is_empty() && selected_visible_count == visible_tool_ids.len();
 
-    let active_tool = detail_tool_id
+    // The selected tool and its position in the AppData `/tools` array (kept in
+    // step with `snapshot.tools` by the refresh effect), used to address the
+    // schema-driven detail form at `/tools/{active_index}/…`.
+    let active_index = detail_tool_id
         .read()
         .clone()
-        .and_then(|tool_id| snapshot.tools.iter().find(|tool| tool.id == tool_id).cloned());
-
-    let detail_diameter_display = if *detail_diameter_is_editing.read() {
-        detail_diameter_draft.read().clone()
-    } else if let Some(tool) = active_tool.as_ref() {
-        format_length_for_user(tool.diameter, unit_system)
-    } else {
-        format_length_field_display(&detail_diameter_mm.read(), unit_system)
-    };
-    let detail_point_angle_display = if *detail_point_angle_is_editing.read() {
-        detail_point_angle_draft.read().clone()
-    } else if let Some(tool) = active_tool.as_ref() {
-        unit_service::format_angle_display(tool.point_angle)
-    } else {
-        format_angle_field_display(&detail_point_angle_degrees.read())
-    };
-    let detail_feed_rate_display = if *detail_feed_rate_is_editing.read() {
-        detail_feed_rate_draft.read().clone()
-    } else if let Some(tool) = active_tool.as_ref() {
-        tool.feed_rate
-            .map(|value| format_feed_rate_for_user(value, unit_system))
-            .unwrap_or_default()
-    } else {
-        format_feed_rate_field_display(&detail_feed_rate_mm_per_min.read(), unit_system)
-    };
-    let detail_spindle_speed_display = if *detail_spindle_speed_is_editing.read() {
-        detail_spindle_speed_draft.read().clone()
-    } else if let Some(tool) = active_tool.as_ref() {
-        tool.spindle_speed
-            .map(unit_service::format_rotational_speed_display)
-            .unwrap_or_default()
-    } else {
-        format_rotational_speed_field_display(&detail_spindle_speed_rpm.read())
-    };
-    let diameter_edit_seed = active_tool
-        .as_ref()
-        .map(|tool| unit_service::format_length_edit_display(tool.diameter, unit_system))
-        .unwrap_or_else(|| detail_diameter_mm.read().clone());
-    let feed_rate_edit_seed = active_tool
-        .as_ref()
-        .and_then(|tool| tool.feed_rate)
-        .map(|feed_rate| format_feed_rate_edit_display(feed_rate, unit_system))
-        .unwrap_or_default();
-
-    let detail_diameter_original_display = active_tool.as_ref().and_then(|tool| {
-        tool.catalog_diameter
-            .map(|value| unit_service::format_length_display(value, unit_system))
-    });
-    let detail_diameter_is_modified = active_tool
-        .as_ref()
-        .and_then(|tool| {
-            tool.catalog_diameter
-                .map(|original| (tool.diameter.as_mm() - original.as_mm()).abs() > 1e-9)
-        })
-        .unwrap_or(false);
-
-    let detail_point_angle_original_display = active_tool.as_ref().and_then(|tool| {
-        tool.catalog_point_angle
-            .map(unit_service::format_angle_display)
-    });
-    let detail_point_angle_is_modified = active_tool
-        .as_ref()
-        .and_then(|tool| {
-            tool.catalog_point_angle
-                .map(|original| (tool.point_angle.as_degrees() - original.as_degrees()).abs() > 1e-9)
-        })
-        .unwrap_or(false);
-
-    let detail_feed_rate_original_display = active_tool.as_ref().and_then(|tool| {
-        tool.catalog_feed_rate
-            .map(|value| format_feed_rate_for_user(value, unit_system))
-    });
-    let detail_feed_rate_is_modified = active_tool
-        .as_ref()
-        .map(|tool| option_feed_rate_changed(tool.feed_rate, tool.catalog_feed_rate))
-        .unwrap_or(false);
-
-    let detail_spindle_speed_original_display = active_tool.as_ref().and_then(|tool| {
-        tool.catalog_spindle_speed
-            .map(unit_service::format_rotational_speed_display)
-    });
-    let detail_spindle_speed_is_modified = active_tool
-        .as_ref()
-        .map(|tool| option_spindle_speed_changed(tool.spindle_speed, tool.catalog_spindle_speed))
-        .unwrap_or(false);
+        .and_then(|tool_id| snapshot.tools.iter().position(|tool| tool.id == tool_id));
+    let active_tool = active_index.map(|index| snapshot.tools[index].clone());
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -505,13 +388,7 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                         .iter()
                                         .cloned()
                                         .collect();
-                                    let mut added = 0usize;
-                                    super::mutate_ctx(
-                                        state,
-                                        |s| {
-                                            added = s.add_tools_from_catalog_selection(&selected);
-                                        },
-                                    );
+                                    let added = crate::ui::data_bind::add_stock_from_catalog(&selected);
                                     stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
                                     show_catalog_picker.set(false);
@@ -560,13 +437,7 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                         .cloned()
                                         .collect();
                                     let active_detail_tool_id = detail_tool_id.read().clone();
-                                    let mut removed = 0usize;
-                                    super::mutate_ctx(
-                                        state,
-                                        |s| {
-                                            removed = s.remove_tools(&selected);
-                                        },
-                                    );
+                                    let removed = crate::ui::data_bind::remove_stock_tools(&selected);
                                     if active_detail_tool_id
                                         .as_ref()
                                         .map(|tool_id| selected.iter().any(|selected_id| selected_id == tool_id))
@@ -585,29 +456,13 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                 }
             }
 
-            if let Some(tool) = active_tool.as_ref() {
-                div {
-                    class: "stock-detail-page",
-                    tabindex: "0",
-                    onmounted: move |evt| async move {
-                        let _ = evt.set_focus(true).await;
-                    },
-                    onkeydown: move |evt| {
-                        let key = evt.key().to_string().to_ascii_lowercase();
-                        if (key == "escape" || key == "esc")
-                            && !*detail_diameter_is_editing.read()
-                            && !*detail_point_angle_is_editing.read()
-                            && !*detail_feed_rate_is_editing.read()
-                            && !*detail_spindle_speed_is_editing.read()
-                        {
-                            detail_tool_id.set(None);
-                        }
-                    },
+            if let (Some(index), Some(tool)) = (active_index, active_tool.as_ref()) {
+                div { class: "stock-detail-page",
                     div { class: "panel stock-detail-panel",
                         div { class: "panel-header",
                             div {
                                 h3 { "Tool detail" }
-                                p { "Edit the tool properties, add a custom name, or clone the tool." }
+                                p { "Edit the tool properties directly, or clone the tool." }
                             }
                             div { class: "actions",
                                 button {
@@ -617,50 +472,10 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                 }
                                 button {
                                     class: "btn btn-secondary",
-                                    onclick: {
-                                        let tool_id = tool.id.clone();
-                                        move |_| {
-                                            let mut cloned_tool = None::<Tool>;
-                                            super::mutate_ctx(
-                                                state,
-                                                |s| {
-                                                    if let Some(new_id) = s.clone_tool(&tool_id) {
-                                                        cloned_tool = s
-                                                            .tools
-                                                            .iter()
-                                                            .find(|entry| entry.id == new_id)
-                                                            .cloned();
-                                                    }
-                                                },
-                                            );
-                                            if let Some(clone) = cloned_tool {
-                                                load_tool_editor(
-                                                    &clone,
-                                                    unit_system,
-                                                    detail_tool_id,
-                                                    detail_composite_name,
-                                                    detail_custom_name,
-                                                    detail_kind,
-                                                    detail_diameter_mm,
-                                                    detail_diameter_is_editing,
-                                                    detail_diameter_draft,
-                                                    detail_point_angle_degrees,
-                                                    detail_point_angle_is_editing,
-                                                    detail_point_angle_draft,
-                                                    detail_feed_rate_mm_per_min,
-                                                    detail_feed_rate_is_editing,
-                                                    detail_feed_rate_draft,
-                                                    detail_spindle_speed_rpm,
-                                                    detail_spindle_speed_is_editing,
-                                                    detail_spindle_speed_draft,
-                                                    detail_source_catalog,
-                                                    detail_manufacturer,
-                                                    detail_sku,
-                                                    detail_status,
-                                                    detail_preference,
-                                                );
-                                                stock_feedback.set(format!("Cloned {}", clone.display_name()));
-                                            }
+                                    onclick: move |_| {
+                                        if let Some(new_id) = crate::ui::data_bind::clone_stock_tool(index) {
+                                            detail_tool_id.set(Some(new_id));
+                                            stock_feedback.set("Cloned tool".to_string());
                                         }
                                     },
                                     "Clone Tool"
@@ -668,825 +483,20 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                             }
                         }
 
-                        if let Some(popup) = detail_field_popup_message.read().clone() {
-                            div { class: "stock-field-popup", "{popup}" }
-                        }
-
+                        // Schema-driven tool editor over the AppData stock singleton
+                        // (`/tools/{index}/…`). Replaces the former ~800-line buffered
+                        // per-field editor; edits write straight to the datastore and
+                        // the table refreshes via the store-revision effect.
                         div { class: "stock-detail-form",
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Label" }
-                                div { class: "stock-detail-readonly", "{detail_composite_name.read()}" }
+                            div { class: "field",
+                                label { "Source catalog" }
+                                div { class: "stock-detail-readonly", "{tool.source_catalog}" }
                             }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Custom name" }
-                                input {
-                                    class: "stock-detail-input",
-                                    value: detail_custom_name.read().clone(),
-                                    placeholder: "Optional nickname",
-                                    oninput: move |evt| {
-                                        let value = evt.value();
-                                        detail_custom_name.set(value.clone());
-                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                            state
-                                                .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-
-                                                        .tools
-                                                        .iter_mut()
-                                                        .find(|entry| entry.id == tool_id)
-                                                    {
-                                                        target.name = value.clone();
-                                                    }
-                                                });
-                                            persist_stock_realm_now(state);
-                                        }
-                                    },
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Type" }
-                                div { class: "stock-detail-readonly", "{detail_kind.read()}" }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Diameter" }
-                                div { class: "stock-detail-field-value",
-                                    if *detail_diameter_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: detail_diameter_display,
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            onfocusin: move |_| detail_pending_focus_field.set(None),
-                                            oninput: move |evt| {
-                                                let value = evt.value();
-                                                detail_diameter_draft.set(value);
-                                            },
-                                            onkeydown: move |evt| {
-                                                let key = evt.key().to_string().to_ascii_lowercase();
-                                                if key == "enter" || key == "numpadenter" {
-                                                    let value = detail_diameter_draft.read().trim().to_string();
-                                                    if value.is_empty() {
-                                                        detail_field_popup_message
-                                                            .set(Some("Diameter must be a valid length".to_string()));
-                                                        return;
-                                                    }
-
-                                                    let normalized_input = if length_input_has_explicit_unit(&value) {
-                                                        value
-                                                    } else {
-                                                        format!("{}{}", value, default_length_unit_suffix(unit_system))
-                                                    };
-
-                                                    match parse_length_for_display_input(&normalized_input, unit_system) {
-                                                        Ok(length) if length.as_mm() > 0.0 => {
-                                                            let normalized = unit_service::format_length_edit_display(
-                                                                length,
-                                                                unit_system,
-                                                            );
-                                                            detail_diameter_mm.set(normalized.clone());
-                                                            detail_diameter_draft.set(normalized);
-                                                            detail_diameter_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.diameter = length;
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                        Ok(_) => {
-                                                            detail_field_popup_message
-                                                                .set(Some("Diameter must be greater than zero".to_string()));
-                                                        }
-                                                        Err(_) => {
-                                                            detail_field_popup_message
-                                                                .set(Some("Diameter must be a valid length".to_string()));
-                                                        }
-                                                    }
-                                                } else if key == "escape" || key == "esc" {
-                                                    evt.stop_propagation();
-                                                    detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                    detail_diameter_is_editing.set(false);
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onfocusout: {
-                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
-                                                move |_| {
-                                                    detail_diameter_draft.set(detail_diameter_mm.read().clone());
-                                                    detail_diameter_is_editing.set(false);
-                                                    if let Some(next) = *detail_pending_focus_field.read() {
-                                                        if next != StockDetailField::Diameter {
-                                                            match next {
-                                                                StockDetailField::PointAngle => {
-                                                                    detail_point_angle_is_editing.set(true);
-                                                                    detail_point_angle_draft
-                                                                        .set(detail_point_angle_degrees.read().clone());
-                                                                }
-                                                                StockDetailField::FeedRate => {
-                                                                    detail_feed_rate_is_editing.set(true);
-                                                                    detail_feed_rate_draft
-                                                                        .set(feed_rate_edit_seed.clone());
-                                                                }
-                                                                StockDetailField::SpindleSpeed => {
-                                                                    detail_spindle_speed_is_editing.set(true);
-                                                                    detail_spindle_speed_draft
-                                                                        .set(detail_spindle_speed_rpm.read().clone());
-                                                                }
-                                                                StockDetailField::Diameter => {}
-                                                            }
-                                                            detail_field_popup_message.set(None);
-                                                        }
-                                                    }
-                                                    detail_pending_focus_field.set(None);
-                                                }
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: {
-                                                let diameter_edit_seed = diameter_edit_seed.clone();
-                                                move |_| {
-                                                    detail_pending_focus_field.set(Some(StockDetailField::Diameter));
-                                                    detail_diameter_is_editing.set(true);
-                                                    detail_diameter_draft.set(diameter_edit_seed.clone());
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onclick: {
-                                                let diameter_edit_seed = diameter_edit_seed.clone();
-                                                move |_| {
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_diameter_is_editing.set(true);
-                                                    detail_diameter_draft.set(diameter_edit_seed.clone());
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            "{detail_diameter_display}"
-                                        }
-                                    }
-
-                                    if detail_diameter_is_modified {
-                                        if let Some(original_value) = detail_diameter_original_display.clone() {
-                                            div { class: "stock-detail-original-group",
-                                                span { class: "stock-detail-original-value",
-                                                    "{original_value}"
-                                                }
-                                                button {
-                                                    r#type: "button",
-                                                    class: "stock-detail-revert-btn",
-                                                    title: "Revert to catalog value",
-                                                    onclick: {
-                                                        let tool_id = tool.id.clone();
-                                                        let original_diameter = tool.catalog_diameter;
-                                                        move |_| {
-                                                            if let Some(original_diameter) = original_diameter {
-                                                                let normalized = unit_service::format_length_edit_display(
-                                                                    original_diameter,
-                                                                    unit_system,
-                                                                );
-                                                                detail_diameter_mm.set(normalized.clone());
-                                                                detail_diameter_draft.set(normalized);
-                                                                detail_diameter_is_editing.set(false);
-                                                                detail_pending_focus_field.set(None);
-                                                                detail_field_popup_message.set(None);
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.diameter = original_diameter;
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                    },
-                                                    "↺"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Tip geometry" }
-                                div { class: "stock-detail-field-value",
-                                    if *detail_point_angle_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: detail_point_angle_display,
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            onfocusin: move |_| detail_pending_focus_field.set(None),
-                                            oninput: move |evt| detail_point_angle_draft.set(evt.value()),
-                                            onkeydown: move |evt| {
-                                                let key = evt.key().to_string().to_ascii_lowercase();
-                                                if key == "enter" || key == "numpadenter" {
-                                                    let draft_value = detail_point_angle_draft.read().clone();
-                                                    match unit_service::parse_angle(&draft_value) {
-                                                        Ok(angle) if angle.as_degrees() > 0.0 && angle.as_degrees() <= 180.0 => {
-                                                            let normalized = unit_service::format_angle_edit_display(angle);
-                                                            detail_point_angle_degrees.set(normalized.clone());
-                                                            detail_point_angle_draft.set(normalized);
-                                                            detail_point_angle_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.point_angle = angle;
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                        Ok(_) => {
-                                                            detail_field_popup_message
-                                                                .set(
-                                                                    Some(
-                                                                        "Tip geometry must be greater than 0 and at most 180 degrees"
-                                                                            .to_string(),
-                                                                    ),
-                                                                );
-                                                        }
-                                                        Err(_) => {
-                                                            detail_field_popup_message
-                                                                .set(Some("Tip geometry must be a valid angle".to_string()));
-                                                        }
-                                                    }
-                                                } else if key == "escape" || key == "esc" {
-                                                    evt.stop_propagation();
-                                                    detail_point_angle_draft.set(detail_point_angle_degrees.read().clone());
-                                                    detail_point_angle_is_editing.set(false);
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onfocusout: {
-                                                let diameter_edit_seed = diameter_edit_seed.clone();
-                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
-                                                move |_| {
-                                                    detail_point_angle_draft
-                                                        .set(detail_point_angle_degrees.read().clone());
-                                                    detail_point_angle_is_editing.set(false);
-                                                    if let Some(next) = *detail_pending_focus_field.read() {
-                                                        if next != StockDetailField::PointAngle {
-                                                            match next {
-                                                                StockDetailField::Diameter => {
-                                                                    detail_diameter_is_editing.set(true);
-                                                                    detail_diameter_draft
-                                                                        .set(diameter_edit_seed.clone());
-                                                                }
-                                                                StockDetailField::FeedRate => {
-                                                                    detail_feed_rate_is_editing.set(true);
-                                                                    detail_feed_rate_draft
-                                                                        .set(feed_rate_edit_seed.clone());
-                                                                }
-                                                                StockDetailField::SpindleSpeed => {
-                                                                    detail_spindle_speed_is_editing.set(true);
-                                                                    detail_spindle_speed_draft
-                                                                        .set(detail_spindle_speed_rpm.read().clone());
-                                                                }
-                                                                StockDetailField::PointAngle => {}
-                                                            }
-                                                            detail_field_popup_message.set(None);
-                                                        }
-                                                    }
-                                                    detail_pending_focus_field.set(None);
-                                                }
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: move |_| {
-                                                detail_pending_focus_field.set(Some(StockDetailField::PointAngle));
-                                                detail_point_angle_is_editing.set(true);
-                                                detail_point_angle_draft
-                                                    .set(detail_point_angle_degrees.read().clone());
-                                                detail_field_popup_message.set(None);
-                                            },
-                                            onclick: move |_| {
-                                                detail_pending_focus_field.set(None);
-                                                detail_point_angle_is_editing.set(true);
-                                                detail_point_angle_draft
-                                                    .set(detail_point_angle_degrees.read().clone());
-                                                detail_field_popup_message.set(None);
-                                            },
-                                            "{detail_point_angle_display}"
-                                        }
-
-                                        if detail_point_angle_is_modified {
-                                            if let Some(original_value) = detail_point_angle_original_display.clone() {
-                                                div { class: "stock-detail-original-group",
-                                                    span { class: "stock-detail-original-value",
-                                                        "{original_value}"
-                                                    }
-                                                    button {
-                                                        r#type: "button",
-                                                        class: "stock-detail-revert-btn",
-                                                        title: "Revert to catalog value",
-                                                        onclick: {
-                                                            let tool_id = tool.id.clone();
-                                                            let original_point_angle = tool.catalog_point_angle;
-                                                            move |_| {
-                                                                if let Some(original_point_angle) = original_point_angle {
-                                                                    let normalized = unit_service::format_angle_edit_display(
-                                                                        original_point_angle,
-                                                                    );
-                                                                    detail_point_angle_degrees.set(normalized.clone());
-                                                                    detail_point_angle_draft.set(normalized);
-                                                                    detail_point_angle_is_editing.set(false);
-                                                                    detail_pending_focus_field.set(None);
-                                                                    detail_field_popup_message.set(None);
-                                                                    state
-                                                                        .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-
-                                                                                .tools
-                                                                                .iter_mut()
-                                                                                .find(|entry| entry.id == tool_id)
-                                                                            {
-                                                                                target.point_angle = original_point_angle;
-                                                                            }
-                                                                        });
-                                                                    persist_stock_realm_now(state);
-                                                                }
-                                                            }
-                                                        },
-                                                        "↺"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Feed rate" }
-                                div { class: "stock-detail-field-value",
-                                    if *detail_feed_rate_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: detail_feed_rate_display,
-                                            placeholder: "Optional",
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            onfocusin: move |_| detail_pending_focus_field.set(None),
-                                            oninput: move |evt| detail_feed_rate_draft.set(evt.value()),
-                                            onkeydown: move |evt| {
-                                                let key = evt.key().to_string().to_ascii_lowercase();
-                                                if key == "enter" || key == "numpadenter" {
-                                                    let value = detail_feed_rate_draft.read().trim().to_string();
-                                                    if value.is_empty() {
-                                                        detail_feed_rate_mm_per_min.set(String::new());
-                                                        detail_feed_rate_draft.set(String::new());
-                                                        detail_feed_rate_is_editing.set(false);
-                                                        detail_pending_focus_field.set(None);
-                                                        detail_field_popup_message.set(None);
-                                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                            state
-                                                                .with_mut(|ui_state| {
-                                                                    if let Some(target) = ui_state
-
-                                                                        .tools
-                                                                        .iter_mut()
-                                                                        .find(|entry| entry.id == tool_id)
-                                                                    {
-                                                                        target.feed_rate = None;
-                                                                    }
-                                                                });
-                                                            persist_stock_realm_now(state);
-                                                        }
-                                                        return;
-                                                    }
-                                                    let normalized_input = if feed_rate_input_has_explicit_unit(&value) {
-                                                        value
-                                                    } else {
-                                                        format!("{}{}", value, default_feed_unit_suffix(unit_system))
-                                                    };
-                                                    match parse_optional_feed_rate(&normalized_input, unit_system, "Feed rate") {
-                                                        Ok(Some(feed_rate)) => {
-                                                            let normalized = format_feed_rate_edit_display(
-                                                                feed_rate,
-                                                                unit_system,
-                                                            );
-                                                            detail_feed_rate_mm_per_min.set(normalized.clone());
-                                                            detail_feed_rate_draft.set(normalized);
-                                                            detail_feed_rate_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.feed_rate = Some(feed_rate);
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                        Ok(None) => {
-                                                            detail_feed_rate_mm_per_min.set(String::new());
-                                                            detail_feed_rate_draft.set(String::new());
-                                                            detail_feed_rate_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.feed_rate = None;
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                        Err(message) => {
-                                                            detail_field_popup_message.set(Some(message));
-                                                        }
-                                                    }
-                                                } else if key == "escape" || key == "esc" {
-                                                    evt.stop_propagation();
-                                                    detail_feed_rate_draft.set(detail_feed_rate_mm_per_min.read().clone());
-                                                    detail_feed_rate_is_editing.set(false);
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onfocusout: move |_| {
-                                                detail_feed_rate_draft
-                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                detail_feed_rate_is_editing.set(false);
-                                                if let Some(next) = *detail_pending_focus_field.read() {
-                                                    if next != StockDetailField::FeedRate {
-                                                        match next {
-                                                            StockDetailField::Diameter => {
-                                                                detail_diameter_is_editing.set(true);
-                                                                detail_diameter_draft
-                                                                    .set(detail_diameter_mm.read().clone());
-                                                            }
-                                                            StockDetailField::PointAngle => {
-                                                                detail_point_angle_is_editing.set(true);
-                                                                detail_point_angle_draft
-                                                                    .set(detail_point_angle_degrees.read().clone());
-                                                            }
-                                                            StockDetailField::SpindleSpeed => {
-                                                                detail_spindle_speed_is_editing.set(true);
-                                                                detail_spindle_speed_draft
-                                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                            }
-                                                            StockDetailField::FeedRate => {}
-                                                        }
-                                                        detail_field_popup_message.set(None);
-                                                    }
-                                                }
-                                                detail_pending_focus_field.set(None);
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: {
-                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
-                                                move |_| {
-                                                    detail_pending_focus_field.set(Some(StockDetailField::FeedRate));
-                                                    detail_feed_rate_is_editing.set(true);
-                                                    detail_feed_rate_draft.set(feed_rate_edit_seed.clone());
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onclick: {
-                                                let feed_rate_edit_seed = feed_rate_edit_seed.clone();
-                                                move |_| {
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_feed_rate_is_editing.set(true);
-                                                    detail_feed_rate_draft.set(feed_rate_edit_seed.clone());
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            if detail_feed_rate_display.is_empty() {
-                                                "Optional"
-                                            } else {
-                                                "{detail_feed_rate_display}"
-                                            }
-                                        }
-
-                                        if detail_feed_rate_is_modified {
-                                            if let Some(original_value) = detail_feed_rate_original_display.clone() {
-                                                div { class: "stock-detail-original-group",
-                                                    span { class: "stock-detail-original-value",
-                                                        "{original_value}"
-                                                    }
-                                                    button {
-                                                        r#type: "button",
-                                                        class: "stock-detail-revert-btn",
-                                                        title: "Revert to catalog value",
-                                                        onclick: {
-                                                            let tool_id = tool.id.clone();
-                                                            let original_feed_rate = tool.catalog_feed_rate;
-                                                            move |_| {
-                                                                if let Some(original_feed_rate) = original_feed_rate {
-                                                                    let normalized = format_feed_rate_edit_display(
-                                                                        original_feed_rate,
-                                                                        unit_system,
-                                                                    );
-                                                                    detail_feed_rate_mm_per_min.set(normalized.clone());
-                                                                    detail_feed_rate_draft.set(normalized);
-                                                                    detail_feed_rate_is_editing.set(false);
-                                                                    detail_pending_focus_field.set(None);
-                                                                    detail_field_popup_message.set(None);
-                                                                    state
-                                                                        .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-
-                                                                                .tools
-                                                                                .iter_mut()
-                                                                                .find(|entry| entry.id == tool_id)
-                                                                            {
-                                                                                target.feed_rate = Some(original_feed_rate);
-                                                                            }
-                                                                        });
-                                                                    persist_stock_realm_now(state);
-                                                                }
-                                                            }
-                                                        },
-                                                        "↺"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Spindle speed" }
-                                div { class: "stock-detail-field-value",
-                                    if *detail_spindle_speed_is_editing.read() {
-                                        input {
-                                            class: "stock-detail-input",
-                                            value: detail_spindle_speed_display,
-                                            placeholder: "Optional",
-                                            autofocus: true,
-                                            onmounted: move |evt| async move {
-                                                let _ = evt.set_focus(true).await;
-                                            },
-                                            onfocusin: move |_| detail_pending_focus_field.set(None),
-                                            oninput: move |evt| detail_spindle_speed_draft.set(evt.value()),
-                                            onkeydown: move |evt| {
-                                                let key = evt.key().to_string().to_ascii_lowercase();
-                                                if key == "enter" || key == "numpadenter" {
-                                                    let draft_value = detail_spindle_speed_draft.read().clone();
-                                                    match unit_service::parse_rotational_speed(&draft_value) {
-                                                        Ok(value) => {
-                                                            let normalized = unit_service::format_rotational_speed_edit_display(
-                                                                value,
-                                                            );
-                                                            detail_spindle_speed_rpm.set(normalized.clone());
-                                                            detail_spindle_speed_draft.set(normalized);
-                                                            detail_spindle_speed_is_editing.set(false);
-                                                            detail_pending_focus_field.set(None);
-                                                            detail_field_popup_message.set(None);
-                                                            if let Some(tool_id) = detail_tool_id.read().clone() {
-                                                                state
-                                                                    .with_mut(|ui_state| {
-                                                                        if let Some(target) = ui_state
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.spindle_speed = Some(value);
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
-                                                        }
-                                                        Err(_) => {
-                                                            detail_field_popup_message
-                                                                .set(
-                                                                    Some("Spindle speed must be a valid rpm value".to_string()),
-                                                                );
-                                                        }
-                                                    }
-                                                } else if key == "escape" || key == "esc" {
-                                                    evt.stop_propagation();
-                                                    detail_spindle_speed_draft.set(detail_spindle_speed_rpm.read().clone());
-                                                    detail_spindle_speed_is_editing.set(false);
-                                                    detail_pending_focus_field.set(None);
-                                                    detail_field_popup_message.set(None);
-                                                }
-                                            },
-                                            onfocusout: move |_| {
-                                                detail_spindle_speed_draft
-                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                detail_spindle_speed_is_editing.set(false);
-                                                if let Some(next) = *detail_pending_focus_field.read() {
-                                                    if next != StockDetailField::SpindleSpeed {
-                                                        match next {
-                                                            StockDetailField::Diameter => {
-                                                                detail_diameter_is_editing.set(true);
-                                                                detail_diameter_draft
-                                                                    .set(detail_diameter_mm.read().clone());
-                                                            }
-                                                            StockDetailField::PointAngle => {
-                                                                detail_point_angle_is_editing.set(true);
-                                                                detail_point_angle_draft
-                                                                    .set(detail_point_angle_degrees.read().clone());
-                                                            }
-                                                            StockDetailField::FeedRate => {
-                                                                detail_feed_rate_is_editing.set(true);
-                                                                detail_feed_rate_draft
-                                                                    .set(detail_feed_rate_mm_per_min.read().clone());
-                                                            }
-                                                            StockDetailField::SpindleSpeed => {}
-                                                        }
-                                                        detail_field_popup_message.set(None);
-                                                    }
-                                                }
-                                                detail_pending_focus_field.set(None);
-                                            },
-                                        }
-                                    } else {
-                                        button {
-                                            r#type: "button",
-                                            class: "stock-detail-input stock-detail-trigger",
-                                            onmousedown: move |_| {
-                                                detail_pending_focus_field.set(Some(StockDetailField::SpindleSpeed));
-                                                detail_spindle_speed_is_editing.set(true);
-                                                detail_spindle_speed_draft
-                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                detail_field_popup_message.set(None);
-                                            },
-                                            onclick: move |_| {
-                                                detail_pending_focus_field.set(None);
-                                                detail_spindle_speed_is_editing.set(true);
-                                                detail_spindle_speed_draft
-                                                    .set(detail_spindle_speed_rpm.read().clone());
-                                                detail_field_popup_message.set(None);
-                                            },
-                                            if detail_spindle_speed_display.is_empty() {
-                                                "Optional"
-                                            } else {
-                                                "{detail_spindle_speed_display}"
-                                            }
-                                        }
-
-                                        if detail_spindle_speed_is_modified {
-                                            if let Some(original_value) = detail_spindle_speed_original_display.clone() {
-                                                div { class: "stock-detail-original-group",
-                                                    span { class: "stock-detail-original-value",
-                                                        "{original_value}"
-                                                    }
-                                                    button {
-                                                        r#type: "button",
-                                                        class: "stock-detail-revert-btn",
-                                                        title: "Revert to catalog value",
-                                                        onclick: {
-                                                            let tool_id = tool.id.clone();
-                                                            let original_spindle_speed = tool.catalog_spindle_speed;
-                                                            move |_| {
-                                                                if let Some(original_spindle_speed) = original_spindle_speed {
-                                                                    let normalized = unit_service::format_rotational_speed_edit_display(
-                                                                        original_spindle_speed,
-                                                                    );
-                                                                    detail_spindle_speed_rpm.set(normalized.clone());
-                                                                    detail_spindle_speed_draft.set(normalized);
-                                                                    detail_spindle_speed_is_editing.set(false);
-                                                                    detail_pending_focus_field.set(None);
-                                                                    detail_field_popup_message.set(None);
-                                                                    state
-                                                                        .with_mut(|ui_state| {
-                                                                            if let Some(target) = ui_state
-
-                                                                                .tools
-                                                                                .iter_mut()
-                                                                                .find(|entry| entry.id == tool_id)
-                                                                            {
-                                                                                target.spindle_speed = Some(original_spindle_speed);
-                                                                            }
-                                                                        });
-                                                                    persist_stock_realm_now(state);
-                                                                }
-                                                            }
-                                                        },
-                                                        "↺"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Status" }
-                                select {
-                                    class: "stock-detail-input",
-                                    value: detail_status.read().clone(),
-                                    onchange: move |evt| {
-                                        let value = evt.value();
-                                        detail_status.set(value.clone());
-                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                            state
-                                                .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-
-                                                        .tools
-                                                        .iter_mut()
-                                                        .find(|entry| entry.id == tool_id)
-                                                    {
-                                                        target.status = tool_status_from_value(&value);
-                                                    }
-                                                });
-                                            persist_stock_realm_now(state);
-                                        }
-                                    },
-                                    option { value: "in-stock", "In stock" }
-                                    option { value: "out-of-stock", "Out of stock" }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Preference" }
-                                select {
-                                    class: "stock-detail-input",
-                                    value: detail_preference.read().clone(),
-                                    onchange: move |evt| {
-                                        let value = evt.value();
-                                        detail_preference.set(value.clone());
-                                        if let Some(tool_id) = detail_tool_id.read().clone() {
-                                            state
-                                                .with_mut(|ui_state| {
-                                                    if let Some(target) = ui_state
-
-                                                        .tools
-                                                        .iter_mut()
-                                                        .find(|entry| entry.id == tool_id)
-                                                    {
-                                                        target.preference = tool_preference_from_value(&value);
-                                                    }
-                                                });
-                                            persist_stock_realm_now(state);
-                                        }
-                                    },
-                                    option { value: "preferred", "Preferred" }
-                                    option { value: "neutral", "Neutral" }
-                                    option { value: "not-preferred", "Not preferred" }
-                                }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Source catalog" }
-                                div { class: "stock-detail-readonly", "{detail_source_catalog.read()}" }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Manufacturer" }
-                                div { class: "stock-detail-readonly", "{detail_manufacturer.read()}" }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "SKU" }
-                                div { class: "stock-detail-readonly", "{detail_sku.read()}" }
-                            }
-                            div { class: "stock-detail-row",
-                                div { class: "stock-detail-label", "Tool ID" }
+                            StockForm { ptr: format!("/tools/{index}/base") }
+                            StockField { ptr: format!("/tools/{index}/availability") }
+                            StockField { ptr: format!("/tools/{index}/preference") }
+                            div { class: "field",
+                                label { "Tool ID" }
                                 div { class: "stock-detail-readonly", "{tool.id}" }
                             }
                         }
@@ -1542,9 +552,12 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                             {
                                 filtered_tools
                                     .iter()
-                                    .map(|(_, tool)| {
+                                    .map(|(original_index, tool)| {
+                                        // Position in `snapshot.tools` == the AppData
+                                        // `/tools` array index (kept in step by the
+                                        // refresh effect), used to address inline edits.
+                                        let row_index = *original_index;
                                         let tool_id = tool.id.clone();
-                                        let tool_for_detail = (*tool).clone();
                                         let is_selected = selected_stock_tool_ids
                                             .read()
                                             .contains(tool_id.as_str());
@@ -1558,34 +571,8 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                                 key: "{tool_id}",
                                                 class: if is_selected { "stock-row selected" } else { "stock-row" },
                                                 ondoubleclick: {
-                                                    let tool_for_detail = tool_for_detail.clone();
-                                                    move |_| {
-                                                        load_tool_editor(
-                                                            &tool_for_detail,
-                                                            unit_system,
-                                                            detail_tool_id,
-                                                            detail_composite_name,
-                                                            detail_custom_name,
-                                                            detail_kind,
-                                                            detail_diameter_mm,
-                                                            detail_diameter_is_editing,
-                                                            detail_diameter_draft,
-                                                            detail_point_angle_degrees,
-                                                            detail_point_angle_is_editing,
-                                                            detail_point_angle_draft,
-                                                            detail_feed_rate_mm_per_min,
-                                                            detail_feed_rate_is_editing,
-                                                            detail_feed_rate_draft,
-                                                            detail_spindle_speed_rpm,
-                                                            detail_spindle_speed_is_editing,
-                                                            detail_spindle_speed_draft,
-                                                            detail_source_catalog,
-                                                            detail_manufacturer,
-                                                            detail_sku,
-                                                            detail_status,
-                                                            detail_preference,
-                                                        );
-                                                    }
+                                                    let tool_id = tool_id.clone();
+                                                    move |_| detail_tool_id.set(Some(tool_id.clone()))
                                                 },
                                                 td {
                                                     input {
@@ -1634,23 +621,11 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
                                                     select {
                                                         class: "stock-inline-select {tool.status.class_name()}",
                                                         value: tool_status_value(tool.status),
-                                                        onchange: {
-                                                            let tool_id = tool_id.clone();
-                                                            move |evt| {
-                                                                let value = evt.value();
-                                                                state
-                                                                    .with_mut(|s| {
-                                                                        if let Some(target) = s
-
-                                                                            .tools
-                                                                            .iter_mut()
-                                                                            .find(|entry| entry.id == tool_id)
-                                                                        {
-                                                                            target.status = tool_status_from_value(&value);
-                                                                        }
-                                                                    });
-                                                                persist_stock_realm_now(state);
-                                                            }
+                                                        onchange: move |evt| {
+                                                            crate::ui::data_bind::set_stock_availability(
+                                                                row_index,
+                                                                evt.value() == "in-stock",
+                                                            );
                                                         },
                                                         option { value: "in-stock", "In stock" }
                                                         option { value: "out-of-stock", "Out of stock" }
@@ -1675,226 +650,10 @@ pub fn StockScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
     }
 }
 
-fn load_tool_editor(
-    tool: &Tool,
-    unit_system: UnitSystem,
-    mut detail_tool_id: Signal<Option<String>>,
-    mut detail_composite_name: Signal<String>,
-    mut detail_custom_name: Signal<String>,
-    mut detail_kind: Signal<String>,
-    mut detail_diameter_mm: Signal<String>,
-    mut detail_diameter_is_editing: Signal<bool>,
-    mut detail_diameter_draft: Signal<String>,
-    mut detail_point_angle_degrees: Signal<String>,
-    mut detail_point_angle_is_editing: Signal<bool>,
-    mut detail_point_angle_draft: Signal<String>,
-    mut detail_feed_rate_mm_per_min: Signal<String>,
-    mut detail_feed_rate_is_editing: Signal<bool>,
-    mut detail_feed_rate_draft: Signal<String>,
-    mut detail_spindle_speed_rpm: Signal<String>,
-    mut detail_spindle_speed_is_editing: Signal<bool>,
-    mut detail_spindle_speed_draft: Signal<String>,
-    mut detail_source_catalog: Signal<String>,
-    mut detail_manufacturer: Signal<String>,
-    mut detail_sku: Signal<String>,
-    mut detail_status: Signal<String>,
-    mut detail_preference: Signal<String>,
-) {
-    detail_tool_id.set(Some(tool.id.clone()));
-    detail_composite_name.set(tool.composite_name.clone());
-    detail_custom_name.set(tool.name.clone());
-    detail_kind.set(tool.kind.clone());
-    let diameter_display = unit_service::format_length_edit_display(tool.diameter, unit_system);
-    detail_diameter_mm.set(diameter_display.clone());
-    detail_diameter_draft.set(diameter_display);
-    detail_diameter_is_editing.set(false);
-    let point_angle_display = unit_service::format_angle_edit_display(tool.point_angle);
-    detail_point_angle_degrees.set(point_angle_display.clone());
-    detail_point_angle_draft.set(point_angle_display);
-    detail_point_angle_is_editing.set(false);
-    let feed_rate_display = tool
-        .feed_rate
-        .map(|value| format_feed_rate_edit_display(value, unit_system))
-        .unwrap_or_default();
-    detail_feed_rate_mm_per_min.set(feed_rate_display.clone());
-    detail_feed_rate_draft.set(feed_rate_display);
-    detail_feed_rate_is_editing.set(false);
-    let spindle_speed_display = tool
-        .spindle_speed
-        .map(unit_service::format_rotational_speed_edit_display)
-        .unwrap_or_default();
-    detail_spindle_speed_rpm.set(spindle_speed_display.clone());
-    detail_spindle_speed_draft.set(spindle_speed_display);
-    detail_spindle_speed_is_editing.set(false);
-    detail_source_catalog.set(tool.source_catalog.clone());
-    detail_manufacturer.set(tool.manufacturer.clone().unwrap_or_default());
-    detail_sku.set(tool.sku.clone().unwrap_or_default());
-    detail_status.set(tool_status_value(tool.status).to_string());
-    detail_preference.set(tool_preference_value(tool.preference).to_string());
-}
-
-fn parse_optional_feed_rate(
-    value: &str,
-    unit_system: UnitSystem,
-    label: &str,
-) -> Result<Option<FeedRate>, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    unit_service::parse_feed_with_preference(trimmed, unit_system)
-        .map(Some)
-        .map_err(|_| format!("{} must be a valid feed rate", label))
-}
-
-fn length_input_has_explicit_unit(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    // Detect explicit unit-bearing values like "3/4in", "1 mm", or 1".
-    trimmed.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '"')
-}
-
-fn feed_rate_input_has_explicit_unit(value: &str) -> bool {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    trimmed.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '/')
-}
-
-fn parse_length_for_display_input(value: &str, unit_system: UnitSystem) -> Result<Length, String> {
-    unit_service::parse_length_with_preference(value, unit_system)
-        .map_err(|_| "Diameter must be a valid length".to_string())
-}
-
-fn default_length_unit_suffix(unit_system: UnitSystem) -> &'static str {
-    unit_service::default_length_suffix(unit_system)
-}
-
-fn default_feed_unit_suffix(unit_system: UnitSystem) -> &'static str {
-    unit_service::default_feed_suffix(unit_system)
-}
-
-fn option_feed_rate_changed(current: Option<FeedRate>, original: Option<FeedRate>) -> bool {
-    match original {
-        Some(original) => match current {
-            Some(current) => (current.as_mm_per_min() - original.as_mm_per_min()).abs() > 1e-9,
-            None => true,
-        },
-        None => false,
-    }
-}
-
-fn option_spindle_speed_changed(current: Option<RotationalSpeed>, original: Option<RotationalSpeed>) -> bool {
-    match original {
-        Some(original) => match current {
-            Some(current) => (current.as_rpm() - original.as_rpm()).abs() > 1e-9,
-            None => true,
-        },
-        None => false,
-    }
-}
-
-fn format_length_for_user(length: Length, unit_system: UnitSystem) -> String {
-    unit_service::format_length_display(length, unit_system)
-}
-
-fn format_length_field_display(raw_value: &str, unit_system: UnitSystem) -> String {
-    let trimmed = raw_value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Ok(length) = parse_length_for_display_input(trimmed, unit_system) else {
-        return trimmed.to_string();
-    };
-
-    format_length_for_user(length, unit_system)
-}
-
-fn format_angle_field_display(raw_value: &str) -> String {
-    let trimmed = raw_value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Ok(angle) = unit_service::parse_angle(trimmed) else {
-        return trimmed.to_string();
-    };
-
-    unit_service::format_angle_display(angle)
-}
-
-fn format_rotational_speed_field_display(raw_value: &str) -> String {
-    let trimmed = raw_value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Ok(speed) = unit_service::parse_rotational_speed(trimmed) else {
-        return trimmed.to_string();
-    };
-
-    unit_service::format_rotational_speed_display(speed)
-}
-
-fn format_feed_rate_edit_display(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
-    unit_service::format_feed_edit_display(feed_rate, unit_system)
-}
-
-fn format_feed_rate_for_user(feed_rate: FeedRate, unit_system: UnitSystem) -> String {
-    unit_service::format_feed_display(feed_rate, unit_system)
-}
-
-fn format_feed_rate_field_display(raw_value: &str, unit_system: UnitSystem) -> String {
-    let trimmed = raw_value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Ok(Some(feed_rate)) = parse_optional_feed_rate(
-        trimmed,
-        unit_system,
-        "Feed rate",
-    ) else {
-        return trimmed.to_string();
-    };
-
-    format_feed_rate_for_user(feed_rate, unit_system)
-}
-
-fn tool_preference_value(preference: ToolPreference) -> &'static str {
-    match preference {
-        ToolPreference::Preferred => "preferred",
-        ToolPreference::Neutral => "neutral",
-        ToolPreference::NotPreferred => "not-preferred",
-    }
-}
-
 fn tool_status_value(status: ToolStatus) -> &'static str {
     match status {
         ToolStatus::InStock => "in-stock",
         ToolStatus::OutOfStock => "out-of-stock",
-    }
-}
-
-fn tool_status_from_value(value: &str) -> ToolStatus {
-    match value {
-        "out-of-stock" => ToolStatus::OutOfStock,
-        _ => ToolStatus::InStock,
-    }
-}
-
-fn tool_preference_from_value(value: &str) -> ToolPreference {
-    match value {
-        "preferred" => ToolPreference::Preferred,
-        "not-preferred" => ToolPreference::NotPreferred,
-        _ => ToolPreference::Neutral,
     }
 }
 
@@ -1970,50 +729,5 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
 
 fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> String {
     unit_service::format_length_display(tool.diameter, unit_system)
-}
-
-fn persist_stock_realm_now(mut state: Signal<crate::app_state_impl::AppCtx>) {
-    // Stock edits are applied to the local UI signal first. Sync local -> global
-    // before persisting so navigation cannot revert to stale global state.
-    let local_snapshot = state.read().clone();
-    with_ctx_mut(|ctx| *ctx = local_snapshot);
-
-    let synced_snapshot = ctx_snapshot();
-    synced_snapshot.persist_realms(&[PersistRealm::Stock]);
-    state.set(synced_snapshot);
-}
-
-fn stock_fingerprint(tools: &[Tool]) -> String {
-    let mut out = String::new();
-    for tool in tools {
-        let feed_rate = tool
-            .feed_rate
-            .map(|value| value.as_mm_per_min().to_string())
-            .unwrap_or_else(|| "null".to_string());
-        let spindle_speed = tool
-            .spindle_speed
-            .map(|value| value.as_rpm().to_string())
-            .unwrap_or_else(|| "null".to_string());
-        let manufacturer = tool.manufacturer.as_deref().unwrap_or_default();
-        let sku = tool.sku.as_deref().unwrap_or_default();
-
-        out.push_str(&format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
-            tool.id,
-            tool.composite_name,
-            tool.name,
-            tool.kind,
-            tool.diameter.as_mm(),
-            tool.point_angle.as_degrees(),
-            feed_rate,
-            spindle_speed,
-            tool.status.label(),
-            tool.preference.label(),
-            tool.source_catalog,
-            manufacturer,
-            sku,
-        ));
-    }
-    out
 }
 

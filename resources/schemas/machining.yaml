@@ -1,5 +1,5 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
-$id: "processing.yaml"
+$id: "machining.yaml"
 x-schema-version: 2
 type: object
 
@@ -124,10 +124,65 @@ properties:
     const: 2
     default: 2
 
+  id:
+    description: Unique machining profile ID.
+    $ref: "id.yaml#/$defs/uuid_v7"
+
   name:
     type: string
     minLength: 1
     default: My machining profile
+
+  # Referenced profiles. Each is a `default` (the active reference) plus the
+  # `choices` allowed for it. `$ref` keeps UUIDv7 validation; `x-ref` makes the
+  # datastore resolve the value against the target profile collection.
+  cnc:
+    description: Selected CNC profile (default) plus allowed choices.
+    type: object
+    properties:
+      default:
+        description: Active CNC profile reference.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "cnc.yaml"
+      choices:
+        type: array
+        items:
+          $ref: "id.yaml#/$defs/uuid_v7"
+          x-ref: "cnc.yaml"
+    required: [default, choices]
+    additionalProperties: false
+
+  fixture:
+    description: Selected fixture profile (default) plus allowed choices.
+    type: object
+    properties:
+      default:
+        description: Active fixture profile reference.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "fixture.yaml"
+      choices:
+        type: array
+        items:
+          $ref: "id.yaml#/$defs/uuid_v7"
+          x-ref: "fixture.yaml"
+    required: [default, choices]
+    additionalProperties: false
+
+  toolset:
+    description: Selected toolset profile (default) plus allowed choices.
+    type: object
+    properties:
+      default:
+        description: Active toolset profile reference.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "toolset.yaml"
+      choices:
+        type: array
+        items:
+          $ref: "id.yaml#/$defs/uuid_v7"
+          x-ref: "toolset.yaml"
+    required: [default, choices]
+    additionalProperties: false
 
   side_to_machine:
     type: string
@@ -214,41 +269,10 @@ properties:
 
 required: [id, name, cnc, fixture, toolset, operations]
 
-allOf:
-  - if:
-      properties:
-        operations:
-          contains: { const: drill_pth }
-    then:
-      required: [drill_pth]
-    else:
-      not: { required: [drill_pth] }
-
-  - if:
-      properties:
-        operations:
-          contains: { const: drill_npth }
-    then:
-      required: [drill_npth]
-    else:
-      not: { required: [drill_npth] }
-
-  - if:
-      properties:
-        operations:
-          contains: { const: route_board }
-    then:
-      required: [route_board]
-    else:
-      not: { required: [route_board] }
-
-  - if:
-      properties:
-        operations:
-          contains: { const: mill_board }
-    then:
-      required: [mill_board]
-    else:
-      not: { required: [mill_board] }
+# Note: the per-operation config objects (drill_pth, route_board, …) are declared
+# as optional properties with defaults and are always materialised by the loader,
+# so they are NOT gated behind conditional-presence rules. The `operations` array
+# is the single source of truth for which operations are enabled; a config object
+# being present does not imply its operation is active.
 
 additionalProperties: false

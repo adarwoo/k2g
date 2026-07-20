@@ -1,19 +1,20 @@
+# Bantam Tools Desktop PCB Milling Machine
 # The Bantam Tools machines are popular and specifically designed for PCB prototyping.
-# They use a TinyG motion controller and have some specific G-code requirements and limitations
-
-# Important Notes for Bantam Tools:
-# The controller (TinyG) does not support canned cycles like G81 and G83.
-# For this profile to work, the application generating the G-code would need
-#  to expand these cycles into individual G0/G1 moves or the user would need to handle this limitation.
-# The machine defaults to the G55 coordinate system, which is a key difference from many other machines that use G54 .
+# They use a TinyG motion controller and have some specific G-code requirements and limitations.
+#
+# Important notes for Bantam Tools:
+#  - The TinyG controller does not support canned cycles like G81 and G83. The
+#    peck_drill primitive below is expanded into explicit G0/G1 moves. The drill
+#    primitive still emits G81 and must be expanded by the application when used.
+#  - The machine defaults to the G55 coordinate system, unlike machines that use G54.
 
 name: "Bantam Tools Desktop PCB Milling Machine"
 
 machine:
-  max_feed_rate: "1000mm/min"  # Conservative for PCB milling in FR-1
+  max_feed_rate: "1000mm/min"
   spindle_rpm_min: "10000rpm"
   spindle_rpm_max: "28000rpm"
-  atc_slot_count: 0  # Manual tool change required
+  atc_slot_count: 0
   scaling:
     x: 1.0
     y: 1.0
@@ -27,7 +28,7 @@ primitives:
   initialise: |
     (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     G17 G90 G21 G40 G49 G80 G94
-    G55  # Bantam Tools uses G55 as its default work coordinate system [citation:8]
+    G55
     G0 Z{z_safe}
   rapid_move: "G0 X{x} Y{y} Z{z}"
   linear_cut: "G1 X{x} Y{y} Z{z} S{s}"
@@ -35,9 +36,7 @@ primitives:
     S{rpm}
     M3
   stop_spindle: "M5"
-  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"  # Note: G81 is not supported by TinyG [citation:4]
-
-  # Bantam/TinyG doesn't support G83, so expand to pecking sequence
+  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
   peck_drill: |
     {let out = "";
      let current_z = unit(z_retract);
@@ -54,8 +53,7 @@ primitives:
        current_z = next_z;
      }
      out}
-
-  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"  # TinyG uses IJK for arcs [citation:4]
+  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
     ; cut_bezier fallback
   change_tool: |
@@ -65,7 +63,7 @@ primitives:
     S{rpm}
   conclude: |
     (end of file)
-    G0 X0 Y0 Z{z_safe}  # Return to a safe position
+    G0 X0 Y0 Z{z_safe}
   pause: |
     MSG {message}
     M1

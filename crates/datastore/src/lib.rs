@@ -231,6 +231,20 @@ impl DataStore {
         parse::instantiate(&self.schemas, schema_id)
     }
 
+    /// Builds a fresh, unattached instance of `schema_id` seeded from a *source
+    /// document* `seed`: schema defaults/consts first, then `seed` deep-overlaid,
+    /// then all identity fields regenerated (any `id` in `seed` is ignored).
+    /// Returns `None` for an unknown schema.
+    ///
+    /// This is the *from a source document* counterpart to [`Self::instantiate`]
+    /// — e.g. creating a new CNC profile from a bundled template. Because it fills
+    /// `const`/`default` fields (such as `schema_version`) before applying the
+    /// seed, a seed may omit both `id` and `schema_version`. To create *and*
+    /// store the instance, use [`ResolvedStore::create_document_from`].
+    pub fn instantiate_from(&self, schema_id: &str, seed: &serde_json::Value) -> Option<Node> {
+        parse::instantiate_from(&self.schemas, schema_id, seed)
+    }
+
     /// Writes every embedded schema to `dir` under its `$id` filename, creating
     /// `dir` if needed (e.g. to seed a user's schema directory).
     pub fn export_schemas(&self, dir: &Path) -> std::io::Result<()> {

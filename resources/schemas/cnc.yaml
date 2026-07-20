@@ -39,6 +39,21 @@ properties:
     $ref: "id.yaml#/$defs/uuid_v7"
 
   # ---------------------------------------------------------------------------
+  # name
+  # ---------------------------------------------------------------------------
+  # Human-readable CNC profile name.
+  #
+  # Valid examples:
+  #   name: "Genmitsu 3018-Pro"
+  #   name: "Masso G3 - With ATC"
+  #
+  name:
+    description: User-facing CNC profile name.
+    type: string
+    minLength: 1
+    default: "My CNC profile"
+
+  # ---------------------------------------------------------------------------
   # machine
   # ---------------------------------------------------------------------------
   # Physical machine configuration.
@@ -450,6 +465,7 @@ properties:
 
 required:
   - id
+  - name
   - machine
   - primitives
 

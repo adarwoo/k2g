@@ -25,7 +25,6 @@ impl AppState {
             toolsets: vec![],
             selected_toolset_id: None,
             machine_mru: vec![],
-            focus_profile_name_editor: false,
             catalogs: vec![],
             tools,
             errors: vec![],
@@ -217,63 +216,10 @@ impl AppState {
             return;
         };
 
-        let persist_processing = realms
-            .iter()
-            .any(|realm| matches!(realm, PersistRealm::ProcessingProfiles));
-        let persist_toolset = realms
-            .iter()
-            .any(|realm| matches!(realm, PersistRealm::ToolsetProfiles));
-
-        if persist_processing && persist_toolset {
-            let processing_profiles = self
-                .process_profiles
-                .iter()
-                .map(|profile| (profile.id.clone(), process_profile_to_value(profile)))
-                .collect::<BTreeMap<_, _>>();
-            let toolset_profiles = build_toolset_profiles(&self.toolsets);
-            match save_processing_and_toolset_profiles_session(
-                &app_dirs,
-                &processing_profiles,
-                &toolset_profiles,
-            ) {
-                Ok(()) => log::info!(
-                    "Persisted processing+toolset session: processing_count={} toolset_count={}",
-                    processing_profiles.len(),
-                    toolset_profiles.len()
-                ),
-                Err(err) => log::warn!(
-                    "Failed to persist processing+toolset session: {err}"
-                ),
-            }
-        }
-
         for realm in realms {
             match realm {
                 PersistRealm::GlobalSettings => self.persist_global_settings(&app_dirs),
-                PersistRealm::CncProfiles => {
-                    self.persist_profile_map_realm(
-                        "cnc_profiles",
-                        &app_dirs,
-                        &self.machines,
-                        |machine| machine.id.clone(),
-                        machine_profile_to_value,
-                        save_cnc_profiles,
-                    );
-                }
-                PersistRealm::FixtureProfiles => {
-                    self.persist_profile_map_realm(
-                        "fixture_profiles",
-                        &app_dirs,
-                        &self.fixtures,
-                        |fixture| fixture.id.clone(),
-                        fixture_profile_to_value,
-                        save_fixture_profiles,
-                    );
-                }
                 PersistRealm::ProcessingProfiles => {
-                    if persist_processing && persist_toolset {
-                        continue;
-                    }
                     self.persist_profile_map_realm(
                         "processing_profiles",
                         &app_dirs,
@@ -282,12 +228,6 @@ impl AppState {
                         process_profile_to_value,
                         save_processing_profiles,
                     );
-                }
-                PersistRealm::ToolsetProfiles => {
-                    if persist_processing && persist_toolset {
-                        continue;
-                    }
-                    self.persist_toolset_profiles(&app_dirs)
                 }
                 PersistRealm::Stock => self.persist_stock(&app_dirs),
             }
@@ -326,28 +266,24 @@ impl AppState {
         })
     }
 
-    fn persist_stock(&self, app_dirs: &AppDirs) {
-        let stock = stock_value_from_tools(&self.tools);
-        match save_stock(&app_dirs, &stock) {
-            Ok(()) => log::info!("Persisted stock: tool_count={}", self.tools.len()),
-            Err(err) => log::warn!("Failed to persist stock: {err}"),
+    /// Persists the stock realm. `stock.yaml` is owned by the AppData datastore
+    /// (see [`crate::data`]), which is the sole writer: the in-memory tool list is
+    /// the edit buffer and is mirrored down to the datastore singleton here. The
+    /// legacy `save_stock` path is retired. Guarded on `appdata_ready` so early or
+    /// test contexts (no live store) are a no-op rather than a panic.
+    fn persist_stock(&self, _app_dirs: &AppDirs) {
+        if !crate::data::appdata_ready() {
+            return;
         }
+        let stock = stock_value_from_tools(&self.tools);
+        crate::data::with_appdata_mut(|data| {
+            data.replace_stock_from_value(&stock);
+        });
+        log::info!("Persisted stock via AppData: tool_count={}", self.tools.len());
     }
 
     fn persist_stock_snapshot(&self) {
         self.persist_realms(&[PersistRealm::Stock]);
-    }
-
-    fn persist_toolset_profiles(&self, app_dirs: &AppDirs) {
-        let toolset_profiles = build_toolset_profiles(&self.toolsets);
-        match save_toolset_profiles(&app_dirs, &toolset_profiles) {
-            Ok(()) => log::info!(
-                "Persisted toolset profiles: count={} selected={}",
-                toolset_profiles.len(),
-                self.selected_toolset_id.clone().unwrap_or_default(),
-            ),
-            Err(err) => log::warn!("Failed to persist toolset profiles: {err}"),
-        }
     }
 
     fn persist_profile_map_realm<T>(
@@ -432,46 +368,14 @@ impl AppState {
         self.errors.retain(|error| error.domain != domain);
     }
 
-    fn clear_runtime_errors_for_owner(&mut self, domain: &str, owner_tag: &str) {
-        self.errors.retain(|error| {
-            !(error.domain == domain && error.owner_tag.as_deref() == Some(owner_tag))
-        });
-    }
-
     fn profile_owner_tag(kind: &str, id: &str) -> String {
         format!("{kind}:{id}")
-    }
-
-    pub fn revalidate_current_job_references_for_owner(&mut self, owner_tag: &str) {
-        self.clear_runtime_errors_for_owner("current-job-ref", owner_tag);
-        for issue in self
-            .current_job_reference_errors()
-            .into_iter()
-            .filter(|issue| issue.owner_tag.as_deref() == Some(owner_tag))
-        {
-            self.push_runtime_error_owned(
-                &issue.domain,
-                issue.owner_tag,
-                issue.message,
-                issue.details,
-            );
-        }
-    }
-
-    pub fn mark_last_edited_process_profile(&mut self, id: Option<String>) {
-        self.last_edited_process_profile_id = id;
     }
 
     pub fn selected_machine(&self) -> Option<&MachineProfile> {
         self.selected_machine_id
             .as_ref()
             .and_then(|id| self.machines.iter().find(|m| &m.id == id))
-    }
-
-    pub fn selected_fixture(&self) -> Option<&FixtureProfile> {
-        self.selected_fixture_id
-            .as_ref()
-            .and_then(|id| self.fixtures.iter().find(|fixture| &fixture.id == id))
     }
 
     pub fn selected_process_profile(&self) -> Option<&JobProfile> {
@@ -785,89 +689,6 @@ impl AppState {
         locations
     }
 
-    fn unique_process_profile_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
-        let trimmed = base_name.trim();
-        let base = if trimmed.is_empty() {
-            "Machining profile".to_string()
-        } else {
-            trimmed.to_string()
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} ({})", base, index)
-            };
-
-            let exists = self
-                .process_profiles
-                .iter()
-                .any(|profile| Some(profile.id.as_str()) != exclude_id && profile.name == candidate);
-
-            if !exists {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    pub fn rename_selected_process_profile(&mut self, new_name: &str) -> Result<String, String> {
-        let Some(selected) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let unique = self.unique_process_profile_name(new_name, Some(selected.as_str()));
-        if unique != new_name.trim() {
-            return Err(format!("Profile name must be unique. Suggested: {}", unique));
-        }
-
-        if let Some(target) = self.process_profiles.iter_mut().find(|profile| profile.id == selected) {
-            target.name = unique.clone();
-            target.pending_required_fields.remove("name");
-            target.usable = target.pending_required_fields.is_empty();
-            self.last_edited_process_profile_id = Some(selected);
-            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-            return Ok(unique);
-        }
-
-        Err("Selected machining profile was not found".to_string())
-    }
-
-    pub fn clone_selected_process_profile(&mut self) -> Result<String, String> {
-        let Some(current) = self.selected_process_profile().cloned() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let clone_name_seed = format!("{} - copy", current.name.trim());
-        let unique_name = self.unique_process_profile_name(&clone_name_seed, None);
-        let id = Uuid::now_v7().to_string();
-
-        self.process_profiles.push(JobProfile {
-            id: id.clone(),
-            name: unique_name,
-            cnc_profile_id: current.cnc_profile_id,
-            cnc_profile_choices: current.cnc_profile_choices,
-            fixture_profile_id: current.fixture_profile_id,
-            fixture_profile_choices: current.fixture_profile_choices,
-            toolset_profile_id: current.toolset_profile_id,
-            toolset_profile_choices: current.toolset_profile_choices,
-            side: current.side,
-            default_operations: current.default_operations,
-            cut_depth_strategy: current.cut_depth_strategy,
-            multi_pass_max_depth: current.multi_pass_max_depth,
-            operation_setups: current.operation_setups,
-            pending_required_fields: current.pending_required_fields,
-            usable: current.usable,
-        });
-
-        self.select_process_profile_by_id(Some(id.clone()));
-        self.last_edited_process_profile_id = Some(id.clone());
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(id)
-    }
-
     #[allow(dead_code)]
     pub fn set_selected_process_profile_cnc(&mut self, cnc_id: &str) -> Result<(), String> {
         self.set_selected_process_profile_cnc_binding(cnc_id, &[cnc_id.to_string()])
@@ -1042,596 +863,10 @@ impl AppState {
         Err("Selected machining profile was not found".to_string())
     }
 
-    pub fn import_process_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
-        let yaml_value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|_| "Machining profile import failed: invalid YAML".to_string())?;
-        let json_value: Value = serde_json::to_value(yaml_value)
-            .map_err(|_| "Machining profile import failed: invalid data".to_string())?;
-        let mut profile = process_profile_from_value(&json_value)
-            .ok_or_else(|| "Machining profile import failed: non-UUID id/reference detected".to_string())?;
-
-        profile.name = self.unique_process_profile_name(&profile.name, None);
-        profile.id = Uuid::now_v7().to_string();
-
-        if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
-            profile.cnc_profile_id = self
-                .selected_machine_id
-                .clone()
-                .or_else(|| self.machines.first().map(|machine| machine.id.clone()))
-                .ok_or_else(|| "Machining profile import failed: no CNC profile is available".to_string())?;
-        }
-        if profile.cnc_profile_choices.is_empty() {
-            profile.cnc_profile_choices = vec![profile.cnc_profile_id.clone()];
-        }
-
-        if !self.fixtures.iter().any(|fixture| fixture.id == profile.fixture_profile_id) {
-            profile.fixture_profile_id = self
-                .selected_fixture_id
-                .clone()
-                .or_else(|| self.fixtures.first().map(|fixture| fixture.id.clone()))
-                .ok_or_else(|| "Machining profile import failed: no fixture profile is available".to_string())?;
-        }
-        if profile.fixture_profile_choices.is_empty() {
-            profile.fixture_profile_choices = vec![profile.fixture_profile_id.clone()];
-        }
-
-        if !self.toolsets.iter().any(|toolset| toolset.id == profile.toolset_profile_id) {
-            profile.toolset_profile_id = self
-                .selected_toolset_id
-                .clone()
-                .or_else(|| self.toolsets.first().map(|toolset| toolset.id.clone()))
-                .ok_or_else(|| "Machining profile import failed: no toolset profile is available".to_string())?;
-        }
-        if profile.toolset_profile_choices.is_empty() {
-            profile.toolset_profile_choices = vec![profile.toolset_profile_id.clone()];
-        }
-
-        let selected = profile.id.clone();
-        self.process_profiles.push(profile);
-        self.select_process_profile_by_id(Some(selected.clone()));
-        self.last_edited_process_profile_id = Some(selected.clone());
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(selected)
-    }
-
-    pub fn export_selected_process_profile_yaml(&self) -> Result<String, String> {
-        let Some(profile) = self.selected_process_profile() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let value = process_profile_to_value(profile);
-        let yaml_value: serde_yaml::Value =
-            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
-        serde_yaml::to_string(&yaml_value)
-            .map_err(|_| "Export failed: unable to write YAML".to_string())
-    }
-
-    fn unique_toolset_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
-        let trimmed = base_name.trim();
-        let base = if trimmed.is_empty() {
-            "Toolset profile".to_string()
-        } else {
-            trimmed.to_string()
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} ({})", base, index)
-            };
-
-            let exists = self
-                .toolsets
-                .iter()
-                .any(|profile| Some(profile.id.as_str()) != exclude_id && profile.name == candidate);
-
-            if !exists {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    fn make_toolset_id(&self, _base_name: &str) -> String {
-        loop {
-            let candidate = Uuid::now_v7().to_string();
-            if !self.toolsets.iter().any(|profile| profile.id == candidate) {
-                return candidate;
-            }
-        }
-    }
-
-    fn new_toolset_profile(&self, base_name: &str, slot_count: u8) -> ToolsetProfile {
-        let unique_name = self.unique_toolset_name(base_name, None);
-        let mut defaults = schema_defaults_from_text(TOOLSET_SCHEMA_TEXT);
-        if let Some(obj) = defaults.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(self.make_toolset_id(&unique_name)));
-            obj.insert("name".to_string(), Value::String(unique_name));
-            if slot_count > 0 {
-                let slots = (1..=slot_count)
-                    .map(|idx| {
-                        json!({
-                            "index": idx,
-                            "mode": "spare",
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                obj.insert("slots".to_string(), Value::Array(slots));
-            }
-        }
-        toolset_profile_from_value(&defaults).unwrap_or_else(|| ToolsetProfile {
-            id: self.make_toolset_id(base_name),
-            name: self.unique_toolset_name(base_name, None),
-            description: String::new(),
-            generation_policy: ToolsetGenerationPolicy::AllowHybrid,
-            slots: BTreeMap::new(),
-            pending_required_fields: BTreeSet::from(["slots".to_string()]),
-            usable: false,
-        })
-    }
-
-    pub fn add_toolset_profile(&mut self, name: &str) {
-        let profile = self.new_toolset_profile(name, 0);
-        let selected = profile.id.clone();
-        self.rack_slots = profile.slots.clone();
-        self.toolsets.push(profile);
-        self.select_toolset_profile_by_id(Some(selected));
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-        if let Some(toolset_id) = self.selected_toolset_id.clone() {
-            let owner_tag = Self::profile_owner_tag("toolset", &toolset_id);
-            self.revalidate_current_job_references_for_owner(&owner_tag);
-        }
-    }
-
-    pub fn clone_selected_toolset_profile(&mut self) -> Result<String, String> {
-        let Some(current) = self.selected_toolset().cloned() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        let clone_name_seed = format!("{} - copy", current.name.trim());
-        let unique_name = self.unique_toolset_name(&clone_name_seed, None);
-        let id = self.make_toolset_id(&unique_name);
-
-        self.toolsets.push(ToolsetProfile {
-            id: id.clone(),
-            name: unique_name,
-            description: current.description,
-            generation_policy: current.generation_policy,
-            slots: current.slots,
-            pending_required_fields: current.pending_required_fields,
-            usable: current.usable,
-        });
-
-        self.select_toolset_profile_by_id(Some(id.clone()));
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-        let owner_tag = Self::profile_owner_tag("toolset", &id);
-        self.revalidate_current_job_references_for_owner(&owner_tag);
-        Ok(id)
-    }
-
-    pub fn rename_selected_toolset_profile(&mut self, new_name: &str) -> Result<String, String> {
-        let Some(selected) = self.selected_toolset_id.clone() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        let unique = self.unique_toolset_name(new_name, Some(selected.as_str()));
-        if unique != new_name.trim() {
-            return Err(format!("Profile name must be unique. Suggested: {}", unique));
-        }
-
-        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
-            target.name = unique.clone();
-            target.pending_required_fields.remove("name");
-            target.usable = target.pending_required_fields.is_empty();
-            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-            let owner_tag = Self::profile_owner_tag("toolset", &selected);
-            self.revalidate_current_job_references_for_owner(&owner_tag);
-            return Ok(unique);
-        }
-
-        Err("Selected toolset profile was not found".to_string())
-    }
-
-    pub fn update_selected_toolset_description(&mut self, description: &str) -> Result<(), String> {
-        let Some(selected) = self.selected_toolset_id.clone() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
-            target.description = description.to_string();
-            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-            let owner_tag = Self::profile_owner_tag("toolset", &selected);
-            self.revalidate_current_job_references_for_owner(&owner_tag);
-            return Ok(());
-        }
-
-        Err("Selected toolset profile was not found".to_string())
-    }
-
-    pub fn set_selected_toolset_generation_policy(&mut self, policy_key: &str) -> Result<(), String> {
-        let Some(selected) = self.selected_toolset_id.clone() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        if let Some(target) = self.toolsets.iter_mut().find(|profile| profile.id == selected) {
-            target.generation_policy = ToolsetGenerationPolicy::from_key(policy_key);
-            target.pending_required_fields.remove("generation_policy");
-            target.usable = target.pending_required_fields.is_empty();
-            self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-            let owner_tag = Self::profile_owner_tag("toolset", &selected);
-            self.revalidate_current_job_references_for_owner(&owner_tag);
-            return Ok(());
-        }
-
-        Err("Selected toolset profile was not found".to_string())
-    }
-
-    pub fn set_selected_toolset_slot_mode(
-        &mut self,
-        slot_index: u8,
-        mode: &str,
-        tool_id: Option<String>,
-    ) -> Result<(), String> {
-        let Some(selected) = self.selected_toolset_id.clone() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        let Some(profile) = self.toolsets.iter_mut().find(|profile| profile.id == selected) else {
-            return Err("Selected toolset profile was not found".to_string());
-        };
-
-        let slot = profile
-            .slots
-            .entry(slot_index)
-            .or_insert(RackSlot {
-                tool_id: None,
-                locked: false,
-                disabled: false,
-            });
-
-        match mode {
-            "fixed" => {
-                slot.disabled = false;
-                slot.locked = true;
-                slot.tool_id = tool_id;
-            }
-            "do_not_use" => {
-                slot.disabled = true;
-                slot.locked = false;
-                slot.tool_id = None;
-            }
-            _ => {
-                slot.disabled = false;
-                slot.locked = false;
-                slot.tool_id = None;
-            }
-        }
-
-        if !profile.slots.is_empty() {
-            profile.pending_required_fields.remove("slots");
-        }
-        profile.usable = profile.pending_required_fields.is_empty();
-
-        self.rack_slots = profile.slots.clone();
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-        let owner_tag = Self::profile_owner_tag("toolset", &selected);
-        self.revalidate_current_job_references_for_owner(&owner_tag);
-        Ok(())
-    }
-
-    pub fn set_selected_toolset_slot_count(&mut self, slot_count: u8) -> Result<(), String> {
-        let Some(selected) = self.selected_toolset_id.clone() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        let target_count = slot_count.max(1);
-        let Some(profile) = self.toolsets.iter_mut().find(|profile| profile.id == selected) else {
-            return Err("Selected toolset profile was not found".to_string());
-        };
-
-        profile.slots.retain(|slot, _| *slot <= target_count);
-        for slot in 1..=target_count {
-            profile.slots.entry(slot).or_insert(RackSlot {
-                tool_id: None,
-                locked: false,
-                disabled: false,
-            });
-        }
-
-        if !profile.slots.is_empty() {
-            profile.pending_required_fields.remove("slots");
-        }
-        profile.usable = profile.pending_required_fields.is_empty();
-
-        self.rack_slots = profile.slots.clone();
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-        let owner_tag = Self::profile_owner_tag("toolset", &selected);
-        self.revalidate_current_job_references_for_owner(&owner_tag);
-        Ok(())
-    }
-
-    pub fn import_toolset_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
-        let yaml_value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|_| "Toolset profile import failed: invalid YAML".to_string())?;
-        let json_value: Value = serde_json::to_value(yaml_value)
-            .map_err(|_| "Toolset profile import failed: invalid data".to_string())?;
-        let mut imported = toolset_profile_from_value(&json_value)
-            .ok_or_else(|| "Toolset profile import failed: non-UUID id/reference detected".to_string())?;
-
-        imported.name = self.unique_toolset_name(&imported.name, None);
-        imported.id = self.make_toolset_id(&imported.name);
-        let selected = imported.id.clone();
-        self.rack_slots = imported.slots.clone();
-        self.toolsets.push(imported);
-        self.select_toolset_profile_by_id(Some(selected.clone()));
-        self.persist_realms(&[PersistRealm::ToolsetProfiles]);
-        let owner_tag = Self::profile_owner_tag("toolset", &selected);
-        self.revalidate_current_job_references_for_owner(&owner_tag);
-        Ok(selected)
-    }
-
-    pub fn export_selected_toolset_yaml(&self) -> Result<String, String> {
-        let Some(profile) = self.selected_toolset() else {
-            return Err("No toolset profile selected".to_string());
-        };
-
-        let value = toolset_profile_to_value(profile);
-        let yaml_value: serde_yaml::Value =
-            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
-        serde_yaml::to_string(&yaml_value)
-            .map_err(|_| "Export failed: unable to write YAML".to_string())
-    }
-
-    pub fn toggle_selected_process_profile_operation(
-        &mut self,
-        op: ProductionOperation,
-    ) -> Result<(), String> {
-        let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        if let Some(profile) = self
-            .process_profiles
-            .iter_mut()
-            .find(|profile| profile.id == selected_id)
-        {
-            if let Some(index) = profile
-                .default_operations
-                .iter()
-                .position(|existing| *existing == op)
-            {
-                profile.default_operations.remove(index);
-                if let Some(setup) = profile.operation_setups.get_mut(operation_to_key(op)) {
-                    if let Some(obj) = setup.as_object_mut() {
-                        obj.insert("enabled".to_string(), Value::Bool(false));
-                    }
-                }
-            } else {
-                profile.default_operations.push(op);
-                let entry = profile
-                    .operation_setups
-                    .entry(operation_to_key(op).to_string())
-                    .or_insert_with(|| default_operation_setup_value(op));
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("enabled".to_string(), Value::Bool(true));
-                }
-            }
-
-            if !profile.default_operations.is_empty() {
-                profile.pending_required_fields.remove("operations");
-            }
-            profile.usable = profile.pending_required_fields.is_empty();
-
-            self.select_process_profile_by_id(Some(selected_id));
-            self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
-            self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-            return Ok(());
-        }
-
-        Err("Selected machining profile was not found".to_string())
-    }
-
-    pub fn set_selected_process_profile_side(&mut self, side: Side) -> Result<(), String> {
-        let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let Some(profile) = self
-            .process_profiles
-            .iter_mut()
-            .find(|profile| profile.id == selected_id)
-        else {
-            return Err("Selected machining profile was not found".to_string());
-        };
-
-        profile.side = side;
-        self.select_process_profile_by_id(Some(selected_id));
-        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(())
-    }
-
-    pub fn set_selected_process_profile_cut_depth_strategy(
-        &mut self,
-        strategy: CutDepthStrategy,
-    ) -> Result<(), String> {
-        let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let Some(profile) = self
-            .process_profiles
-            .iter_mut()
-            .find(|profile| profile.id == selected_id)
-        else {
-            return Err("Selected machining profile was not found".to_string());
-        };
-
-        profile.cut_depth_strategy = strategy;
-        self.select_process_profile_by_id(Some(selected_id));
-        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(())
-    }
-
-    pub fn set_selected_process_profile_multi_pass_max_depth_mm(
-        &mut self,
-        depth_mm: f32,
-    ) -> Result<(), String> {
-        let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let Some(profile) = self
-            .process_profiles
-            .iter_mut()
-            .find(|profile| profile.id == selected_id)
-        else {
-            return Err("Selected machining profile was not found".to_string());
-        };
-
-        profile.multi_pass_max_depth = units::Length::from_mm(depth_mm.max(0.01) as f64);
-        self.select_process_profile_by_id(Some(selected_id));
-        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(())
-    }
-
-    pub fn set_selected_process_operation_bool(
-        &mut self,
-        op: ProductionOperation,
-        path: &[&str],
-        value: bool,
-    ) -> Result<(), String> {
-        self.set_selected_process_operation_value(op, path, Value::Bool(value))
-    }
-
-    pub fn set_selected_process_operation_string(
-        &mut self,
-        op: ProductionOperation,
-        path: &[&str],
-        value: String,
-    ) -> Result<(), String> {
-        self.set_selected_process_operation_value(op, path, Value::String(value))
-    }
-
-    pub fn set_selected_process_operation_u64(
-        &mut self,
-        op: ProductionOperation,
-        path: &[&str],
-        value: u64,
-    ) -> Result<(), String> {
-        self.set_selected_process_operation_value(op, path, Value::Number(value.into()))
-    }
-
-    fn set_selected_process_operation_value(
-        &mut self,
-        op: ProductionOperation,
-        path: &[&str],
-        value: Value,
-    ) -> Result<(), String> {
-        if path.is_empty() {
-            return Err("Operation config path is empty".to_string());
-        }
-
-        let Some(selected_id) = self.selected_process_profile_id.clone() else {
-            return Err("No machining profile selected".to_string());
-        };
-
-        let Some(profile) = self
-            .process_profiles
-            .iter_mut()
-            .find(|profile| profile.id == selected_id)
-        else {
-            return Err("Selected machining profile was not found".to_string());
-        };
-
-        let setup = profile
-            .operation_setups
-            .entry(operation_to_key(op).to_string())
-            .or_insert_with(|| default_operation_setup_value(op));
-
-        set_nested_value(setup, path, value);
-
-        if !profile.default_operations.iter().any(|existing| *existing == op) {
-            profile.default_operations.push(op);
-        }
-
-        if let Some(obj) = setup.as_object_mut() {
-            obj.insert("enabled".to_string(), Value::Bool(true));
-        }
-
-        if !profile.default_operations.is_empty() {
-            profile.pending_required_fields.remove("operations");
-        }
-        profile.usable = profile.pending_required_fields.is_empty();
-
-        self.select_process_profile_by_id(Some(selected_id));
-        self.last_edited_process_profile_id = self.selected_process_profile_id.clone();
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        Ok(())
-    }
-
     pub fn selected_machine_has_atc(&self) -> bool {
         self.selected_machine()
             .map(|m| m.atc_slot_count > 0)
             .unwrap_or(false)
-    }
-
-    fn make_machine_id(&self, _base_name: &str) -> String {
-        loop {
-            let candidate = Uuid::now_v7().to_string();
-            if !self.machines.iter().any(|m| m.id == candidate) {
-                return candidate;
-            }
-        }
-    }
-
-    pub fn unique_machine_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
-        let trimmed = base_name.trim();
-        let base = if trimmed.is_empty() {
-            "CNC profile".to_string()
-        } else {
-            trimmed.to_string()
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} ({})", base, index)
-            };
-
-            let exists = self
-                .machines
-                .iter()
-                .any(|m| Some(m.id.as_str()) != exclude_id && m.name == candidate);
-
-            if !exists {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    pub fn unique_copy_name(&self, source_name: &str) -> String {
-        let base = format!("{} - copy", source_name.trim());
-        let first = self.unique_machine_name(&base, None);
-        if first == base {
-            return first;
-        }
-
-        let mut index = 2usize;
-        loop {
-            let candidate = format!("{} - copy ({})", source_name.trim(), index);
-            if !self.machines.iter().any(|m| m.name == candidate) {
-                return candidate;
-            }
-            index += 1;
-        }
     }
 
     pub fn select_machine_profile_by_id(&mut self, id: Option<String>) {
@@ -1643,257 +878,83 @@ impl AppState {
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
-    pub fn add_machine_profile(&mut self, mut profile: MachineProfile) {
-        profile.built_in = false;
-        profile.name = self.unique_machine_name(&profile.name, None);
-        profile.id = self.make_machine_id(&profile.name);
-        let selected = profile.id.clone();
-        self.machines.push(profile.clone());
-        self.seed_rack_slots(profile.atc_slot_count);
-        self.show_first_launch = false;
-        self.select_machine_profile_by_id(Some(selected));
-
-        self.persist_realms(&[
-            PersistRealm::CncProfiles,
-            PersistRealm::ProcessingProfiles,
-            PersistRealm::ToolsetProfiles,
-            PersistRealm::GlobalSettings,
-        ]);
-    }
-
-    pub fn add_machine_profile_from_schema(&mut self, name: &str) {
-        let mut defaults = schema_defaults_from_text(CNC_SCHEMA_TEXT);
-        let unique_name = self.unique_machine_name(name, None);
-        if let Some(obj) = defaults.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(Uuid::now_v7().to_string()));
-            obj.insert("name".to_string(), Value::String(unique_name));
+    /// Rebuilds the in-memory CNC machine list from the `AppData`-owned CNC
+    /// documents (serialized to JSON values). AppData persists the CNC realm;
+    /// this projection keeps the legacy consumers — the GCode generator, the
+    /// setup screen list, and the active machine selection — coherent while the
+    /// two layers coexist. Selection and MRU entries whose profiles no longer
+    /// exist are pruned. Does not itself persist (AppData already wrote the file).
+    pub fn refresh_machines(&mut self, values: &[Value]) {
+        let machines: Vec<MachineProfile> =
+            values.iter().filter_map(machine_profile_from_value).collect();
+        if !machines.is_empty() {
+            self.show_first_launch = false;
         }
 
-        if let Some(profile) = machine_profile_from_value(&defaults) {
-            self.add_machine_profile(profile);
-        }
-    }
-
-    pub fn rename_selected_machine(&mut self, new_name: &str) -> Result<String, String> {
-        let Some(selected) = self.selected_machine_id.clone() else {
-            return Err("No CNC profile selected".to_string());
-        };
-
-        let unique = self.unique_machine_name(new_name, Some(selected.as_str()));
-        if unique != new_name.trim() {
-            return Err(format!("Profile name must be unique. Suggested: {}", unique));
-        }
-
-        if let Some(target) = self.machines.iter_mut().find(|m| m.id == selected) {
-            target.name = unique.clone();
-            let renamed = target.name.clone();
-            self.persist_realms(&[PersistRealm::CncProfiles]);
-            return Ok(renamed);
-        }
-
-        Err("Selected CNC profile was not found".to_string())
-    }
-
-    #[allow(dead_code)]
-    pub fn add_demo_machine(&mut self) {
-        let machine = MachineProfile {
-            name: format!("Demo CNC profile {}", self.machines.len() + 1),
-            max_feed_rate: units::FeedRate::from_mm_per_min(2000.0),
-            spindle_rpm_min: units::RotationalSpeed::from_rpm(5000.0),
-            spindle_rpm_max: units::RotationalSpeed::from_rpm(24000.0),
-            atc_slot_count: 8,
-            ..MachineProfile::default()
-        };
-
-        self.add_machine_profile(machine);
-    }
-
-    pub fn clone_selected_machine(&mut self) {
-        let Some(current) = self.selected_machine().cloned() else {
-            return;
-        };
-
-        let name = self.unique_copy_name(&current.name);
-        let clone = MachineProfile {
-            id: String::new(),
-            name,
-            built_in: false,
-            ..current
-        };
-
-        self.add_machine_profile(clone);
-        self.focus_profile_name_editor = true;
-    }
-
-    pub fn add_fixture_profile(&mut self, name: &str) {
-        let unique_name = self.unique_fixture_name(name, None);
-        let fixture_id = Uuid::now_v7().to_string();
-        let mut defaults = schema_defaults_from_text(FIXTURE_SCHEMA_TEXT);
-        if let Some(obj) = defaults.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(fixture_id.clone()));
-            obj.insert("name".to_string(), Value::String(unique_name));
-        }
-        if let Some(profile) = fixture_profile_from_value(&defaults) {
-            self.fixtures.push(profile);
-            self.selected_fixture_id = Some(fixture_id);
-            self.persist_realms(&[PersistRealm::FixtureProfiles]);
-        }
-    }
-
-    fn unique_fixture_name(&self, base_name: &str, exclude_id: Option<&str>) -> String {
-        let trimmed = base_name.trim();
-        let base = if trimmed.is_empty() {
-            "Fixture profile".to_string()
-        } else {
-            trimmed.to_string()
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} ({})", base, index)
-            };
-
-            let exists = self
-                .fixtures
-                .iter()
-                .any(|fixture| Some(fixture.id.as_str()) != exclude_id && fixture.name == candidate);
-
-            if !exists {
-                return candidate;
+        let ids: BTreeSet<String> = machines.iter().map(|m| m.id.clone()).collect();
+        self.machine_mru.retain(|id| ids.contains(id));
+        if let Some(selected) = self.selected_machine_id.clone() {
+            if !ids.contains(&selected) {
+                self.selected_machine_id = machines.first().map(|m| m.id.clone());
             }
-            index += 1;
-        }
-    }
-
-    pub fn clone_selected_fixture_profile(&mut self) -> Result<String, String> {
-        let Some(current) = self.selected_fixture().cloned() else {
-            return Err("No fixture profile selected".to_string());
-        };
-
-        let clone_name_seed = format!("{} - copy", current.name.trim());
-        let unique_name = self.unique_fixture_name(&clone_name_seed, None);
-        let fixture_id = Uuid::now_v7().to_string();
-
-        self.fixtures.push(FixtureProfile {
-            id: fixture_id.clone(),
-            name: unique_name,
-            coordinate_context: current.coordinate_context,
-            backing_board: current.backing_board,
-            pending_required_fields: current.pending_required_fields,
-            usable: current.usable,
-        });
-
-        self.selected_fixture_id = Some(fixture_id.clone());
-        self.persist_realms(&[PersistRealm::FixtureProfiles]);
-        Ok(fixture_id)
-    }
-
-    pub fn rename_selected_fixture_profile(&mut self, new_name: &str) -> Result<String, String> {
-        let Some(selected) = self.selected_fixture_id.clone() else {
-            return Err("No fixture profile selected".to_string());
-        };
-
-        let unique = self.unique_fixture_name(new_name, Some(selected.as_str()));
-        if unique != new_name.trim() {
-            return Err(format!("Profile name must be unique. Suggested: {}", unique));
         }
 
-        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
-            target.name = unique.clone();
-            target.pending_required_fields.remove("name");
-            target.usable = target.pending_required_fields.is_empty();
-            self.persist_realms(&[PersistRealm::FixtureProfiles]);
-            return Ok(unique);
-        }
-
-        Err("Selected fixture profile was not found".to_string())
+        self.machines = machines;
     }
 
-    pub fn update_selected_fixture_coordinate_context(&mut self, value: &str) -> Result<(), String> {
-        let Some(selected) = self.selected_fixture_id.clone() else {
-            return Err("No fixture profile selected".to_string());
-        };
+    /// Rebuilds the in-memory machining (process) profile list from the
+    /// `AppData`-owned machining documents. AppData persists that realm; this
+    /// projection keeps the legacy consumers — the GCode generator and the active
+    /// selection — coherent while the two layers coexist. A selection whose
+    /// profile no longer exists is repointed. Does not itself persist.
+    pub fn refresh_process_profiles(&mut self, values: &[Value]) {
+        let profiles: Vec<JobProfile> =
+            values.iter().filter_map(process_profile_from_value).collect();
 
-        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
-            target.coordinate_context = value.to_string();
-            if !value.trim().is_empty() {
-                target.pending_required_fields.remove("work_origin_reference");
-                target.pending_required_fields.remove("work_origin_reference.z0_reference");
+        let ids: BTreeSet<String> = profiles.iter().map(|p| p.id.clone()).collect();
+        if let Some(selected) = self.selected_process_profile_id.clone() {
+            if !ids.contains(&selected) {
+                self.selected_process_profile_id = profiles.first().map(|p| p.id.clone());
             }
-            target.usable = target.pending_required_fields.is_empty();
-            self.persist_realms(&[PersistRealm::FixtureProfiles]);
-            return Ok(());
         }
 
-        Err("Selected fixture profile was not found".to_string())
+        self.process_profiles = profiles;
     }
 
-    pub fn update_selected_fixture_backing_board(&mut self, value: &str) -> Result<(), String> {
-        let Some(selected) = self.selected_fixture_id.clone() else {
-            return Err("No fixture profile selected".to_string());
-        };
+    /// Rebuilds the in-memory toolset list from the `AppData`-owned toolset
+    /// documents, and refreshes the active `rack_slots` from the selected toolset.
+    /// AppData persists that realm; this projection keeps the legacy consumers —
+    /// the GCode generator and the rack view — coherent. A selection whose toolset
+    /// no longer exists is repointed. Does not itself persist.
+    pub fn refresh_toolsets(&mut self, values: &[Value]) {
+        let toolsets: Vec<ToolsetProfile> =
+            values.iter().filter_map(toolset_profile_from_value).collect();
 
-        if let Some(target) = self.fixtures.iter_mut().find(|fixture| fixture.id == selected) {
-            target.backing_board = value.to_string();
-            if !value.trim().is_empty() {
-                target.pending_required_fields.remove("board_holding_method");
+        let ids: BTreeSet<String> = toolsets.iter().map(|t| t.id.clone()).collect();
+        if let Some(selected) = self.selected_toolset_id.clone() {
+            if !ids.contains(&selected) {
+                self.selected_toolset_id = toolsets.first().map(|t| t.id.clone());
             }
-            target.usable = target.pending_required_fields.is_empty();
-            self.persist_realms(&[PersistRealm::FixtureProfiles]);
-            return Ok(());
         }
 
-        Err("Selected fixture profile was not found".to_string())
-    }
+        self.toolsets = toolsets;
 
-    pub fn import_fixture_profile_yaml(&mut self, yaml: &str) -> Result<String, String> {
-        let yaml_value: serde_yaml::Value =
-            serde_yaml::from_str(yaml).map_err(|_| "Fixture profile import failed: invalid YAML".to_string())?;
-        let json_value: Value = serde_json::to_value(yaml_value)
-            .map_err(|_| "Fixture profile import failed: invalid data".to_string())?;
-        let mut profile = fixture_profile_from_value(&json_value)
-            .ok_or_else(|| "Fixture profile import failed: non-UUID id detected".to_string())?;
-
-        profile.name = self.unique_fixture_name(&profile.name, None);
-        profile.id = Uuid::now_v7().to_string();
-        let selected = profile.id.clone();
-        self.fixtures.push(profile);
-        self.selected_fixture_id = Some(selected.clone());
-        self.persist_realms(&[PersistRealm::FixtureProfiles]);
-        Ok(selected)
-    }
-
-    pub fn export_selected_fixture_yaml(&self) -> Result<String, String> {
-        let Some(profile) = self.selected_fixture() else {
-            return Err("No fixture profile selected".to_string());
-        };
-
-        let value = fixture_profile_to_value(profile);
-        let yaml_value: serde_yaml::Value =
-            serde_json::from_value(value).map_err(|_| "Export failed: unable to serialize profile".to_string())?;
-        serde_yaml::to_string(&yaml_value)
-            .map_err(|_| "Export failed: unable to write YAML".to_string())
-    }
-
-    pub fn add_process_profile(&mut self, name: &str) {
-        let unique_name = self.unique_process_profile_name(name, None);
-        let id = Uuid::now_v7().to_string();
-        let mut defaults = schema_defaults_from_text(PROCESSING_SCHEMA_TEXT);
-        if let Some(obj) = defaults.as_object_mut() {
-            obj.insert("id".to_string(), Value::String(id.clone()));
-            obj.insert("name".to_string(), Value::String(unique_name));
+        match self
+            .selected_toolset_id
+            .clone()
+            .and_then(|sel| self.toolsets.iter().find(|t| t.id == sel))
+        {
+            Some(toolset) => self.rack_slots = toolset.slots.clone(),
+            None => self.rack_slots.clear(),
         }
+    }
 
-        let Some(profile) = process_profile_from_value(&defaults) else {
-            return;
-        };
-        self.process_profiles.push(profile);
-        self.select_process_profile_by_id(Some(id.clone()));
-        self.last_edited_process_profile_id = Some(id);
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
+    /// Rebuilds the in-memory `tools` (stock inventory) from the `AppData`-owned
+    /// stock document. AppData persists the stock singleton; this projection keeps
+    /// the legacy consumers — the GCode generator and the toolset rack picker —
+    /// coherent. Does not itself persist.
+    pub fn refresh_tools(&mut self, stock_value: &Value) {
+        self.tools = tools_from_stock_value(stock_value);
     }
 
     pub fn impact_delete_cnc_profile(&self, cnc_id: &str) -> CascadeDeleteImpact {
@@ -1968,207 +1029,6 @@ impl AppState {
         impact
     }
 
-    pub fn impact_delete_process_profile(&self, process_profile_id: &str) -> CascadeDeleteImpact {
-        let mut impact = CascadeDeleteImpact::default();
-        if let Some(profile) = self
-            .process_profiles
-            .iter()
-            .find(|profile| profile.id == process_profile_id)
-        {
-            impact
-                .primary_profiles
-                .push(format!("Machining profile: {}", profile.name));
-        }
-        if self
-            .selected_process_profile_id
-            .as_deref()
-            .map(|id| id == process_profile_id)
-            .unwrap_or(false)
-        {
-            impact.deleted_live_projects.push("Active job session".to_string());
-        }
-        impact
-    }
-
-    pub fn impact_delete_toolset_profile(&self, toolset_id: &str) -> CascadeDeleteImpact {
-        let mut impact = CascadeDeleteImpact::default();
-        if let Some(toolset) = self.toolsets.iter().find(|item| item.id == toolset_id) {
-            impact
-                .primary_profiles
-                .push(format!("Toolset profile: {}", toolset.name));
-        }
-
-        let dependent_ids: BTreeSet<String> = self
-            .process_profiles
-            .iter()
-            .filter(|profile| profile.toolset_profile_id == toolset_id)
-            .map(|profile| profile.id.clone())
-            .collect();
-
-        for profile in self
-            .process_profiles
-            .iter()
-            .filter(|profile| dependent_ids.contains(&profile.id))
-        {
-            impact
-                .dependent_process_profiles
-                .push(format!("Machining profile: {}", profile.name));
-        }
-
-        if self
-            .selected_process_profile_id
-            .as_ref()
-            .map(|id| dependent_ids.contains(id))
-            .unwrap_or(false)
-        {
-            impact.deleted_live_projects.push("Active job session".to_string());
-        }
-
-        impact
-    }
-
-    pub fn delete_cnc_profile_with_cascade(&mut self, cnc_id: &str) -> CascadeDeleteImpact {
-        let impact = self.impact_delete_cnc_profile(cnc_id);
-
-        if !impact.dependent_process_profiles.is_empty() {
-            return impact;
-        }
-
-        self.machines.retain(|machine| machine.id != cnc_id);
-        self.machine_mru.retain(|id| id != cnc_id);
-
-        let next_processing_id = self
-            .selected_process_profile_id
-            .clone()
-            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
-            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
-
-        if let Some(processing_id) = next_processing_id {
-            self.select_process_profile_by_id(Some(processing_id));
-        }
-
-        if self.selected_process_profile_id.is_none() {
-            let next_selected = self
-                .machine_mru
-                .iter()
-                .find(|id| self.machines.iter().any(|machine| &machine.id == *id))
-                .cloned()
-                .or_else(|| self.machines.first().map(|machine| machine.id.clone()));
-
-            self.select_machine_profile_by_id(next_selected);
-        }
-
-        if self.machines.is_empty() {
-            self.show_first_launch = true;
-            self.selected_screen = Screen::CncProfiles;
-        }
-
-        self.persist_realms(&[
-            PersistRealm::CncProfiles,
-            PersistRealm::GlobalSettings,
-            PersistRealm::ProcessingProfiles,
-        ]);
-
-        impact
-    }
-
-    pub fn delete_fixture_profile_with_cascade(&mut self, fixture_id: &str) -> CascadeDeleteImpact {
-        let impact = self.impact_delete_fixture_profile(fixture_id);
-
-        if !impact.dependent_process_profiles.is_empty() {
-            return impact;
-        }
-
-        self.fixtures.retain(|fixture| fixture.id != fixture_id);
-
-        let next_processing_id = self
-            .selected_process_profile_id
-            .clone()
-            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
-            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
-
-        self.select_process_profile_by_id(next_processing_id);
-
-        if self
-            .selected_fixture_id
-            .as_ref()
-            .map(|id| !self.fixtures.iter().any(|fixture| &fixture.id == id))
-            .unwrap_or(false)
-        {
-            self.selected_fixture_id = self.fixtures.first().map(|fixture| fixture.id.clone());
-        }
-
-        self.persist_realms(&[PersistRealm::FixtureProfiles]);
-
-        impact
-    }
-
-    pub fn delete_process_profile_with_cascade(&mut self, process_profile_id: &str) -> CascadeDeleteImpact {
-        let impact = self.impact_delete_process_profile(process_profile_id);
-        self.process_profiles.retain(|profile| profile.id != process_profile_id);
-        let next_processing_id = self
-            .selected_process_profile_id
-            .clone()
-            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
-            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
-
-        self.select_process_profile_by_id(next_processing_id);
-        self.persist_realms(&[PersistRealm::ProcessingProfiles]);
-        impact
-    }
-
-    pub fn delete_toolset_profile_with_cascade(&mut self, toolset_id: &str) -> CascadeDeleteImpact {
-        let impact = self.impact_delete_toolset_profile(toolset_id);
-
-        self.toolsets.retain(|toolset| toolset.id != toolset_id);
-
-        for profile in self.process_profiles.iter_mut() {
-            if profile.toolset_profile_id == toolset_id {
-                // Keep active/default reference as broken so users can repair explicitly.
-                profile.toolset_profile_choices = vec![toolset_id.to_string()];
-            } else {
-                // Clean non-active references from the allowed set.
-                profile
-                    .toolset_profile_choices
-                    .retain(|id| id != toolset_id);
-            }
-
-            if profile.toolset_profile_id.trim().is_empty() {
-                profile.pending_required_fields.insert("toolset.default".to_string());
-            } else {
-                profile.pending_required_fields.remove("toolset.default");
-            }
-            if profile.toolset_profile_choices.is_empty() {
-                profile.pending_required_fields.insert("toolset.choices".to_string());
-            } else {
-                profile.pending_required_fields.remove("toolset.choices");
-            }
-            profile.usable = profile.pending_required_fields.is_empty();
-        }
-
-        let next_processing_id = self
-            .selected_process_profile_id
-            .clone()
-            .filter(|id| self.process_profiles.iter().any(|profile| &profile.id == id))
-            .or_else(|| self.process_profiles.first().map(|profile| profile.id.clone()));
-
-        self.select_process_profile_by_id(next_processing_id);
-
-        if self.selected_toolset_id.as_deref() == Some(toolset_id) {
-            self.selected_toolset_id = Some(toolset_id.to_string());
-            self.rack_slots.clear();
-        }
-
-        self.validate_current_job_references();
-        self.persist_realms(&[
-            PersistRealm::ToolsetProfiles,
-            PersistRealm::ProcessingProfiles,
-            PersistRealm::GlobalSettings,
-        ]);
-
-        impact
-    }
-
     #[allow(dead_code)]
     pub fn add_demo_tool(&mut self) {
         let idx = self.tools.len() + 1;
@@ -2203,38 +1063,17 @@ impl AppState {
         }
     }
 
-    fn unique_tool_clone_name(&self, source: &Tool) -> String {
-        let base = if source.name.trim().is_empty() {
-            "Copy".to_string()
-        } else {
-            format!("{} copy", source.name.trim())
-        };
-
-        let mut index = 1usize;
-        loop {
-            let candidate = if index == 1 {
-                base.clone()
-            } else {
-                format!("{} {}", base, index)
-            };
-            let display_name = format!("{} - {}", source.composite_name.trim(), candidate);
-            if !self
-                .tools
-                .iter()
-                .any(|tool| tool.display_name().eq_ignore_ascii_case(&display_name))
-            {
-                return candidate;
-            }
-            index += 1;
-        }
-    }
-
-    pub fn add_tools_from_catalog_selection(&mut self, selected_tool_keys: &[String]) -> usize {
+    /// Builds the stock tools to add for a catalog-picker selection: resolves each
+    /// selected catalog tool, skipping any already present — in stock or already
+    /// queued this call — by non-empty SKU, or by (label, kind, diameter) identity.
+    /// Pure: the caller projects the result to the stock document (the AppData
+    /// writer). Returns the new tools in catalog order.
+    pub fn build_catalog_tool_additions(&self, selected_tool_keys: &[String]) -> Vec<Tool> {
+        let mut additions: Vec<Tool> = Vec::new();
         if selected_tool_keys.is_empty() {
-            return 0;
+            return additions;
         }
 
-        let mut added = 0usize;
         for catalog in &self.catalogs {
             for section in &catalog.sections {
                 for tool in &section.tools {
@@ -2242,34 +1081,18 @@ impl AppState {
                         continue;
                     }
 
-                    let has_same_sku = tool
-                        .sku
-                        .as_ref()
-                        .map(|sku| !sku.trim().is_empty())
-                        .unwrap_or(false)
-                        && self
-                            .tools
-                            .iter()
-                            .any(|existing| {
-                                existing
-                                    .sku
-                                    .as_ref()
-                                    .map(|x| x == tool.sku.as_ref().unwrap())
-                                    .unwrap_or(false)
-                            });
-                    let has_same_identity = self
-                        .tools
-                        .iter()
-                        .any(|existing| {
-                            existing.composite_name == tool.display_name
+                    let has_sku = tool.sku.as_ref().map(|sku| !sku.trim().is_empty()).unwrap_or(false);
+                    let is_duplicate = self.tools.iter().chain(additions.iter()).any(|existing| {
+                        (has_sku && existing.sku.as_deref() == tool.sku.as_deref())
+                            || (existing.composite_name == tool.display_name
                                 && existing.kind == tool.kind
-                                && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001
-                        });
-                    if has_same_sku || has_same_identity {
+                                && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001)
+                    });
+                    if is_duplicate {
                         continue;
                     }
 
-                    self.tools.push(Tool {
+                    additions.push(Tool {
                         id: self.next_tool_id(),
                         composite_name: tool.display_name.clone(),
                         name: String::new(),
@@ -2288,61 +1111,11 @@ impl AppState {
                         manufacturer: Some(format!("{} / {}", catalog.name, section.name)),
                         sku: tool.sku.clone(),
                     });
-                    added += 1;
                 }
             }
         }
 
-        if added > 0 {
-            self.persist_stock_snapshot();
-        }
-
-        added
-    }
-
-    pub fn clone_tool(&mut self, tool_id: &str) -> Option<String> {
-        let source = self.tools.iter().find(|tool| tool.id == tool_id).cloned()?;
-        let new_id = self.next_tool_id();
-        let clone = Tool {
-            id: new_id.clone(),
-            name: self.unique_tool_clone_name(&source),
-            ..source
-        };
-        self.tools.push(clone);
-        self.persist_stock_snapshot();
-        Some(new_id)
-    }
-
-    pub fn remove_tools(&mut self, tool_ids: &[String]) -> usize {
-        if tool_ids.is_empty() {
-            return 0;
-        }
-
-        let to_remove: BTreeSet<&str> = tool_ids.iter().map(|tool_id| tool_id.as_str()).collect();
-        let before = self.tools.len();
-
-        self.tools.retain(|tool| !to_remove.contains(tool.id.as_str()));
-
-        let removed = before.saturating_sub(self.tools.len());
-        if removed > 0 {
-            self.persist_stock_snapshot();
-            self.validate_current_job_references();
-        }
-        removed
-    }
-
-    pub fn toolset_referencing_process_profiles(&self, toolset_id: &str) -> Vec<String> {
-        self.process_profiles
-            .iter()
-            .filter(|profile| {
-                profile.toolset_profile_id == toolset_id
-                    || profile
-                        .toolset_profile_choices
-                        .iter()
-                        .any(|choice| choice == toolset_id)
-            })
-            .map(|profile| profile.name.clone())
-            .collect()
+        additions
     }
 
     pub fn select_screen(&mut self, screen: Screen) {
@@ -2418,17 +1191,6 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "banner": machine.route_retract,
         }
     })
-}
-
-const CNC_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/cnc.yaml");
-const FIXTURE_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/fixture.yaml");
-const PROCESSING_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/processing.yaml");
-const TOOLSET_SCHEMA_TEXT: &str = include_str!("../../resources/schemas/toolset.yaml");
-
-fn schema_defaults_from_text(schema_text: &str) -> Value {
-    let yaml_schema: serde_yaml::Value = serde_yaml::from_str(schema_text).unwrap_or(serde_yaml::Value::Null);
-    let json_schema: Value = serde_json::to_value(yaml_schema).unwrap_or(Value::Null);
-    crate::config::defaults::populate_defaults(&json_schema).unwrap_or_else(|| json!({}))
 }
 
 fn has_path(value: &Value, path: &str) -> bool {
@@ -2573,7 +1335,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
     Some(MachineProfile {
         id,
         name,
-        built_in: false,
         max_feed_rate,
         spindle_rpm_min,
         spindle_rpm_max,
@@ -3081,31 +1842,6 @@ fn default_operation_setup_value(op: ProductionOperation) -> Value {
     }
 }
 
-fn set_nested_value(root: &mut Value, path: &[&str], value: Value) {
-    if path.is_empty() {
-        return;
-    }
-
-    if !root.is_object() {
-        *root = json!({});
-    }
-
-    let mut current = root;
-    for key in &path[..path.len() - 1] {
-        if !current.is_object() {
-            *current = json!({});
-        }
-        let obj = current.as_object_mut().expect("object expected");
-        current = obj
-            .entry((*key).to_string())
-            .or_insert_with(|| json!({}));
-    }
-
-    if let Some(obj) = current.as_object_mut() {
-        obj.insert(path[path.len() - 1].to_string(), value);
-    }
-}
-
 fn merge_object_defaults(target: &mut Value, defaults: &Value) {
     let Some(default_obj) = defaults.as_object() else {
         return;
@@ -3298,13 +2034,6 @@ fn toolset_profile_to_value(profile: &ToolsetProfile) -> Value {
         "generation_policy": profile.generation_policy.as_key(),
         "slots": slot_values,
     })
-}
-
-fn build_toolset_profiles(toolsets: &[ToolsetProfile]) -> BTreeMap<String, Value> {
-    toolsets
-        .iter()
-        .map(|profile| (profile.id.clone(), toolset_profile_to_value(profile)))
-        .collect()
 }
 
 fn operation_to_key(operation: ProductionOperation) -> &'static str {

@@ -1,4 +1,4 @@
-use super::model::UnitSystem;
+use crate::domain::app_shell::UnitSystem;
 use units::{
     Angle, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed, ScalarValue,
     UnitParseError,
@@ -104,10 +104,6 @@ pub fn rotational_speed_unit_label() -> &'static str {
     "rpm"
 }
 
-pub fn percentage_unit_label() -> &'static str {
-    "%"
-}
-
 pub fn length_input_step(unit_system: UnitSystem) -> &'static str {
     match unit_system {
         UnitSystem::Metric => "0.001",
@@ -124,14 +120,6 @@ pub fn feed_input_step(unit_system: UnitSystem) -> &'static str {
     }
 }
 
-pub fn default_length_suffix(unit_system: UnitSystem) -> &'static str {
-    length_unit_label(unit_system)
-}
-
-pub fn default_feed_suffix(unit_system: UnitSystem) -> &'static str {
-    feed_unit_label(unit_system)
-}
-
 pub fn format_angle_display(angle: Angle) -> String {
     let value = format_trimmed(angle.as_degrees(), 0.01, 2);
     format!("{value}{}", angle_unit_label())
@@ -140,15 +128,6 @@ pub fn format_angle_display(angle: Angle) -> String {
 pub fn format_rotational_speed_display(speed: RotationalSpeed) -> String {
     let value = format_trimmed(speed.as_rpm(), 1.0, 0);
     format!("{value} {}", rotational_speed_unit_label())
-}
-
-pub fn format_percentage_display(value: f64) -> String {
-    let out = format_trimmed(value, 0.1, 1);
-    format!("{out}{}", percentage_unit_label())
-}
-
-pub fn format_percentage_edit_display(value: f64) -> String {
-    format_trimmed(value, 0.1, 1)
 }
 
 pub fn display_length_value_from_mm(value_mm: f64, unit_system: UnitSystem) -> f64 {
@@ -332,11 +311,3 @@ pub fn parse_rotational_speed(value: &str) -> Result<RotationalSpeed, UnitParseE
     RotationalSpeed::from_string(value, Some(units::RotationalSpeedUnit::Rpm))
 }
 
-pub fn parse_percentage(value: &str) -> Result<f64, UnitParseError> {
-    let raw = value.trim();
-    let value = strip_suffix(raw, "%").unwrap_or(raw);
-    value
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| UnitParseError::InvalidNumberFormat)
-}

@@ -1,3 +1,8 @@
+//! App-shell model types shared by the runtime context and the UI: top-level
+//! screen navigation, the Job screen's sub-views, user unit/theme preferences,
+//! generation status, the UI launch payload, and the persistence realm marker.
+//! (Relocated out of the former `ui::model` facade — these belong below the UI.)
+
 use pcb::BoardSnapshot;
 use units::UserUnitSystem;
 
@@ -154,4 +159,14 @@ pub enum GenerationState {
     Idle,
     Generating,
     Failed,
+}
+
+/// A persistable realm — the unit at which the legacy context still writes global
+/// settings and (transitionally) stock. Profile realms are owned by the AppData
+/// datastore now, so only these remain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PersistRealm {
+    GlobalSettings,
+    ProcessingProfiles,
+    Stock,
 }

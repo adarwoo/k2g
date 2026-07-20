@@ -11,7 +11,6 @@ use super::state::RackSlot;
 pub struct MachineProfile {
     pub id: String,
     pub name: String,
-    pub built_in: bool,
     pub max_feed_rate: FeedRate,
     pub spindle_rpm_min: RotationalSpeed,
     pub spindle_rpm_max: RotationalSpeed,
@@ -41,7 +40,6 @@ impl Default for MachineProfile {
         Self {
             id: String::new(),
             name: String::new(),
-            built_in: false,
             max_feed_rate: FeedRate::from_mm_per_min(0.0),
             spindle_rpm_min: RotationalSpeed::from_rpm(0.0),
             spindle_rpm_max: RotationalSpeed::from_rpm(0.0),

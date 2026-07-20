@@ -4,13 +4,11 @@
 
 name: "Masso G3 - With ATC"
 
-name: "MASSO G3 Controller"
-
 machine:
   max_feed_rate: "2500mm/min"
   spindle_rpm_min: "5000rpm"
   spindle_rpm_max: "24000rpm"
-  atc_slot_count: 0
+  atc_slot_count: 8
   scaling:
     x: 1.0
     y: 1.0

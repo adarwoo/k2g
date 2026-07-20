@@ -102,6 +102,33 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 overrides.insert("name".to_string(), Value::String(tool.name.clone()));
             }
 
+            // Build `base` explicitly so optional unit fields are *omitted* when
+            // absent rather than emitted as `null`. Both are schema-valid (their
+            // `anyOf` includes null), but the datastore's unit decoder reports a
+            // spurious "expected a string or number, got null" on a null unit; an
+            // absent key reads back identically (see `value_to_feed`).
+            let mut base = serde_json::Map::new();
+            base.insert("name".into(), Value::String(tool.composite_name.clone()));
+            base.insert(
+                "kind".into(),
+                Value::String(ToolKind::from_kind_label(&tool.kind).as_storage_key().to_string()),
+            );
+            base.insert("diameter".into(), json!(tool.diameter));
+            base.insert("point_angle".into(), json!(tool.point_angle));
+            if let Some(manufacturer) = &tool.manufacturer {
+                base.insert("manufacturer".into(), Value::String(manufacturer.clone()));
+            }
+            if let Some(sku) = &tool.sku {
+                base.insert("sku".into(), Value::String(sku.clone()));
+            }
+            if let Some(spindle) = tool.spindle_speed {
+                base.insert("spindle".into(), json!(spindle));
+            }
+            if let Some(feed_rate) = tool.feed_rate {
+                base.insert("z_feed".into(), json!(feed_rate));
+                base.insert("table_feed".into(), json!(feed_rate));
+            }
+
             json!({
                 "id": tool.id,
                 "summary": tool.display_name(),
@@ -114,23 +141,17 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                     "section": Value::Null,
                     "sku": tool.sku,
                 },
-                "base": {
-                    "name": tool.composite_name,
-                    "kind": ToolKind::from_kind_label(&tool.kind).as_storage_key(),
-                    "manufacturer": tool.manufacturer,
-                    "sku": tool.sku,
-                    "diameter": tool.diameter,
-                    "point_angle": tool.point_angle,
-                    "spindle": tool.spindle_speed,
-                    "z_feed": tool.feed_rate,
-                    "table_feed": tool.feed_rate,
-                },
+                "base": Value::Object(base),
                 "overrides": Value::Object(overrides)
             })
         })
         .collect::<Vec<_>>();
 
-    json!({ "tools": tool_values })
+    // `schema_version` is mandatory: stock.yaml declares `x-schema-version: 1`, so
+    // the datastore rejects any document lacking a matching `schema_version` during
+    // version gating. Emitting it here keeps this projection re-parseable by the
+    // AppData writer (the sole writer of stock.yaml).
+    json!({ "schema_version": 1, "tools": tool_values })
 }
 
 /// stock.yaml <-> Tool conversion boundary.

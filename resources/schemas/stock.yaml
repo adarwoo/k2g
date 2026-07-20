@@ -61,7 +61,11 @@ $defs:
         description: Source catalog identifier, usually file stem or catalog name.
       tool_id:
         description: UUIDv7 of the referenced catalog tool item.
+        # `$ref` keeps UUIDv7 pattern validation; `x-ref` makes datastore treat
+        # this as a reference to a catalog tool (resolved by UUID), not an
+        # identity of its own. x-ref is ignored by JSON Schema validation.
         $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "catalog.yaml"
       section:
         anyOf:
           - type: string

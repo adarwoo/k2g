@@ -65,20 +65,9 @@ impl AppCtx {
 
         self.job_references = collect_job_references(&self.app);
         let change_set = collect_mutation_changes(&previous_app, &self.app);
-
-        // Some UI edit paths mutate CNC profiles directly; enforce persistence at sync tail.
-        if !change_set.changed_machine_profile_ids.is_empty() {
-            log::info!(
-                "Detected CNC profile changes at sync tail; persisting cnc_profiles for ids=[{}]",
-                change_set
-                    .changed_machine_profile_ids
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-            self.app.persist_realms(&[PersistRealm::CncProfiles]);
-        }
+        // CNC profile files are owned by the `AppData` datastore (see `crate::data`);
+        // the legacy layer no longer persists them at the sync tail. `change_set` is
+        // still consumed below for regeneration triggers and modified-UUID reporting.
 
         self.issues = self
             .app

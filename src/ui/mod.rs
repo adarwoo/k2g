@@ -1,17 +1,24 @@
 pub mod app;
-pub mod model;
+pub mod data_bind;
 pub mod theme;
 pub mod unit_service;
 
 use std::sync::OnceLock;
 
-pub use model::UiLaunchData;
+pub use crate::domain::UiLaunchData;
 
 static BOOT_DATA: OnceLock<UiLaunchData> = OnceLock::new();
 
 pub fn launch(data: UiLaunchData) {
     let _ = BOOT_DATA.set(data);
     crate::app_state_impl::initialize_ctx(boot_data().clone());
+
+    // Initialize the new datastore-backed store alongside the legacy context
+    // (Phase 1: available to migrated screens; legacy remains the source of
+    // truth until each screen is switched over).
+    for problem in crate::data::init_appdata() {
+        log::warn!("AppData load: {problem}");
+    }
 
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("k2g - KiCAD to GCode")

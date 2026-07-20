@@ -3,3 +3,4 @@ This project is computer aided machining application which generate a CNC machin
 The project specification document is in docs/specification.md
 The architecture is in docs/architecture.md
 
+Code generated in properly documented including private function with a description and intent

@@ -471,7 +471,7 @@ impl Angle {
     pub fn from_degrees(degrees: f64) -> Self {
         Self {
             scalar: ScalarValue::Float(degrees),
-            unit: AngleUnit::Degree,
+            unit: AngleUnit::Deg,
         }
     }
 
@@ -484,7 +484,7 @@ impl Angle {
     pub fn from_kicad(value: f64) -> Self {
         Self {
             scalar: ScalarValue::Float(value),
-            unit: AngleUnit::Degree,
+            unit: AngleUnit::Deg,
         }
     }
 
@@ -493,7 +493,7 @@ impl Angle {
         let (scalar, unit_str) = parse_number_with_optional_unit(input)?;
         let unit = match unit_str {
             Some(raw) => AngleUnit::parse(raw).ok_or(UnitParseError::InvalidUnit)?,
-            None => default_unit.unwrap_or(AngleUnit::Degree),
+            None => default_unit.unwrap_or(AngleUnit::Deg),
         };
 
         Ok(Self { scalar, unit })
@@ -505,7 +505,7 @@ impl Angle {
     pub(crate) const fn from_scalar(scalar: ScalarValue) -> Self {
         Self {
             scalar,
-            unit: AngleUnit::Degree,
+            unit: AngleUnit::Deg,
         }
     }
 
@@ -521,7 +521,7 @@ impl Angle {
 }
 
 impl fmt::Display for Angle {
-    /// Renders the canonical source form, e.g. `130degree`.
+    /// Renders the canonical source form, e.g. `130deg`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}{}", self.scalar, self.unit.name())
     }

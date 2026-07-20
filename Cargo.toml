@@ -16,6 +16,7 @@ members = [
 [dependencies]
 units = { path = "crates/units" }
 pcb = { path = "crates/pcb" }
+datastore = { path = "crates/datastore" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 dioxus = { version = "0.7", features = ["desktop"] }

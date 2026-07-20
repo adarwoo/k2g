@@ -535,6 +535,44 @@ pub(crate) fn instantiate(set: &SchemaSet, schema_id: &str) -> Option<Node> {
     Some(annotate(set, schema_id, &None, schema_id, root_schema, &value).0)
 }
 
+/// Builds a fresh instance of `schema_id`'s root seeded from a *source document*
+/// `seed`: schema defaults/consts are applied first, then `seed` is deep-overlaid
+/// on top, then every identity is regenerated (so any `id` present in `seed` is
+/// ignored). Returns `None` for an unknown schema.
+///
+/// Used to materialise a new document from a source such as a CNC template.
+/// Routing through the factory value — not [`parse_document`] — is deliberate: it
+/// fills fields like `schema_version` from their `const` *before* the seed is
+/// applied, so a seed may legitimately omit both `id` and `schema_version`.
+pub(crate) fn instantiate_from(set: &SchemaSet, schema_id: &str, seed: &Value) -> Option<Node> {
+    let root_schema = set.root(schema_id)?;
+    let base = factory_value(set, schema_id, root_schema)?;
+    let merged = deep_merge(base, seed);
+    let node = annotate(set, schema_id, &None, schema_id, root_schema, &merged).0;
+    // Regenerate identities so the seed's own id (if any) is never reused.
+    Some(node.clone_with_new_ids())
+}
+
+/// Recursively overlays `overlay` onto `base`: matching object keys are merged
+/// depth-first; any other value (scalar or array) is replaced wholesale by
+/// `overlay`. Object key ordering is irrelevant here — [`annotate`] re-imposes
+/// schema-declared order when it rebuilds the tree.
+fn deep_merge(base: Value, overlay: &Value) -> Value {
+    match (base, overlay) {
+        (Value::Object(mut base_map), Value::Object(overlay_map)) => {
+            for (key, overlay_value) in overlay_map {
+                let merged = match base_map.remove(key) {
+                    Some(base_value) => deep_merge(base_value, overlay_value),
+                    None => overlay_value.clone(),
+                };
+                base_map.insert(key.clone(), merged);
+            }
+            Value::Object(base_map)
+        }
+        (_, overlay) => overlay.clone(),
+    }
+}
+
 /// Builds a fresh item for the array at `array_pointer` within `schema_id`.
 pub(crate) fn instantiate_item(
     set: &SchemaSet,
@@ -545,6 +583,65 @@ pub(crate) fn instantiate_item(
     let items = pick_effective(array_schema).get("items")?;
     let value = factory_value(set, &base, items)?;
     Some(annotate(set, schema_id, &None, &base, items, &value).0)
+}
+
+/// Decodes a raw input string into a typed [`NodeValue`] according to the schema
+/// field at `pointer` within `schema_id`. Unit fields decode via the units
+/// bridge; integer/number/boolean scalars parse to their type; enums and plain
+/// strings stay strings. Returns `None` when the field is not settable from a
+/// string (object/array/id/ref, unknown pointer) or the value fails to decode
+/// (e.g. a malformed unit or a non-numeric integer) — the caller then leaves the
+/// existing value untouched.
+pub(crate) fn decode_str(
+    set: &SchemaSet,
+    schema_id: &str,
+    pointer: &str,
+    raw: &str,
+) -> Option<NodeValue> {
+    let (schema_node, base) = schema_node_at(set, schema_id, pointer)?;
+    let cls = classify(set, &base, schema_node);
+    match cls.kind {
+        FieldKind::Unit(kind) => match decode_unit(kind, &Value::String(raw.to_string())) {
+            Ok(Some(unit)) => Some(NodeValue::Unit(unit)),
+            // Untyped unit kinds (percent, speed, …) keep their raw scalar.
+            Ok(None) => Some(NodeValue::Str(raw.to_string())),
+            Err(_) => None,
+        },
+        FieldKind::Enum(_) | FieldKind::Scalar => {
+            let effective = cls.structural.as_ref().map(|s| s.node).unwrap_or(schema_node);
+            match schema_type(effective) {
+                Some("integer") => raw.trim().parse::<i64>().ok().map(NodeValue::Int),
+                Some("number") => raw.trim().parse::<f64>().ok().map(NodeValue::Float),
+                Some("boolean") => parse_bool(raw).map(NodeValue::Bool),
+                _ => Some(NodeValue::Str(raw.to_string())),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The effective JSON-Schema `type` of a node as a `&str`, treating a
+/// `[T, "null"]` union as the first non-null type (so nullable scalars decode
+/// like their base type).
+fn schema_type(node: &Value) -> Option<&str> {
+    match node.get("type")? {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|t| *t != "null"),
+        _ => None,
+    }
+}
+
+/// Parses a boolean from common textual forms (from a text input; checkboxes set
+/// a `Bool` directly and never reach here).
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// Resolves the schema node governing a data JSON Pointer, following

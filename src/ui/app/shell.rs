@@ -4,8 +4,9 @@ use std::sync::OnceLock;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
-use super::super::model::*;
+use crate::domain::*;
 use super::super::UiLaunchData;
+use crate::app_state_impl::AppError;
 use crate::ctx::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
 
 #[component]
@@ -132,6 +133,9 @@ fn dispatch_ui_command(mut state: Signal<crate::ctx::AppCtx>, command: UiCommand
 
     apply_ui_command(command);
     state.set(ctx_snapshot());
+    // Datastore-backed fields (SchemaField) read the active unit system from the
+    // live context; nudge their render counter so they reconvert on unit change.
+    crate::ui::data_bind::bump_render();
 }
 
 fn app_icon_data_url() -> &'static str {

@@ -1323,6 +1323,98 @@ p {
     margin-top: 12px;
 }
 
+/* Schema-driven fields (SchemaField) ------------------------------------- */
+.field-hint {
+    margin: 2px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    opacity: 0.62;
+}
+
+.field > label > .field-required {
+    color: #d64545;
+    font-weight: 700;
+}
+
+.field.field-invalid > label {
+    color: #d64545;
+}
+
+.field.field-invalid > input,
+.field.field-invalid > select {
+    border-color: #d64545;
+    box-shadow: 0 0 0 1px color-mix(in srgb, #d64545 35%, transparent);
+}
+
+/* Schema-driven machining detail: sections, nested subsections, and pickers. */
+.schema-section {
+    grid-column: 1 / -1;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.schema-section > .section-title {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.75;
+}
+
+.schema-subsection {
+    margin: 6px 0 6px 6px;
+    padding-left: 10px;
+    border-left: 2px solid color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.schema-subsection-title {
+    margin: 0 0 4px;
+    font-size: 12px;
+    font-weight: 600;
+    opacity: 0.7;
+}
+
+.binding-picker,
+.operations-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.binding-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.binding-row .binding-name {
+    font-size: 13px;
+}
+
+.rack-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.rack-slot-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rack-slot-label {
+    min-width: 42px;
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.rack-slot-row select {
+    flex: 1;
+}
+
 .binding-selector {
     position: relative;
     display: flex;

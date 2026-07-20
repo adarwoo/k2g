@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 
 use super::boot_data;
-use super::model::*;
+use crate::domain::*;
 use super::theme::APP_STYLE;
 use crate::app_state_impl::{ctx_snapshot, with_ctx_mut};
 use pcb::KiCad;
@@ -9,13 +9,10 @@ use pcb::KiCad;
 mod cnc;
 mod catalog;
 mod fixture;
+mod profile_manager;
 mod profiles_common;
-#[path = "project.rs"]
 mod job;
-mod setup;
-mod setup_sections;
-#[path = "process_profiles.rs"]
-mod machining_profiles;
+mod machining;
 mod shell;
 mod stock;
 mod toolset;
@@ -24,7 +21,7 @@ use cnc::CncScreen;
 use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
 use job::JobScreen;
-use machining_profiles::MachiningProfilesScreen;
+use machining::MachiningProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar};
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;

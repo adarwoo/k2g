@@ -2868,6 +2868,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "datastore",
  "dioxus",
  "dioxus-logger",
  "image 0.24.9",

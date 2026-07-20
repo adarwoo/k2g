@@ -6,35 +6,41 @@ use uuid::Uuid;
 use super::profiles_common::{slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog};
 use crate::data::Profile;
 use crate::ui::data_bind::{
-    clone_named, create_named, data_revision, export_yaml, import_yaml, refresh_legacy_toolsets,
-    remove_profile_result, use_profiles, RackGrid, SchemaField,
+    clone_named, create_named, data_revision, export_yaml, import_yaml, machining_operations,
+    refresh_legacy_machining, remove_profile_result, use_operations, use_profiles, BindingPicker,
+    OperationsEditor, SchemaField, SchemaForm,
 };
-use crate::domain::stock::ToolStatus;
 
-/// Toolset ("rack") profile screen, backed by the `AppData` datastore.
+/// Machining ("process") profile screen, fully backed by the `AppData` datastore.
 ///
-/// Identity and the generation policy render through [`SchemaField`]; the `T1..Tn`
-/// rack renders through [`RackGrid`]. AppData owns the `toolset_profiles` files;
-/// the legacy generator still reads the in-memory `toolsets`/`rack_slots`, so the
-/// screen mirrors AppData back into that projection on every change (see
-/// [`refresh_legacy_toolsets`]). Deletion is guarded natively by the datastore: a
-/// toolset referenced by a machining profile refuses to delete, so the user
-/// clears the reference first.
+/// A machining profile is mostly references (cnc/fixture/toolset bindings) plus an
+/// operation set and per-operation configuration. The detail editor is generated
+/// from `machining.yaml`: the deep per-operation config renders through
+/// [`SchemaForm`]; only the reference bindings and the operation toggles use
+/// dedicated pickers. AppData owns the `processing_profiles` files; because the
+/// legacy generator still reads the in-memory `process_profiles`, the screen
+/// mirrors AppData back into that projection on every change (see
+/// [`refresh_legacy_machining`]). Deletion is by simple reference guard — a
+/// referenced cnc/fixture/toolset blocks its own deletion, so profiles are
+/// removed leaf-first; nothing references a machining profile, so it deletes
+/// freely.
 #[component]
-pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
+pub fn MachiningProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> Element {
+    // Mirror AppData into the legacy projection on every store mutation, then
+    // refresh the legacy snapshot so the generator and other screens agree.
     use_effect(move || {
         let _ = data_revision();
-        refresh_legacy_toolsets();
+        refresh_legacy_machining();
         state.set(crate::app_state_impl::ctx_snapshot());
     });
 
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
-    let mut dialog_name = use_signal(|| "My toolset profile".to_string());
+    let mut dialog_name = use_signal(|| "My machining profile".to_string());
     let mut selected = use_signal(|| None::<Uuid>);
 
-    let profiles = use_profiles(Profile::Toolset);
+    let profiles = use_profiles(Profile::Machining);
     let current = (*selected.read()).or_else(|| profiles.first().map(|(id, _)| *id));
     let current_name = current
         .and_then(|id| profiles.iter().find(|(pid, _)| *pid == id).map(|(_, n)| n.clone()));
@@ -43,27 +49,17 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
         .map(|(id, name)| (id.to_string(), name.clone()))
         .collect::<Vec<_>>();
 
-    // In-stock tools for the rack picker (stock is not on the datastore yet, so
-    // the options come from the legacy snapshot).
-    let tools = state
-        .read()
-        .tools
-        .iter()
-        .filter(|tool| tool.status == ToolStatus::InStock)
-        .map(|tool| (tool.id.clone(), tool.display_name()))
-        .collect::<Vec<_>>();
-
     rsx! {
         div { class: "screen single stock-shell",
             div { class: "stock-toolbar",
                 div {
-                    h3 { "Toolset profile management" }
+                    h3 { "Machining profile management" }
                     p {
-                        "A toolset profile defines the T1..Tn rack \u{2014} each slot fixed to a tool, left spare, or disabled \u{2014} plus the generation policy."
+                        "A machining profile defines a job context: which CNC, fixture and toolset to use, and which operations to run."
                     }
                 }
                 ProfileLifecycleToolbar {
-                    profile_type_label: "Toolset".to_string(),
+                    profile_type_label: "Machining".to_string(),
                     profiles: toolbar_profiles,
                     selected_profile_id: current.map(|id| id.to_string()),
                     can_export: current.is_some(),
@@ -92,15 +88,15 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                         };
                         let confirmed = MessageDialog::new()
                             .set_level(MessageLevel::Warning)
-                            .set_title("Delete toolset profile")
-                            .set_description("Delete this toolset profile?")
+                            .set_title("Delete machining profile")
+                            .set_description("Delete this machining profile?")
                             .set_buttons(MessageButtons::YesNo)
                             .show();
                         if confirmed == rfd::MessageDialogResult::Yes {
                             match remove_profile_result(id) {
                                 Ok(()) => {
                                     selected.set(None);
-                                    status_message.set("Toolset profile deleted".to_string());
+                                    status_message.set("Machining profile deleted".to_string());
                                 }
                                 Err(message) => status_message.set(message),
                             }
@@ -113,15 +109,15 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                                 status_message.set("No profile selected".to_string());
                                 return;
                             };
-                            let name = current_name.clone().unwrap_or_else(|| "toolset-profile".to_string());
+                            let name = current_name.clone().unwrap_or_else(|| "machining-profile".to_string());
                             let default_name = format!(
-                                "{}.toolset-profile.yaml",
-                                slug_file_name(&name, "toolset-profile"),
+                                "{}.machining-profile.yaml",
+                                slug_file_name(&name, "machining-profile"),
                             );
                             let Some(path) = FileDialog::new()
-                                .set_title("Export toolset profile")
+                                .set_title("Export machining profile")
                                 .set_file_name(&default_name)
-                                .add_filter("Toolset profile YAML", &["yaml", "yml"])
+                                .add_filter("Machining profile YAML", &["yaml", "yml"])
                                 .save_file()
                             else {
                                 return;
@@ -129,7 +125,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                             match export_yaml(id) {
                                 Some(yaml) => {
                                     if fs::write(&path, yaml).is_ok() {
-                                        status_message.set("Toolset profile exported".to_string());
+                                        status_message.set("Machining profile exported".to_string());
                                     } else {
                                         status_message.set("Export failed: unable to write file".to_string());
                                     }
@@ -140,8 +136,8 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                     },
                     on_import: move |_| {
                         let Some(path) = FileDialog::new()
-                            .set_title("Import toolset profile")
-                            .add_filter("Toolset profile YAML", &["yaml", "yml"])
+                            .set_title("Import machining profile")
+                            .add_filter("Machining profile YAML", &["yaml", "yml"])
                             .pick_file()
                         else {
                             return;
@@ -153,10 +149,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                                 return;
                             }
                         };
-                        match import_yaml(Profile::Toolset, &text) {
+                        match import_yaml(Profile::Machining, &text) {
                             Some(id) => {
                                 selected.set(Some(id));
-                                status_message.set("Toolset profile imported and selected".to_string());
+                                status_message.set("Machining profile imported and selected".to_string());
                             }
                             None => status_message.set("Import failed: invalid profile".to_string()),
                         }
@@ -169,25 +165,16 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
             }
 
             if let Some(id) = current {
-                div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
-                    div { class: "profile-editor-scroll",
-                        div { class: "edit-grid",
-                            SchemaField { id, ptr: "/name".to_string() }
-                            SchemaField { id, ptr: "/description".to_string() }
-                            SchemaField { id, ptr: "/generation_policy".to_string() }
-                            RackGrid { id, tools }
-                        }
-                    }
-                }
+                MachiningDetail { id }
             } else {
                 div { class: "panel stock-detail-panel profile-editor-shell",
-                    p { class: "diag-status", "Select or add a toolset profile to edit details." }
+                    p { class: "diag-status", "Select or add a machining profile to edit details." }
                 }
             }
 
             if *show_name_dialog.read() {
                 ProfileNameDialog {
-                    title: if *dialog_is_clone.read() { "Clone toolset profile".to_string() } else { "Add toolset profile".to_string() },
+                    title: if *dialog_is_clone.read() { "Clone machining profile".to_string() } else { "Add machining profile".to_string() },
                     name_label: "Profile name".to_string(),
                     name_value: dialog_name.read().clone(),
                     template_options: Vec::<(String, String)>::new(),
@@ -205,7 +192,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                         let result = if is_clone {
                             current.and_then(|id| clone_named(id, &name))
                         } else {
-                            create_named(Profile::Toolset, &name)
+                            create_named(Profile::Machining, &name)
                         };
                         match result {
                             Some(id) => {
@@ -218,6 +205,51 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::app_state_impl::AppCtx>) -> El
                             None => status_message.set("Operation failed".to_string()),
                         }
                     },
+                }
+            }
+        }
+    }
+}
+
+/// The machining detail editor: identity + reference bindings + operation set,
+/// then schema-generated configuration sections for routing and each enabled
+/// operation.
+#[component]
+fn MachiningDetail(id: Uuid) -> Element {
+    let enabled_ops = use_operations(id);
+
+    rsx! {
+        div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
+            div { class: "profile-editor-scroll",
+                div { class: "edit-grid",
+                    SchemaField { id, ptr: "/name".to_string() }
+
+                    BindingPicker { id, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
+                    BindingPicker { id, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
+                    BindingPicker { id, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
+
+                    OperationsEditor { id }
+
+                    SchemaField { id, ptr: "/side_to_machine".to_string() }
+
+                    div { class: "schema-section",
+                        h4 { class: "section-title", "Routing" }
+                        SchemaForm { id, ptr: "/routing".to_string() }
+                    }
+
+                    // Configuration sections for the currently enabled operations.
+                    for (key , op_label) in machining_operations().iter().copied() {
+                        if enabled_ops.iter().any(|op| op == key) {
+                            div { class: "schema-section",
+                                h4 { class: "section-title", "{op_label}" }
+                                if key == "drill_locating_pins" {
+                                    p { class: "field-hint", "No additional options." }
+                                } else {
+                                    SchemaForm { id, ptr: format!("/{key}") }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

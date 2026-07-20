@@ -48,6 +48,7 @@ properties:
   name:
     type: string
     minLength: 1
+    default: "My toolset profile"
     description: User-facing toolset profile name.
 
   # ---------------------------------------------------------------------------
@@ -61,6 +62,7 @@ properties:
   #
   description:
     type: string
+    default: ""
     description: Optional profile description.
 
   # ---------------------------------------------------------------------------
@@ -135,6 +137,9 @@ properties:
   slots:
     type: array
     minItems: 1
+    default:
+      - index: 1
+        mode: spare
     description: Ordered logical toolset slots, each mapped to T1..Tx by index.
     items:
       type: object
