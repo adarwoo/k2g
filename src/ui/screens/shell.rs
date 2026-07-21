@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 
 use crate::data::model::*;
-use super::super::UiLaunchData;
+use crate::ui::navigation::*;
 use crate::runtime::AppError;
 use crate::runtime::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
 
@@ -28,10 +28,16 @@ pub fn AppTopBar(
     let board_name = snapshot
         .board
         .as_ref()
-        .map(|board| format!("Loaded board · {} holes", board.holes.len()))
+        .map(|board| {
+            if board.name.is_empty() {
+                "Loaded board".to_string()
+            } else {
+                board.name.clone()
+            }
+        })
         .unwrap_or_else(|| "No board loaded".to_string());
     let status_label = match snapshot.generation_state {
-        GenerationState::Generating => "Generating".to_string(),
+        GenerationState::Running => "Generating…".to_string(),
         GenerationState::Failed => "Generation failed".to_string(),
         GenerationState::Idle if error_count == 0 && warning_count == 0 => "Ready".to_string(),
         GenerationState::Idle => format!("{error_count} errors, {warning_count} warnings"),
@@ -56,6 +62,22 @@ pub fn AppTopBar(
                 span { class: if has_board { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
                     "{board_name}"
                 }
+                button {
+                    class: "board-reload-btn",
+                    r#type: "button",
+                    title: "Reload PCB",
+                    "aria-label": "Reload PCB",
+                    onclick: move |_| {
+                        // Re-acquire off the ctx lock, then set it: a genuine board
+                        // change re-stitches (once) and triggers regeneration.
+                        if let Some(board) = crate::runtime::acquire_board() {
+                            super::mutate_ctx(state, |s| { s.board = Some(board); });
+                        }
+                    },
+                    // Clockwise refresh glyph (↻), same tiny-icon style as the stock
+                    // revert control.
+                    "\u{21bb}"
+                }
             }
 
             div { class: "topbar-board",
@@ -71,23 +93,23 @@ pub fn AppTopBar(
             div { class: "topbar-chip-row",
                 div { class: "unit-toggle",
                     button {
-                        class: if snapshot.unit_system == UnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                        class: if snapshot.unit_system == UserUnitSystem::Metric { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Metric));
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UserUnitSystem::Metric));
                         },
                         "mm"
                     }
                     button {
-                        class: if snapshot.unit_system == UnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                        class: if snapshot.unit_system == UserUnitSystem::Imperial { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Imperial));
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UserUnitSystem::Imperial));
                         },
                         "in"
                     }
                     button {
-                        class: if snapshot.unit_system == UnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                        class: if snapshot.unit_system == UserUnitSystem::Mil { "unit-toggle-btn active" } else { "unit-toggle-btn" },
                         onclick: move |_| {
-                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UnitSystem::Mil));
+                            dispatch_ui_command(state, UiCommand::SetUnitSystem(UserUnitSystem::Mil));
                         },
                         "mil"
                     }
@@ -99,8 +121,8 @@ pub fn AppTopBar(
             div { class: "topbar-status-group",
                 span {
                     class: match snapshot.generation_state {
-                        GenerationState::Generating => "status-pill status-busy",
-                        GenerationState::Failed => "status-pill status-err",
+                        GenerationState::Running => "status-pill status-warn",
+                        GenerationState::Failed => "status-pill status-warn",
                         GenerationState::Idle if error_count == 0 && warning_count == 0 => {
                             "status-pill status-ok"
                         }
@@ -168,7 +190,7 @@ pub fn DiagnosticsBanner(
         "diag-banner diag-banner-warning"
     };
     let status_text = match generation_state {
-        GenerationState::Generating => "Generation in progress",
+        GenerationState::Running => "Generating…",
         GenerationState::Failed => "Generation failed",
         GenerationState::Idle => "Diagnostics available",
     };
@@ -254,126 +276,91 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
 fn rail_icon(screen: Screen) -> Element {
     match screen {
         Screen::Job => rsx! {
+            // Circuit board: an IC with legs — the PCB the job produces.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                path { d: "M4 6h16v12H4z" }
-                path { d: "M4 10h16" }
-                circle { cx: "8", cy: "8", r: "1" }
-                circle { cx: "12", cy: "8", r: "1" }
-                circle { cx: "16", cy: "8", r: "1" }
+                rect { x: "3", y: "4", width: "18", height: "16", rx: "2" }
+                rect { x: "9", y: "9", width: "6", height: "6", rx: "1" }
+                path { d: "M9 11H6" }
+                path { d: "M9 13H6" }
+                path { d: "M15 11h3" }
+                path { d: "M15 13h3" }
             }
         },
         Screen::CncProfiles => rsx! {
+            // CNC machine: a portal/gantry frame with a spindle head — the hardware.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                path { d: "M12 4l5 3v6l-5 3-5-3V7z" }
-                path { d: "M12 16v4" }
-                path { d: "M9.5 20h5" }
+                path { d: "M4 20h16" }
+                path { d: "M6 20V8h12v12" }
+                rect { x: "10", y: "8", width: "4", height: "5", rx: "0.8" }
+                path { d: "M12 13v2.5" }
             }
         },
         Screen::FixtureProfiles => rsx! {
+            // Vise: two jaws clamping a board between them — holding the work.
             svg {
                 class: "rail-icon-svg",
-                view_box: "0 0 64 64",
+                view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                circle { cx: "21", cy: "22", r: "4.5" }
-                line {
-                    x1: "21",
-                    y1: "12.5",
-                    x2: "21",
-                    y2: "16.5",
-                }
-                line {
-                    x1: "21",
-                    y1: "27.5",
-                    x2: "21",
-                    y2: "31.5",
-                }
-                line {
-                    x1: "11.5",
-                    y1: "22",
-                    x2: "15.5",
-                    y2: "22",
-                }
-                line {
-                    x1: "26.5",
-                    y1: "22",
-                    x2: "30.5",
-                    y2: "22",
-                }
-                circle {
-                    cx: "46",
-                    cy: "20",
-                    r: "2.2",
-                    fill: "currentColor",
-                }
-                path { d: "M15 47 C 22 47, 24 39, 31 39 S 40 47, 47 47" }
-                path {
-                    d: "M44.5 44 L49 47 L44.5 50 Z",
-                    fill: "currentColor",
-                    stroke: "none",
-                }
+                rect { x: "2.5", y: "8", width: "4", height: "8", rx: "1" }
+                rect { x: "17.5", y: "8", width: "4", height: "8", rx: "1" }
+                rect { x: "6.5", y: "10", width: "11", height: "4", rx: "0.6" }
             }
         },
         Screen::MachiningProfiles => rsx! {
+            // A cutting bit entering a workpiece surface — the machining operation.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                rect {
-                    x: "5",
-                    y: "4",
-                    width: "10",
-                    height: "13",
-                    rx: "1.8",
-                }
-                path { d: "M8 8h4" }
-                path { d: "M8 11h4" }
-                path { d: "M15 9l4 4-4 4" }
+                rect { x: "10", y: "3", width: "4", height: "8", rx: "1" }
+                path { d: "M10 11l2 5 2-5" }
+                path { d: "M3 14h18" }
             }
         },
         Screen::Stock => rsx! {
+            // A drawer cabinet — the tool inventory.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                rect {
-                    x: "4",
-                    y: "7",
-                    width: "16",
-                    height: "10",
-                    rx: "2",
-                }
-                path { d: "M8 7V5" }
-                path { d: "M16 7V5" }
-                path { d: "M8 12h8" }
+                rect { x: "4", y: "4", width: "16", height: "16", rx: "1.5" }
+                path { d: "M4 9.3h16" }
+                path { d: "M4 14.6h16" }
+                path { d: "M10.5 6.7h3" }
+                path { d: "M10.5 11.9h3" }
+                path { d: "M10.5 17.2h3" }
             }
         },
         Screen::ToolsetProfiles => rsx! {
+            // A rack rail with three tool bits hanging from it — the loaded tool set.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                path { d: "M12 4v4" }
-                path { d: "M12 16v4" }
-                path { d: "M6 12h4" }
-                path { d: "M14 12h4" }
-                circle { cx: "12", cy: "12", r: "3" }
+                path { d: "M4 6h16" }
+                path { d: "M8 6v6" }
+                path { d: "M6.6 12L8 15l1.4-3" }
+                path { d: "M12 6v6" }
+                path { d: "M10.6 12L12 15l1.4-3" }
+                path { d: "M16 6v6" }
+                path { d: "M14.6 12L16 15l1.4-3" }
             }
         },
         Screen::Catalog => rsx! {
+            // An open book — the reference catalog.
             svg {
                 class: "rail-icon-svg",
                 view_box: "0 0 24 24",
                 "aria-hidden": "true",
-                path { d: "M6 5h12v14H6z" }
-                path { d: "M9 8h6" }
-                path { d: "M9 11h6" }
-                path { d: "M9 14h4" }
+                path { d: "M12 6C9 4.5 6 4.5 4 6v12c2-1.5 5-1.5 8 0" }
+                path { d: "M12 6c3-1.5 6-1.5 8 0v12c-2-1.5-5-1.5-8 0" }
+                path { d: "M12 6v12" }
             }
         },
     }
@@ -412,8 +399,8 @@ pub fn StatusBar(state: Signal<crate::runtime::AppCtx>, boot: UiLaunchData) -> E
         .map(|board| format!("{} holes · {} edges", board.holes.len(), board.edge_shapes.len()))
         .unwrap_or_else(|| "No board snapshot".to_string());
     let generation_label = match snapshot.generation_state {
-        GenerationState::Generating => "Generating GCode…".to_string(),
-        GenerationState::Failed => "Last generation failed".to_string(),
+        GenerationState::Running => "Generating GCode…".to_string(),
+        GenerationState::Failed => "Generation failed".to_string(),
         GenerationState::Idle => {
             let modified = if snapshot.gcode_modified { "modified" } else { "clean" };
             format!("{} · {}", snapshot.save_filename, modified)

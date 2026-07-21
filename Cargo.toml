@@ -8,6 +8,7 @@ description = "GCode generator"
 members = [
     ".",
     "crates/datastore",
+    "crates/gtl",
     "crates/pcb",
     "crates/units",
     "xtask",
@@ -18,7 +19,7 @@ units = { path = "crates/units" }
 pcb = { path = "crates/pcb" }
 datastore = { path = "crates/datastore" }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 dioxus = { version = "0.7", features = ["desktop"] }
 clap = { version = "4", features = ["derive"] }
 rhai = "1"
@@ -30,6 +31,7 @@ log = "0.4"
 image = "0.24"
 base64 = "0.22"
 rfd = "0.15"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 uuid = { version = "1", features = ["v5", "v7"] }
 dioxus-logger = "0.7.9"
 tracing = "0.1.44"

@@ -34,14 +34,14 @@ impl AppState {
                 selected_operations: vec![ProductionOperation::DrillPth],
                 rotation_angle: 0,
                 tab_count: 4,
-                tab_width_mm: 3.0,
-                tab_width_baseline_mm: 3.0,
+                tab_width: Length::from_mm(3.0),
+                tab_width_baseline: Length::from_mm(3.0),
                 allow_routing_holes: true,
                 drill_then_route: false,
                 pilot_hole_fallback: true,
                 outline_router_tool_id: None,
                 mouse_bites_enabled: false,
-                mouse_bite_pitch_mm: 0.8,
+                mouse_bite_pitch: Length::from_mm(0.8),
                 mouse_bite_drill_tool_id: None,
             },
             gcode: sample_gcode(),
@@ -50,12 +50,6 @@ impl AppState {
             suppress_persistence: false,
             show_first_launch: true,
             rack_slots: BTreeMap::new(),
-            board_layers: BoardLayers {
-                holes: true,
-                routes: true,
-                paths: true,
-                tabs: true,
-            },
             board: board_snapshot,
         };
 
@@ -219,7 +213,6 @@ impl AppState {
         for realm in realms {
             match realm {
                 PersistRealm::GlobalSettings => self.persist_global_settings(&app_dirs),
-                PersistRealm::Stock => self.persist_stock(&app_dirs),
             }
         }
     }
@@ -249,11 +242,7 @@ impl AppState {
     fn make_global_settings_payload(&self) -> Value {
         json!({
             "schema_version": 1,
-            "units": match self.unit_system {
-                UnitSystem::Metric => "mm",
-                UnitSystem::Imperial => "in",
-                UnitSystem::Mil => "mil",
-            },
+            "units": self.unit_system.as_settings_str(),
             "theme": match self.theme {
                 Theme::Light => "Light",
                 Theme::Dark => "Dark",
@@ -263,26 +252,6 @@ impl AppState {
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
         })
-    }
-
-    /// Persists the stock realm. `stock.yaml` is owned by the AppData datastore
-    /// (see [`crate::data`]), which is the sole writer: the in-memory tool list is
-    /// the edit buffer and is mirrored down to the datastore singleton here. The
-    /// legacy `save_stock` path is retired. Guarded on `appdata_ready` so early or
-    /// test contexts (no live store) are a no-op rather than a panic.
-    fn persist_stock(&self, _app_dirs: &AppDirs) {
-        if !crate::data::appdata_ready() {
-            return;
-        }
-        let stock = stock_value_from_tools(&self.tools);
-        crate::data::with_appdata_mut(|data| {
-            data.replace_stock_from_value(&stock);
-        });
-        log::info!("Persisted stock via AppData: tool_count={}", self.tools.len());
-    }
-
-    fn persist_stock_snapshot(&self) {
-        self.persist_realms(&[PersistRealm::Stock]);
     }
 
     // Runtime event log helper for UI notifications.
@@ -823,31 +792,6 @@ impl AppState {
         impact
     }
 
-    #[allow(dead_code)]
-    pub fn add_demo_tool(&mut self) {
-        let idx = self.tools.len() + 1;
-        self.tools.push(Tool {
-            id: self.next_tool_id(),
-            composite_name: format!("0.6mm End Mill {idx}"),
-            name: String::new(),
-            kind: "End Mill".to_string(),
-            diameter: Length::from_mm(0.6),
-            catalog_diameter: None,
-            point_angle: Angle::from_degrees(180.0),
-            catalog_point_angle: None,
-            feed_rate: None,
-            catalog_feed_rate: None,
-            spindle_speed: None,
-            catalog_spindle_speed: None,
-            status: ToolStatus::InStock,
-            preference: ToolPreference::Neutral,
-            source_catalog: "Manual".to_string(),
-            manufacturer: None,
-            sku: None,
-        });
-        self.persist_stock_snapshot();
-    }
-
     fn next_tool_id(&self) -> String {
         loop {
             let candidate = Uuid::now_v7().to_string();
@@ -916,12 +860,6 @@ impl AppState {
         self.selected_screen = screen;
     }
 
-    #[allow(dead_code)]
-    pub fn set_rotation_angle(&mut self, angle: i32) {
-        self.project_config.rotation_angle = angle;
-        self.gcode_modified = false;
-    }
-
     pub fn seed_rack_slots(&mut self, slot_count: u8) {
         for slot in 1..=slot_count {
             self.rack_slots.entry(slot).or_insert(RackSlot {
@@ -968,8 +906,6 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "line_numbering_increment": machine.line_numbering_increment,
         },
         "primitives": {
-            "use_metric": "{set_precision(3)}G21",
-            "use_imperial": "{set_precision(5)}G20",
             "initialise": machine.gcode_header,
             "rapid_move": machine.drill_first_move,
             "linear_cut": machine.drill_cycle_mode_series,
@@ -1848,9 +1784,9 @@ fn value_to_length_mm(value: &Value) -> Option<f64> {
     value_to_length(value).map(Length::as_mm)
 }
 
-fn load_persisted_unit_system() -> UnitSystem {
+fn load_persisted_unit_system() -> UserUnitSystem {
     let Some(state) = persistence_state() else {
-        return UnitSystem::Metric;
+        return UserUnitSystem::Metric;
     };
 
     let units_value = state
@@ -1866,11 +1802,7 @@ fn load_persisted_unit_system() -> UnitSystem {
                 .and_then(Value::as_str)
         });
 
-    match units_value {
-        Some("mil") => UnitSystem::Mil,
-        Some("in") | Some("imperial") => UnitSystem::Imperial,
-        _ => UnitSystem::Metric,
-    }
+    UserUnitSystem::from_settings_str(units_value)
 }
 
 fn load_persisted_theme() -> Theme {

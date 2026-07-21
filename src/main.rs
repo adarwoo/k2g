@@ -7,7 +7,7 @@ mod ui;
 mod paths;
 
 use cli::CliArgs;
-use pcb::{stitch_edge_shapes, KiCad};
+use pcb::KiCad;
 use ui::UiLaunchData;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -31,29 +31,12 @@ fn main() {
         Ok(client) => match client.version() {
             Ok(full_version) => {
                 let status = format!("Connected - KiCad {}", full_version);
+                // Stitching is done once, in the ctx, when the board is cached
+                // (see `AppCtx`); acquisition here only collects the raw snapshot.
                 let snapshot = match client.collect_first_snapshot() {
-                    Ok(Some(s)) => {
-                        let stitch_result = stitch_edge_shapes(&s.edge_shapes);
-                        if stitch_result.errors.is_empty() {
-                            println!(
-                                "[stitch] startup: {} edge shape(s), {} contour(s) — OK",
-                                s.edge_shapes.len(),
-                                stitch_result.contours.len(),
-                            );
-                        } else {
-                            eprintln!(
-                                "[stitch] startup: {} error(s) — board cannot be processed:",
-                                stitch_result.errors.len(),
-                            );
-                            for e in &stitch_result.errors {
-                                eprintln!("[stitch]   {e}");
-                            }
-                        }
-                        Some(s)
-                    }
-                    Ok(None) => None,
+                    Ok(snapshot) => snapshot,
                     Err(err) => {
-                        eprintln!("warning: could not collect board snapshot: {err}");
+                        log::warn!("could not collect board snapshot: {err}");
                         None
                     }
                 };

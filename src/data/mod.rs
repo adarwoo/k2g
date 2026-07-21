@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use datastore::{
-    DataError, DataStore, Document, FactoryError, Handle, Node, NodeValue, ParseInput,
-    RemoveError, ResolvedStore, WriteError,
+    DataError, DataStore, Document, FactoryError, NodeValue, ParseInput,
+    RemoveError, ResolvedStore,
 };
 use log::warn;
 use serde_json::Value;
@@ -170,7 +170,9 @@ impl AppData {
         // gate now requires; inject it on load so such files still parse (and are
         // then rewritten in modern form by the AppData writer).
         let settings_text = fs::read_to_string(&settings_path).ok().map(|text| inject_schema_version(&text));
-        let stock_text = fs::read_to_string(&stock_path).ok().map(|text| inject_schema_version(&text));
+        let stock_text = fs::read_to_string(&stock_path).ok().map(|text| {
+            materialize_stock_overrides(&migrate_stock_ref(&inject_schema_version(&text)))
+        });
         let mut inputs = Vec::new();
         if let Some(text) = &settings_text {
             inputs.push(ParseInput { schema_id: "settings.yaml", source: Some(settings_path.clone()), text });
@@ -385,14 +387,6 @@ impl AppData {
         serde_yaml::to_string(&value).ok()
     }
 
-    /// Edits a document in place and schedules its write. Re-resolves references
-    /// afterwards in case the closure changed structure.
-    pub fn edit(&mut self, id: Uuid, f: impl FnOnce(&mut Document)) {
-        if self.store.edit_by_id(id, f).is_some() {
-            self.store.resolve_references();
-        }
-    }
-
     /// Replaces a single field of a profile by JSON Pointer and schedules the
     /// write.
     pub fn set_field(&mut self, id: Uuid, pointer: &str, value: NodeValue) -> Option<bool> {
@@ -407,31 +401,10 @@ impl AppData {
         self.store.set_value_str_by_id(id, pointer, raw)
     }
 
-    /// Sets a settings-singleton field from a raw input string (schema-decoded).
-    pub fn set_setting_str(&mut self, pointer: &str, raw: &str) -> Option<bool> {
-        let path = self.settings_path.clone();
-        self.store.set_value_str(&path, pointer, raw)
-    }
-
     /// Removes a profile and deletes its file, unless something still references
     /// it (then [`RemoveError::InUse`] names the referrers).
     pub fn remove(&mut self, id: Uuid) -> Result<(), RemoveError> {
         self.store.remove_document(id)
-    }
-
-    // ---- catalog (read-only) ---------------------------------------------
-
-    /// Every loaded tool catalog.
-    pub fn catalogs(&self) -> impl Iterator<Item = &Document> {
-        self.store
-            .documents()
-            .iter()
-            .filter(|doc| doc.schema_id == "catalog.yaml")
-    }
-
-    /// Follows a resolved reference handle (e.g. a stock item's catalog tool).
-    pub fn tool(&self, handle: Handle) -> Option<&Node> {
-        self.store.get(handle)
     }
 
     // ---- CNC templates ----------------------------------------------------
@@ -578,11 +551,6 @@ impl AppData {
     /// Blocks until all scheduled writes have completed (e.g. at shutdown).
     pub fn flush(&self) {
         self.store.flush();
-    }
-
-    /// Drains and returns any background write errors so far.
-    pub fn write_errors(&self) -> Vec<WriteError> {
-        self.store.write_errors()
     }
 
     // ---- internals --------------------------------------------------------
@@ -794,6 +762,62 @@ fn inject_schema_version(text: &str) -> String {
     };
     if let Some(obj) = value.as_object_mut() {
         obj.entry("schema_version").or_insert(Value::from(1));
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
+}
+
+/// Upgrades pre-existing stock files to the trimmed schema: the old `ref` (catalog
+/// reference) object is replaced by a plain `source_catalog` name — all the app
+/// ever used from it. Runs on load before validation so files written with the old
+/// `ref` still parse (the removed `ref` would otherwise fail `additionalProperties`).
+/// Idempotent — tools without `ref` are left untouched.
+fn migrate_stock_ref(text: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    if let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            let Some(obj) = tool.as_object_mut() else {
+                continue;
+            };
+            let Some(reference) = obj.remove("ref") else {
+                continue;
+            };
+            if !obj.contains_key("source_catalog") {
+                if let Some(catalog) = reference.get("catalog").cloned() {
+                    obj.insert("source_catalog".to_string(), catalog);
+                }
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
+}
+
+/// Fills each stock tool's `overrides` with any `base` field it is missing, so the
+/// override object is fully materialized. The stock detail editor edits override
+/// fields in place (it cannot insert), so every editable field must already exist.
+/// Idempotent — existing overrides win, so user edits are preserved; a field left
+/// equal to base simply reads as "unchanged". Runs on load to upgrade tools written
+/// before the immutable-base / editable-overrides split.
+fn materialize_stock_overrides(text: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return text.to_string();
+    };
+    if let Some(tools) = value.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            let Some(base) = tool.get("base").and_then(Value::as_object).cloned() else {
+                continue;
+            };
+            let Some(obj) = tool.as_object_mut() else {
+                continue;
+            };
+            let overrides = obj.entry("overrides").or_insert_with(|| serde_json::json!({}));
+            if let Some(over) = overrides.as_object_mut() {
+                for (key, val) in base {
+                    over.entry(key).or_insert(val);
+                }
+            }
+        }
     }
     serde_json::to_string(&value).unwrap_or_else(|_| text.to_string())
 }
@@ -1101,6 +1125,16 @@ mod tests {
         assert!(
             matches!(stock.root.get_pointer("/schema_version").map(|n| &n.value), Some(NodeValue::Int(1))),
             "schema_version should have been injected"
+        );
+        // The legacy `ref` object was migrated to a plain `source_catalog` name (and
+        // `ref` is no longer a valid property, so a clean load proves it was stripped).
+        assert!(stock.root.get_pointer("/tools/0/ref").is_none());
+        assert!(
+            matches!(
+                stock.root.get_pointer("/tools/0/source_catalog").map(|n| &n.value),
+                Some(NodeValue::Str(s)) if s == "Manual"
+            ),
+            "ref.catalog should have been migrated to source_catalog"
         );
     }
 

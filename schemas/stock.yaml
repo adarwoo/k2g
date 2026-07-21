@@ -8,19 +8,16 @@ description: >
   records, usually created from catalog tools, then customized by the user.
 
   Each stock item has its own UUIDv7 id because it is mutable user-owned state.
-  Each stock item also keeps a mandatory reference back to the originating
-  catalog item using that catalog tool's UUIDv7. This allows the application to
-  re-link to the catalog item when available, undo local overrides, or add the
-  catalog tool again if a referenced stock tool is missing from an old project.
 
-  A stock item also stores a full catalog snapshot under `base`. This makes the
-  tool operational even if the source catalog file is missing or the catalog
-  item can no longer be found. In that case the tool is considered orphaned, but
-  still usable because all important tool characteristics are persisted locally.
+  `base` holds an immutable snapshot of the tool's original (catalog-derived)
+  values, captured when the item is created; it keeps the tool operational even
+  if the source catalog is later missing. `overrides` holds the user's local
+  edits. The effective value of a field is its override, falling back to `base`;
+  a field is "changed" when its override differs from `base`, and reverting it
+  drops the override.
 
-  Local user changes are stored under `overrides`. Effective values are resolved
-  by taking the referenced catalog item when available, otherwise the local
-  `base` snapshot, then applying `overrides`.
+  Catalog tools have no maintained id, so no id-based reference back to the
+  catalog is kept — only the catalog's name (`source_catalog`), for display.
 
   This schema references shared definitions from files located in the same
   directory:
@@ -30,56 +27,6 @@ description: >
 type: object
 
 $defs:
-
-  # ---------------------------------------------------------------------------
-  # catalog_ref
-  # ---------------------------------------------------------------------------
-  # Mandatory reference back to the source catalog item.
-  #
-  # Fields:
-  #   catalog
-  #     Catalog identifier, typically the catalog file stem or catalog name.
-  #
-  #   tool_id
-  #     UUIDv7 of the tool entry inside the catalog.
-  #
-  #   section
-  #     Optional catalog section name, kept for display/debugging.
-  #
-  #   sku
-  #     Optional manufacturer SKU, kept for display and search.
-  #
-  # If the catalog is missing or the UUID cannot be found, the stock item remains
-  # usable through its `base` snapshot and local `overrides`.
-  #
-  catalog_ref:
-    type: object
-    properties:
-      catalog:
-        type: string
-        minLength: 1
-        description: Source catalog identifier, usually file stem or catalog name.
-      tool_id:
-        description: UUIDv7 of the referenced catalog tool item.
-        # `$ref` keeps UUIDv7 pattern validation; `x-ref` makes datastore treat
-        # this as a reference to a catalog tool (resolved by UUID), not an
-        # identity of its own. x-ref is ignored by JSON Schema validation.
-        $ref: "id.yaml#/$defs/uuid_v7"
-        x-ref: "catalog.yaml"
-      section:
-        anyOf:
-          - type: string
-            minLength: 1
-          - type: "null"
-        description: Optional catalog section, series, or product family.
-      sku:
-        anyOf:
-          - type: string
-            minLength: 1
-          - type: "null"
-        description: Optional manufacturer SKU or part number.
-    required: [catalog, tool_id]
-    additionalProperties: false
 
   # ---------------------------------------------------------------------------
   # tool_values
@@ -206,11 +153,15 @@ properties:
           description: Unique application-managed stock item ID.
           $ref: "id.yaml#/$defs/uuid_v7"
 
-        # Reference back to the originating catalog item.
+        # Name of the catalog the tool was created from (display only). Catalog
+        # tools have no maintained id, so no id-based reference is kept.
         #
-        ref:
-          description: Reference to the originating catalog tool item.
-          $ref: "#/$defs/catalog_ref"
+        source_catalog:
+          anyOf:
+            - type: string
+              minLength: 1
+            - type: "null"
+          description: Name of the catalog this tool was created from, for display.
 
         # Persisted catalog snapshot.
         #
@@ -262,7 +213,6 @@ properties:
 
       required:
         - id
-        - ref
         - base
         - availability
         - preference

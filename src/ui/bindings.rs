@@ -13,8 +13,8 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
-use crate::data::model::UnitSystem;
-use crate::ui::unit_format;
+use crate::data::model::UserUnitSystem;
+use units::user_format as unit_format;
 use datastore::{FieldKind, Node, NodeValue, RemoveError, UnitValue};
 use serde_json::Value;
 
@@ -148,14 +148,26 @@ pub fn use_stock_field(ptr: &str) -> Option<FieldView> {
     addr_field(FieldAddr::Stock, ptr)
 }
 
-/// Sets a field from a raw input string (schema-decoded) and triggers re-render.
-pub fn set_input(id: Uuid, ptr: &str, raw: String) {
-    addr_set_input(FieldAddr::Doc(id), ptr, &raw);
-}
-
-/// Sets a boolean field directly (from a checkbox) and triggers re-render.
-pub fn set_bool(id: Uuid, ptr: &str, on: bool) {
-    addr_set_value(FieldAddr::Doc(id), ptr, NodeValue::Bool(on));
+/// Reverts every edited field of the stock tool at `index` back to its immutable
+/// `base` (catalog) values by replacing its `overrides` with a copy of `base`.
+pub fn revert_stock_tool(index: usize) {
+    with_appdata_mut(|data| {
+        let Some(mut value) = data.stock().map(|doc| doc.to_value()) else {
+            return;
+        };
+        let Some(tool) = value
+            .get_mut("tools")
+            .and_then(|tools| tools.get_mut(index))
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        if let Some(base) = tool.get("base").cloned() {
+            tool.insert("overrides".to_string(), base);
+            data.replace_stock_from_value(&value);
+        }
+    });
+    bump_render();
 }
 
 /// Lists profiles of `kind` as `(id, name)`, subscribing to store mutations.
@@ -180,19 +192,6 @@ pub fn use_profiles(kind: crate::data::Profile) -> Vec<(Uuid, String)> {
             })
             .collect()
     })
-}
-
-/// Creates a new profile of `kind` from schema defaults; returns its id.
-pub fn create_profile(kind: crate::data::Profile) -> Option<Uuid> {
-    let id = with_appdata_mut(|data| data.create(kind).ok());
-    bump_render();
-    id
-}
-
-/// Removes a profile by id (no-op if it is still referenced elsewhere).
-pub fn remove_profile(id: Uuid) {
-    let _ = with_appdata_mut(|data| data.remove(id));
-    bump_render();
 }
 
 /// Removes a profile, returning a user-facing message if it is blocked because
@@ -251,12 +250,6 @@ pub fn use_cnc_templates() -> Vec<(String, String)> {
 /// Creates a CNC profile from the bundled template `key`, keeping the template's
 /// own name (the setup screen's quick-add, which does not prompt for a name).
 /// Returns the new id.
-pub fn create_cnc_template(key: &str) -> Option<Uuid> {
-    let id = with_appdata_mut(|data| data.create_cnc_from_template(key).ok())?;
-    bump_render();
-    Some(id)
-}
-
 /// Rebuilds the legacy in-memory `machines` projection from the AppData-owned CNC
 /// documents. AppData is the file writer for the CNC realm; this mirrors the data
 /// back into the legacy copy read by the GCode generator and the active machine
@@ -781,7 +774,7 @@ pub fn RackGrid(id: Uuid, tools: Vec<(String, String)>) -> Element {
                 },
             }
         }
-        div { class: "field rack-grid",
+        div { class: "field rack-slot-list",
             label { "Slots" }
             for slot in slots {
                 RackSlotRow {
@@ -900,8 +893,23 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
         return rsx! {};
     };
 
+    // Stock override fields carry a rollback affordance: when the current
+    // (override) value differs from the immutable `base` original, an orange revert
+    // control resets it. The base value is compared by, and reverted through, the
+    // same schema-decoding display used for edits.
+    let revert_display: Option<String> =
+        if matches!(addr, FieldAddr::Stock) && ptr.contains("/overrides/") {
+            let base_ptr = ptr.replacen("/overrides/", "/base/", 1);
+            addr_field(FieldAddr::Stock, &base_ptr)
+                .map(|base| base.display)
+                .filter(|base_display| *base_display != field.display)
+        } else {
+            None
+        };
     let field_class = if field.incomplete {
         "field field-invalid"
+    } else if revert_display.is_some() {
+        "field field-changed"
     } else {
         "field"
     };
@@ -911,6 +919,11 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
     } else {
         None
     };
+
+    // CNC primitive templates are GTL scripts that routinely span several lines,
+    // so they always edit in a textarea — even when the current value is a single
+    // line. Other string fields stay single-line until they contain a newline.
+    let is_primitive_template = ptr.contains("/primitives/");
 
     let input = match &field.kind {
         // Fixed value set → dropdown (commits immediately).
@@ -940,11 +953,12 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
             }
         }
         // Multi-line string (e.g. a G-code primitive) → textarea (live commit,
-        // since Enter must insert a newline rather than commit).
-        _ if matches!(&field.value, NodeValue::Str(s) if s.contains('\n')) => {
+        // since Enter must insert a newline rather than commit). CNC primitives
+        // always use the textarea; other strings switch to it once they wrap.
+        _ if matches!(&field.value, NodeValue::Str(s) if is_primitive_template || s.contains('\n')) => {
             let value = field.display.clone();
             let ptr = ptr.clone();
-            let rows = field.display.lines().count().clamp(2, 16);
+            let rows = field.display.lines().count().clamp(3, 16);
             rsx! {
                 textarea {
                     class: "gcode-editor cnc-template-editor",
@@ -1014,6 +1028,18 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
                 }
             }
             {input}
+            if let Some(base_display) = revert_display.clone() {
+                button {
+                    class: "stock-revert-btn",
+                    r#type: "button",
+                    title: "Revert to catalog value",
+                    onclick: {
+                        let ptr = ptr.clone();
+                        move |_| addr_set_input(FieldAddr::Stock, &ptr, &base_display)
+                    },
+                    "\u{21ba}"
+                }
+            }
             if let Some(desc) = field.description.clone() {
                 p { class: "field-hint", "{desc}" }
             }
@@ -1024,13 +1050,13 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
 /// The active display unit system. Read live from the legacy context during the
 /// migration (the settings screen is not on the datastore yet); the unit toggle
 /// bumps the render counter (see `dispatch_ui_command`) so fields reconvert.
-fn system_unit() -> UnitSystem {
+fn system_unit() -> UserUnitSystem {
     crate::runtime::with_ctx(|ctx| ctx.app.unit_system)
 }
 
 /// Display text for a typed unit value: converted to `sys`, with the native
 /// value shown in `[...]` when it differs (via the shared unit_service).
-fn unit_display(value: &UnitValue, sys: UnitSystem) -> String {
+fn unit_display(value: &UnitValue, sys: UserUnitSystem) -> String {
     match value {
         UnitValue::Length(length) => unit_format::format_length_display(*length, sys),
         UnitValue::Feed(feed) => unit_format::format_feed_display(*feed, sys),
@@ -1041,7 +1067,7 @@ fn unit_display(value: &UnitValue, sys: UnitSystem) -> String {
 
 /// The value seeded into the editor: the native value with its unit stripped
 /// when it already matches `sys`, kept with its unit otherwise.
-fn unit_edit_display(value: &UnitValue, sys: UnitSystem) -> String {
+fn unit_edit_display(value: &UnitValue, sys: UserUnitSystem) -> String {
     match value {
         UnitValue::Length(length) => unit_format::format_length_edit_display(*length, sys),
         UnitValue::Feed(feed) => unit_format::format_feed_edit_display(*feed, sys),
@@ -1054,7 +1080,7 @@ fn unit_edit_display(value: &UnitValue, sys: UnitSystem) -> String {
 /// preference (so a bare number is read in the system unit, an explicit unit
 /// overrides) and stored as a typed value; other fields decode by schema type.
 /// A value that fails to parse is left unchanged (the next render reverts it).
-fn commit_value(addr: FieldAddr, ptr: &str, unit: Option<UnitValue>, edited: &str, sys: UnitSystem) {
+fn commit_value(addr: FieldAddr, ptr: &str, unit: Option<UnitValue>, edited: &str, sys: UserUnitSystem) {
     let Some(value) = unit else {
         addr_set_input(addr, ptr, edited);
         return;

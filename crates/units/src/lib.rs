@@ -45,8 +45,10 @@
 //! ```
 
 mod display;
+pub mod machine;
 mod persistence;
 mod types;
+pub mod user_format;
 
 pub use display::{UnitDisplay, UserUnitDisplay, UserUnitSystem};
 pub use types::{

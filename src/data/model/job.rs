@@ -1,3 +1,5 @@
+use units::Length;
+
 /// Job side selection.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -81,13 +83,13 @@ pub struct JobConfig {
     pub selected_operations: Vec<ProductionOperation>,
     pub rotation_angle: i32,
     pub tab_count: u8,
-    pub tab_width_mm: f32,
-    pub tab_width_baseline_mm: f32,
+    pub tab_width: Length,
+    pub tab_width_baseline: Length,
     pub allow_routing_holes: bool,
     pub drill_then_route: bool,
     pub pilot_hole_fallback: bool,
     pub outline_router_tool_id: Option<String>,
     pub mouse_bites_enabled: bool,
-    pub mouse_bite_pitch_mm: f32,
+    pub mouse_bite_pitch: Length,
     pub mouse_bite_drill_tool_id: Option<String>,
 }

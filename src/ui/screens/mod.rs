@@ -1,10 +1,9 @@
 use dioxus::prelude::*;
 
 use super::boot_data;
-use crate::data::model::*;
+use crate::ui::navigation::*;
 use super::theme::APP_STYLE;
 use crate::runtime::{ctx_snapshot, with_ctx_mut};
-use pcb::KiCad;
 
 mod cnc;
 mod catalog;
@@ -37,25 +36,17 @@ pub fn AppRoot() -> Element {
     let boot = boot_data().clone();
     let state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
-    let mut startup_board_sync_done = use_signal(|| false);
 
-    // Auto-load board on startup
-    use_effect(move || {
-        if !*startup_board_sync_done.read() {
-            startup_board_sync_done.set(true);
-            match KiCad::connect() {
-                Ok(client) => {
-                    if let Ok(pcbs) = client.enumerate_pcbs() {
-                        if let Some(pcb) = pcbs.first() {
-                            if let Ok(board_snapshot) = client.collect_snapshot(pcb) {
-                                mutate_ctx(state, |s| s.board = Some(board_snapshot));
-                            }
-                        }
-                    }
-                }
-                Err(_) => {
-                    // KiCad not available - that's OK, board will be unavailable
-                }
+    // Bridge background generation → UI. The worker publishes results into the
+    // global ctx off the UI thread and bumps a wake channel; re-sync the signal on
+    // each bump so the Job views refresh without a user action. (The startup board
+    // comes from the boot payload via `from_launch`; the Reload PCB action
+    // re-acquires on demand — see `docs/gcode-generation.md` §4, §8.)
+    use_future(move || async move {
+        let mut state = state;
+        if let Some(mut wake) = crate::runtime::ui_wake_receiver() {
+            while wake.changed().await.is_ok() {
+                state.set(ctx_snapshot());
             }
         }
     });

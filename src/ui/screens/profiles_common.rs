@@ -15,17 +15,6 @@ pub fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> Stri
     lines.join("\n")
 }
 
-#[allow(dead_code)]
-pub fn format_impact_summary(prefix: &str, impact: &CascadeDeleteImpact) -> String {
-    format!(
-        "{}: {} primary, {} dependent process profile(s), {} live project(s)",
-        prefix,
-        impact.primary_profiles.len(),
-        impact.dependent_process_profiles.len(),
-        impact.deleted_live_projects.len()
-    )
-}
-
 pub fn slug_file_name(value: &str, fallback: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;

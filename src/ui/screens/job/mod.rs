@@ -6,7 +6,7 @@
 
 use dioxus::prelude::*;
 
-use crate::data::model::*;
+use crate::ui::navigation::*;
 
 mod board;
 mod code;

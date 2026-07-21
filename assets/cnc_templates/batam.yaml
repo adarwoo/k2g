@@ -4,9 +4,14 @@
 #
 # Important notes for Bantam Tools:
 #  - The TinyG controller does not support canned cycles like G81 and G83. The
-#    peck_drill primitive below is expanded into explicit G0/G1 moves. The drill
-#    primitive still emits G81 and must be expanded by the application when used.
+#    peck_drill primitive below is expanded into explicit G0/G1 moves using a GTL
+#    script loop. The drill primitive still emits G81 and must be expanded by the
+#    application when used.
 #  - The machine defaults to the G55 coordinate system, unlike machines that use G54.
+#
+# Primitives use the GCode Template Language (see docs/gcode-template-language.md):
+# a backtick line emits GCode, other lines are Rhai script, and {expr} in an emit
+# line is evaluated and unit-converted. metric() emits G21 and fixes the unit.
 
 name: "Bantam Tools Desktop PCB Milling Machine"
 
@@ -21,50 +26,43 @@ machine:
   line_numbering_increment: 10
 
 primitives:
-  use_metric: |
-    {set_precision(3)}G21
-  use_imperial: |
-    {set_precision(5)}G20
   initialise: |
-    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    G17 G90 G21 G40 G49 G80 G94
-    G55
-    G0 Z{z_safe}
-  rapid_move: "G0 X{x} Y{y} Z{z}"
-  linear_cut: "G1 X{x} Y{y} Z{z} S{s}"
+    `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    `G17 G90 G40 G49 G80 G94
+    metric();
+    `G55
+    `G0 Z{z_safe}
+  rapid_move: "`G0 X{x} Y{y} Z{z}"
+  linear_cut: "`G1 X{x} Y{y} Z{z} S{s}"
   start_spindle: |
-    S{rpm}
-    M3
-  stop_spindle: "M5"
-  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+    `S{rpm}
+    `M3
+  stop_spindle: "`M5"
+  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  # TinyG has no G83 canned cycle: peck manually down to z_bottom, retracting to
+  # z_retract between passes. z/z_bottom/z_retract/peck are lengths, z_feedrate a
+  # feed, so the maths and comparisons below are unit-correct.
   peck_drill: |
-    {let out = "";
-     let current_z = unit(z_retract);
-     let target_z = unit(z_bottom);
-     let peck_depth = unit(peck);
-
-     out += "G0 X" + unit(x).to_string() + " Y" + unit(y).to_string() + "\n";
-     out += "G0 Z" + current_z.to_string() + "\n";
-
-     while current_z > target_z {
-       let next_z = (current_z - peck_depth).max(target_z);
-       out += "G1 Z" + next_z.to_string() + " F" + unit(z_feedrate).to_string() + "\n";
-       out += "G0 Z" + unit(z_retract).to_string() + "\n";
-       current_z = next_z;
-     }
-     out}
-  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+    `G0 X{x} Y{y}
+    `G0 Z{z_retract}
+    let z = z_retract;
+    while z > z_bottom {
+        z = max(z - peck, z_bottom);
+        `G1 Z{z} F{z_feedrate}
+        `G0 Z{z_retract}
+    }
+  cut_arc: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
-    ; cut_bezier fallback
+    `; cut_bezier fallback
   change_tool: |
-    M5
-    {manual_message}
-    T{slot} M6
-    S{rpm}
+    `M5
+    `{manual_message}
+    `T{slot} M6
+    `S{rpm}
   conclude: |
-    (end of file)
-    G0 X0 Y0 Z{z_safe}
+    `(end of file)
+    `G0 X0 Y0 Z{z_safe}
   pause: |
-    MSG {message}
-    M1
-  banner: "( {text} )"
+    `MSG {message}
+    `M1
+  banner: "`( {text} )"

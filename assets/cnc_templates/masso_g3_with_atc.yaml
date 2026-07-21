@@ -1,6 +1,10 @@
 # Masso G3 - With ATC (Automatic Tool Changer)
 # Suitable for a Masso G3 build with an 8-slot automatic tool changer.
 # Tool changes are fully automatic; no manual prompt is emitted.
+#
+# Primitives use the GCode Template Language (see docs/gcode-template-language.md):
+# a backtick line emits GCode, other lines are Rhai script, and {expr} in an emit
+# line is evaluated and unit-converted. metric() emits G21 and fixes the unit.
 
 name: "Masso G3 - With ATC"
 
@@ -15,35 +19,31 @@ machine:
   line_numbering_increment: 10
 
 primitives:
-  use_metric: |
-    {set_precision(3)}G21
-  use_imperial: |
-    {set_precision(5)}G20
   initialise: |
-    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    G17 G54 G40 G49 G80 G90
-    {use_metric}
-    G0 Z{z_safe}
-  rapid_move: "G0 X{x} Y{y} Z{z}"
-  linear_cut: "G1 X{x} Y{y} Z{z} S{s}"
+    `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+    `G17 G54 G40 G49 G80 G90
+    metric();
+    `G0 Z{z_safe}
+  rapid_move: "`G0 X{x} Y{y} Z{z}"
+  linear_cut: "`G1 X{x} Y{y} Z{z} S{s}"
   start_spindle: |
-    S{rpm}
-    M3
-  stop_spindle: "M5"
-  drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
-  peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
-  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+    `S{rpm}
+    `M3
+  stop_spindle: "`M5"
+  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  peck_drill: "`G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
+  cut_arc: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
-    ; cut_bezier fallback
+    `; cut_bezier fallback
   change_tool: |
-    M05
-    T{slot} M06
-    S{rpm}
+    `M05
+    `T{slot} M06
+    `S{rpm}
   conclude: |
-    (end of file)
-    G0 Z{z_safe}
-    G0 X0 Y0
+    `(end of file)
+    `G0 Z{z_safe}
+    `G0 X0 Y0
   pause: |
-    MSG {message}
-    M1
-  banner: "( {text} )"
+    `MSG {message}
+    `M1
+  banner: "`( {text} )"

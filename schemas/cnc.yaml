@@ -5,9 +5,10 @@ x-schema-version: 1
 title: CNC Profile
 description: >
   CNC profile persisted configuration. This file controls the emitted GCode
-  templates various CNC profiles. Templates are evaluated through the
-  application's RHAI expression path. Template text may include placeholders in
-  braces, for example {x}, {y}, {z_safe}.
+  for a CNC machine. The `primitives` templates are written in the GCode
+  Template Language (GTL): a line starting with a backtick emits GCode, every
+  other line is Rhai script, and `{expr}` inside an emit line is evaluated and
+  unit-converted. See docs/gcode-template-language.md for the full grammar.
 
   This schema references shared UUID and unit definitions from files located in
   the same directory:
@@ -202,105 +203,68 @@ properties:
 # ---------------------------------------------------------------------------
   # primitives
   # ---------------------------------------------------------------------------
-  # Primitive templates evaluated through RHAI for CNC-specific GCode emission.
+  # Primitive templates written in the GCode Template Language (GTL); see
+  # docs/gcode-template-language.md for the full grammar.
   #
-  # Unit rendering model:
-  #   - Coordinate, distance, feed, and spindle values are rendered by the
-  #     application according to the currently active output unit system.
-  #   - The active output unit can be changed from a RHAI expression by calling
-  #     use_metric() or use_imperial().
-  #   - Calling use_metric() should emit the controller command for metric mode,
-  #     typically G21.
-  #   - Calling use_imperial() should emit the controller command for imperial
-  #     mode, typically G20.
-  #   - After the unit switch, subsequent rendered values are formatted in that
-  #     selected unit system until switched again.
+  # Emit vs script:
+  #   - A line whose first non-whitespace character is a backtick (`) emits
+  #     GCode. Every other line is Rhai script (loops, conditionals, variables).
+  #   - Inside an emit line, {expr} is evaluated in scope and spliced in,
+  #     converted to the active output unit. Example:  `G0 X{x} Y{y}
+  #   - Braces delimit, so no spaces are needed between fields: `X{x}Y{y}`.
+  #     A literal brace is doubled: {{ or }}.
   #
-  # Template expression model:
-  #   - Text inside braces is evaluated through the application's RHAI path.
-  #   - Simple placeholders can be variable names, for example {x}, {y}, {rpm}.
-  #   - Placeholders may also be full RHAI expressions, for example:
-  #       {x * 0.001}
-  #       {rpm.clamp(1000, 24000)}
-  #       {if slot > 0 { slot } else { 1 }}
-  #   - The available variables and helper functions are defined by the
-  #     application for each primitive.
+  # Unit model:
+  #   - Call metric() (emits G21) or imperial() (emits G20), normally once in
+  #     initialise. That call fixes how every later value is formatted and
+  #     mirrors the machine's own modal state, so the author never tracks units.
+  #   - Display precision follows the active unit system automatically.
+  #   - Values keep their unit type in script logic, so `z - peck` and
+  #     `z > z_bottom` are unit-correct; conversion to a number happens only at
+  #     emit. Force a specific unit with an accessor: {z_safe.mm}, {z_safe.inch}.
   #
-  # Complex RHAI examples:
+  # Example (manual peck cycle for a controller without a canned G83):
   #
-  #   Example: scale a coordinate before rendering:
-  #
-  #     G1 X{x * 0.001} Y{y * 0.001} F{xy_feedrate}
-  #
-  #   Example: clamp spindle speed:
-  #
-  #     S{rpm.clamp(1000, 24000)}
-  #
-  #   Example: conditional coolant command:
-  #
-  #     {if coolant { "M08" } else { "" }}
-  #
-  #   Example: expand several passes from an array. The exact syntax depends on
-  #   how the application exposes output accumulation to RHAI, but the intent is
-  #   that an expression can build multi-line GCode:
-  #
-  #     {let out = "";
-  #      for z in passes {
-  #        out += `G1 Z${z} F${z_feedrate}\n`;
-  #        out += `G1 X${x} Y${y} F${xy_feedrate}\n`;
-  #      }
-  #      out}
+  #     `G0 X{x} Y{y}
+  #     `G0 Z{z_retract}
+  #     let z = z_retract;
+  #     while z > z_bottom {
+  #         z = max(z - peck, z_bottom);
+  #         `G1 Z{z} F{z_feedrate}
+  #         `G0 Z{z_retract}
+  #     }
   #
   # Notes:
   #   - These templates are strings; this schema validates their presence and
-  #     type, not whether each RHAI expression is semantically valid.
-  #   - The application should perform template compilation/evaluation checks
-  #     separately when loading or editing the CNC profile.
+  #     type, not whether each script is semantically valid. The application
+  #     compiles/evaluates them separately when loading or editing the profile.
   #
   primitives:
-    description: Primitive templates evaluated through RHAI for CNC-specific GCode emission.
+    description: Primitive templates in the GCode Template Language (backtick lines emit GCode; other lines are Rhai script). See docs/gcode-template-language.md.
     type: object
     properties:
-
-      # Switch output rendering to metric units.
-      #
-      # Default emits G21.
-      #
-      use_metric:
-        description: Special function which switches value rendering to metric.
-        type: string
-        default: |
-          {set_precision(3)}G21
-
-      # Switch output rendering to imperial units.
-      #
-      # Default emits G20.
-      #
-      use_imperial:
-        description: Special function which switches value rendering to imperial.
-        type: string
-        default: |
-          {set_precision(5)}G20
 
       # Program initialization block.
       #
       # Expected placeholders include:
       #   {pcb_filename}
       #   {timestamp}
-      #   {use_mm}
       #   {z_safe}
+      #
+      # Calls metric() to establish millimetre output (emits G21) before any
+      # coordinate is emitted.
       #
       initialise:
         description: Program initialization block.
         type: string
         default: |
-          (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-          (Reset all back to safe defaults)
-          G17 G54 G40 G49 G80 G90
-          {use_metric}
-          G10 P0
-          (Establish the Z-Safe)
-          G0 Z{z_safe}
+          `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+          `(Reset all back to safe defaults)
+          `G17 G54 G40 G49 G80 G90
+          metric();
+          `G10 P0
+          `(Establish the Z-Safe)
+          `G0 Z{z_safe}
 
       # Rapid positioning move primitive.
       #
@@ -312,7 +276,7 @@ properties:
       rapid_move:
         description: Positioning move primitive. Takes x, y, and z.
         type: string
-        default: G0 X{x} Y{y} Z{z}
+        default: "`G0 X{x} Y{y} Z{z}"
 
       # Linear cutting move primitive.
       #
@@ -325,7 +289,7 @@ properties:
       linear_cut:
         description: Linear cutting primitive. Takes x, y, z, and s.
         type: string
-        default: G1 X{x} Y{y} Z{z} S{s}
+        default: "`G1 X{x} Y{y} Z{z} S{s}"
 
       # Start spindle primitive.
       #
@@ -336,15 +300,15 @@ properties:
         description: Start spindle primitive.
         type: string
         default: |
-          S{rpm}
-          M03
+          `S{rpm}
+          `M03
 
       # Stop spindle primitive.
       #
       stop_spindle:
         description: Stop spindle primitive.
         type: string
-        default: M05
+        default: "`M05"
 
       # Drill cycle primitive.
       #
@@ -358,7 +322,7 @@ properties:
       drill:
         description: Drill primitive template.
         type: string
-        default: G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+        default: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
 
       # Peck drill cycle primitive.
       #
@@ -373,7 +337,7 @@ properties:
       peck_drill:
         description: Peck drill primitive template.
         type: string
-        default: G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}
+        default: "`G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
 
       # Arc cutting primitive.
       #
@@ -388,7 +352,7 @@ properties:
       cut_arc:
         description: Arc cutting primitive template.
         type: string
-        default: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+        default: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
 
       # Bezier cutting primitive.
       #
@@ -399,8 +363,8 @@ properties:
         description: Bezier primitive template. May be native or an approximation sequence.
         type: string
         default: |
-          ; cut_bezier fallback
-          ; implementation may expand into one or more arc segments
+          `; cut_bezier fallback
+          `; implementation may expand into one or more arc segments
 
       # Tool change primitive.
       #
@@ -413,10 +377,10 @@ properties:
         description: Tool change primitive template.
         type: string
         default: |
-          M05
-          {manual_message}
-          T{slot} M06
-          S{rpm}
+          `M05
+          `{manual_message}
+          `T{slot} M06
+          `S{rpm}
 
       # Program finalization block.
       #
@@ -424,7 +388,7 @@ properties:
         description: Program conclude/finalization block.
         type: string
         default: |
-          (end of file)
+          `(end of file)
 
       # Optional pause/message primitive.
       #
@@ -435,8 +399,8 @@ properties:
         description: Optional pause/message insertion primitive.
         type: string
         default: |
-          MSG {message}
-          M01
+          `MSG {message}
+          `M01
 
       # Optional comment/banner primitive.
       #
@@ -446,7 +410,7 @@ properties:
       banner:
         description: Optional comment/banner insertion primitive.
         type: string
-        default: "( {text} )"
+        default: "`( {text} )"
 
     required:
       - initialise

@@ -8,7 +8,7 @@ use units::Length;
 
 use crate::runtime::AppCtx;
 use crate::data::model::*;
-use crate::ui::unit_format;
+use units::user_format as unit_format;
 
 /// The job-configuration sidebar. Reads the active job snapshot and writes edits
 /// back through `mutate_ctx` (runtime job state).
@@ -24,38 +24,40 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
         .iter()
         .any(|op| matches!(op, ProductionOperation::RouteBoard | ProductionOperation::MillBoard));
     let tab_width_display = unit_format::format_length_input_value_from_mm(
-        snapshot.project_config.tab_width_mm as f64,
+        snapshot.project_config.tab_width.as_mm(),
         snapshot.unit_system,
     );
-    let tab_width_is_overridden =
-        (snapshot.project_config.tab_width_mm - snapshot.project_config.tab_width_baseline_mm).abs() > 1e-6;
+    let tab_width_is_overridden = (snapshot.project_config.tab_width.as_mm()
+        - snapshot.project_config.tab_width_baseline.as_mm())
+    .abs()
+        > 1e-6;
     let tab_width_step = unit_format::length_input_step(snapshot.unit_system);
     let tab_width_display_label = unit_format::format_length_display(
-        Length::from_mm(snapshot.project_config.tab_width_mm as f64),
+        snapshot.project_config.tab_width,
         snapshot.unit_system,
     );
     let mouse_bite_pitch_display_label = unit_format::format_length_display(
-        Length::from_mm(snapshot.project_config.mouse_bite_pitch_mm as f64),
+        snapshot.project_config.mouse_bite_pitch,
         snapshot.unit_system,
     );
     let tab_width_hint = match snapshot.unit_system {
-        UnitSystem::Metric => "2.4mm",
-        UnitSystem::Imperial => "1/16in",
-        UnitSystem::Mil => "95mil",
+        UserUnitSystem::Metric => "2.4mm",
+        UserUnitSystem::Imperial => "1/16in",
+        UserUnitSystem::Mil => "95mil",
     };
     let mouse_bite_pitch_display = unit_format::format_length_input_value_from_mm(
-        snapshot.project_config.mouse_bite_pitch_mm as f64,
+        snapshot.project_config.mouse_bite_pitch.as_mm(),
         snapshot.unit_system,
     );
     let mouse_bite_pitch_min = match snapshot.unit_system {
-        UnitSystem::Metric => "0.6",
-        UnitSystem::Imperial => "0.024",
-        UnitSystem::Mil => "24",
+        UserUnitSystem::Metric => "0.6",
+        UserUnitSystem::Imperial => "0.024",
+        UserUnitSystem::Mil => "24",
     };
     let mouse_bite_pitch_max = match snapshot.unit_system {
-        UnitSystem::Metric => "1.5",
-        UnitSystem::Imperial => "0.059",
-        UnitSystem::Mil => "59",
+        UserUnitSystem::Metric => "1.5",
+        UserUnitSystem::Imperial => "0.059",
+        UserUnitSystem::Mil => "59",
     };
     let eligible_router_tools: Vec<&Tool> = snapshot
         .tools
@@ -350,17 +352,19 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                                                     let value = evt.value().parse::<f32>().unwrap_or(0.0).max(0.0);
                                                     state
                                                         .with_mut(|s| {
-                                                            s.project_config.tab_width_mm = unit_format::mm_from_display_length(
-                                                                value as f64,
-                                                                s.unit_system,
-                                                            ) as f32;
+                                                            s.project_config.tab_width = Length::from_mm(
+                                                                unit_format::mm_from_display_length(
+                                                                    value as f64,
+                                                                    s.unit_system,
+                                                                ),
+                                                            );
                                                         });
                                                 },
                                             }
                                             if tab_width_is_overridden {
                                                 div { class: "stock-detail-original-group",
                                                     span { class: "stock-detail-original-value",
-                                                        "{unit_format::format_length_display(Length::from_mm(snapshot.project_config.tab_width_baseline_mm as f64), snapshot.unit_system)}"
+                                                        "{unit_format::format_length_display(snapshot.project_config.tab_width_baseline, snapshot.unit_system)}"
                                                     }
                                                     button {
                                                         r#type: "button",
@@ -369,9 +373,9 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                                                         onclick: move |_| {
                                                             state
                                                                 .with_mut(|s| {
-                                                                    s.project_config.tab_width_mm = s
+                                                                    s.project_config.tab_width = s
                                                                         .project_config
-                                                                        .tab_width_baseline_mm;
+                                                                        .tab_width_baseline;
                                                                 });
                                                         },
                                                         "↺"
@@ -411,10 +415,12 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                                                         let value = evt.value().parse::<f32>().unwrap_or(0.8).max(0.0);
                                                         state
                                                             .with_mut(|s| {
-                                                                s.project_config.mouse_bite_pitch_mm = unit_format::mm_from_display_length(
-                                                                    value as f64,
-                                                                    s.unit_system,
-                                                                ) as f32;
+                                                                s.project_config.mouse_bite_pitch = Length::from_mm(
+                                                                    unit_format::mm_from_display_length(
+                                                                        value as f64,
+                                                                        s.unit_system,
+                                                                    ),
+                                                                );
                                                             });
                                                     },
                                                 }

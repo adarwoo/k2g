@@ -10,7 +10,7 @@ use pcb::{BoardEdgeShape, HoleKind};
 use units::Length;
 
 use crate::runtime::AppCtx;
-use crate::ui::unit_format;
+use units::user_format as unit_format;
 
 fn board_display_label(board_filename: &str) -> String {
     Path::new(board_filename)

@@ -11,10 +11,37 @@
 use crate::types::{Angle, FeedRate, Length, LengthUnit, RotationalSpeed};
 
 /// The unit system the operator has selected for display.
+///
+/// `Mil` is a length-only presentation (thousandths of an inch); for feed rates
+/// it behaves as `Imperial` (in/min), and angle/rpm are system-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserUnitSystem {
     Metric,
     Imperial,
+    Mil,
+}
+
+impl UserUnitSystem {
+    /// The stable token this system persists as in settings files
+    /// (`"mm"` / `"in"` / `"mil"`).
+    pub fn as_settings_str(self) -> &'static str {
+        match self {
+            Self::Metric => "mm",
+            Self::Imperial => "in",
+            Self::Mil => "mil",
+        }
+    }
+
+    /// Parses a persisted settings token back into a system, tolerating the
+    /// legacy `"imperial"` spelling and defaulting unknown/missing values to
+    /// [`UserUnitSystem::Metric`].
+    pub fn from_settings_str(value: Option<&str>) -> Self {
+        match value {
+            Some("mil") => Self::Mil,
+            Some("in") | Some("imperial") => Self::Imperial,
+            _ => Self::Metric,
+        }
+    }
 }
 
 /// A value rendered for the user, plus an optional "native" annotation.
@@ -50,11 +77,16 @@ impl UserUnitDisplay for Length {
                 let inch = round_to_step(mm / 25.4, 0.0001);
                 format_with_unit(inch, "in", 4)
             }
+            UserUnitSystem::Mil => {
+                let value = round_to_step(self.as_mil(), 0.1);
+                format_with_unit(value, "mil", 1)
+            }
         };
 
         let native = match (user_unit_system, self.unit()) {
             (UserUnitSystem::Metric, LengthUnit::Mm) => None,
             (UserUnitSystem::Imperial, LengthUnit::In | LengthUnit::Inch) => None,
+            (UserUnitSystem::Mil, LengthUnit::Mil | LengthUnit::Thou) => None,
             _ => Some(format_native_length(*self)),
         };
 
@@ -68,6 +100,7 @@ impl UserUnitDisplay for Length {
                 let mm = round_to_step(self.as_mm(), 0.001);
                 round_to_step(mm / 25.4, 0.0001)
             }
+            UserUnitSystem::Mil => round_to_step(self.as_mil(), 0.1),
         }
     }
 }
@@ -79,7 +112,7 @@ impl UserUnitDisplay for FeedRate {
                 let value = round_to_step(self.as_mm_per_min(), 0.001);
                 format_with_unit(value, "mm/min", 3)
             }
-            UserUnitSystem::Imperial => {
+            UserUnitSystem::Imperial | UserUnitSystem::Mil => {
                 let value = round_to_step(self.as_in_per_min(), 0.0001);
                 format_with_unit(value, "ipm", 4)
             }
@@ -89,7 +122,7 @@ impl UserUnitDisplay for FeedRate {
             (user_unit_system, self.unit()),
             (UserUnitSystem::Metric, crate::types::FeedRateUnit::MmPerMin)
                 | (
-                    UserUnitSystem::Imperial,
+                    UserUnitSystem::Imperial | UserUnitSystem::Mil,
                     crate::types::FeedRateUnit::Ipm
                         | crate::types::FeedRateUnit::InPerMin
                         | crate::types::FeedRateUnit::InchPerMin
@@ -108,7 +141,9 @@ impl UserUnitDisplay for FeedRate {
     fn user_value(&self, user_unit_system: UserUnitSystem) -> f64 {
         match user_unit_system {
             UserUnitSystem::Metric => round_to_step(self.as_mm_per_min(), 0.001),
-            UserUnitSystem::Imperial => round_to_step(self.as_in_per_min(), 0.0001),
+            UserUnitSystem::Imperial | UserUnitSystem::Mil => {
+                round_to_step(self.as_in_per_min(), 0.0001)
+            }
         }
     }
 }
@@ -141,24 +176,24 @@ impl UserUnitDisplay for RotationalSpeed {
     }
 }
 
-/// Rounds `value` to the nearest multiple of `step`, leaving non-finite values
-/// untouched.
-fn round_to_step(value: f64, step: f64) -> f64 {
-    if !value.is_finite() {
+/// Rounds `value` to the nearest multiple of `step`. Non-finite values and a
+/// non-positive `step` are returned unchanged. This is the single rounder shared
+/// across the crate's display layers (`display` and `user_format`).
+pub(crate) fn round_to_step(value: f64, step: f64) -> f64 {
+    if !value.is_finite() || step <= 0.0 {
         return value;
     }
     (value / step).round() * step
 }
 
-/// Formats `value` with `unit_suffix`, trimming trailing zeros up to
-/// `max_decimals` places.
-fn format_with_unit(value: f64, unit_suffix: &str, max_decimals: usize) -> String {
-    let mut text = if max_decimals == 0 {
-        format!("{}", value.round() as i64)
-    } else {
-        format!("{value:.max_decimals$}")
-    };
-
+/// Formats `value` to at most `max_decimals` places, trimming trailing zeros.
+///
+/// The single number-formatting core shared across the crate's display layers
+/// (`display`'s `format_with_unit` and `user_format`'s `format_trimmed`). For
+/// `max_decimals == 0` it defers to `{:.0}` (round-half-to-even) with no trim;
+/// callers that need round-half-away-from-zero handle that before calling.
+pub(crate) fn format_number(value: f64, max_decimals: usize) -> String {
+    let mut text = format!("{value:.max_decimals$}");
     if max_decimals > 0 {
         while text.contains('.') && text.ends_with('0') {
             text.pop();
@@ -167,7 +202,18 @@ fn format_with_unit(value: f64, unit_suffix: &str, max_decimals: usize) -> Strin
             text.pop();
         }
     }
+    text
+}
 
+/// Formats `value` with `unit_suffix`, trimming trailing zeros up to
+/// `max_decimals` places. Whole-number output at `max_decimals == 0` rounds
+/// half away from zero (via integer cast) to match historical behaviour.
+fn format_with_unit(value: f64, unit_suffix: &str, max_decimals: usize) -> String {
+    let text = if max_decimals == 0 {
+        format!("{}", value.round() as i64)
+    } else {
+        format_number(value, max_decimals)
+    };
     format!("{text}{unit_suffix}")
 }
 

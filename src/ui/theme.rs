@@ -293,23 +293,23 @@ body {
 }
 
 .rail-button-icon {
-    width: 22px;
-    height: 22px;
+    width: 35px;
+    height: 35px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    border-radius: 7px;
+    border-radius: 11px;
     background: color-mix(in srgb, var(--bg-elev) 80%, transparent);
     border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
     flex: 0 0 auto;
 }
 
 .rail-icon-svg {
-    width: 15px;
-    height: 15px;
+    width: 24px;
+    height: 24px;
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.8;
+    stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
 }
@@ -1346,6 +1346,53 @@ p {
     box-shadow: 0 0 0 1px color-mix(in srgb, #d64545 35%, transparent);
 }
 
+/* A stock field whose value has been edited away from its catalog original: the
+   label is tinted and an orange revert (↺) control sits at the field's corner. */
+.field.field-changed {
+    position: relative;
+}
+
+.field.field-changed > label {
+    color: #e08a00;
+}
+
+.stock-revert-btn {
+    position: absolute;
+    top: 0;
+    right: 0;
+    border: none;
+    background: transparent;
+    color: #e08a00;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    padding: 1px 5px;
+    border-radius: 6px;
+}
+
+.stock-revert-btn:hover {
+    background: color-mix(in srgb, #e08a00 16%, transparent);
+}
+
+/* Reload-PCB affordance next to the board name: the same tiny glyph-button style
+   as the stock revert control, but inline and neutrally tinted. */
+.board-reload-btn {
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    padding: 1px 6px;
+    border-radius: 6px;
+    opacity: 0.6;
+}
+
+.board-reload-btn:hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
 /* Schema-driven machining detail: sections, nested subsections, and pickers. */
 .schema-section {
     grid-column: 1 / -1;
@@ -1393,7 +1440,10 @@ p {
     font-size: 13px;
 }
 
-.rack-grid {
+/* Toolset "rack" editor: T1..Tn rows stacked in a single vertical column.
+ * Distinct from the job screen's `.rack-grid` card grid, which wraps into
+ * multiple columns — sharing that class here forced these rows sideways. */
+.rack-slot-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
@@ -2415,6 +2465,29 @@ th {
     white-space: nowrap;
 }
 
+/* Clickable catalog rows — click a row to view its tools; active row is tinted. */
+.catalog-row {
+    cursor: pointer;
+}
+
+.catalog-row:hover td {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.catalog-row.active td {
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+/* Section header row inside the read-only catalog contents table. */
+.catalog-section-row td {
+    background: var(--bg-subtle);
+    font-weight: 700;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-subtle);
+}
+
 .size-cell {
     display: flex;
     flex-direction: column;
@@ -2529,6 +2602,154 @@ summary {
         align-items: flex-start;
         gap: 5px;
     }
+}
+
+/* In-context help ------------------------------------------------------- */
+.stock-toolbar-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.help-trigger {
+    white-space: nowrap;
+}
+
+.help-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 120;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.help-panel {
+    width: min(760px, 94vw);
+    max-height: 86vh;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.help-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+}
+
+.help-panel-head h2 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.help-markdown {
+    overflow: auto;
+    padding: 4px 20px 20px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+}
+
+.help-markdown h1 {
+    font-size: 18px;
+    margin: 20px 0 8px;
+}
+
+.help-markdown h2 {
+    font-size: 15px;
+    margin: 20px 0 8px;
+}
+
+.help-markdown h3 {
+    font-size: 13px;
+    margin: 16px 0 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-subtle);
+}
+
+.help-markdown p {
+    margin: 8px 0;
+}
+
+.help-markdown ul,
+.help-markdown ol {
+    margin: 8px 0;
+    padding-left: 22px;
+}
+
+.help-markdown li {
+    margin: 3px 0;
+}
+
+.help-markdown a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.help-markdown a:hover {
+    text-decoration: underline;
+}
+
+.help-markdown code {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px;
+}
+
+.help-markdown pre {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 10px 0;
+}
+
+.help-markdown pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    line-height: 1.5;
+}
+
+.help-markdown table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 12px;
+}
+
+.help-markdown th,
+.help-markdown td {
+    border: 1px solid var(--border);
+    padding: 6px 10px;
+    text-align: left;
+    vertical-align: top;
+}
+
+.help-markdown th {
+    background: var(--bg-elev);
+    font-weight: 600;
+}
+
+.help-markdown blockquote {
+    margin: 10px 0;
+    padding: 4px 14px;
+    border-left: 3px solid var(--border);
+    color: var(--text-subtle);
 }
 "#;
 

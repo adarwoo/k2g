@@ -23,6 +23,9 @@ pub(crate) type Client = KiCadClientBlocking;
 /// Everything k2g keeps about one PCB, collected from a KiCad document.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoardSnapshot {
+    /// Short, user-facing PCB name (the board file's name), set at collection
+    /// from the enumerated `PcbInfo`; empty when unknown.
+    pub name: String,
     pub thickness: Option<Length>,
     pub bounding_box: Option<BoardBoundingBox>,
     pub edge_shapes: Vec<BoardEdgeShape>,
@@ -122,6 +125,7 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
         .is_empty();
     if !has_board {
         return Ok(BoardSnapshot {
+            name: String::new(),
             thickness: None,
             bounding_box: None,
             edge_shapes: Vec::new(),
@@ -311,6 +315,7 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
     });
 
     Ok(BoardSnapshot {
+        name: String::new(),
         thickness: board_thickness,
         bounding_box,
         edge_shapes,

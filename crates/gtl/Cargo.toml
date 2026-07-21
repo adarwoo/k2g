@@ -1,0 +1,9 @@
+[package]
+name = "gtl"
+version = "0.1.0"
+edition = "2021"
+description = "Generic Template Language — a line-oriented Rhai scripting engine whose backtick-marked lines emit text, with typed `{ expr }` interpolation. Host-agnostic: it emits plain strings and the output dialect (formatting, domain functions) is registered by the host."
+
+[dependencies]
+rhai = "1"
+thiserror = "2"

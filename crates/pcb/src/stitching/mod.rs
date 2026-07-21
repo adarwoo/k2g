@@ -318,10 +318,10 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         };
     }
 
-    println!("[stitch] raw closed chains: {}", closed_polys.len());
+    log::debug!("[stitch] raw closed chains: {}", closed_polys.len());
     for (i, poly) in closed_polys.iter().enumerate() {
         let (xmin, ymin, xmax, ymax) = bbox_nm(poly);
-        println!(
+        log::trace!(
             "[stitch]   chain {i}: {} pts  bbox ({:.3},{:.3})-({:.3},{:.3}) mm",
             poly.len(),
             xmin as f64 / 1_000_000.0, ymin as f64 / 1_000_000.0,
@@ -330,7 +330,7 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
     }
     if !errors.is_empty() {
         for e in &errors {
-            println!("[stitch] ERROR: {e}");
+            log::debug!("[stitch] ERROR: {e}");
         }
     }
 
@@ -344,7 +344,7 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
                 .collect::<Path64>()
         })
         .collect();
-    println!("[stitch] after nesting prep: {} contour(s)", paths.len());
+    log::debug!("[stitch] after nesting prep: {} contour(s)", paths.len());
 
     let mut contours_with_depth: Vec<(usize, Contour)> = paths
         .iter()
@@ -384,11 +384,11 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
 
     let contours: Vec<Contour> = contours_with_depth.into_iter().map(|(_, contour)| contour).collect();
 
-    println!("[stitch] contour nesting ({} total):", contours.len());
+    log::debug!("[stitch] contour nesting ({} total):", contours.len());
     for (i, c) in contours.iter().enumerate() {
         let (xmin, ymin, xmax, ymax) = bbox_nm(&c.points);
         let area = signed_area_nm2(&c.points).unsigned_abs();
-        println!(
+        log::trace!(
             "[stitch]   #{i} {} {} pts  bbox ({:.3},{:.3})-({:.3},{:.3}) mm  area {:.2} mm^2",
             if c.is_hole { "HOLE " } else { "OUTER" },
             c.points.len(),
@@ -398,9 +398,9 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         );
     }
     if !errors.is_empty() {
-        println!("[stitch] {} validation error(s) — board cannot be processed:", errors.len());
+        log::debug!("[stitch] {} validation error(s) — board cannot be processed:", errors.len());
         for e in &errors {
-            println!("[stitch]   ERROR: {e}");
+            log::debug!("[stitch]   ERROR: {e}");
         }
     }
 

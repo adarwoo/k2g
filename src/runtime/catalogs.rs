@@ -9,11 +9,28 @@ fn load_catalog_index() -> Vec<CatalogStockCatalog> {
         });
     }
 
+    // The bundled catalogs are seeded into the user's catalog dir and then loaded
+    // back from disk like any other file, so identify them by filename stem: those
+    // are protected (built-in), everything else in the directory is a user import
+    // and may be deleted.
+    let builtin_stems: std::collections::HashSet<String> = default_catalogs()
+        .iter()
+        .filter_map(|(name, _)| {
+            std::path::Path::new(name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+
     if let (Ok(mut manager), Ok(dir)) = (CatalogManager::new(), catalog_dir()) {
         let _ = manager.load_dir(&dir);
         source_catalogs = manager
             .catalogs()
-            .map(|(stem, catalog)| (stem.to_string(), catalog.clone(), false))
+            .map(|(stem, catalog)| {
+                let built_in = builtin_stems.contains(stem);
+                (stem.to_string(), catalog.clone(), built_in)
+            })
             .collect();
     }
 
@@ -61,8 +78,6 @@ fn catalog_to_stock_catalog(
 
             tools.push(CatalogStockTool {
                 key: format!("{}::t{}", section_key, tool_idx),
-                catalog_name: display_name.to_string(),
-                section_name: section.name.clone(),
                 display_name: display_tool_name,
                 kind,
                 diameter: core.diameter,

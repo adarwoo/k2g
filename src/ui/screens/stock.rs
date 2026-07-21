@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use crate::runtime::ctx_snapshot;
 use crate::ui::bindings::{StockField, StockForm};
-use crate::ui::unit_format;
+use units::user_format as unit_format;
 
 use crate::data::model::*;
 
@@ -480,19 +480,30 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                     },
                                     "Clone Tool"
                                 }
+                                button {
+                                    class: "btn btn-secondary",
+                                    title: "Reset every edited field back to its original catalog value",
+                                    onclick: move |_| {
+                                        crate::ui::bindings::revert_stock_tool(index);
+                                        stock_feedback.set("Reverted tool to catalog values".to_string());
+                                    },
+                                    "Revert to catalog"
+                                }
                             }
                         }
 
-                        // Schema-driven tool editor over the AppData stock singleton
-                        // (`/tools/{index}/…`). Replaces the former ~800-line buffered
-                        // per-field editor; edits write straight to the datastore and
+                        // Schema-driven tool editor over the AppData stock singleton.
+                        // Edits write to `overrides` (`/tools/{index}/overrides/…`);
+                        // `base` stays the immutable catalog original. A field that
+                        // differs from base shows an orange revert control (see
+                        // `field_widget`). Edits persist straight to the datastore and
                         // the table refreshes via the store-revision effect.
                         div { class: "stock-detail-form",
                             div { class: "field",
                                 label { "Source catalog" }
                                 div { class: "stock-detail-readonly", "{tool.source_catalog}" }
                             }
-                            StockForm { ptr: format!("/tools/{index}/base") }
+                            StockForm { ptr: format!("/tools/{index}/overrides") }
                             StockField { ptr: format!("/tools/{index}/availability") }
                             StockField { ptr: format!("/tools/{index}/preference") }
                             div { class: "field",
@@ -706,7 +717,7 @@ fn stock_tool_preference_rank(preference: ToolPreference) -> u8 {
     }
 }
 
-fn tool_diameter(tool: &Tool, unit_system: UnitSystem) -> String {
+fn tool_diameter(tool: &Tool, unit_system: UserUnitSystem) -> String {
     unit_format::format_length_display(tool.diameter, unit_system)
 }
 
@@ -727,7 +738,7 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
     }
 }
 
-fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UnitSystem) -> String {
+fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UserUnitSystem) -> String {
     unit_format::format_length_display(tool.diameter, unit_system)
 }
 

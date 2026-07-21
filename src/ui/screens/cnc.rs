@@ -49,6 +49,7 @@ pub fn CncScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
             groups: cnc_field_groups(),
             templates,
             delete_guard: Some(delete_guard),
+            help: Some(crate::ui::help::GTL),
         }
     }
 }
@@ -100,9 +101,5 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
             ],
         ),
         group("Tool change", &["/primitives/change_tool"]),
-        group(
-            "Unit switching",
-            &["/primitives/use_metric", "/primitives/use_imperial"],
-        ),
     ]
 }

@@ -13,50 +13,48 @@ impl AppCtx {
             boot.board_snapshot.is_some().to_string(),
         );
 
-        let stitched_board_data = boot.board_snapshot.as_ref().map(|board| {
-            let stitched = stitch_edge_shapes(&board.edge_shapes);
-            StitchedBoardData {
-                contour_count: stitched.contours.len(),
-                error_count: stitched.errors.len(),
-                errors: stitched.errors,
-            }
-        });
+        // One stitch when the boot board is cached; the full result (contours +
+        // errors) is kept for the readiness gate and the generator.
+        let stitched_board_data = boot
+            .board_snapshot
+            .as_ref()
+            .map(|board| stitch_edge_shapes(&board.edge_shapes));
         let job_references = collect_job_references(&app);
 
         Self {
             app,
-            cli_args: boot.cli_args.clone(),
             stitched_board_data,
             job_references,
-            kicad_status: boot.kicad_status.clone(),
-            issues: vec![],
             status,
             catalogs_loaded: false,
         }
     }
 
-    fn sync_from_app_state(&mut self, state: &AppState) {
-        let previous_app = self.app.clone();
+    /// Reconcile derived context after a mutation. `previous_app` is the app state
+    /// captured *before* the mutation ran (see `with_ctx_mut`), so the diff against
+    /// the now-current `self.app` is real — this is what drives board re-stitching
+    /// and the regeneration trigger.
+    fn sync_after_mutation(&mut self, previous_app: &AppState) {
         let previous_references = self.job_references.clone();
-        let mut next_app = state.clone();
-        let board_changed = self.app.board != next_app.board;
+        let board_changed = previous_app.board != self.app.board;
 
-        // Keep context as the source of truth for lazily-loaded catalogs.
-        if self.catalogs_loaded && !self.app.catalogs.is_empty() && next_app.catalogs.is_empty() {
-            next_app.catalogs = self.app.catalogs.clone();
+        // Keep context as the source of truth for lazily-loaded catalogs: if the
+        // mutation dropped them (a fresh snapshot with none), refill from before.
+        if self.catalogs_loaded
+            && !previous_app.catalogs.is_empty()
+            && self.app.catalogs.is_empty()
+        {
+            self.app.catalogs = previous_app.catalogs.clone();
         }
 
-        self.app = next_app;
-
         if board_changed {
-            self.stitched_board_data = self.app.board.as_ref().map(|board| {
-                let stitched = stitch_edge_shapes(&board.edge_shapes);
-                StitchedBoardData {
-                    contour_count: stitched.contours.len(),
-                    error_count: stitched.errors.len(),
-                    errors: stitched.errors,
-                }
-            });
+            // One stitch per board (re)acquisition; the full result — contours
+            // included — is cached for the generator and the readiness gate.
+            self.stitched_board_data = self
+                .app
+                .board
+                .as_ref()
+                .map(|board| stitch_edge_shapes(&board.edge_shapes));
         }
 
         if !self.app.catalogs.is_empty() {
@@ -64,23 +62,13 @@ impl AppCtx {
         }
 
         self.job_references = collect_job_references(&self.app);
-        let change_set = collect_mutation_changes(&previous_app, &self.app);
-        // CNC profile files are owned by the `AppData` datastore (see `crate::data`);
-        // the legacy layer no longer persists them at the sync tail. `change_set` is
-        // still consumed below for regeneration triggers and modified-UUID reporting.
-
-        self.issues = self
-            .app
-            .errors
-            .iter()
-            .map(issue_from_app_error)
-            .collect::<Vec<_>>();
+        let change_set = collect_mutation_changes(previous_app, &self.app);
 
         self.status.insert(
             STATUS_KEY_REGENERATION.to_string(),
             match self.app.generation_state {
                 GenerationState::Idle => "idle",
-                GenerationState::Generating => "generating",
+                GenerationState::Running => "running",
                 GenerationState::Failed => "failed",
             }
             .to_string(),
@@ -109,7 +97,7 @@ impl AppCtx {
         );
 
         if let Some(trigger) = detect_generation_trigger(
-            &previous_app,
+            previous_app,
             &self.app,
             &previous_references,
             &self.job_references,
@@ -144,23 +132,55 @@ impl AppCtx {
         }
     }
 
+    /// A regeneration trigger fired and the readiness gate is open: snapshot the
+    /// job input, mark the state Running, and hand the request to the worker
+    /// (single-flight; a newer request will cancel this one). See
+    /// `docs/gcode-generation.md` §5–6.
     fn report_generation_started(
         &mut self,
         trigger: GenerationTriggerCause,
-        change_set: &MutationChangeSet,
+        _change_set: &MutationChangeSet,
     ) {
-        // Stub phase: report generation start, but do not execute generation yet.
-        let modified = change_set.modified_uuid_entries().join(", ");
-        log::info!(
-            "Generation initiated: cause={} modified=[{}]",
-            trigger.cause_key(),
-            modified
-        );
-        self.app.log_event(format!(
-            "Generation started ({}) [stub/no-op] modified={}",
-            trigger.label(),
-            if modified.is_empty() { "none" } else { &modified }
-        ));
+        let input = self.build_generation_input();
+        self.app.generation_state = GenerationState::Running;
+        // No start toast: on a live tool generation fires on every edit, so a
+        // per-run toast would spam. The bottom status bar shows "Generating GCode…"
+        // (and the pill greys) while Running; only completion/failure notify (§8).
+        log::info!("Generation enqueued: cause={}", trigger.cause_key());
+        enqueue_generation(input);
+    }
+
+    /// Snapshot the resolved job into an immutable [`GenerationInput`] for the
+    /// worker. The Coder never sees the ctx or AppData — only this snapshot.
+    fn build_generation_input(&self) -> GenerationInput {
+        let process = selected_process_profile_from_app(&self.app);
+        let process_profile_name = process
+            .map(|profile| profile.name.clone())
+            .unwrap_or_default();
+        let cnc_profile_name = process
+            .and_then(|profile| {
+                self.app
+                    .machines
+                    .iter()
+                    .find(|machine| machine.id == profile.cnc_profile_id)
+            })
+            .map(|machine| machine.name.clone())
+            .unwrap_or_default();
+        let operations = self
+            .app
+            .project_config
+            .selected_operations
+            .iter()
+            .map(|op| op.label().to_string())
+            .collect();
+        GenerationInput {
+            board: self.app.board.clone(),
+            stitched: self.stitched_board_data.clone(),
+            process_profile_name,
+            cnc_profile_name,
+            operations,
+            save_filename: self.app.save_filename.clone(),
+        }
     }
 
     pub fn ensure_catalogs_loaded(&mut self) {
@@ -168,11 +188,6 @@ impl AppCtx {
             return;
         }
 
-        self.app.catalogs = load_catalog_index();
-        self.catalogs_loaded = true;
-    }
-
-    pub fn refresh_catalogs(&mut self) {
         self.app.catalogs = load_catalog_index();
         self.catalogs_loaded = true;
     }
@@ -243,39 +258,6 @@ impl AppCtx {
         Ok(())
     }
 
-    pub fn clear_domain(&mut self, domain: &str) {
-        self.issues.retain(|issue| issue.domain != domain);
-    }
-
-    pub fn set_status(&mut self, key: &str, value: impl Into<String>) {
-        self.status.insert(key.to_string(), value.into());
-    }
-
-    pub fn as_rhai_ctx(&self) -> Map {
-        let mut ctx = Map::new();
-        ctx.insert("kicad_status".into(), Dynamic::from(self.kicad_status.clone()));
-        ctx.insert("cnc_count".into(), Dynamic::from(self.app.machines.len() as i64));
-        ctx.insert(
-            "process_profile_count".into(),
-            Dynamic::from(self.app.process_profiles.len() as i64),
-        );
-        ctx.insert("stock_count".into(), Dynamic::from(self.app.tools.len() as i64));
-        ctx.insert("has_board".into(), Dynamic::from(self.app.board.is_some()));
-
-        let status_map = self
-            .status
-            .iter()
-            .map(|(key, value)| {
-                let mut item = Map::new();
-                item.insert("key".into(), Dynamic::from(key.clone()));
-                item.insert("value".into(), Dynamic::from(value.clone()));
-                Dynamic::from(item)
-            })
-            .collect::<Array>();
-        ctx.insert("status".into(), Dynamic::from(status_map));
-
-        ctx
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -378,7 +360,7 @@ impl MutationChangeSet {
 
 fn evaluate_generation_readiness(
     app: &AppState,
-    stitched: Option<&StitchedBoardData>,
+    stitched: Option<&StitchResult>,
 ) -> GenerationReadiness {
     let mut nogo_reasons = Vec::new();
 
@@ -402,7 +384,7 @@ fn evaluate_generation_readiness(
             {
                 nogo_reasons.push("Floating island detected".to_string());
             }
-            if stitched_board.error_count > 0
+            if !stitched_board.errors.is_empty()
                 && !nogo_reasons.iter().any(|reason| reason == "Open contours detected")
                 && !nogo_reasons.iter().any(|reason| reason == "Floating island detected")
             {
@@ -695,14 +677,14 @@ fn job_config_fingerprint(config: &JobConfig) -> String {
         "ops={operations};rot={};tab_count={};tab_width={};tab_width_base={};allow_holes={};drill_then_route={};pilot={};router={};mouse_bites={};mouse_pitch={};mouse_tool={}",
         config.rotation_angle,
         config.tab_count,
-        config.tab_width_mm,
-        config.tab_width_baseline_mm,
+        config.tab_width.as_mm(),
+        config.tab_width_baseline.as_mm(),
         config.allow_routing_holes,
         config.drill_then_route,
         config.pilot_hole_fallback,
         config.outline_router_tool_id.clone().unwrap_or_default(),
         config.mouse_bites_enabled,
-        config.mouse_bite_pitch_mm,
+        config.mouse_bite_pitch.as_mm(),
         config.mouse_bite_drill_tool_id.clone().unwrap_or_default(),
     )
 }
@@ -728,21 +710,3 @@ impl DerefMut for AppCtx {
     }
 }
 
-fn issue_from_app_error(err: &AppError) -> CtxIssue {
-    CtxIssue {
-        id: err.id.clone(),
-        domain: err.domain.clone(),
-        owner_tag: err.owner_tag.clone(),
-        is_error: err.is_error,
-        message: err.message.clone(),
-        details: err.details.clone(),
-        created_ms: now_ms(),
-    }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
-}

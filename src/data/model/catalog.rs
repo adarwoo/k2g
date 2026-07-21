@@ -61,25 +61,6 @@ pub enum LinearUnit {
     In,
 }
 
-impl LinearUnit {
-    #[allow(dead_code)]
-    pub fn suffix(self) -> &'static str {
-        match self {
-            Self::Mm => "mm",
-            Self::In => "in",
-        }
-    }
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FeedUnit {
-    #[serde(rename = "mm_min")]
-    MmMin,
-    #[serde(rename = "ipm")]
-    Ipm,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEntry {
     #[serde(default)]
@@ -100,11 +81,6 @@ pub struct ToolEntry {
 }
 
 impl ToolEntry {
-    #[allow(dead_code)]
-    pub fn diameter_label(&self) -> String {
-        self.diameter.to_string()
-    }
-
     pub fn to_tool_core(&self) -> ToolCore {
         ToolCore {
             kind: self.tool_type.to_tool_kind(),
@@ -136,8 +112,6 @@ pub struct Catalog {
 pub enum CatalogError {
     #[error("Failed to compile catalog schema: {0}")]
     SchemaCompile(String),
-    #[error("Cannot read catalog file '{path}': {error}")]
-    Read { path: String, error: String },
     #[error("YAML parse error in '{path}': {error}")]
     YamlParse { path: String, error: String },
     #[error("Schema validation failed for '{path}':\n{error}")]
@@ -189,35 +163,6 @@ impl CatalogManager {
         errors
     }
 
-    pub fn drillbits(&self) -> impl Iterator<Item = (String, &ToolEntry)> {
-        self.all_tools()
-            .filter(|(_, t)| t.tool_type == ToolType::Drillbit)
-    }
-
-    pub fn router_bits(&self) -> impl Iterator<Item = (String, &ToolEntry)> {
-        self.all_tools()
-            .filter(|(_, t)| t.tool_type == ToolType::Routerbit)
-    }
-
-    pub fn all_tools(&self) -> impl Iterator<Item = (String, &ToolEntry)> {
-        self.catalogs.iter().flat_map(|lc| {
-            lc.catalog.sections.iter().flat_map(move |sec| {
-                sec.tools.iter().map(move |tool| {
-                    let id = format!("[{}] {} / {}", lc.stem, sec.name, tool.diameter_label());
-                    (id, tool)
-                })
-            })
-        })
-    }
-
-    pub fn find(&self, id: &str) -> Option<&ToolEntry> {
-        self.all_tools().find(|(k, _)| k == id).map(|(_, t)| t)
-    }
-
-    pub fn catalog_stems(&self) -> Vec<&str> {
-        self.catalogs.iter().map(|lc| lc.stem.as_str()).collect()
-    }
-
     pub fn catalogs(&self) -> impl Iterator<Item = (&str, &Catalog)> {
         self.catalogs
             .iter()
@@ -261,8 +206,6 @@ fn compile_schema(yaml_text: &str) -> Result<Value, CatalogError> {
 #[derive(Clone)]
 pub struct CatalogStockTool {
     pub key: String,
-    pub catalog_name: String,
-    pub section_name: String,
     pub display_name: String,
     pub kind: String,
     pub diameter: Length,

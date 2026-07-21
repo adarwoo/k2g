@@ -9,3 +9,4 @@ units = { path = "../units" }
 kicad-ipc-rs = { version = "0.5.1", features = ["blocking"] }
 clipper2-rust = "1.0"
 thiserror = "2"
+log = "0.4"

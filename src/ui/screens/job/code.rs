@@ -5,7 +5,7 @@ use dioxus::prelude::*;
 use units::Length;
 
 use crate::runtime::AppCtx;
-use crate::ui::unit_format;
+use units::user_format as unit_format;
 
 /// The G-code program view: shows the generated program in an editable textarea
 /// and a stat strip. Editing marks the program modified.

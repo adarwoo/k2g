@@ -18,6 +18,7 @@ use crate::ui::bindings::{
     clone_named, create_named, create_named_from_template, export_yaml, import_yaml,
     remove_profile_result, use_profiles, SchemaField,
 };
+use crate::ui::help::{HelpButton, HelpDoc};
 
 /// A titled group of schema field pointers rendered as one section of the
 /// detail editor. An empty `title` renders no header.
@@ -46,6 +47,8 @@ impl FieldGroup {
 /// - `templates` are `(key, label)` seeds shown in the add dialog (CNC only).
 /// - `delete_guard`, if set, is called with the id before delete and may return
 ///   a message to block it (transitional legacy cross-reference safety).
+/// - `help`, if set, adds a header button opening an in-context reference page
+///   (e.g. the GCode template syntax for CNC primitive fields).
 #[component]
 pub fn ProfileManager(
     kind: Profile,
@@ -54,6 +57,7 @@ pub fn ProfileManager(
     groups: Vec<FieldGroup>,
     templates: Vec<(String, String)>,
     delete_guard: Option<Callback<String, Option<String>>>,
+    help: Option<HelpDoc>,
 ) -> Element {
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
@@ -76,8 +80,11 @@ pub fn ProfileManager(
     rsx! {
         div { class: "screen single stock-shell",
             div { class: "stock-toolbar",
-                div {
+                div { class: "stock-toolbar-heading",
                     h3 { "{type_label} profile management" }
+                    if let Some(doc) = help {
+                        HelpButton { doc }
+                    }
                 }
                 ProfileLifecycleToolbar {
                     profile_type_label: type_label.clone(),

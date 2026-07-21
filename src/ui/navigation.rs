@@ -1,10 +1,13 @@
-//! App-shell model types shared by the runtime context and the UI: top-level
-//! screen navigation, the Job screen's sub-views, user unit/theme preferences,
-//! generation status, the UI launch payload, and the persistence realm marker.
-//! (Relocated out of the former `ui::model` facade — these belong below the UI.)
+//! UI navigation and shell state: top-level screen selection, the Job screen's
+//! sub-views, the visual theme, the launch payload, the generation status, and
+//! the persistence-realm dispatch marker. These describe *where the user is* and
+//! how the shell is framed, so they live under the UI layer.
+//!
+//! Note that `GenerationState` and `PersistRealm` are not navigation as such —
+//! they ride along here as small shell-level status/dispatch markers that the
+//! runtime keeps on `AppState` alongside the navigation fields.
 
 use pcb::BoardSnapshot;
-use units::UserUnitSystem;
 
 /// Boot payload received when launching the UI layer.
 #[derive(Clone, PartialEq)]
@@ -83,50 +86,6 @@ impl JobCenterView {
     }
 }
 
-/// User-facing measurement display system.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UnitSystem {
-    Metric,
-    Imperial,
-    Mil,
-}
-
-impl UnitSystem {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Metric => "metric",
-            Self::Imperial => "imperial",
-            Self::Mil => "mil",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn user_unit_system(self) -> UserUnitSystem {
-        match self {
-            Self::Metric => UserUnitSystem::Metric,
-            Self::Imperial | Self::Mil => UserUnitSystem::Imperial,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn length_unit_label(self) -> &'static str {
-        match self {
-            Self::Metric => "mm",
-            Self::Imperial => "\"",
-            Self::Mil => "mil",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn feed_unit_label(self) -> &'static str {
-        match self {
-            Self::Metric => "mm/min",
-            Self::Imperial | Self::Mil => "in/min",
-        }
-    }
-}
-
 /// Application visual theme.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
@@ -136,14 +95,6 @@ pub enum Theme {
 
 impl Theme {
     #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Light => "light",
-            Self::Dark => "dark",
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn from_str(value: &str) -> Self {
         match value {
             "light" => Self::Light,
@@ -152,12 +103,14 @@ impl Theme {
     }
 }
 
-/// GCode generation status for UI feedback.
-#[allow(dead_code)]
+/// GCode generation status for UI feedback (see `docs/gcode-generation.md` §8).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GenerationState {
+    /// Nothing running; the last program (if any) is current.
     Idle,
-    Generating,
+    /// The worker is generating; the displayed program is stale/greyed.
+    Running,
+    /// The last run failed; outputs are cleared and diagnostics surfaced.
     Failed,
 }
 
@@ -168,5 +121,4 @@ pub enum GenerationState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistRealm {
     GlobalSettings,
-    Stock,
 }

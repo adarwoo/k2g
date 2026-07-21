@@ -114,15 +114,6 @@ impl ToolsetGenerationPolicy {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::FixedToolset => "Fixed toolset",
-            Self::AllowReload => "Allow reload",
-            Self::AllowHybrid => "Allow hybrid",
-        }
-    }
-
     pub fn from_key(value: &str) -> Self {
         match value {
             "fixed_toolset" => Self::FixedToolset,

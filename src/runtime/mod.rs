@@ -5,9 +5,8 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
-use rhai::{Array, Dynamic, Map};
 
-use pcb::BoardSnapshot;
+use pcb::{BoardSnapshot, KiCad, StitchResult};
 use crate::catalog_io::{
     backfill_catalog_fields, ensure_default_files, normalize_catalog_fields,
 };
@@ -17,12 +16,16 @@ use crate::data::model::state::RackSlot;
 use crate::data::model::stock::{stock_value_from_tools, tools_from_stock_value};
 use crate::data::model::{
     CascadeDeleteImpact, CatalogStockCatalog, CatalogStockSection, CatalogStockTool,
-    CutDepthStrategy, FixtureProfile, GenerationState, JobCenterView, JobConfig, JobProfile,
-    MachineProfile, PersistRealm, ProductionOperation, Screen, Side, Theme, Tool,
-    ToolPreference, ToolStatus, ToolsetGenerationPolicy, ToolsetProfile, UiLaunchData,
-    UnitSystem,
+    CutDepthStrategy, FixtureProfile, JobConfig, JobProfile, MachineProfile,
+    ProductionOperation, Side, Tool, ToolPreference, ToolStatus, ToolsetGenerationPolicy,
+    ToolsetProfile, UserUnitSystem,
 };
-use units::{Angle, Length};
+// Navigation/shell state lives under the UI layer; the runtime references it
+// because `AppState` carries the current screen, theme, and generation status.
+use crate::ui::navigation::{
+    GenerationState, JobCenterView, PersistRealm, Screen, Theme, UiLaunchData,
+};
+use units::Length;
 use crate::paths::{
     AppDirs,
     ensure_app_dirs,
@@ -42,20 +45,8 @@ pub const STATUS_KEY_GENERATION_MODIFIED_UUIDS: &str = "generation.modified_uuid
 
 #[derive(Clone, Copy)]
 pub enum UiCommand {
-    SetUnitSystem(UnitSystem),
+    SetUnitSystem(UserUnitSystem),
     ToggleTheme,
-}
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct CtxIssue {
-    pub id: String,
-    pub domain: String,
-    pub owner_tag: Option<String>,
-    pub is_error: bool,
-    pub message: String,
-    pub details: Option<String>,
-    pub created_ms: u64,
 }
 
 /// Runtime diagnostic entry shown in UI.
@@ -78,22 +69,12 @@ pub struct AppEvent {
     pub created_ms: u64,
 }
 
-/// Visible board overlay layers in the board view.
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct BoardLayers {
-    pub holes: bool,
-    pub routes: bool,
-    pub paths: bool,
-    pub tabs: bool,
-}
-
 /// Canonical runtime application state.
 #[derive(Clone)]
 pub struct AppState {
     pub selected_screen: Screen,
     pub selected_job_view: JobCenterView,
-    pub unit_system: UnitSystem,
+    pub unit_system: UserUnitSystem,
     pub theme: Theme,
     pub machines: Vec<MachineProfile>,
     pub selected_machine_id: Option<String>,
@@ -117,20 +98,10 @@ pub struct AppState {
     pub suppress_persistence: bool,
     pub show_first_launch: bool,
     pub rack_slots: BTreeMap<u8, RackSlot>,
-    #[allow(dead_code)]
-    pub board_layers: BoardLayers,
     pub board: Option<BoardSnapshot>,
 }
 
 include!("state.rs");
-
-#[allow(dead_code)]
-#[derive(Clone)]
-pub struct StitchedBoardData {
-    pub contour_count: usize,
-    pub error_count: usize,
-    pub errors: Vec<String>,
-}
 
 /// Resolved references used by the active job.
 #[allow(dead_code)]
@@ -148,11 +119,11 @@ pub struct JobReferences {
 #[derive(Clone)]
 pub struct AppCtx {
     pub app: AppState,
-    pub cli_args: Vec<String>,
-    pub stitched_board_data: Option<StitchedBoardData>,
+    /// The stitched board model (contours + errors) for the current board,
+    /// computed once per acquisition and read by the readiness gate and the
+    /// generator. `None` until a board is cached.
+    pub stitched_board_data: Option<StitchResult>,
     pub job_references: JobReferences,
-    pub kicad_status: String,
-    pub issues: Vec<CtxIssue>,
     pub status: BTreeMap<String, String>,
     pub catalogs_loaded: bool,
 }
@@ -160,6 +131,8 @@ pub struct AppCtx {
 include!("orchestration.rs");
 
 include!("catalogs.rs");
+
+include!("generation.rs");
 
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
@@ -265,6 +238,20 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     }
 
     let _ = GLOBAL_CTX.set(RwLock::new(AppCtx::from_launch(&boot)));
+
+    // Start the background generation worker now that the global ctx exists (the
+    // worker publishes results into it). See `docs/gcode-generation.md` §6.
+    start_generation_service();
+}
+
+/// Acquire the first available board snapshot from KiCad, if any. Used by the
+/// Reload PCB action. Stitching happens once when the snapshot is cached in the
+/// ctx (see `sync_after_mutation`), not here.
+pub fn acquire_board() -> Option<BoardSnapshot> {
+    let client = KiCad::connect().ok()?;
+    let pcbs = client.enumerate_pcbs().ok()?;
+    let first = pcbs.first()?;
+    client.collect_snapshot(first).ok()
 }
 
 #[allow(dead_code)]
@@ -293,9 +280,12 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
     let mut guard = lock
         .write()
         .expect("Global ctx write lock should not be poisoned");
+    // Snapshot the app *before* the mutation so `sync_after_mutation` sees a real
+    // old→new diff. (Cloning after `f` would compare the mutated state to itself,
+    // which silently disabled board re-stitching and the regeneration trigger.)
+    let previous_app = guard.app.clone();
     let result = f(&mut guard);
-    let updated_state = guard.app.clone();
-    guard.sync_from_app_state(&updated_state);
+    guard.sync_after_mutation(&previous_app);
     result
 }
 
@@ -318,18 +308,4 @@ pub fn apply_ui_command(command: UiCommand) {
     });
 }
 
-#[allow(dead_code)]
-pub fn ensure_catalogs_loaded() {
-    with_ctx_mut(|ctx| ctx.ensure_catalogs_loaded());
-}
-
-#[allow(dead_code)]
-pub fn refresh_catalogs() {
-    with_ctx_mut(|ctx| ctx.refresh_catalogs());
-}
-
-#[allow(dead_code)]
-pub fn rhai_read_only_ctx() -> Map {
-    with_ctx(|ctx| ctx.as_rhai_ctx())
-}
 

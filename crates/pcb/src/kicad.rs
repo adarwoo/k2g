@@ -104,7 +104,10 @@ impl KiCad {
     /// query to the instance that owns it.
     pub fn collect_snapshot(&self, pcb: &PcbInfo) -> Result<BoardSnapshot, PcbError> {
         let client = self.resolve_client(pcb);
-        snapshot::collect(&client).map_err(PcbError::Collect)
+        let mut snapshot = snapshot::collect(&client).map_err(PcbError::Collect)?;
+        // The name lives in the enumerated `PcbInfo`, not the geometry collect.
+        snapshot.name = pcb.display_name();
+        Ok(snapshot)
     }
 
     /// Convenience for startup: collect the first open PCB, or `None` if no
