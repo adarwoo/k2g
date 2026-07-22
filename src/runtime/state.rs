@@ -7,7 +7,7 @@ struct RuntimeIssueDraft {
 
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
-    pub fn new(save_filename_override: Option<String>, board_snapshot: Option<BoardSnapshot>) -> Self {
+    pub fn new(boot: &UiLaunchData) -> Self {
         let tools = vec![];
 
         let mut state = Self {
@@ -45,12 +45,12 @@ impl AppState {
                 mouse_bite_drill_tool_id: None,
             },
             gcode: sample_gcode(),
-            save_filename: save_filename_override.unwrap_or_else(|| "output.nc".to_string()),
             gcode_modified: false,
             suppress_persistence: false,
             show_first_launch: true,
             rack_slots: BTreeMap::new(),
-            board: board_snapshot,
+            board: boot.board_snapshot.clone(),
+            kicad_status: boot.kicad_status.clone(),
         };
 
         state.hydrate_from_persistence();
@@ -134,9 +134,12 @@ impl AppState {
             }
         }
 
+        // The live job's machining profile is the authoritative selection; fall
+        // back to the last-edited profile when the job has none yet.
         let selected_process = persisted
-            .last_edited_process_profile_id
+            .job_machining_profile
             .clone()
+            .or_else(|| persisted.last_edited_process_profile_id.clone())
             .filter(|selected| {
                 self.process_profiles
                     .iter()
@@ -400,7 +403,22 @@ impl AppState {
         self.project_config.selected_operations = ordered_operations;
         self.gcode_modified = false;
         self.validate_current_job_references();
+        self.persist_job();
         self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Mirrors the active machining-profile selection into the live job singleton
+    /// (`job.yaml`), so the job persists what it runs. A no-op during startup
+    /// hydration or when the store is not ready.
+    fn persist_job(&self) {
+        if self.suppress_persistence || !crate::data::appdata_ready() {
+            return;
+        }
+        let target = self
+            .selected_process_profile_id
+            .as_ref()
+            .and_then(|id| Uuid::parse_str(id).ok());
+        crate::data::with_appdata_mut(|data| data.set_job_machining_profile(target));
     }
 
     pub fn validate_current_job_references(&mut self) {
@@ -1301,7 +1319,30 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
     value
 }
 
+/// Produces a "flat" machining value for the current single-setup projection: the
+/// top-level identity fields (id/name/schema_version) plus every field of the
+/// first step lifted to the top level. If the value has no `steps` (already flat,
+/// e.g. a hand-built fingerprint value), it is returned unchanged.
+fn flatten_first_step(value: &Value) -> Value {
+    let Some(step) = value.pointer("/steps/0").and_then(Value::as_object) else {
+        return value.clone();
+    };
+    let mut flat = step.clone();
+    for key in ["id", "name", "schema_version"] {
+        if let Some(v) = value.get(key) {
+            flat.insert(key.to_string(), v.clone());
+        }
+    }
+    Value::Object(flat)
+}
+
 fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
+    // v3 machining profiles nest the setup under steps[]. Flatten step 0 up beside
+    // id/name so this (currently single-setup) projection reads it as before.
+    // Multi-step projection lands with the step editor + planner.
+    let flattened = flatten_first_step(value);
+    let value = &flattened;
+
     let mut pending_required_fields = collect_missing_required(value, process_required_paths());
 
     let id = value
@@ -1843,4 +1884,47 @@ G0 Z5.0\n\
 M5\n\
 M30\n"
         .to_string()
+}
+
+#[cfg(test)]
+mod step_projection_tests {
+    use super::*;
+
+    /// A v3 stepped machining value, mirroring what AppData yields.
+    fn stepped_machining(cnc: &str) -> Value {
+        json!({
+            "schema_version": 3,
+            "id": "018f0000-0000-7000-8000-000000000001",
+            "name": "PTH board",
+            "steps": [
+                {
+                    "name": "Drill PTH",
+                    "cnc": { "default": cnc, "choices": [cnc] },
+                    "fixture": { "default": cnc, "choices": [cnc] },
+                    "toolset": { "default": cnc, "choices": [cnc] },
+                    "side_to_machine": "top",
+                    "operations": ["drill_pth", "route_board"],
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn flatten_first_step_lifts_step_zero_beside_identity() {
+        let cnc = "018f0000-0000-7000-8000-0000000000aa";
+        let flat = flatten_first_step(&stepped_machining(cnc));
+        assert_eq!(flat.get("name").and_then(Value::as_str), Some("PTH board"));
+        assert_eq!(flat.pointer("/cnc/default").and_then(Value::as_str), Some(cnc));
+        assert!(flat.get("operations").and_then(Value::as_array).is_some());
+    }
+
+    #[test]
+    fn process_profile_from_value_reads_the_first_step() {
+        // The single-setup projection sources cnc/operations from step 0.
+        let cnc = "018f0000-0000-7000-8000-0000000000bb";
+        let profile = process_profile_from_value(&stepped_machining(cnc)).expect("projects");
+        assert_eq!(profile.cnc_profile_id, cnc);
+        assert!(profile.default_operations.contains(&ProductionOperation::DrillPth));
+        assert!(profile.default_operations.contains(&ProductionOperation::RouteBoard));
+    }
 }

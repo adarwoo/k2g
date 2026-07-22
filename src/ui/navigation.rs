@@ -12,11 +12,10 @@ use pcb::BoardSnapshot;
 /// Boot payload received when launching the UI layer.
 #[derive(Clone, PartialEq)]
 pub struct UiLaunchData {
-    pub env_vars: Vec<(String, String)>,
-    pub cli_args: Vec<String>,
+    /// A short, clean KiCad connection status for display (no raw error dump).
     pub kicad_status: String,
+    /// The board collected at startup (the reachable KiCad's open PCB), if any.
     pub board_snapshot: Option<BoardSnapshot>,
-    pub save_filename_override: Option<String>,
 }
 
 /// Top-level screens available in the application shell.

@@ -81,6 +81,8 @@ pub struct AppState {
     pub fixtures: Vec<FixtureProfile>,
     pub selected_fixture_id: Option<String>,
     pub process_profiles: Vec<JobProfile>,
+    /// The machining profile the live job runs (drives generation). Mirrored to
+    /// the `job.yaml` singleton.
     pub selected_process_profile_id: Option<String>,
     pub last_edited_process_profile_id: Option<String>,
     pub toolsets: Vec<ToolsetProfile>,
@@ -93,12 +95,13 @@ pub struct AppState {
     pub generation_state: GenerationState,
     pub project_config: JobConfig,
     pub gcode: String,
-    pub save_filename: String,
     pub gcode_modified: bool,
     pub suppress_persistence: bool,
     pub show_first_launch: bool,
     pub rack_slots: BTreeMap<u8, RackSlot>,
     pub board: Option<BoardSnapshot>,
+    /// Clean KiCad connection status for the status bar.
+    pub kicad_status: String,
 }
 
 include!("state.rs");
@@ -151,6 +154,8 @@ struct PersistenceState {
     toolset_profiles: BTreeMap<String, Value>,
     selected_process_profile_id: Option<String>,
     last_edited_process_profile_id: Option<String>,
+    /// The machining profile referenced by the live job singleton (`job.yaml`).
+    job_machining_profile: Option<String>,
     selected_cnc_profile_id: Option<String>,
     selected_fixture_profile_id: Option<String>,
     selected_toolset_profile_id: Option<String>,
@@ -194,6 +199,7 @@ fn persistence_state_from_appdata() -> Option<PersistenceState> {
         };
         let selected_process_profile_id = get_id("selected_process_profile_id");
         let last_edited_process_profile_id = get_id("last_edited_process_profile_id");
+        let job_machining_profile = data.job_machining_profile().map(|id| id.to_string());
         let selected_cnc_profile_id = get_id("selected_cnc_profile_id");
         let selected_fixture_profile_id = get_id("selected_fixture_profile_id");
         let selected_toolset_profile_id = get_id("selected_toolset_profile_id");
@@ -207,6 +213,7 @@ fn persistence_state_from_appdata() -> Option<PersistenceState> {
             toolset_profiles,
             selected_process_profile_id,
             last_edited_process_profile_id,
+            job_machining_profile,
             selected_cnc_profile_id,
             selected_fixture_profile_id,
             selected_toolset_profile_id,
@@ -244,14 +251,28 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     start_generation_service();
 }
 
-/// Acquire the first available board snapshot from KiCad, if any. Used by the
-/// Reload PCB action. Stitching happens once when the snapshot is cached in the
+/// Connect to KiCad and collect the reachable instance's open board. There is at
+/// most one — KiCad serves a single fixed API socket, so a second instance is not
+/// addressable and a single instance holds at most one PCB (see the
+/// `kicad-multi-instance` reference). Returns a clean connection status for display
+/// and the board (if any). Stitching happens once when the board is cached in the
 /// ctx (see `sync_after_mutation`), not here.
-pub fn acquire_board() -> Option<BoardSnapshot> {
-    let client = KiCad::connect().ok()?;
-    let pcbs = client.enumerate_pcbs().ok()?;
-    let first = pcbs.first()?;
-    client.collect_snapshot(first).ok()
+pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
+    match KiCad::connect() {
+        Ok(client) => {
+            let status = match client.version() {
+                Ok(version) => format!("KiCad {version}"),
+                Err(_) => "connected".to_string(),
+            };
+            let board = client
+                .enumerate_pcbs()
+                .ok()
+                .and_then(|pcbs| pcbs.into_iter().next())
+                .and_then(|pcb| client.collect_snapshot(&pcb).ok());
+            (status, board)
+        }
+        Err(_) => ("not connected".to_string(), None),
+    }
 }
 
 #[allow(dead_code)]

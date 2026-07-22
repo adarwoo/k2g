@@ -126,3 +126,84 @@ It is possible to save the project data. Once save, the project name in place of
 
 Adding a <filename> to the cli which is a saved project.
 When opening a project file, the top bar shows the file.
+
+1. Syntax highlighting
+Tree-sitter
+Syntect
+With additional change to support `
+
+2. Rework the job schema
+=> DONE (2026-07-22). Machining profile is now an ordered `steps` array
+   (schemas/machining.yaml v3); each step = one setup (cnc/fixture/toolset +
+   operations + config). Legacy flat files migrate to a single step.
+
+3. Discuss how a job could be saved
+=> Not save. The project is saved.
+
+4. Job with many machining ops
+Idea : A button placed at the end allow adding a new job
+=> This should be reflected in the schema
+=> DONE (2026-07-22). "Add step" / reorder / remove in the Machining screen;
+   reflected in the schema as machining `steps[]`. (The many ops live on the
+   MACHINING PROFILE as steps; the job just references that profile.)
+
+5. Add the job to the data -> Everything but the PCB lives in the data
+The generator is given the PCB data and the data
+=> DONE (2026-07-22). The job is a SINGLETON (schemas/job.yaml, no id/name,
+   next to settings/stock) referencing one machining profile. It's the single
+   live thing being processed; no named library, no separate "project" layer.
+
+6. Discuss how to save the project
+=> PARTIAL (2026-07-22). Reference graph (Job → Machining → cnc/fixture/toolset)
+   exists. Bundling the job + PCB + referenced profiles into an archive is still
+   deferred.
+Means open a job / save a job means persisting all
+That's a point!
+May be saving the job - saves all persisted files, persist the job data and the PCB data and zip
+I am saying that the job becomes persistable too!
+Why not...
+A job is a collection of machining operations using toolset and profiles.
+The job can override any profile data
+Now - when we save - we save a project - which is an archive of all files + PCB data
+Opening a job opens all in a virtual environment. Profiles can be edited and imported.
+Note: We don't take chances reusing existing profiles. We'd need a hash to guarantee
+compatiblity introducing unwarranted complexitity.
+The shadow profiles can be edited (they should be expanded in a temporary user folder - cache)
+we keep everything the same! Nice.
+But cloning, import, delete are not available. Also, the
+
+7. Remove the cli
+No cli! We
+
+8. Fix bugs. Refresh on the top must be improved.
+If started from KiCAD (env var) - fixed + reload
+If started stand alone = dropdown + refresh
+
+Status on the bottom: Just report no connection. Detail in the log.
+
+9. auto merge and 3 way merge
+As the user can make changes to the generated GCode, we need to merge his changes
+when the code is re-generated.
+Evaluate diffy for this
+
+10. Implement the generator Part 1
+Step 1: Tools selection and mapping!
+Need a good discussion to define the algorithm and document it.
++ Viewing the tools selection and rack
+
+11. Generator Part 2
+Create a list of all drills and routes.
+Apply TSP.
+State machine convert each step into basic machining ops
+ops are converted to GCode
+GCode is optimized?
+ * all 0 movements are squashed
+
+12. Rework of the graphical view.
+Lines too thick
+Check board orientation and scale
+(Should scale to the window - with a minimum size so the holes can be seen)
+
+13. Add About section
+
+14. Add Log section (allow the user to increase the level + persist in config)

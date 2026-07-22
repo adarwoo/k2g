@@ -6,8 +6,9 @@ use uuid::Uuid;
 use super::profiles_common::{slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog};
 use crate::data::Profile;
 use crate::ui::bindings::{
-    clone_named, create_named, data_revision, export_yaml, import_yaml, machining_operations,
-    refresh_legacy_machining, remove_profile_result, use_operations, use_profiles, BindingPicker,
+    add_step, clone_named, create_named, data_revision, export_yaml, import_yaml,
+    machining_operations, move_step, refresh_legacy_machining, remove_profile_result, remove_step,
+    use_duplicate_primitives, use_operations, use_profiles, use_step_count, BindingPicker,
     OperationsEditor, SchemaField, SchemaForm,
 };
 
@@ -211,12 +212,13 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
     }
 }
 
-/// The machining detail editor: identity + reference bindings + operation set,
-/// then schema-generated configuration sections for routing and each enabled
-/// operation.
+/// The machining detail editor: identity, then the ordered list of steps. Each
+/// step is one machining setup (its own cnc/fixture/toolset + operations); the
+/// list can grow, shrink and reorder.
 #[component]
 fn MachiningDetail(id: Uuid) -> Element {
-    let enabled_ops = use_operations(id);
+    let step_count = use_step_count(id);
+    let duplicates = use_duplicate_primitives(id);
 
     rsx! {
         div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
@@ -224,30 +226,90 @@ fn MachiningDetail(id: Uuid) -> Element {
                 div { class: "edit-grid",
                     SchemaField { id, ptr: "/name".to_string() }
 
-                    BindingPicker { id, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
-                    BindingPicker { id, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
-                    BindingPicker { id, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
-
-                    OperationsEditor { id }
-
-                    SchemaField { id, ptr: "/side_to_machine".to_string() }
-
-                    div { class: "schema-section",
-                        h4 { class: "section-title", "Routing" }
-                        SchemaForm { id, ptr: "/routing".to_string() }
+                    if !duplicates.is_empty() {
+                        p { class: "diag-status diag-warning",
+                            "Warning: {duplicates.join(\", \")} is used in more than one step — is that intended?"
+                        }
                     }
 
-                    // Configuration sections for the currently enabled operations.
-                    for (key , op_label) in machining_operations().iter().copied() {
-                        if enabled_ops.iter().any(|op| op == key) {
-                            div { class: "schema-section",
-                                h4 { class: "section-title", "{op_label}" }
-                                if key == "drill_locating_pins" {
-                                    p { class: "field-hint", "No additional options." }
-                                } else {
-                                    SchemaForm { id, ptr: format!("/{key}") }
-                                }
-                            }
+                    h4 { class: "section-title", "Machining steps" }
+                    p { class: "field-hint",
+                        "Each step is one physical setup with its own CNC, fixture, toolset and operations. Steps run in order."
+                    }
+
+                    for index in 0..step_count {
+                        StepCard { key: "{index}", id, index, step_count }
+                    }
+
+                    button {
+                        r#type: "button",
+                        class: "add-step-btn",
+                        onclick: move |_| add_step(id),
+                        "+ Add step"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One machining step card: identity + reference bindings + operation set, then
+/// schema-generated configuration for routing and each enabled operation, plus
+/// reorder/remove controls.
+#[component]
+fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
+    let enabled_ops = use_operations(id, index);
+
+    rsx! {
+        div { class: "schema-section step-card",
+            div { class: "step-card-header",
+                h4 { class: "section-title", "Step {index + 1}" }
+                div { class: "step-card-actions",
+                    button {
+                        r#type: "button", class: "icon-btn", disabled: index == 0,
+                        title: "Move step up",
+                        onclick: move |_| move_step(id, index, index.saturating_sub(1)),
+                        "↑"
+                    }
+                    button {
+                        r#type: "button", class: "icon-btn", disabled: index + 1 >= step_count,
+                        title: "Move step down",
+                        onclick: move |_| move_step(id, index, index + 1),
+                        "↓"
+                    }
+                    button {
+                        r#type: "button", class: "icon-btn icon-btn-danger", disabled: step_count <= 1,
+                        title: "Remove step",
+                        onclick: move |_| remove_step(id, index),
+                        "✕"
+                    }
+                }
+            }
+
+            SchemaField { id, ptr: format!("/steps/{index}/name") }
+
+            BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
+            BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
+            BindingPicker { id, step: index, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
+
+            OperationsEditor { id, step: index }
+
+            SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
+
+            div { class: "schema-section",
+                h4 { class: "section-title", "Routing" }
+                SchemaForm { id, ptr: format!("/steps/{index}/routing") }
+            }
+
+            // Configuration sections for the currently enabled operations.
+            for (key , op_label) in machining_operations().iter().copied() {
+                if enabled_ops.iter().any(|op| op == key) {
+                    div { class: "schema-section",
+                        h4 { class: "section-title", "{op_label}" }
+                        if key == "drill_locating_pins" {
+                            p { class: "field-hint", "No additional options." }
+                        } else {
+                            SchemaForm { id, ptr: format!("/steps/{index}/{key}") }
                         }
                     }
                 }

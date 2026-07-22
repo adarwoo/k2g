@@ -37,12 +37,12 @@ pub struct PcbInfo {
 }
 
 impl PcbInfo {
-    /// A short, user-facing label: the board file's name, falling back to the
-    /// project name, then to a generic placeholder.
+    /// A short, user-facing label: the board file's name **without extension**,
+    /// falling back to the project name, then to a generic placeholder.
     pub fn display_name(&self) -> String {
         if let Some(board) = self.board_filename.as_deref().filter(|s| !s.is_empty()) {
             return Path::new(board)
-                .file_name()
+                .file_stem()
                 .and_then(|name| name.to_str())
                 .map(str::to_string)
                 .unwrap_or_else(|| board.to_string());

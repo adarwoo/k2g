@@ -1,7 +1,19 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "machining.yaml"
-x-schema-version: 2
+x-schema-version: 3
 type: object
+
+# ---------------------------------------------------------------------------
+# A machining profile is an ORDERED SEQUENCE OF STEPS. Each step is one
+# physical machining setup — its own CNC, fixture, toolset and the operations
+# (primitives) run in that setup — so a profile can describe a whole process
+# such as: drill locating+PTH  (setup 1)  → drill NPTH+route (setup 2, on a
+# possibly different machine/fixture). See docs/architecture.md.
+#
+# Prior versions (schema_version 2) stored a single flat setup at the top
+# level. Those files are migrated on load into a one-step profile (see
+# `normalize_machining_value` in src/data/mod.rs).
+# ---------------------------------------------------------------------------
 
 $defs:
   operation_key:
@@ -118,11 +130,169 @@ $defs:
     required: [edge]
     additionalProperties: false
 
+  # -------------------------------------------------------------------------
+  # step — one machining setup within the profile's ordered sequence.
+  #
+  # Bindings (cnc/fixture/toolset) are each a `default` (the active reference)
+  # plus the `choices` allowed for it. `$ref` keeps UUIDv7 validation; `x-ref`
+  # makes the datastore resolve the value against the target profile
+  # collection. They are left absent on a freshly-added step (the step reads
+  # as incomplete until the user picks them), mirroring the old top-level
+  # bindings.
+  # -------------------------------------------------------------------------
+  step:
+    type: object
+    default:
+      name: Machining step
+      operations: [drill_pth]
+    properties:
+      name:
+        description: Human-readable step name (e.g. "Drill PTH + locating").
+        type: string
+        minLength: 1
+        default: Machining step
+
+      cnc:
+        description: Selected CNC profile (default) plus allowed choices.
+        type: object
+        properties:
+          default:
+            description: Active CNC profile reference.
+            $ref: "id.yaml#/$defs/uuid_v7"
+            x-ref: "cnc.yaml"
+          choices:
+            type: array
+            items:
+              $ref: "id.yaml#/$defs/uuid_v7"
+              x-ref: "cnc.yaml"
+        required: [default, choices]
+        additionalProperties: false
+
+      fixture:
+        description: Selected fixture profile (default) plus allowed choices.
+        type: object
+        properties:
+          default:
+            description: Active fixture profile reference.
+            $ref: "id.yaml#/$defs/uuid_v7"
+            x-ref: "fixture.yaml"
+          choices:
+            type: array
+            items:
+              $ref: "id.yaml#/$defs/uuid_v7"
+              x-ref: "fixture.yaml"
+        required: [default, choices]
+        additionalProperties: false
+
+      toolset:
+        description: Selected toolset profile (default) plus allowed choices.
+        type: object
+        properties:
+          default:
+            description: Active toolset profile reference.
+            $ref: "id.yaml#/$defs/uuid_v7"
+            x-ref: "toolset.yaml"
+          choices:
+            type: array
+            items:
+              $ref: "id.yaml#/$defs/uuid_v7"
+              x-ref: "toolset.yaml"
+        required: [default, choices]
+        additionalProperties: false
+
+      side_to_machine:
+        description: Which side of the board this step machines.
+        type: string
+        enum: [top, bottom]
+        default: top
+
+      operations:
+        description: Primitives run in this step, in order.
+        type: array
+        items: { $ref: "#/$defs/operation_key" }
+        uniqueItems: true
+        minItems: 1
+        default: [drill_pth]
+
+      routing:
+        type: object
+        default:
+          cut_depth_strategy: automatic
+          multi_pass_max_depth: 1.0mm
+        properties:
+          cut_depth_strategy:
+            type: string
+            enum: [automatic, single_pass, multi_pass]
+            default: automatic
+          multi_pass_max_depth:
+            $ref: "units.yaml#/$defs/size"
+            default: 1.0mm
+        additionalProperties: false
+
+      drill_locating_pins:
+        type: object
+        default: {}
+        additionalProperties: false
+
+      drill_pth:
+        $ref: "#/$defs/drill_holes_common"
+        default:
+          holes:
+            route_fallback: false
+            drill_first: true
+            pilot: false
+            oblong: drill_ends_then_route
+
+      drill_npth:
+        $ref: "#/$defs/drill_holes_common"
+        default:
+          holes:
+            route_fallback: false
+            drill_first: true
+            pilot: false
+            oblong: drill_ends_then_route
+
+      route_board:
+        $ref: "#/$defs/route_board"
+        default:
+          edge:
+            cut: route
+            retention: tabs
+            tabs: 4
+            tab_width: 2.0mm
+            bite_holes: 3
+          finishing:
+            clearance: 0.1mm
+            direction: climb
+
+      mill_board:
+        type: object
+        default:
+          finishing:
+            clearance: 0.1mm
+            direction: climb
+        properties:
+          finishing:
+            type: object
+            properties:
+              clearance:
+                $ref: "units.yaml#/$defs/size"
+                default: 0.1mm
+              direction:
+                type: string
+                default: climb
+                enum: [conventional, climb]
+            additionalProperties: false
+        additionalProperties: false
+
+    required: [name, cnc, fixture, toolset, operations]
+    additionalProperties: false
+
 properties:
   schema_version:
     type: integer
-    const: 2
-    default: 2
+    const: 3
+    default: 3
 
   id:
     description: Unique machining profile ID.
@@ -133,146 +303,26 @@ properties:
     minLength: 1
     default: My machining profile
 
-  # Referenced profiles. Each is a `default` (the active reference) plus the
-  # `choices` allowed for it. `$ref` keeps UUIDv7 validation; `x-ref` makes the
-  # datastore resolve the value against the target profile collection.
-  cnc:
-    description: Selected CNC profile (default) plus allowed choices.
-    type: object
-    properties:
-      default:
-        description: Active CNC profile reference.
-        $ref: "id.yaml#/$defs/uuid_v7"
-        x-ref: "cnc.yaml"
-      choices:
-        type: array
-        items:
-          $ref: "id.yaml#/$defs/uuid_v7"
-          x-ref: "cnc.yaml"
-    required: [default, choices]
-    additionalProperties: false
-
-  fixture:
-    description: Selected fixture profile (default) plus allowed choices.
-    type: object
-    properties:
-      default:
-        description: Active fixture profile reference.
-        $ref: "id.yaml#/$defs/uuid_v7"
-        x-ref: "fixture.yaml"
-      choices:
-        type: array
-        items:
-          $ref: "id.yaml#/$defs/uuid_v7"
-          x-ref: "fixture.yaml"
-    required: [default, choices]
-    additionalProperties: false
-
-  toolset:
-    description: Selected toolset profile (default) plus allowed choices.
-    type: object
-    properties:
-      default:
-        description: Active toolset profile reference.
-        $ref: "id.yaml#/$defs/uuid_v7"
-        x-ref: "toolset.yaml"
-      choices:
-        type: array
-        items:
-          $ref: "id.yaml#/$defs/uuid_v7"
-          x-ref: "toolset.yaml"
-    required: [default, choices]
-    additionalProperties: false
-
-  side_to_machine:
-    type: string
-    enum: [top, bottom]
-    default: top
-
-  operations:
+  steps:
+    description: >
+      Ordered machining steps (setups). Each step is one physical setup with
+      its own CNC, fixture, toolset and operations. A profile has at least one
+      step.
     type: array
-    items: { $ref: "#/$defs/operation_key" }
-    uniqueItems: true
     minItems: 1
-    default: [drill_pth]
-
-  routing:
-    type: object
     default:
-      cut_depth_strategy: automatic
-      multi_pass_max_depth: 1.0mm
-    properties:
-      cut_depth_strategy:
-        type: string
-        enum: [automatic, single_pass, multi_pass]
-        default: automatic
-      multi_pass_max_depth:
-        $ref: "units.yaml#/$defs/size"
-        default: 1.0mm
-    additionalProperties: false
+      - name: Machining step
+        operations: [drill_pth]
+    items:
+      $ref: "#/$defs/step"
 
-  drill_locating_pins:
-    type: object
-    default: {}
-    additionalProperties: false
+required: [id, name, steps]
 
-  drill_pth:
-    $ref: "#/$defs/drill_holes_common"
-    default:
-      holes:
-        route_fallback: false
-        drill_first: true
-        pilot: false
-        oblong: drill_ends_then_route
-
-  drill_npth:
-    $ref: "#/$defs/drill_holes_common"
-    default:
-      holes:
-        route_fallback: false
-        drill_first: true
-        pilot: false
-        oblong: drill_ends_then_route
-
-  route_board:
-    $ref: "#/$defs/route_board"
-    default:
-      edge:
-        cut: route
-        retention: tabs
-        tabs: 4
-        tab_width: 2.0mm
-        bite_holes: 3
-      finishing:
-        clearance: 0.1mm
-        direction: climb
-
-  mill_board:
-    type: object
-    default:
-      finishing:
-        clearance: 0.1mm
-        direction: climb
-    properties:
-      finishing:
-        type: object
-        properties:
-          clearance:
-            $ref: "units.yaml#/$defs/size"
-            default: 0.1mm
-          direction:
-            type: string
-            default: climb
-            enum: [conventional, climb]
-        additionalProperties: false
-    additionalProperties: false
-
-required: [id, name, cnc, fixture, toolset, operations]
-
-# Note: the per-operation config objects (drill_pth, route_board, …) are declared
-# as optional properties with defaults and are always materialised by the loader,
-# so they are NOT gated behind conditional-presence rules. The `operations` array
-# is the single source of truth for which operations are enabled; a config object
-# being present does not imply its operation is active.
+# Note: within a step, the per-operation config objects (drill_pth, route_board,
+# …) are declared as optional properties with defaults and are always
+# materialised by the loader, so they are NOT gated behind conditional-presence
+# rules. Each step's `operations` array is the source of truth for which
+# primitives are enabled in that step; a config object being present does not
+# imply its operation is active.
 
 additionalProperties: false

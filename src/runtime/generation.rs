@@ -18,7 +18,6 @@ pub struct GenerationInput {
     pub process_profile_name: String,
     pub cnc_profile_name: String,
     pub operations: Vec<String>,
-    pub save_filename: String,
 }
 
 /// A successful run's output, published atomically into `AppState`.
@@ -148,7 +147,6 @@ fn run_generation(
 
     let mut gcode = String::new();
     gcode.push_str("(k2g generated program — placeholder)\n");
-    gcode.push_str(&format!("(file: {})\n", input.save_filename));
     gcode.push_str(&format!("(machining profile: {})\n", input.process_profile_name));
     gcode.push_str(&format!("(cnc profile: {})\n", input.cnc_profile_name));
     gcode.push_str(&format!("(board: {hole_count} holes, {contour_count} contours)\n"));
@@ -218,7 +216,6 @@ mod tests {
             process_profile_name: "Proto".to_string(),
             cnc_profile_name: "Genmitsu".to_string(),
             operations: vec!["Drill PTH".to_string(), "Route outline".to_string()],
-            save_filename: "board.nc".to_string(),
         }
     }
 

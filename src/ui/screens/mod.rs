@@ -1,6 +1,5 @@
 use dioxus::prelude::*;
 
-use super::boot_data;
 use crate::ui::navigation::*;
 use super::theme::APP_STYLE;
 use crate::runtime::{ctx_snapshot, with_ctx_mut};
@@ -33,7 +32,6 @@ pub fn mutate_ctx<R>(mut state: Signal<crate::runtime::AppCtx>, f: impl FnOnce(&
 
 #[component]
 pub fn AppRoot() -> Element {
-    let boot = boot_data().clone();
     let state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
 
@@ -101,7 +99,7 @@ pub fn AppRoot() -> Element {
 
             EventNotifications { state }
 
-            StatusBar { state, boot: boot.clone() }
+            StatusBar { state }
         }
     }
 }

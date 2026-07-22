@@ -48,6 +48,7 @@ const SCHEMAS: &[(&str, &str)] = &[
     ("fixture.yaml", include_str!("../../schemas/fixture.yaml")),
     ("toolset.yaml", include_str!("../../schemas/toolset.yaml")),
     ("machining.yaml", include_str!("../../schemas/machining.yaml")),
+    ("job.yaml", include_str!("../../schemas/job.yaml")),
     ("catalog.yaml", include_str!("../../schemas/catalog.yaml")),
 ];
 
@@ -66,8 +67,11 @@ const SCHEMA_META_KEY: &str = "$schema";
 
 const SETTINGS_FILE: &str = "global.setting.yaml";
 const STOCK_FILE: &str = "stock.yaml";
+const JOB_FILE: &str = "job.yaml";
 
-/// The four id'd, per-file profile collections.
+/// The four id'd, per-file profile collections. The single live **Job** is not
+/// here — it is a singleton (`job.yaml`, one per install, no id/name), handled
+/// alongside settings/stock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Cnc,
@@ -126,6 +130,7 @@ pub struct AppData {
     cnc_templates: Vec<CncTemplate>,
     settings_path: PathBuf,
     stock_path: PathBuf,
+    job_path: PathBuf,
 }
 
 impl AppData {
@@ -159,10 +164,12 @@ impl AppData {
 
         let settings_path = data_dir.join(SETTINGS_FILE);
         let stock_path = data_dir.join(STOCK_FILE);
+        let job_path = data_dir.join(JOB_FILE);
 
         // Seed the singletons if absent, then parse them as the initial docs.
         seed_singleton_if_missing(&schemas, "settings.yaml", &settings_path);
         seed_singleton_if_missing(&schemas, "stock.yaml", &stock_path);
+        seed_singleton_if_missing(&schemas, "job.yaml", &job_path);
 
         // A legacy `global.setting.yaml`/`stock.yaml` (written before the
         // datastore's `x-schema-version` gating, by the retired
@@ -173,12 +180,16 @@ impl AppData {
         let stock_text = fs::read_to_string(&stock_path).ok().map(|text| {
             materialize_stock_overrides(&migrate_stock_ref(&inject_schema_version(&text)))
         });
+        let job_text = fs::read_to_string(&job_path).ok().map(|text| inject_schema_version(&text));
         let mut inputs = Vec::new();
         if let Some(text) = &settings_text {
             inputs.push(ParseInput { schema_id: "settings.yaml", source: Some(settings_path.clone()), text });
         }
         if let Some(text) = &stock_text {
             inputs.push(ParseInput { schema_id: "stock.yaml", source: Some(stock_path.clone()), text });
+        }
+        if let Some(text) = &job_text {
+            inputs.push(ParseInput { schema_id: "job.yaml", source: Some(job_path.clone()), text });
         }
         let outcome = schemas.parse(&inputs);
         errors.extend(outcome.errors);
@@ -203,7 +214,7 @@ impl AppData {
         let cnc_templates = load_cnc_templates();
 
         (
-            Self { store, cnc_templates, settings_path, stock_path },
+            Self { store, cnc_templates, settings_path, stock_path, job_path },
             errors,
         )
     }
@@ -428,12 +439,14 @@ impl AppData {
         self.store.create_document_from("cnc.yaml", &seed)
     }
 
-    // ---- machining structural edits --------------------------------------
+    // ---- machining step structural edits ---------------------------------
     //
-    // Machining documents have structural fields the fine-grained setters can't
-    // express: the cnc/fixture/toolset bindings (a `default` reference plus a
-    // `choices` array) and the `operations` array. These edit the plain document
-    // value and re-parse it (see [`ResolvedStore::replace_document_from_value`]).
+    // A machining profile is an ordered `steps` array; each step has structural
+    // fields the fine-grained setters can't express: the cnc/fixture/toolset
+    // bindings (a `default` reference plus a `choices` array) and the
+    // `operations` array, plus add/remove/reorder of steps themselves. These
+    // edit the plain document value and re-parse it (see
+    // [`ResolvedStore::replace_document_from_value`]).
 
     /// Edits a document at the plain-value level and re-parses it (structural
     /// edits that the fine-grained setters can't express). Returns `false` if
@@ -446,19 +459,30 @@ impl AppData {
         self.store.replace_document_from_value(id, &value).is_some()
     }
 
-    /// Sets a machining profile's binding for `field` (`"cnc"`, `"fixture"`, or
+    /// Sets a **step's** binding for `field` (`"cnc"`, `"fixture"`, or
     /// `"toolset"`): the active `default` reference (absent when `None`) and the
-    /// allowed `choices`.
-    pub fn set_machining_binding(
+    /// allowed `choices`. Creates the binding object if the step lacks it (a
+    /// freshly-added step has no cnc/fixture/toolset until picked).
+    pub fn set_step_binding(
         &mut self,
         id: Uuid,
+        step: usize,
         field: &str,
         default: Option<Uuid>,
         choices: &[Uuid],
     ) -> bool {
         let field = field.to_string();
         self.edit_document_value(id, |value| {
-            let Some(binding) = value.get_mut(&field).and_then(Value::as_object_mut) else {
+            let Some(step_obj) = value
+                .pointer_mut(&format!("/steps/{step}"))
+                .and_then(Value::as_object_mut)
+            else {
+                return;
+            };
+            let entry = step_obj
+                .entry(field.clone())
+                .or_insert_with(|| serde_json::json!({ "choices": [] }));
+            let Some(binding) = entry.as_object_mut() else {
                 return;
             };
             match default {
@@ -476,19 +500,122 @@ impl AppData {
         })
     }
 
-    /// Sets the machining profile's enabled `operations`, in order. Each entry is
-    /// an operation key (e.g. `"drill_pth"`). The per-operation config objects are
+    /// Sets a **step's** enabled `operations`, in order. Each entry is an
+    /// operation key (e.g. `"drill_pth"`). The per-operation config objects are
     /// always present (schema defaults); this only changes what is *enabled*.
-    pub fn set_machining_operations(&mut self, id: Uuid, operations: &[String]) -> bool {
+    pub fn set_step_operations(&mut self, id: Uuid, step: usize, operations: &[String]) -> bool {
         self.edit_document_value(id, |value| {
-            let Some(obj) = value.as_object_mut() else {
+            let Some(step_obj) = value
+                .pointer_mut(&format!("/steps/{step}"))
+                .and_then(Value::as_object_mut)
+            else {
                 return;
             };
-            obj.insert(
+            step_obj.insert(
                 "operations".into(),
                 Value::Array(operations.iter().map(|s| Value::String(s.clone())).collect()),
             );
         })
+    }
+
+    /// Appends a fresh default step (one `drill_pth` operation; op-config objects
+    /// materialize on re-parse). Bindings are left absent until the user picks
+    /// them.
+    pub fn add_step(&mut self, id: Uuid) -> bool {
+        self.edit_document_value(id, |value| {
+            let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) else {
+                return;
+            };
+            steps.push(serde_json::json!({ "name": "Machining step", "operations": ["drill_pth"] }));
+        })
+    }
+
+    /// Removes the step at `step`. A machining profile keeps at least one step, so
+    /// removing the last one is a no-op.
+    pub fn remove_step(&mut self, id: Uuid, step: usize) -> bool {
+        self.edit_document_value(id, |value| {
+            let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) else {
+                return;
+            };
+            if steps.len() > 1 && step < steps.len() {
+                steps.remove(step);
+            }
+        })
+    }
+
+    /// Reorders a step from index `from` to index `to`. Out-of-range or `from ==
+    /// to` is a no-op.
+    pub fn move_step(&mut self, id: Uuid, from: usize, to: usize) -> bool {
+        self.edit_document_value(id, |value| {
+            let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) else {
+                return;
+            };
+            if from < steps.len() && to < steps.len() && from != to {
+                let item = steps.remove(from);
+                steps.insert(to, item);
+            }
+        })
+    }
+
+    /// Back-compat shim for the still-single-step machining UI: edits the binding
+    /// on the first step. Removed once the UI drives steps by index (Stage 3).
+    pub fn set_machining_binding(
+        &mut self,
+        id: Uuid,
+        field: &str,
+        default: Option<Uuid>,
+        choices: &[Uuid],
+    ) -> bool {
+        self.set_step_binding(id, 0, field, default, choices)
+    }
+
+    /// Back-compat shim: edits the first step's operations. See
+    /// [`Self::set_machining_binding`].
+    pub fn set_machining_operations(&mut self, id: Uuid, operations: &[String]) -> bool {
+        self.set_step_operations(id, 0, operations)
+    }
+
+    // ---- job singleton ----------------------------------------------------
+    //
+    // The Job is the single live thing being processed: one `job.yaml` per
+    // install (no id/name), referencing the machining profile it runs.
+
+    /// The live job document (singleton), if loaded.
+    pub fn job(&self) -> Option<&Document> {
+        self.singleton("job.yaml")
+    }
+
+    /// The machining profile the live job references, if set.
+    pub fn job_machining_profile(&self) -> Option<Uuid> {
+        self.job()
+            .and_then(|doc| doc.root.get_pointer("/machining_profile"))
+            .and_then(|node| match &node.value {
+                NodeValue::Ref(reference) => Some(reference.raw),
+                NodeValue::Id(id) => Some(*id),
+                NodeValue::Str(s) => Uuid::parse_str(s).ok(),
+                _ => None,
+            })
+    }
+
+    /// Sets (or clears with `None`) the live job's `machining_profile`, re-parsing
+    /// so the UUID string decodes to a resolved reference (the datastore rejects
+    /// setting a ref from a raw string via `set_str`, so this goes value-level).
+    pub fn set_job_machining_profile(&mut self, target: Option<Uuid>) -> bool {
+        let path = self.job_path.clone();
+        let Some(mut value) = self.job().map(|doc| doc.to_value()) else {
+            return false;
+        };
+        if let Some(obj) = value.as_object_mut() {
+            match target {
+                Some(uuid) => {
+                    obj.insert("machining_profile".into(), Value::String(uuid.to_string()));
+                }
+                None => {
+                    obj.remove("machining_profile");
+                }
+            }
+        }
+        self.store.replace_document_from_value_at(&path, &value).is_some()
     }
 
     // ---- toolset rack edits ----------------------------------------------
@@ -716,18 +843,75 @@ fn load_machining_normalized(store: &mut ResolvedStore, dir: &Path) -> Vec<DataE
     store.parse_texts("machining.yaml", dir, &items)
 }
 
-/// Converts a legacy `processing_profiles` value into `machining.yaml` form:
+/// The per-step keys moved out of the pre-v3 flat top level into a step object.
+const STEP_KEYS: &[&str] = &[
+    "cnc",
+    "fixture",
+    "toolset",
+    "side_to_machine",
+    "operations",
+    "routing",
+    "drill_locating_pins",
+    "drill_pth",
+    "drill_npth",
+    "route_board",
+    "mill_board",
+];
+
+/// Converts an on-disk `processing_profiles` value into current `machining.yaml`
+/// (schema_version 3) form.
+///
+/// - A **pre-v3 flat** profile (no `steps`, the whole setup at the top level) is
+///   wrapped into a single-step profile: the [`STEP_KEYS`] are lifted into one
+///   `steps[0]` entry and stamped `schema_version: 3`. This is lossless — the one
+///   setup becomes the profile's only step.
+/// - A **v3 stepped** profile is left structurally intact.
+///
+/// Either way each step is cleaned by [`normalize_step_value`]. The version is
+/// stamped to 3 so the datastore's `x-schema-version` gate accepts the file
+/// (it hard-rejects a mismatched `schema_version`).
+fn normalize_machining_value(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    obj.insert("schema_version".to_string(), Value::from(3));
+
+    if !obj.contains_key("steps") {
+        // Legacy flat: pull the top-level setup into a single step.
+        let mut step = serde_json::Map::new();
+        step.insert("name".to_string(), Value::String("Machining step".to_string()));
+        for key in STEP_KEYS {
+            if let Some(field) = obj.remove(*key) {
+                step.insert((*key).to_string(), field);
+            }
+        }
+        let mut step_value = Value::Object(step);
+        normalize_step_value(&mut step_value);
+        obj.insert("steps".to_string(), Value::Array(vec![step_value]));
+        return;
+    }
+
+    if let Some(steps) = obj.get_mut("steps").and_then(Value::as_array_mut) {
+        for step in steps {
+            normalize_step_value(step);
+        }
+    }
+}
+
+/// Cleans a single step object:
 ///
 /// - removes each operation object's `enabled` flag — the schema drives
-///   enablement from the `operations` array, and `additionalProperties: false`
-///   would otherwise reject the field;
-/// - drops empty-string references so an unset cnc/fixture/toolset reads as
-///   *absent* (hence incomplete, prompting the user) rather than an invalid UUID.
+///   enablement from the step's `operations` array, and `additionalProperties:
+///   false` would otherwise reject the field;
+/// - drops empty-string cnc/fixture/toolset references so an unset binding reads
+///   as *absent* (hence incomplete, prompting the user) rather than an invalid
+///   UUID.
 ///
 /// Operation config objects are left in place (always materialized by the
 /// loader); only their `enabled` flag is stripped.
-fn normalize_machining_value(value: &mut Value) {
-    let Some(obj) = value.as_object_mut() else {
+fn normalize_step_value(step: &mut Value) {
+    let Some(obj) = step.as_object_mut() else {
         return;
     };
 
@@ -919,23 +1103,108 @@ mod tests {
 
         let (mut data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
 
-        // The legacy file loaded as a machining doc: `enabled` gone, empty fixture
-        // ref dropped (so it is absent, not an invalid UUID).
+        // The legacy flat file migrated into a single-step machining doc:
+        // `enabled` gone, empty fixture ref dropped (absent, not invalid), real cnc
+        // ref preserved — all now under steps[0].
         let doc = data.get(id).expect("legacy machining loaded");
-        assert!(doc.root.get_pointer("/drill_pth/enabled").is_none(), "enabled should be stripped");
-        assert!(doc.root.get_pointer("/fixture/default").is_none(), "empty ref should be dropped");
-        assert!(doc.root.get_pointer("/cnc/default").is_some(), "real ref preserved");
+        assert!(
+            matches!(&doc.root.get_pointer("/steps").unwrap().value, NodeValue::Array(a) if a.len() == 1),
+            "flat legacy profile becomes one step"
+        );
+        assert!(doc.root.get_pointer("/steps/0/drill_pth/enabled").is_none(), "enabled should be stripped");
+        assert!(doc.root.get_pointer("/steps/0/fixture/default").is_none(), "empty ref should be dropped");
+        assert!(doc.root.get_pointer("/steps/0/cnc/default").is_some(), "real ref preserved");
 
-        // Structural edits round-trip: set a fixture binding and change operations.
+        // Structural edits round-trip: set step 0's fixture binding and operations.
         let fixture = uuid::Uuid::now_v7();
-        assert!(data.set_machining_binding(id, "fixture", Some(fixture), &[fixture]));
-        assert!(data.set_machining_operations(id, &["drill_pth".to_string(), "route_board".to_string()]));
+        assert!(data.set_step_binding(id, 0, "fixture", Some(fixture), &[fixture]));
+        assert!(data.set_step_operations(id, 0, &["drill_pth".to_string(), "route_board".to_string()]));
 
         let doc = data.get(id).unwrap();
-        let fixture_default = doc.root.get_pointer("/fixture/default").expect("fixture set");
+        let fixture_default = doc.root.get_pointer("/steps/0/fixture/default").expect("fixture set");
         assert!(matches!(&fixture_default.value, NodeValue::Ref(r) if r.raw == fixture));
-        let ops = doc.root.get_pointer("/operations").unwrap();
+        let ops = doc.root.get_pointer("/steps/0/operations").unwrap();
         assert!(matches!(&ops.value, NodeValue::Array(a) if a.len() == 2));
+    }
+
+    #[test]
+    fn machining_creates_with_one_default_step() {
+        // A fresh machining profile has exactly one step whose operations and
+        // per-op config are materialized; its bindings are absent (incomplete)
+        // until the user picks them.
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+
+        let doc = data.get(id).unwrap();
+        assert!(
+            matches!(&doc.root.get_pointer("/steps").unwrap().value, NodeValue::Array(a) if a.len() == 1),
+            "one default step"
+        );
+        assert!(doc.root.get_pointer("/steps/0/operations").is_some(), "step operations materialized");
+        assert!(
+            doc.root.get_pointer("/steps/0/drill_pth/holes").is_some(),
+            "per-op config materialized within the step"
+        );
+        assert!(doc.root.get_pointer("/steps/0/cnc/default").is_none(), "binding absent until picked");
+    }
+
+    #[test]
+    fn machining_step_add_remove_and_reorder() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+
+        let step_count = |data: &AppData| match &data.get(id).unwrap().root.get_pointer("/steps").unwrap().value {
+            NodeValue::Array(items) => items.len(),
+            _ => 0,
+        };
+
+        // Add a second step and configure it distinctly.
+        assert!(data.add_step(id));
+        assert_eq!(step_count(&data), 2);
+        assert!(data.set_step_operations(id, 1, &["route_board".to_string()]));
+        assert!(data.set_field(id, "/steps/1/name", NodeValue::Str("Route".into())).unwrap_or(false));
+
+        // Reorder: step 1 → position 0.
+        assert!(data.move_step(id, 1, 0));
+        let doc = data.get(id).unwrap();
+        assert!(
+            matches!(&doc.root.get_pointer("/steps/0/name").unwrap().value, NodeValue::Str(s) if s == "Route"),
+            "moved step is now first"
+        );
+
+        // Remove down to one; removing the last is a no-op.
+        assert!(data.remove_step(id, 0));
+        assert_eq!(step_count(&data), 1);
+        assert!(data.remove_step(id, 0));
+        assert_eq!(step_count(&data), 1, "a profile always keeps at least one step");
+    }
+
+    #[test]
+    fn job_singleton_references_a_machining_profile() {
+        // The Job is a singleton (no id/name) referencing one machining profile;
+        // the reference persists next to settings/stock and survives reload.
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let machining = data.create(Profile::Machining).expect("create machining");
+
+        assert!(data.job().is_some(), "job singleton seeded on a fresh dir");
+        assert!(data.job_machining_profile().is_none(), "no machining profile yet");
+
+        assert!(data.set_job_machining_profile(Some(machining)));
+        assert_eq!(data.job_machining_profile(), Some(machining));
+        data.flush();
+
+        let path = dir.path().join("data").join(JOB_FILE);
+        assert!(path.exists(), "expected job file at {}", path.display());
+
+        // The job's reference survives a reload. (The freshly-created machining
+        // profile is itself incomplete — no cnc/fixture/toolset picked yet — which
+        // is expected and unrelated to the job singleton, so we don't assert a
+        // clean reload here.)
+        let (reloaded, _errors) = load_temp(dir.path());
+        assert_eq!(reloaded.job_machining_profile(), Some(machining), "reference survives reload");
     }
 
     #[test]

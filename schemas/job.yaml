@@ -1,0 +1,29 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "job.yaml"
+x-schema-version: 1
+type: object
+
+# ---------------------------------------------------------------------------
+# The Job is the single live thing being processed. It is not a named library
+# item — there is exactly one, so it is a singleton (like settings/stock) with
+# no id and no name. It references ONE machining profile (whose ordered steps
+# describe the work) and, in future, will also carry the last-minute/live data
+# for the current session.
+#
+#   Job → Machining profile → CNC / Fixture / Toolset
+# ---------------------------------------------------------------------------
+
+properties:
+  schema_version:
+    type: integer
+    const: 1
+    default: 1
+
+  machining_profile:
+    description: The machining profile this job runs (its ordered steps).
+    $ref: "id.yaml#/$defs/uuid_v7"
+    x-ref: "machining.yaml"
+
+required: [schema_version]
+
+additionalProperties: false

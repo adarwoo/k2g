@@ -220,6 +220,37 @@ Primitive set:
 - `change_tool`
 - `conclude`
 
+### Entity model (as built)
+
+```
+CNC / Fixture / Toolset profiles       (leaf profiles)
+Machining profile  (Profile::Machining, schemas/machining.yaml, x-schema-version 3)
+    = an ordered `steps` array; each step is ONE physical setup with its own
+      cnc/fixture/toolset bindings ({default, choices}) + operations + config
+Job                (schemas/job.yaml, a SINGLETON — one per install, no id/name)
+    = the single live thing being processed; references ONE machining profile
+      (its ordered steps). Future: also carries the session's last-minute data.
+```
+
+Notes:
+- A machining profile grew from one flat setup to an ordered list of steps
+  (drill locating+PTH → re-fixture → drill NPTH+route, etc.); different steps can
+  target different CNCs. Pre-v3 flat files migrate to a single step on load
+  (`normalize_machining_value` in `src/data/mod.rs`).
+- The **Job is a singleton**, not a named collection — there is exactly one live
+  job. It lives in `job.yaml` next to `settings`/`stock`, and holds just the
+  `machining_profile` it runs. It is the anchor for the session's future
+  last-minute data and for saving the whole thing (job + PCB + referenced
+  profiles) as a portable archive.
+- The runtime keeps a step-0 projection (`JobProfile`) so the existing generation
+  path and readiness gate work unchanged. The job singleton's `machining_profile`
+  is the authoritative active selection (mirrored to `selected_process_profile_id`
+  via `persist_job` in `state.rs`, read back at hydrate). Walking all steps
+  arrives with the real OperationPlanner.
+- UI: the **Machining** screen edits the step list (add/remove/reorder, per-step
+  bindings + operations + config); the **Job** screen selects which machining
+  profile the live job runs and generates.
+
 ### Process profile
 The process profile is split into 3 parts so frontend and backend concerns remain isolated.
 

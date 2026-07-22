@@ -1,10 +1,7 @@
 #[allow(dead_code)]
 impl AppCtx {
     fn from_launch(boot: &UiLaunchData) -> Self {
-        let app = AppState::new(
-            boot.save_filename_override.clone(),
-            boot.board_snapshot.clone(),
-        );
+        let app = AppState::new(boot);
 
         let mut status = BTreeMap::new();
         status.insert(STATUS_KEY_KICAD.to_string(), boot.kicad_status.clone());
@@ -179,7 +176,6 @@ impl AppCtx {
             process_profile_name,
             cnc_profile_name,
             operations,
-            save_filename: self.app.save_filename.clone(),
         }
     }
 

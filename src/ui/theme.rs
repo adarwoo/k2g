@@ -150,6 +150,13 @@ body {
     min-width: 220px;
 }
 
+/* Name-or-picker and the refresh glyph, side by side, under the "Board" label. */
+.topbar-board-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .topbar-label,
 .summary-chip-label,
 .diag-banner-subtitle,
@@ -1408,6 +1415,102 @@ p {
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.75;
+}
+
+/* Multi-step machining editor: each step is a bordered card with reorder/remove
+   controls; the whole set can grow via the dashed add-step button. */
+.step-card {
+    grid-column: 1 / -1;
+    border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-top: 12px;
+}
+
+.step-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.step-card-actions {
+    display: flex;
+    gap: 4px;
+}
+
+.icon-btn {
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    background: transparent;
+    color: inherit;
+    border-radius: 6px;
+    width: 26px;
+    height: 26px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.icon-btn:hover:not(:disabled) {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+
+.icon-btn:disabled {
+    opacity: 0.3;
+    cursor: default;
+}
+
+.icon-btn-danger:hover:not(:disabled) {
+    color: #d9534f;
+    border-color: #d9534f;
+}
+
+.add-step-btn {
+    grid-column: 1 / -1;
+    margin-top: 12px;
+    padding: 8px 12px;
+    border: 1px dashed color-mix(in srgb, currentColor 30%, transparent);
+    background: transparent;
+    color: inherit;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+    opacity: 0.85;
+}
+
+.add-step-btn:hover {
+    opacity: 1;
+    background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.diag-warning {
+    color: #b8860b;
+    font-weight: 600;
+}
+
+/* Job summary: an aligned two-column (label · value) table. Muted uppercase
+   labels line up in the first column; values are emphasized in the second. */
+.job-summary {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 5px 14px;
+    margin-top: 6px;
+    align-items: baseline;
+}
+
+.job-summary-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    opacity: 0.55;
+    white-space: nowrap;
+}
+
+.job-summary-value {
+    font-size: 12.5px;
+    font-weight: 600;
+    word-break: break-word;
 }
 
 .schema-subsection {

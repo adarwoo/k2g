@@ -77,7 +77,8 @@ pub struct FixtureProfile {
     pub usable: bool,
 }
 
-/// Machining profile persisted with processing schema.
+/// Machining profile projection (one setup / `steps[0]` today). Persisted with
+/// the machining schema, whose ordered `steps` describe the full process.
 #[derive(Clone)]
 pub struct JobProfile {
     pub id: String,

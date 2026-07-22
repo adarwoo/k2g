@@ -24,7 +24,27 @@ Built and compile/test-verified (not yet runtime-verified — see §5.2):
 - **Change-detection fix** — `with_ctx_mut` snapshots state *before* the mutation
   (`sync_after_mutation`), so board re-stitch and the regeneration trigger actually
   fire (they were previously inert).
-- **Reload PCB** action + PCB name display (top bar).
+- **Board acquisition UX** — `runtime::acquire_board()` collects the reachable
+  KiCad's open board (at most one) and returns a clean status; the top bar shows
+  `{board name}` (or "No board") + a refresh glyph, unconditionally. No picker: a
+  second KiCad process isn't client-addressable and a single instance holds at
+  most one PCB, so there is never a list (verified live 2026-07-22 — one fixed API
+  socket; see the `kicad-multi-instance` reference). The CLI and the
+  output-filename concept were also removed (2026-07-22) — they return when
+  save/export is designed.
+
+- **Machining steps + live Job singleton** (2026-07-22) — the machining profile
+  is now an ordered `steps` array (each step = one setup: its own cnc/fixture/
+  toolset + operations + config), `schemas/machining.yaml` is `x-schema-version 3`,
+  and pre-v3 flat files migrate to a single step on load. The **Job** is a
+  **singleton** (`schemas/job.yaml`, one per install, no id/name) that references
+  the one machining profile the live session runs — not a named library. The
+  Machining screen edits the step list; the Job screen picks which machining
+  profile the live job runs (mirrored into `job.yaml` via `persist_job`). The
+  runtime still uses a **step-0 projection** (`JobProfile`) — generation walking
+  *all* steps arrives with the OperationPlanner (§1). Deferred by design: the
+  job's session/last-minute data + overrides, and saving the whole thing (job +
+  PCB + referenced profiles) as a portable archive.
 
 Everything below is outstanding.
 
@@ -74,9 +94,10 @@ Then: **wire it into `run_generation`** (replace the placeholder), emitting type
 
 ## 3. Cross-cutting / supporting
 
-1. **GCode export to file** — no action writes the program to disk today
-   (`save_filename` exists; nothing uses it for the program). Add an Export/Save
-   `.nc` action (the app already uses `rfd::FileDialog` for YAML profile export).
+1. **GCode save / export / send** — deferred by design. The output-filename
+   concept and the CLI were removed (2026-07-22); how the program leaves the app
+   (save `.nc`, export, send to a sender) is to be designed later. The app already
+   uses `rfd::FileDialog` for YAML profile export as a reference pattern.
 2. **GTL catalogs** (`gcode-engine.md` §9, phase 2) — variable + built-in
    registries. Prerequisite for *safe* namespaced job-context (flags unknown
    `ns.field` at load) and for the editor.

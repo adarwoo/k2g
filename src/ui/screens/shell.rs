@@ -59,24 +59,21 @@ pub fn AppTopBar(
 
             div { class: "topbar-board",
                 span { class: "topbar-label", "Board" }
-                span { class: if has_board { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
-                    "{board_name}"
-                }
-                button {
-                    class: "board-reload-btn",
-                    r#type: "button",
-                    title: "Reload PCB",
-                    "aria-label": "Reload PCB",
-                    onclick: move |_| {
-                        // Re-acquire off the ctx lock, then set it: a genuine board
-                        // change re-stitches (once) and triggers regeneration.
-                        if let Some(board) = crate::runtime::acquire_board() {
-                            super::mutate_ctx(state, |s| { s.board = Some(board); });
-                        }
-                    },
-                    // Clockwise refresh glyph (↻), same tiny-icon style as the stock
-                    // revert control.
-                    "\u{21bb}"
+                div { class: "topbar-board-row",
+                    // The reachable KiCad's open board (at most one — see the
+                    // `kicad-multi-instance` reference), plus a refresh glyph.
+                    span {
+                        class: if has_board { "topbar-value mono" } else { "topbar-value topbar-value-missing mono" },
+                        "{board_name}"
+                    }
+                    button {
+                        class: "board-reload-btn",
+                        r#type: "button",
+                        title: "Refresh PCB data",
+                        "aria-label": "Refresh PCB data",
+                        onclick: move |_| do_refresh(state),
+                        "\u{21bb}"
+                    }
                 }
             }
 
@@ -145,6 +142,17 @@ pub fn AppTopBar(
             }
         }
     }
+}
+
+/// Re-acquire the reachable KiCad's board (recovering a connection made after
+/// startup) and update the status. Setting a changed board re-stitches once and
+/// triggers regeneration (see `sync_after_mutation`).
+fn do_refresh(state: Signal<crate::runtime::AppCtx>) {
+    let (status, board) = crate::runtime::acquire_board();
+    super::mutate_ctx(state, |s| {
+        s.kicad_status = status;
+        s.board = board;
+    });
 }
 
 fn dispatch_ui_command(mut state: Signal<crate::runtime::AppCtx>, command: UiCommand) {
@@ -391,26 +399,32 @@ pub fn EventNotifications(state: Signal<crate::runtime::AppCtx>) -> Element {
 }
 
 #[component]
-pub fn StatusBar(state: Signal<crate::runtime::AppCtx>, boot: UiLaunchData) -> Element {
+pub fn StatusBar(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
+    let connected = snapshot.kicad_status != "not connected";
     let board_label = snapshot
         .board
         .as_ref()
         .map(|board| format!("{} holes · {} edges", board.holes.len(), board.edge_shapes.len()))
-        .unwrap_or_else(|| "No board snapshot".to_string());
+        .unwrap_or_else(|| "No board".to_string());
     let generation_label = match snapshot.generation_state {
         GenerationState::Running => "Generating GCode…".to_string(),
         GenerationState::Failed => "Generation failed".to_string(),
         GenerationState::Idle => {
-            let modified = if snapshot.gcode_modified { "modified" } else { "clean" };
-            format!("{} · {}", snapshot.save_filename, modified)
+            if snapshot.gcode.is_empty() {
+                "No program".to_string()
+            } else if snapshot.gcode_modified {
+                "Program (edited)".to_string()
+            } else {
+                "Program ready".to_string()
+            }
         }
     };
 
     rsx! {
         footer { class: "shell-statusbar",
-            span { class: if boot.kicad_status.starts_with("Connected") { "status-connection ok" } else { "status-connection err" },
-                "KiCad: {boot.kicad_status}"
+            span { class: if connected { "status-connection ok" } else { "status-connection err" },
+                "KiCad: {snapshot.kicad_status}"
             }
             span { class: "status-meta", "{board_label}" }
             span { class: "status-meta", "{generation_label}" }

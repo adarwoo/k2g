@@ -399,8 +399,8 @@ fn ref_uuid(value: &NodeValue) -> Option<Uuid> {
     }
 }
 
-/// Reads the `default`/`choices` binding for machining `field` from document `id`.
-fn read_binding_inner(id: Uuid, field: &str) -> BindingView {
+/// Reads the `default`/`choices` binding for `field` on `step` of document `id`.
+fn read_binding_inner(id: Uuid, step: usize, field: &str) -> BindingView {
     if !appdata_ready() {
         return BindingView::default();
     }
@@ -410,11 +410,11 @@ fn read_binding_inner(id: Uuid, field: &str) -> BindingView {
         };
         let default = doc
             .root
-            .get_pointer(&format!("/{field}/default"))
+            .get_pointer(&format!("/steps/{step}/{field}/default"))
             .and_then(|node| ref_uuid(&node.value));
         let choices = doc
             .root
-            .get_pointer(&format!("/{field}/choices"))
+            .get_pointer(&format!("/steps/{step}/{field}/choices"))
             .map(|node| match &node.value {
                 NodeValue::Array(items) => items.iter().filter_map(|it| ref_uuid(&it.value)).collect(),
                 _ => Vec::new(),
@@ -424,31 +424,31 @@ fn read_binding_inner(id: Uuid, field: &str) -> BindingView {
     })
 }
 
-/// Reads a machining binding, subscribing the caller to store mutations.
-pub fn use_binding(id: Uuid, field: &str) -> BindingView {
+/// Reads a step binding, subscribing the caller to store mutations.
+pub fn use_binding(id: Uuid, step: usize, field: &str) -> BindingView {
     subscribe();
-    read_binding_inner(id, field)
+    read_binding_inner(id, step, field)
 }
 
-/// Reads a machining binding without subscribing — for use inside event handlers.
-pub fn read_binding(id: Uuid, field: &str) -> BindingView {
-    read_binding_inner(id, field)
+/// Reads a step binding without subscribing — for use inside event handlers.
+pub fn read_binding(id: Uuid, step: usize, field: &str) -> BindingView {
+    read_binding_inner(id, step, field)
 }
 
-/// Writes a machining binding (`default` + `choices`) and triggers re-render.
-pub fn set_binding(id: Uuid, field: &str, default: Option<Uuid>, choices: &[Uuid]) {
-    with_appdata_mut(|data| data.set_machining_binding(id, field, default, choices));
+/// Writes a step binding (`default` + `choices`) and triggers re-render.
+pub fn set_binding(id: Uuid, step: usize, field: &str, default: Option<Uuid>, choices: &[Uuid]) {
+    with_appdata_mut(|data| data.set_step_binding(id, step, field, default, choices));
     bump_render();
 }
 
-/// Reads the enabled `operations` list of document `id`.
-fn read_operations_inner(id: Uuid) -> Vec<String> {
+/// Reads the enabled `operations` of `step` on document `id`.
+fn read_operations_inner(id: Uuid, step: usize) -> Vec<String> {
     if !appdata_ready() {
         return Vec::new();
     }
     with_appdata(|data| {
         data.get(id)
-            .and_then(|doc| doc.root.get_pointer("/operations"))
+            .and_then(|doc| doc.root.get_pointer(&format!("/steps/{step}/operations")))
             .map(|node| match &node.value {
                 NodeValue::Array(items) => items
                     .iter()
@@ -463,29 +463,102 @@ fn read_operations_inner(id: Uuid) -> Vec<String> {
     })
 }
 
-/// Reads the enabled operations, subscribing the caller to store mutations.
-pub fn use_operations(id: Uuid) -> Vec<String> {
+/// Reads a step's enabled operations, subscribing the caller to store mutations.
+pub fn use_operations(id: Uuid, step: usize) -> Vec<String> {
     subscribe();
-    read_operations_inner(id)
+    read_operations_inner(id, step)
 }
 
-/// Reads the enabled operations without subscribing — for use in event handlers.
-pub fn read_operations(id: Uuid) -> Vec<String> {
-    read_operations_inner(id)
+/// Reads a step's enabled operations without subscribing — for event handlers.
+pub fn read_operations(id: Uuid, step: usize) -> Vec<String> {
+    read_operations_inner(id, step)
 }
 
-/// Writes the enabled `operations` and triggers re-render.
-pub fn set_operations(id: Uuid, operations: &[String]) {
-    with_appdata_mut(|data| data.set_machining_operations(id, operations));
+/// Writes a step's enabled `operations` and triggers re-render.
+pub fn set_operations(id: Uuid, step: usize, operations: &[String]) {
+    with_appdata_mut(|data| data.set_step_operations(id, step, operations));
     bump_render();
+}
+
+/// The number of steps in machining profile `id` (subscribes to store mutations).
+pub fn use_step_count(id: Uuid) -> usize {
+    subscribe();
+    if !appdata_ready() {
+        return 0;
+    }
+    with_appdata(|data| {
+        data.get(id)
+            .and_then(|doc| doc.root.get_pointer("/steps"))
+            .map(|node| match &node.value {
+                NodeValue::Array(items) => items.len(),
+                _ => 0,
+            })
+            .unwrap_or(0)
+    })
+}
+
+/// Appends a fresh machining step and triggers re-render.
+pub fn add_step(id: Uuid) {
+    with_appdata_mut(|data| data.add_step(id));
+    bump_render();
+}
+
+/// Removes the step at `step` (a profile keeps at least one) and re-renders.
+pub fn remove_step(id: Uuid, step: usize) {
+    with_appdata_mut(|data| data.remove_step(id, step));
+    bump_render();
+}
+
+/// Reorders a step from `from` to `to` and triggers re-render.
+pub fn move_step(id: Uuid, from: usize, to: usize) {
+    with_appdata_mut(|data| data.move_step(id, from, to));
+    bump_render();
+}
+
+/// Operation keys enabled in more than one step of `id` — a likely authoring
+/// error (e.g. PTH drilled twice; distinct keys across steps are fine).
+/// Subscribes to store mutations.
+pub fn use_duplicate_primitives(id: Uuid) -> Vec<String> {
+    subscribe();
+    if !appdata_ready() {
+        return Vec::new();
+    }
+    with_appdata(|data| {
+        let Some(doc) = data.get(id) else {
+            return Vec::new();
+        };
+        let count = match doc.root.get_pointer("/steps").map(|node| &node.value) {
+            Some(NodeValue::Array(items)) => items.len(),
+            _ => 0,
+        };
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for i in 0..count {
+            if let Some(NodeValue::Array(ops)) = doc
+                .root
+                .get_pointer(&format!("/steps/{i}/operations"))
+                .map(|node| &node.value)
+            {
+                for op in ops {
+                    if let NodeValue::Str(key) = &op.value {
+                        *counts.entry(key.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c > 1)
+            .map(|(key, _)| key)
+            .collect()
+    })
 }
 
 /// A reference-binding editor for a machining `field` (`"cnc"`/`"fixture"`/
 /// `"toolset"`): tick the allowed `choices`, pick the active `default` (a radio
 /// among the ticked). Options are the available profiles of `kind`.
 #[component]
-pub fn BindingPicker(id: Uuid, field: String, kind: crate::data::Profile, label: String) -> Element {
-    let binding = use_binding(id, &field);
+pub fn BindingPicker(id: Uuid, step: usize, field: String, kind: crate::data::Profile, label: String) -> Element {
+    let binding = use_binding(id, step, &field);
     let options = use_profiles(kind);
 
     rsx! {
@@ -497,6 +570,7 @@ pub fn BindingPicker(id: Uuid, field: String, kind: crate::data::Profile, label:
             for (pid, name) in options {
                 BindingRow {
                     id,
+                    step,
                     field: field.clone(),
                     pid,
                     name,
@@ -510,7 +584,7 @@ pub fn BindingPicker(id: Uuid, field: String, kind: crate::data::Profile, label:
 
 /// One selectable profile within a [`BindingPicker`].
 #[component]
-fn BindingRow(id: Uuid, field: String, pid: Uuid, name: String, checked: bool, is_default: bool) -> Element {
+fn BindingRow(id: Uuid, step: usize, field: String, pid: Uuid, name: String, checked: bool, is_default: bool) -> Element {
     let field_toggle = field.clone();
     let field_default = field;
     rsx! {
@@ -519,7 +593,7 @@ fn BindingRow(id: Uuid, field: String, pid: Uuid, name: String, checked: bool, i
                 r#type: "checkbox",
                 checked,
                 onchange: move |evt| {
-                    let current = read_binding(id, &field_toggle);
+                    let current = read_binding(id, step, &field_toggle);
                     let mut next = current.choices;
                     let mut next_default = current.default;
                     if evt.checked() {
@@ -535,17 +609,17 @@ fn BindingRow(id: Uuid, field: String, pid: Uuid, name: String, checked: bool, i
                             next_default = next.first().copied();
                         }
                     }
-                    set_binding(id, &field_toggle, next_default, &next);
+                    set_binding(id, step, &field_toggle, next_default, &next);
                 },
             }
             input {
                 r#type: "radio",
-                name: "binding-{field_default}-{id}",
+                name: "binding-{field_default}-{step}-{id}",
                 checked: is_default,
                 disabled: !checked,
                 onchange: move |_| {
-                    let current = read_binding(id, &field_default);
-                    set_binding(id, &field_default, Some(pid), &current.choices);
+                    let current = read_binding(id, step, &field_default);
+                    set_binding(id, step, &field_default, Some(pid), &current.choices);
                 },
             }
             span { class: "binding-name", "{name}" }
@@ -553,17 +627,18 @@ fn BindingRow(id: Uuid, field: String, pid: Uuid, name: String, checked: bool, i
     }
 }
 
-/// The machining operations toggle set: enables/disables each operation, keeping
-/// the stored `operations` array in schema order.
+/// The machining operations toggle set for a step: enables/disables each
+/// operation, keeping the stored `operations` array in schema order.
 #[component]
-pub fn OperationsEditor(id: Uuid) -> Element {
-    let enabled = use_operations(id);
+pub fn OperationsEditor(id: Uuid, step: usize) -> Element {
+    let enabled = use_operations(id, step);
     rsx! {
         div { class: "field operations-editor",
             label { "Operations" }
             for (key , op_label) in MACHINING_OPERATIONS.iter().copied() {
                 OperationToggle {
                     id,
+                    step,
                     op_key: key.to_string(),
                     label: op_label.to_string(),
                     checked: enabled.iter().any(|op| op == key),
@@ -575,14 +650,14 @@ pub fn OperationsEditor(id: Uuid) -> Element {
 
 /// One operation checkbox within an [`OperationsEditor`].
 #[component]
-fn OperationToggle(id: Uuid, op_key: String, label: String, checked: bool) -> Element {
+fn OperationToggle(id: Uuid, step: usize, op_key: String, label: String, checked: bool) -> Element {
     rsx! {
         label { class: "checkbox-line",
             input {
                 r#type: "checkbox",
                 checked,
                 onchange: move |evt| {
-                    let mut current = read_operations(id);
+                    let mut current = read_operations(id, step);
                     if evt.checked() {
                         if !current.iter().any(|op| op == &op_key) {
                             current.push(op_key.clone());
@@ -596,7 +671,7 @@ fn OperationToggle(id: Uuid, op_key: String, label: String, checked: bool) -> El
                         .filter(|(k, _)| current.iter().any(|op| op == k))
                         .map(|(k, _)| (*k).to_string())
                         .collect();
-                    set_operations(id, &ordered);
+                    set_operations(id, step, &ordered);
                 },
             }
             span { "{label}" }

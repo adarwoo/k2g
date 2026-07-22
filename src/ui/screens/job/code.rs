@@ -38,7 +38,6 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
                 },
             }
             div { class: "program-stats",
-                span { "Save target: {snapshot.save_filename}" }
                 span { "Lines: {snapshot.gcode.lines().count()}" }
                 span { "Characters: {snapshot.gcode.len()}" }
                 span {
