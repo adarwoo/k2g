@@ -395,6 +395,9 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 "Reset"
                                             }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
+                                            span { class: "board-view-status",
+                                                "{board.holes.len()} holes · {board.edge_shapes.len()} edges"
+                                            }
                                         }
                                         div { class: "board-preview-layout",
                                             div {

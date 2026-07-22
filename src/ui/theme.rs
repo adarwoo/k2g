@@ -1238,6 +1238,112 @@ body {
     gap: 10px;
 }
 
+/* Tooling plan view: per-step tool-selection + requirements tables. */
+.tooling-view {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    align-items: stretch;
+    text-align: left;
+}
+
+.tooling-step {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tooling-step-title {
+    font-size: 14px;
+    margin: 0;
+}
+
+.tooling-subtitle {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--text-subtle);
+    margin: 6px 0 0;
+}
+
+.tooling-separator {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 6px 0;
+}
+
+.tooling-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.tooling-table th,
+.tooling-table td {
+    text-align: left;
+    padding: 7px 9px;
+    border-bottom: 1px solid var(--border);
+}
+
+.tooling-table th {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-subtle);
+    letter-spacing: 0.35px;
+}
+
+.tooling-slot-col {
+    width: 5rem;
+}
+
+.tooling-count-col {
+    width: 6rem;
+}
+
+.tooling-slot {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.tooling-count {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+.tooling-error {
+    border: 1px solid color-mix(in srgb, var(--err) 55%, var(--border));
+    background: color-mix(in srgb, var(--err) 12%, var(--bg-elev));
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tooling-error-title {
+    font-weight: 700;
+    color: var(--err);
+}
+
+.tooling-error ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 12px;
+}
+
+.tooling-warnings {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+}
+
+.tooling-warning {
+    font-size: 12px;
+    color: var(--warn);
+}
+
 .panel {
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -1330,6 +1436,42 @@ p {
     margin-top: 12px;
 }
 
+/* The editable control(s) of one field. Capped to a readable width so a field
+   never stretches across a full wide column; the width is a percentage with a
+   floor, so shrinking the window stops it at the minimum rather than collapsing
+   it. Multiline editors (CNC GTL templates) opt out and fill the width;
+   checkboxes shrink to their natural size. */
+.field-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 30%;
+    min-width: 12rem;
+    max-width: 32rem;
+}
+
+.field-control > input:not([type="checkbox"]),
+.field-control > select {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+}
+
+.field-control-wide {
+    width: 100%;
+    max-width: none;
+}
+
+.field-control-wide > textarea {
+    flex: 1 1 auto;
+    width: 100%;
+}
+
+.field-control-check {
+    width: auto;
+    min-width: 0;
+}
+
 /* Schema-driven fields (SchemaField) ------------------------------------- */
 .field-hint {
     margin: 2px 0 0;
@@ -1347,8 +1489,8 @@ p {
     color: #d64545;
 }
 
-.field.field-invalid > input,
-.field.field-invalid > select {
+.field.field-invalid .field-control > input,
+.field.field-invalid .field-control > select {
     border-color: #d64545;
     box-shadow: 0 0 0 1px color-mix(in srgb, #d64545 35%, transparent);
 }
@@ -1364,9 +1506,7 @@ p {
 }
 
 .stock-revert-btn {
-    position: absolute;
-    top: 0;
-    right: 0;
+    flex: 0 0 auto;
     border: none;
     background: transparent;
     color: #e08a00;

@@ -10,11 +10,7 @@ use crate::runtime::AppError;
 use crate::runtime::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
 
 #[component]
-pub fn AppTopBar(
-    state: Signal<crate::runtime::AppCtx>,
-    error_count: usize,
-    warning_count: usize,
-) -> Element {
+pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
 
     let has_board = snapshot.board.is_some();
@@ -36,11 +32,14 @@ pub fn AppTopBar(
             }
         })
         .unwrap_or_else(|| "No board loaded".to_string());
+    // The pill reflects the generated program's availability — the thing a user
+    // actually waits on. Errors/warnings are surfaced by the DiagnosticsBanner.
     let status_label = match snapshot.generation_state {
         GenerationState::Running => "Generating…".to_string(),
         GenerationState::Failed => "Generation failed".to_string(),
-        GenerationState::Idle if error_count == 0 && warning_count == 0 => "Ready".to_string(),
-        GenerationState::Idle => format!("{error_count} errors, {warning_count} warnings"),
+        GenerationState::Idle if snapshot.gcode.is_empty() => "No program".to_string(),
+        GenerationState::Idle if snapshot.gcode_modified => "Program edited".to_string(),
+        GenerationState::Idle => "Program ready".to_string(),
     };
 
     rsx! {
@@ -119,11 +118,10 @@ pub fn AppTopBar(
                 span {
                     class: match snapshot.generation_state {
                         GenerationState::Running => "status-pill status-warn",
-                        GenerationState::Failed => "status-pill status-warn",
-                        GenerationState::Idle if error_count == 0 && warning_count == 0 => {
-                            "status-pill status-ok"
-                        }
-                        GenerationState::Idle => "status-pill status-warn",
+                        GenerationState::Failed => "status-pill status-err",
+                        GenerationState::Idle if snapshot.gcode.is_empty() => "status-pill status-warn",
+                        GenerationState::Idle if snapshot.gcode_modified => "status-pill status-warn",
+                        GenerationState::Idle => "status-pill status-ok",
                     },
                     "{status_label}"
                 }
@@ -402,32 +400,14 @@ pub fn EventNotifications(state: Signal<crate::runtime::AppCtx>) -> Element {
 pub fn StatusBar(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let connected = snapshot.kicad_status != "not connected";
-    let board_label = snapshot
-        .board
-        .as_ref()
-        .map(|board| format!("{} holes · {} edges", board.holes.len(), board.edge_shapes.len()))
-        .unwrap_or_else(|| "No board".to_string());
-    let generation_label = match snapshot.generation_state {
-        GenerationState::Running => "Generating GCode…".to_string(),
-        GenerationState::Failed => "Generation failed".to_string(),
-        GenerationState::Idle => {
-            if snapshot.gcode.is_empty() {
-                "No program".to_string()
-            } else if snapshot.gcode_modified {
-                "Program (edited)".to_string()
-            } else {
-                "Program ready".to_string()
-            }
-        }
-    };
 
+    // Program availability now lives in the top-bar pill; board geometry lives in
+    // the Board view. The status bar owns the KiCad connection state.
     rsx! {
         footer { class: "shell-statusbar",
             span { class: if connected { "status-connection ok" } else { "status-connection err" },
                 "KiCad: {snapshot.kicad_status}"
             }
-            span { class: "status-meta", "{board_label}" }
-            span { class: "status-meta", "{generation_label}" }
         }
     }
 }

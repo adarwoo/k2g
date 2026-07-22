@@ -143,11 +143,11 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                                 r#type: "number",
                                 min: "-180",
                                 max: "180",
-                                step: "0.1",
+                                step: "1",
                                 value: "{snapshot.project_config.rotation_angle}",
                                 oninput: move |evt| {
-                                    let value = evt.value().parse::<i32>().unwrap_or(0).clamp(-180, 180);
-                                    crate::ui::screens::mutate_ctx(state, |s| s.project_config.rotation_angle = value);
+                                    let value = evt.value().parse::<i32>().unwrap_or(0);
+                                    crate::ui::screens::mutate_ctx(state, |s| s.set_board_orientation(value));
                                 },
                             }
                         }

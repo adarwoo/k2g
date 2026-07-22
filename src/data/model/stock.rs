@@ -66,6 +66,10 @@ pub struct Tool {
     pub catalog_diameter: Option<Length>,
     pub point_angle: Angle,
     pub catalog_point_angle: Option<Angle>,
+    /// Usable cutting length of the bit (`None` when unspecified). Used by the
+    /// tool-selection Z-feasibility check to confirm the bit can reach through
+    /// the board; the lossy legacy projection historically dropped it.
+    pub flute_length: Option<Length>,
     pub feed_rate: Option<FeedRate>,
     pub catalog_feed_rate: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
@@ -104,6 +108,7 @@ fn tool_values_map(
     sku: Option<&String>,
     spindle: Option<RotationalSpeed>,
     feed: Option<FeedRate>,
+    flute_length: Option<Length>,
 ) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
     m.insert("name".into(), Value::String(name.to_string()));
@@ -125,6 +130,9 @@ fn tool_values_map(
     if let Some(feed) = feed {
         m.insert("z_feed".into(), json!(feed));
         m.insert("table_feed".into(), json!(feed));
+    }
+    if let Some(flute_length) = flute_length {
+        m.insert("flute_length".into(), json!(flute_length));
     }
     m
 }
@@ -151,6 +159,7 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.sku.as_ref(),
                 tool.catalog_spindle_speed.or(tool.spindle_speed),
                 tool.catalog_feed_rate.or(tool.feed_rate),
+                tool.flute_length,
             );
             let effective_name = if tool.name.trim().is_empty() {
                 tool.composite_name.clone()
@@ -166,6 +175,7 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.sku.as_ref(),
                 tool.spindle_speed,
                 tool.feed_rate,
+                tool.flute_length,
             );
 
             json!({
@@ -276,6 +286,8 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 .and_then(value_to_rpm_speed)
                 .or(catalog_spindle_speed);
 
+            let flute_length = effective.get("flute_length").and_then(value_to_length);
+
             let source_catalog = item
                 .get("source_catalog")
                 .and_then(Value::as_str)
@@ -303,6 +315,7 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 catalog_diameter,
                 point_angle,
                 catalog_point_angle,
+                flute_length,
                 feed_rate,
                 catalog_feed_rate,
                 spindle_speed,
@@ -403,6 +416,7 @@ mod tests {
             catalog_diameter: Some(Length::from_mm(original_diameter_mm)),
             point_angle: Angle::from_degrees(118.0),
             catalog_point_angle: Some(Angle::from_degrees(118.0)),
+            flute_length: None,
             feed_rate: Some(FeedRate::from_mm_per_min(300.0)),
             catalog_feed_rate: Some(FeedRate::from_mm_per_min(200.0)),
             spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),

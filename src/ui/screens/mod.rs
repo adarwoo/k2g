@@ -50,14 +50,12 @@ pub fn AppRoot() -> Element {
     });
 
     let snapshot = state.read().clone();
-    let error_count = snapshot.errors.iter().filter(|e| e.is_error).count();
-    let warning_count = snapshot.errors.len().saturating_sub(error_count);
 
     rsx! {
         style { "{APP_STYLE}" }
 
         div { class: if snapshot.theme == Theme::Dark { "app-shell shell-theme-dark" } else { "app-shell shell-theme-light" },
-            AppTopBar { state, error_count, warning_count }
+            AppTopBar { state }
 
             DiagnosticsBanner {
                 errors: snapshot.errors.clone(),

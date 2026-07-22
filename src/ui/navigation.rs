@@ -62,6 +62,7 @@ pub enum JobCenterView {
     Board,
     Machining,
     Code,
+    Tooling,
     Rack,
 }
 
@@ -71,6 +72,7 @@ impl JobCenterView {
             Self::Board => "Board",
             Self::Machining => "Machining",
             Self::Code => "Code",
+            Self::Tooling => "Tooling",
             Self::Rack => "Rack",
         }
     }
@@ -80,6 +82,7 @@ impl JobCenterView {
             Self::Board => "board",
             Self::Machining => "machining",
             Self::Code => "code",
+            Self::Tooling => "tooling",
             Self::Rack => "rack",
         }
     }

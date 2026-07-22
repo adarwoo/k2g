@@ -1,7 +1,9 @@
 //! GCode generation.
 //!
-//! Currently houses the work-in-progress expression/template engine
-//! ([`template`]) that renders CNC templates against a job context. It is not
-//! yet wired into the live generation path; see the note in `template.rs`.
+//! Houses the work-in-progress expression/template engine ([`template`]) that
+//! renders CNC templates against a job context, and the tool-selection
+//! [`assigner`] (Specification.md §8.7). Neither is wired into the live
+//! generation path yet; see the notes in each module.
 
+pub mod assigner;
 pub mod template;

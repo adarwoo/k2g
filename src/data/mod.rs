@@ -618,6 +618,29 @@ impl AppData {
         self.store.replace_document_from_value_at(&path, &value).is_some()
     }
 
+    /// The board orientation angle (degrees) the live job stores. Absent/legacy
+    /// job files default to 0 (the schema default), so this never fails.
+    pub fn job_board_orientation(&self) -> i32 {
+        self.job()
+            .map(|doc| doc.to_value())
+            .and_then(|value| value.get("board_orientation").and_then(Value::as_i64))
+            .map(|angle| angle as i32)
+            .unwrap_or(0)
+    }
+
+    /// Sets the live job's `board_orientation` (degrees). Goes value-level and
+    /// re-parses so the datastore re-validates the angle against the schema.
+    pub fn set_job_board_orientation(&mut self, angle: i32) -> bool {
+        let path = self.job_path.clone();
+        let Some(mut value) = self.job().map(|doc| doc.to_value()) else {
+            return false;
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("board_orientation".into(), Value::from(angle));
+        }
+        self.store.replace_document_from_value_at(&path, &value).is_some()
+    }
+
     // ---- toolset rack edits ----------------------------------------------
     //
     // A toolset's `slots` are a `T1..Tn` rack: each slot has a `mode`
@@ -1208,6 +1231,23 @@ mod tests {
     }
 
     #[test]
+    fn job_board_orientation_defaults_to_zero_and_persists() {
+        // The board orientation is live per-job data on the singleton: it defaults
+        // to 0 on a fresh job and survives a reload once set (persist-and-project).
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        assert_eq!(data.job_board_orientation(), 0, "fresh job orients at 0");
+
+        assert!(data.set_job_board_orientation(37));
+        assert_eq!(data.job_board_orientation(), 37);
+        data.flush();
+
+        let (reloaded, _errors) = load_temp(dir.path());
+        assert_eq!(reloaded.job_board_orientation(), 37, "angle survives reload");
+    }
+
+    #[test]
     fn stock_items_add_edit_and_remove() {
         let dir = tempdir().unwrap();
         let (mut data, _) = load_temp(dir.path());
@@ -1268,6 +1308,7 @@ mod tests {
                 catalog_diameter: Some(Length::from_mm(1.5)),
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
+                flute_length: None,
                 feed_rate: Some(FeedRate::from_mm_per_min(1200.0)),
                 catalog_feed_rate: Some(FeedRate::from_mm_per_min(1200.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),
@@ -1287,6 +1328,7 @@ mod tests {
                 catalog_diameter: Some(Length::from_mm(0.8)),
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
+                flute_length: None,
                 feed_rate: None,
                 catalog_feed_rate: None,
                 spindle_speed: None,

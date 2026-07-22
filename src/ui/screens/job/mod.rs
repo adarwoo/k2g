@@ -13,18 +13,21 @@ mod code;
 mod machining;
 mod rack;
 mod sidebar;
+mod tooling;
 
 use board::BoardView;
 use code::CodeView;
 use machining::MachiningView;
 use rack::RackView;
 use sidebar::JobSidebar;
+use tooling::ToolingView;
 
 #[component]
 pub fn JobScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let has_atc = snapshot.selected_machine_has_atc();
-    let mut views = vec![JobCenterView::Board, JobCenterView::Machining, JobCenterView::Code];
+    let mut views =
+        vec![JobCenterView::Board, JobCenterView::Machining, JobCenterView::Code, JobCenterView::Tooling];
     if has_atc {
         views.push(JobCenterView::Rack);
     }
@@ -62,6 +65,9 @@ pub fn JobScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                         },
                         JobCenterView::Code => rsx! {
                             CodeView { state }
+                        },
+                        JobCenterView::Tooling => rsx! {
+                            ToolingView { state }
                         },
                         JobCenterView::Rack => rsx! {
                             RackView { state }

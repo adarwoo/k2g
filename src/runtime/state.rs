@@ -197,6 +197,10 @@ impl AppState {
             self.show_first_launch = true;
         }
 
+        // Project the persisted board orientation into the live runtime config so
+        // it survives a restart (the singleton `job.yaml` is the source of truth).
+        self.project_config.rotation_angle = persisted.job_board_orientation;
+
         self.suppress_persistence = false;
     }
 
@@ -419,6 +423,18 @@ impl AppState {
             .as_ref()
             .and_then(|id| Uuid::parse_str(id).ok());
         crate::data::with_appdata_mut(|data| data.set_job_machining_profile(target));
+    }
+
+    /// Updates the board orientation angle (degrees) on the live runtime config
+    /// and writes it through to the job singleton (`job.yaml`) so it persists.
+    /// Clamps to the schema range; a no-op write during startup hydration.
+    pub fn set_board_orientation(&mut self, angle: i32) {
+        let angle = angle.clamp(-180, 180);
+        self.project_config.rotation_angle = angle;
+        if self.suppress_persistence || !crate::data::appdata_ready() {
+            return;
+        }
+        crate::data::with_appdata_mut(|data| data.set_job_board_orientation(angle));
     }
 
     pub fn validate_current_job_references(&mut self) {
@@ -857,6 +873,7 @@ impl AppState {
                         catalog_diameter: Some(tool.diameter),
                         point_angle: tool.point_angle,
                         catalog_point_angle: Some(tool.point_angle),
+                        flute_length: None,
                         feed_rate: tool.feed_rate,
                         catalog_feed_rate: tool.feed_rate,
                         spindle_speed: tool.spindle_speed,

@@ -137,6 +137,9 @@ include!("catalogs.rs");
 
 include!("generation.rs");
 
+/// Per-step tooling plan for the Job screen's "Tooling" tab.
+pub mod tooling;
+
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
 
@@ -156,6 +159,8 @@ struct PersistenceState {
     last_edited_process_profile_id: Option<String>,
     /// The machining profile referenced by the live job singleton (`job.yaml`).
     job_machining_profile: Option<String>,
+    /// The board orientation angle (degrees) the live job stores.
+    job_board_orientation: i32,
     selected_cnc_profile_id: Option<String>,
     selected_fixture_profile_id: Option<String>,
     selected_toolset_profile_id: Option<String>,
@@ -200,6 +205,7 @@ fn persistence_state_from_appdata() -> Option<PersistenceState> {
         let selected_process_profile_id = get_id("selected_process_profile_id");
         let last_edited_process_profile_id = get_id("last_edited_process_profile_id");
         let job_machining_profile = data.job_machining_profile().map(|id| id.to_string());
+        let job_board_orientation = data.job_board_orientation();
         let selected_cnc_profile_id = get_id("selected_cnc_profile_id");
         let selected_fixture_profile_id = get_id("selected_fixture_profile_id");
         let selected_toolset_profile_id = get_id("selected_toolset_profile_id");
@@ -214,6 +220,7 @@ fn persistence_state_from_appdata() -> Option<PersistenceState> {
             selected_process_profile_id,
             last_edited_process_profile_id,
             job_machining_profile,
+            job_board_orientation,
             selected_cnc_profile_id,
             selected_fixture_profile_id,
             selected_toolset_profile_id,

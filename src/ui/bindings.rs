@@ -1094,6 +1094,20 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
         }
     };
 
+    // The editable control is wrapped so it can be width-capped (a field never
+    // spans a whole wide column) with the inline revert affordance beside it.
+    // Multiline editors (CNC GTL templates, wrapped strings) take the full width;
+    // checkboxes keep their natural size.
+    let control_class = if matches!(&field.kind, FieldKind::Enum(_)) {
+        "field-control"
+    } else if matches!(&field.value, NodeValue::Bool(_)) {
+        "field-control field-control-check"
+    } else if matches!(&field.value, NodeValue::Str(text) if is_primitive_template || text.contains('\n')) {
+        "field-control field-control-wide"
+    } else {
+        "field-control"
+    };
+
     rsx! {
         div { class: "{field_class}",
             label {
@@ -1102,17 +1116,19 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
                     span { class: "field-required", " *" }
                 }
             }
-            {input}
-            if let Some(base_display) = revert_display.clone() {
-                button {
-                    class: "stock-revert-btn",
-                    r#type: "button",
-                    title: "Revert to catalog value",
-                    onclick: {
-                        let ptr = ptr.clone();
-                        move |_| addr_set_input(FieldAddr::Stock, &ptr, &base_display)
-                    },
-                    "\u{21ba}"
+            div { class: "{control_class}",
+                {input}
+                if let Some(base_display) = revert_display.clone() {
+                    button {
+                        class: "stock-revert-btn",
+                        r#type: "button",
+                        title: "Revert to catalog value",
+                        onclick: {
+                            let ptr = ptr.clone();
+                            move |_| addr_set_input(FieldAddr::Stock, &ptr, &base_display)
+                        },
+                        "\u{21ba}"
+                    }
                 }
             }
             if let Some(desc) = field.description.clone() {

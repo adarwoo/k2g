@@ -25,6 +25,25 @@ $defs:
       - route_board
       - mill_board
 
+  allowance:
+    description: >-
+      Tolerance band for substituting a stock tool for a required hole size: a
+      relative fraction of the hole diameter, capped by an absolute maximum.
+      Effective allowance = min(relative × hole_diameter, max).
+    type: object
+    default:
+      relative: 8%
+      max: 0.10mm
+    properties:
+      relative:
+        $ref: "units.yaml#/$defs/percent"
+        default: 8%
+      max:
+        $ref: "units.yaml#/$defs/size"
+        default: 0.10mm
+    required: [relative, max]
+    additionalProperties: false
+
   drill_holes_common:
     type: object
     default:
@@ -48,9 +67,11 @@ $defs:
           pilot: false
           oblong: drill_ends_then_route
           oversize:
-            $ref: "#/$defs/allowance"
+            relative: 8%
+            max: 0.10mm
           undersize:
-            $ref: "#/$defs/allowance"
+            relative: 6%
+            max: 0.08mm
         properties:
           route_fallback: { type: boolean, default: false }
           drill_first: { type: boolean, default: true }
@@ -59,6 +80,16 @@ $defs:
             type: string
             default: drill_ends_then_route
             enum: [route, drill_ends_then_route, drill_chain, drill_chain_then_route]
+          oversize:
+            $ref: "#/$defs/allowance"
+            default:
+              relative: 8%
+              max: 0.10mm
+          undersize:
+            $ref: "#/$defs/allowance"
+            default:
+              relative: 6%
+              max: 0.08mm
         additionalProperties: false
     required: [holes]
     additionalProperties: false

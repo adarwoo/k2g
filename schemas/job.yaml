@@ -24,6 +24,16 @@ properties:
     $ref: "id.yaml#/$defs/uuid_v7"
     x-ref: "machining.yaml"
 
+  board_orientation:
+    description: >-
+      Board placement angle in degrees for this run. Live per-job data — it lets
+      the board be rotated to fit the CNC bed and is NOT a profile setting (the
+      same board on a different bed may need a different angle).
+    type: integer
+    minimum: -180
+    maximum: 180
+    default: 0
+
 required: [schema_version]
 
 additionalProperties: false
