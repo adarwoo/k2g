@@ -45,6 +45,7 @@ pub fn ToolingView(state: Signal<AppCtx>) -> Element {
                         },
                         StepOutcome::Resolved(resolved) => rsx! {
                             h4 { class: "tooling-subtitle", "Tool selection" }
+                            p { class: "diag-status", "{resolved.summary}" }
                             if resolved.rack.is_empty() {
                                 p { class: "diag-status", "No tools assigned." }
                             } else {
@@ -76,14 +77,39 @@ pub fn ToolingView(state: Signal<AppCtx>) -> Element {
                                             th { "Requirement" }
                                             th { class: "tooling-count-col", "Count" }
                                             th { class: "tooling-slot-col", "Tool" }
+                                            th { class: "tooling-slot-col", "Ø" }
+                                            th { class: "tooling-slot-col", "Δ" }
                                         }
                                     }
                                     tbody {
                                         for row in resolved.requirements.iter() {
                                             tr {
+                                                class: if row.tools.iter().any(|tool| tool.routed) { "tooling-req-routed" } else { "" },
                                                 td { "{row.label}" }
                                                 td { class: "tooling-count", "{row.count}" }
-                                                td { class: "tooling-slot", "{row.resolved}" }
+                                                td { class: "tooling-slot",
+                                                    for tool in row.tools.iter() {
+                                                        div { class: "tooling-tool-line",
+                                                            span { "{tool.slot}" }
+                                                            if let Some(role) = tool.role {
+                                                                span { class: "tooling-role", " {role}" }
+                                                            }
+                                                            if tool.routed {
+                                                                span { class: "tooling-routed-badge", "routed" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                td { class: "tooling-slot",
+                                                    for tool in row.tools.iter() {
+                                                        div { class: "tooling-tool-line", "{tool.diameter}" }
+                                                    }
+                                                }
+                                                td {
+                                                    for tool in row.tools.iter() {
+                                                        div { class: "tooling-tool-line {tool.delta_class}", "{tool.delta_text}" }
+                                                    }
+                                                }
                                             }
                                         }
                                     }

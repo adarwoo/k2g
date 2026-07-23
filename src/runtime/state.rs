@@ -450,6 +450,46 @@ impl AppState {
         }
     }
 
+    /// Runs the per-step tool-selection plan and raises a blocking error for any step
+    /// with no solution, so the status pill and diagnostics banner reflect that the
+    /// job cannot be machined until it is fixed. De-duplicates against what is already
+    /// posted so re-running on every mutation does not re-toast an unchanged failure.
+    pub fn validate_tooling(&mut self) {
+        let failures: Vec<(String, Vec<String>)> = if crate::data::appdata_ready() {
+            crate::runtime::tooling::plan_tooling(self)
+                .steps
+                .into_iter()
+                .filter_map(|step| match step.outcome {
+                    crate::runtime::tooling::StepOutcome::Failed(messages) => Some((step.name, messages)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let next: Vec<(String, Option<String>)> = failures
+            .into_iter()
+            .map(|(name, messages)| {
+                (format!("No tooling solution for step '{name}'."), Some(messages.join("\n")))
+            })
+            .collect();
+        let current: Vec<(String, Option<String>)> = self
+            .errors
+            .iter()
+            .filter(|error| error.domain == "tooling")
+            .map(|error| (error.message.clone(), error.details.clone()))
+            .collect();
+        if next == current {
+            return; // unchanged — avoid re-posting and re-toasting
+        }
+
+        self.clear_runtime_errors("tooling");
+        for (message, details) in next {
+            self.push_runtime_error_owned("tooling", None, message, details);
+        }
+    }
+
     fn current_job_reference_errors(&self) -> Vec<RuntimeIssueDraft> {
         let mut issues = Vec::new();
 

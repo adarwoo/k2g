@@ -33,10 +33,14 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
         })
         .unwrap_or_else(|| "No board loaded".to_string());
     // The pill reflects the generated program's availability — the thing a user
-    // actually waits on. Errors/warnings are surfaced by the DiagnosticsBanner.
+    // actually waits on. Errors/warnings are surfaced by the DiagnosticsBanner. A
+    // blocking error (e.g. no tooling solution) means the job cannot be machined, so
+    // the program is not "ready" regardless of any stale output.
+    let has_blocking_error = snapshot.errors.iter().any(|error| error.is_error);
     let status_label = match snapshot.generation_state {
         GenerationState::Running => "Generating…".to_string(),
         GenerationState::Failed => "Generation failed".to_string(),
+        _ if has_blocking_error => "Not ready".to_string(),
         GenerationState::Idle if snapshot.gcode.is_empty() => "No program".to_string(),
         GenerationState::Idle if snapshot.gcode_modified => "Program edited".to_string(),
         GenerationState::Idle => "Program ready".to_string(),
@@ -119,6 +123,7 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
                     class: match snapshot.generation_state {
                         GenerationState::Running => "status-pill status-warn",
                         GenerationState::Failed => "status-pill status-err",
+                        _ if has_blocking_error => "status-pill status-err",
                         GenerationState::Idle if snapshot.gcode.is_empty() => "status-pill status-warn",
                         GenerationState::Idle if snapshot.gcode_modified => "status-pill status-warn",
                         GenerationState::Idle => "status-pill status-ok",

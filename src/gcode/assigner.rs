@@ -136,13 +136,17 @@ pub enum OverflowPolicy {
     AllowHybrid,
 }
 
-/// The rack: `capacity` usable slots (K), the `fixed` slots pinned to a tool, and
+/// The rack: `capacity` usable slots (K), the `fixed` slots pinned to a tool, the
+/// `spare_slots` (physical slot numbers) auto-selected tools may occupy, and
 /// `mandatory` tool ids that must be present and never removed by shrink (the
-/// routing set `R_project`). Fixed tools are implicitly mandatory too.
+/// routing set `R_project`). Fixed tools are implicitly mandatory too. Slots that
+/// are neither fixed nor spare (e.g. do-not-use) simply do not appear here, so they
+/// are never assigned.
 #[derive(Clone, Debug)]
 pub struct RackSpec {
     pub capacity: usize,
     pub fixed: Vec<(u8, String)>,
+    pub spare_slots: Vec<u8>,
     pub mandatory: Vec<String>,
     pub policy: OverflowPolicy,
 }
@@ -765,20 +769,19 @@ fn warn_unverified_reach(works: &[HoleWork], diagnostics: &mut Vec<Diagnostic>) 
     }
 }
 
-/// Lays out the rack as **one row per distinct tool** the job needs. A fixed tool
-/// keeps its pinned slot (its first, if the toolset pins it in several); every other
-/// tool takes the lowest slot not already reserved by a fixed pin, ordered by
-/// diameter then id for determinism. Because `rack_tools` is a set, no tool is ever
-/// listed in two slots — a toolset that redundantly pins one tool across slots shows
-/// it once.
+/// Lays out the rack as **one row per distinct tool** the job needs, on the
+/// toolset's real slots. A fixed tool keeps its pinned slot (its first, if pinned in
+/// several); every other tool fills the next `spare_slot` in order, by diameter then
+/// id for determinism. Slots absent from both `fixed` and `spare_slots` (e.g.
+/// do-not-use) are never used, so they are simply skipped. Because `rack_tools` is a
+/// set, no tool is ever listed twice.
 fn build_rack_layout(rack_tools: &BTreeSet<String>, tools: &[Tool], rack: &RackSpec) -> Vec<SlotAssignment> {
     // The slot each fixed tool occupies (its first, when pinned in several).
     let mut fixed_slot: BTreeMap<&str, u8> = BTreeMap::new();
     for (slot, id) in &rack.fixed {
         fixed_slot.entry(id.as_str()).or_insert(*slot);
     }
-    // Every physically-pinned slot is reserved, so auto tools never land on one.
-    let reserved: BTreeSet<u8> = rack.fixed.iter().map(|(slot, _)| *slot).collect();
+    let fixed_slots: BTreeSet<u8> = rack.fixed.iter().map(|(slot, _)| *slot).collect();
 
     let tool_um = |id: &str| -> i64 {
         tools.iter().find(|t| t.id == id).map(|t| micron(t.diameter)).unwrap_or(0)
@@ -795,9 +798,10 @@ fn build_rack_layout(rack_tools: &BTreeSet<String>, tools: &[Tool], rack: &RackS
     }
 
     auto.sort_by(|a, b| tool_um(a).cmp(&tool_um(b)).then(a.as_str().cmp(b.as_str())));
-    let mut free_slots = (1u8..=u8::MAX).filter(|n| !reserved.contains(n));
+    // Auto tools take the toolset's spare slots in index order (never a fixed slot).
+    let mut spare = rack.spare_slots.iter().copied().filter(|slot| !fixed_slots.contains(slot));
     for id in auto {
-        if let Some(slot) = free_slots.next() {
+        if let Some(slot) = spare.next() {
             layout.push(SlotAssignment { slot, tool_id: id.clone() });
         }
     }
@@ -877,7 +881,13 @@ mod tests {
     }
 
     fn rack(capacity: usize) -> RackSpec {
-        RackSpec { capacity, fixed: vec![], mandatory: vec![], policy: OverflowPolicy::FixedToolset }
+        RackSpec {
+            capacity,
+            fixed: vec![],
+            spare_slots: (1..=capacity as u8).collect(),
+            mandatory: vec![],
+            policy: OverflowPolicy::FixedToolset,
+        }
     }
 
     // --- tests ------------------------------------------------------------
@@ -1076,6 +1086,19 @@ mod tests {
         let out = assign(&holes, &tools, &config(false), &spec, &roomy_setup()).unwrap();
         assert_eq!(out.rack.iter().filter(|s| s.tool_id == "dup").count(), 1, "no duplicate slots");
         assert_eq!(out.rack.len(), 2, "one row per distinct tool");
+    }
+
+    #[test]
+    fn auto_tools_fill_spare_slots_and_skip_excluded_ones() {
+        // spare_slots omits slot 3 (a do-not-use slot upstream); tools must skip it.
+        let tools = vec![drill("a", 1.0), drill("b", 2.0), drill("c", 3.0)];
+        let holes = vec![round_hole("h1", 1.0), round_hole("h2", 2.0), round_hole("h3", 3.0)];
+        let mut spec = rack(3);
+        spec.spare_slots = vec![1, 2, 4]; // slot 3 excluded (do-not-use)
+        let out = assign(&holes, &tools, &config(false), &spec, &roomy_setup()).unwrap();
+        let slots: Vec<u8> = out.rack.iter().map(|s| s.slot).collect();
+        assert_eq!(slots, vec![1, 2, 4], "fills spare slots in order, skipping the excluded slot");
+        assert!(!out.rack.iter().any(|s| s.slot == 3), "the excluded slot is never used");
     }
 
     #[test]

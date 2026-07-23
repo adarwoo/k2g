@@ -24,9 +24,9 @@ use crate::data::model::{Tool, ToolsetGenerationPolicy};
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{
     self, Allowance, AssignConfig, AssignError, DemandKind, FaultReason, HoleDemand, OverflowPolicy,
-    RackSpec, Setup, Strategy, Weights,
+    RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
-use crate::runtime::AppCtx;
+use crate::runtime::AppState;
 
 /// The full tooling plan: one entry per machining step (in order).
 pub struct ToolingPlan {
@@ -51,6 +51,8 @@ pub enum StepOutcome {
 }
 
 pub struct StepResolved {
+    /// One-line context, e.g. "9 tools · manual tool changes (no ATC)".
+    pub summary: String,
     pub rack: Vec<RackRow>,
     pub requirements: Vec<RequirementRow>,
     pub warnings: Vec<String>,
@@ -65,8 +67,25 @@ pub struct RackRow {
 pub struct RequirementRow {
     pub label: String,
     pub count: usize,
-    /// Resolved tool slot (e.g. `T2`, `T2 · route`) or `—` when unresolved.
-    pub resolved: String,
+    /// The tool(s) resolving this requirement. An oblong/slot may use two — a drill
+    /// for the ends/width plus a router for the slot.
+    pub tools: Vec<ResolvedTool>,
+}
+
+/// One tool resolving (part of) a requirement, for the plan table.
+pub struct ResolvedTool {
+    /// Slot label, e.g. `T3`, or `—` when unresolved.
+    pub slot: String,
+    /// Role when a requirement uses several tools ("drill"); else `None`.
+    pub role: Option<&'static str>,
+    /// Selected tool diameter (formatted), or `—`.
+    pub diameter: String,
+    /// Size delta: `+3.2%`, `exact` (routed to size), or `—`.
+    pub delta_text: String,
+    /// CSS class colouring the delta by magnitude.
+    pub delta_class: &'static str,
+    /// This feature is milled by a router rather than drilled.
+    pub routed: bool,
 }
 
 /// Raw per-step data read from the datastore in one pass (owned so the `with_appdata`
@@ -84,6 +103,8 @@ struct DrillConfigRaw {
     route_fallback: bool,
     drill_first: bool,
     pilot: bool,
+    /// Oblong-hole strategy: `route | drill_ends_then_route | drill_chain | drill_chain_then_route`.
+    oblong: String,
     oversize: Allowance,
     undersize: Allowance,
 }
@@ -94,6 +115,7 @@ impl Default for DrillConfigRaw {
             route_fallback: false,
             drill_first: true,
             pilot: false,
+            oblong: "drill_ends_then_route".to_string(),
             oversize: Allowance { relative: 0.08, max: Length::from_mm(0.10) },
             undersize: Allowance { relative: 0.06, max: Length::from_mm(0.08) },
         }
@@ -102,7 +124,7 @@ impl Default for DrillConfigRaw {
 
 /// Builds the tooling plan for the current context. Reads all steps of the selected
 /// machining profile, runs the assigner for each, and formats the outcome.
-pub fn plan_tooling(ctx: &AppCtx) -> ToolingPlan {
+pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
     let Some(profile_id) = ctx
         .selected_process_profile_id
         .as_deref()
@@ -183,6 +205,7 @@ fn read_drill_config(root: &Node, base: &str) -> DrillConfigRaw {
         route_fallback: node_bool(root, &format!("{base}/route_fallback")).unwrap_or(default.route_fallback),
         drill_first: node_bool(root, &format!("{base}/drill_first")).unwrap_or(default.drill_first),
         pilot: node_bool(root, &format!("{base}/pilot")).unwrap_or(default.pilot),
+        oblong: node_str(root, &format!("{base}/oblong")).unwrap_or(default.oblong),
         oversize: read_allowance(root, &format!("{base}/oversize"), default.oversize),
         undersize: read_allowance(root, &format!("{base}/undersize"), default.undersize),
     }
@@ -197,7 +220,7 @@ fn read_allowance(root: &Node, base: &str, fallback: Allowance) -> Allowance {
 }
 
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
-fn plan_step(ctx: &AppCtx, raw: &StepRaw) -> StepOutcome {
+fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let has_pth = raw.operations.iter().any(|op| op == "drill_pth");
     let has_npth = raw.operations.iter().any(|op| op == "drill_npth");
     let has_route = raw.operations.iter().any(|op| op == "route_board" || op == "mill_board");
@@ -220,21 +243,28 @@ fn plan_step(ctx: &AppCtx, raw: &StepRaw) -> StepOutcome {
     let holes = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
 
-    // Preliminary outline router (mandatory in the rack) when routing is enabled.
+    // A router is needed for the board outline and/or for oblong slots that route.
+    let has_oblongs = groups.iter().any(|g| g.minor.is_some());
+    let oblong_drills = matches!(
+        raw.drill.oblong.as_str(),
+        "drill_ends_then_route" | "drill_chain" | "drill_chain_then_route"
+    );
+    let oblong_routes = matches!(
+        raw.drill.oblong.as_str(),
+        "route" | "drill_ends_then_route" | "drill_chain_then_route"
+    );
+    let needs_router = has_route || (has_oblongs && oblong_routes);
+
     let mut warnings: Vec<String> = Vec::new();
-    let outline_router = if has_route {
-        pick_outline_router(ctx, toolset)
-    } else {
-        None
-    };
-    if has_route && outline_router.is_none() {
-        warnings.push("No router in stock for the board outline — routing is unresolved.".into());
+    let outline_router = if needs_router { pick_outline_router(ctx, toolset) } else { None };
+    if needs_router && outline_router.is_none() {
+        warnings.push("No router in stock for routing (board outline / slots) — routing is unresolved.".into());
     }
     if has_locating {
         warnings.push("Locating pins are not yet planned (no board metadata for locating holes).".into());
     }
 
-    if groups.is_empty() && outline_router.is_none() && !has_route {
+    if groups.is_empty() && !has_route {
         return StepOutcome::Empty;
     }
 
@@ -257,68 +287,45 @@ fn plan_step(ctx: &AppCtx, raw: &StepRaw) -> StepOutcome {
     };
     let rack = build_rack_spec(toolset, atc_slots, outline_router.as_deref());
 
-    // If there is genuinely nothing to drill (route-only step), skip the assigner and
-    // present the routing requirement alone.
-    if demands.is_empty() {
-        let mut requirements = Vec::new();
-        if has_route {
-            requirements.push(route_requirement(ctx, &outline_router, 1 /* T1..: unknown yet */));
-        }
-        return StepOutcome::Resolved(StepResolved {
-            rack: outline_router
-                .as_ref()
-                .map(|id| single_router_rack(ctx, id))
-                .unwrap_or_default(),
-            requirements,
-            warnings,
-        });
-    }
-
     match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
         Ok(assignment) => {
-            // tool_id → slot number, for resolving each requirement.
-            let slot_of: std::collections::BTreeMap<&str, u8> = assignment
-                .rack
-                .iter()
-                .map(|s| (s.tool_id.as_str(), s.slot))
-                .collect();
+            // The assigner already placed each tool on the toolset's real slot (fixed
+            // tools pinned; the rest filling spare slots in order; do-not-use slots
+            // skipped), so the slot numbers are used as-is.
+            let number_of: std::collections::BTreeMap<&str, u8> =
+                assignment.rack.iter().map(|s| (s.tool_id.as_str(), s.slot)).collect();
 
-            let rack_rows = assignment
+            let rack_rows: Vec<RackRow> = assignment
                 .rack
                 .iter()
-                .map(|s| RackRow {
-                    slot: format!("T{}", s.slot),
-                    tool: tool_label(ctx, &s.tool_id),
-                })
+                .map(|s| RackRow { slot: format!("T{}", s.slot), tool: tool_label(ctx, &s.tool_id) })
                 .collect();
 
             let mut requirements: Vec<RequirementRow> = groups
                 .iter()
                 .map(|group| {
-                    let assigned = assignment.holes.iter().find(|h| h.hole_id == group.id());
-                    let resolved = match assigned {
-                        Some(h) => {
-                            let slot = slot_of.get(h.tool_id.as_str()).copied();
-                            match slot {
-                                Some(n) if h.strategy == Strategy::Route => format!("T{n} · route"),
-                                Some(n) => format!("T{n}"),
-                                None => "—".into(),
-                            }
-                        }
-                        None => "—".into(),
-                    };
-                    RequirementRow { label: group.label(ctx), count: group.count, resolved }
+                    let tools = resolve_group_tools(
+                        ctx,
+                        &assignment,
+                        group,
+                        &number_of,
+                        oblong_drills,
+                        oblong_routes,
+                        outline_router.as_deref(),
+                    );
+                    RequirementRow { label: group.label(ctx), count: group.count, tools }
                 })
                 .collect();
 
             if has_route {
-                let router_slot = outline_router
+                let router = outline_router
                     .as_ref()
-                    .and_then(|id| slot_of.get(id.as_str()).copied());
+                    .map(|id| resolve_router_tool(ctx, id, &number_of, None))
+                    .unwrap_or_else(unresolved_tool);
                 requirements.push(RequirementRow {
                     label: "Board outline (route)".into(),
                     count: 1,
-                    resolved: router_slot.map(|n| format!("T{n}")).unwrap_or_else(|| "—".into()),
+                    tools: vec![router],
                 });
             }
 
@@ -326,9 +333,121 @@ fn plan_step(ctx: &AppCtx, raw: &StepRaw) -> StepOutcome {
                 warnings.push(diagnostic.message.clone());
             }
 
-            StepOutcome::Resolved(StepResolved { rack: rack_rows, requirements, warnings })
+            StepOutcome::Resolved(StepResolved {
+                summary: machine_summary(rack_rows.len(), atc_slots),
+                rack: rack_rows,
+                requirements,
+                warnings,
+            })
         }
         Err(error) => StepOutcome::Failed(format_error(ctx, &error)),
+    }
+}
+
+/// Resolves the tool(s) for a requirement group: the assigner's drill (a round hole,
+/// or the ends/width of an oblong) plus a router when the oblong strategy routes the
+/// slot. A round hole is a single tool.
+fn resolve_group_tools(
+    ctx: &AppState,
+    assignment: &ToolAssignment,
+    group: &HoleGroup,
+    number_of: &std::collections::BTreeMap<&str, u8>,
+    oblong_drills: bool,
+    oblong_routes: bool,
+    outline_router: Option<&str>,
+) -> Vec<ResolvedTool> {
+    if group.minor.is_none() {
+        return vec![resolve_drill_tool(ctx, assignment, group, number_of, None)];
+    }
+    // Oblong / slot: possibly a drill (ends or chain) and a router (the slot).
+    let mut tools = Vec::new();
+    if oblong_drills {
+        tools.push(resolve_drill_tool(ctx, assignment, group, number_of, Some("drill")));
+    }
+    if oblong_routes {
+        if let Some(router) = outline_router {
+            tools.push(resolve_router_tool(ctx, router, number_of, None));
+        }
+    }
+    if tools.is_empty() {
+        tools.push(resolve_drill_tool(ctx, assignment, group, number_of, None));
+    }
+    tools
+}
+
+/// The drill the assigner picked for a group, with its diameter and size delta.
+fn resolve_drill_tool(
+    ctx: &AppState,
+    assignment: &ToolAssignment,
+    group: &HoleGroup,
+    number_of: &std::collections::BTreeMap<&str, u8>,
+    role: Option<&'static str>,
+) -> ResolvedTool {
+    let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else {
+        return ResolvedTool { role, ..unresolved_tool() };
+    };
+    let slot = number_of.get(assigned.tool_id.as_str()).map(|n| format!("T{n}")).unwrap_or_else(|| "—".into());
+    let diameter = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter);
+    let match_len = group.minor.unwrap_or(group.target);
+    let routed = assigned.strategy == Strategy::Route;
+    match diameter {
+        Some(dia) => {
+            let (delta_text, delta_class) = if routed {
+                ("exact".to_string(), "tooling-delta-ok")
+            } else {
+                delta_cell(dia, match_len)
+            };
+            ResolvedTool { slot, role, diameter: fmt_len(ctx, dia), delta_text, delta_class, routed }
+        }
+        None => ResolvedTool { slot, role, diameter: "—".into(), delta_text: "—".into(), delta_class: "", routed },
+    }
+}
+
+/// A router resolving a routed slot / outline. It interpolates to the exact size, so
+/// there is no size delta — the tool diameter is just the router's own.
+fn resolve_router_tool(
+    ctx: &AppState,
+    router_id: &str,
+    number_of: &std::collections::BTreeMap<&str, u8>,
+    role: Option<&'static str>,
+) -> ResolvedTool {
+    let slot = number_of.get(router_id).map(|n| format!("T{n}")).unwrap_or_else(|| "—".into());
+    let diameter = ctx
+        .tools
+        .iter()
+        .find(|t| t.id == router_id)
+        .map(|t| fmt_len(ctx, t.diameter))
+        .unwrap_or_else(|| "—".into());
+    ResolvedTool { slot, role, diameter, delta_text: "exact".into(), delta_class: "tooling-delta-ok", routed: true }
+}
+
+/// The size-delta cell for a drill of `tool` diameter making a `target`-size hole.
+/// Computed at micron precision (matching the assigner) so an exact match reads
+/// `exact` rather than a rounded `+0.0%`; otherwise `(tool − target) / target`,
+/// green within 2 % and amber beyond, kept to enough precision that a real (if
+/// tiny) difference never collapses to a misleading `0.0%`.
+fn delta_cell(tool: Length, target: Length) -> (String, &'static str) {
+    let target_um = micron(target);
+    if target_um == 0 {
+        return ("—".to_string(), "");
+    }
+    if micron(tool) == target_um {
+        return ("exact".to_string(), "tooling-delta-ok");
+    }
+    let pct = (micron(tool) - target_um) as f64 / target_um as f64 * 100.0;
+    let class = if pct.abs() < 2.0 { "tooling-delta-ok" } else { "tooling-delta-warn" };
+    let text = if pct.abs() < 0.05 { format!("{pct:+.2}%") } else { format!("{pct:+.1}%") };
+    (text, class)
+}
+
+fn unresolved_tool() -> ResolvedTool {
+    ResolvedTool {
+        slot: "—".into(),
+        role: None,
+        diameter: "—".into(),
+        delta_text: "—".into(),
+        delta_class: "",
+        routed: false,
     }
 }
 
@@ -364,7 +483,7 @@ impl HoleGroup {
         }
     }
 
-    fn label(&self, ctx: &AppCtx) -> String {
+    fn label(&self, ctx: &AppState) -> String {
         let kind = match self.kind {
             DemandKind::Pth => "PTH",
             DemandKind::Npth => "NPTH",
@@ -416,7 +535,7 @@ fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_npth: bool) 
 /// Picks a preliminary outline router: a routerbit/end-mill already pinned in the
 /// toolset's fixed slots, else the smallest in-stock router in the shop. Returns its
 /// stock-tool id.
-fn pick_outline_router(ctx: &AppCtx, toolset: &crate::data::model::ToolsetProfile) -> Option<String> {
+fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::ToolsetProfile) -> Option<String> {
     let is_router = |tool: &Tool| matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill);
 
     // Prefer a router already fixed in the toolset.
@@ -444,9 +563,6 @@ fn build_rack_spec(
     atc_slots: usize,
     outline_router: Option<&str>,
 ) -> RackSpec {
-    let usable = toolset.slots.values().filter(|s| !s.disabled).count();
-    let capacity = if atc_slots > 0 { usable.min(atc_slots) } else { usable };
-
     let fixed: Vec<(u8, String)> = toolset
         .slots
         .iter()
@@ -459,9 +575,42 @@ fn build_rack_spec(
         })
         .collect();
 
+    // Spare slots (index order) available for auto-assignment: neither fixed nor
+    // do-not-use. A `BTreeMap` iterates by key, so these come out sorted.
+    let spare_slots: Vec<u8> = toolset
+        .slots
+        .iter()
+        .filter(|(_, slot)| !slot.locked && !slot.disabled)
+        .map(|(index, _)| *index)
+        .collect();
+
+    // Capacity is the number of DISTINCT tools the rack can hold: each distinct fixed
+    // tool plus one per spare slot. Counting physical slots would over-count when a
+    // tool is fixed in several slots (the extra slots are wasted, not extra capacity),
+    // letting the assigner "resolve" more tools than can actually be placed. An ATC
+    // machine caps this by its physical slot count.
+    let distinct_fixed = fixed
+        .iter()
+        .map(|(_, id)| id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let placeable = distinct_fixed + spare_slots.len();
+    let capacity = if atc_slots > 0 { placeable.min(atc_slots) } else { placeable };
+
     let mandatory = outline_router.map(|id| vec![id.to_string()]).unwrap_or_default();
 
-    RackSpec { capacity, fixed, mandatory, policy: map_policy(toolset.generation_policy) }
+    RackSpec { capacity, fixed, spare_slots, mandatory, policy: map_policy(toolset.generation_policy) }
+}
+
+/// A one-line context for a resolved step: tool count and how tools are changed.
+/// A 0-ATC machine changes tools manually (no physical rack), so the T-numbers are
+/// a change sequence rather than slot positions.
+fn machine_summary(tool_count: usize, atc_slots: usize) -> String {
+    if atc_slots == 0 {
+        format!("{tool_count} tool(s) · manual tool changes (no ATC)")
+    } else {
+        format!("{tool_count} tool(s) · {atc_slots}-slot ATC")
+    }
 }
 
 fn map_policy(policy: ToolsetGenerationPolicy) -> OverflowPolicy {
@@ -472,22 +621,8 @@ fn map_policy(policy: ToolsetGenerationPolicy) -> OverflowPolicy {
     }
 }
 
-/// The rack for a route-only step: just the outline router in slot T1.
-fn single_router_rack(ctx: &AppCtx, router_id: &str) -> Vec<RackRow> {
-    vec![RackRow { slot: "T1".into(), tool: tool_label(ctx, router_id) }]
-}
-
-/// The routing requirement row for a route-only step (router in T1).
-fn route_requirement(_ctx: &AppCtx, outline_router: &Option<String>, slot: u8) -> RequirementRow {
-    RequirementRow {
-        label: "Board outline (route)".into(),
-        count: 1,
-        resolved: if outline_router.is_some() { format!("T{slot}") } else { "—".into() },
-    }
-}
-
 /// Formats an assigner error into displayable diagnostic lines.
-fn format_error(ctx: &AppCtx, error: &AssignError) -> Vec<String> {
+fn format_error(ctx: &AppState, error: &AssignError) -> Vec<String> {
     match error {
         AssignError::UncoverableHoles(faults) => faults
             .iter()
@@ -519,7 +654,7 @@ fn format_error(ctx: &AppCtx, error: &AssignError) -> Vec<String> {
 }
 
 /// A stock tool's display label with its diameter.
-fn tool_label(ctx: &AppCtx, tool_id: &str) -> String {
+fn tool_label(ctx: &AppState, tool_id: &str) -> String {
     match ctx.tools.iter().find(|t| t.id == tool_id) {
         Some(tool) => format!("{} (⌀{})", tool.display_name(), fmt_len(ctx, tool.diameter)),
         None => format!("Unknown tool ({tool_id})"),
@@ -527,7 +662,7 @@ fn tool_label(ctx: &AppCtx, tool_id: &str) -> String {
 }
 
 /// Formats a length in the user's preferred unit only (no native-unit suffix).
-fn fmt_len(ctx: &AppCtx, length: Length) -> String {
+fn fmt_len(ctx: &AppState, length: Length) -> String {
     length.unit_display(ctx.unit_system).user
 }
 

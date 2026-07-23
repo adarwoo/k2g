@@ -1,7 +1,10 @@
 #[allow(dead_code)]
 impl AppCtx {
     fn from_launch(boot: &UiLaunchData) -> Self {
-        let app = AppState::new(boot);
+        let mut app = AppState::new(boot);
+        // Validate tool selection up front so an infeasible job reads as not-ready
+        // (red pill + banner) from the first frame, not only after the first mutation.
+        app.validate_tooling();
 
         let mut status = BTreeMap::new();
         status.insert(STATUS_KEY_KICAD.to_string(), boot.kicad_status.clone());
@@ -82,6 +85,10 @@ impl AppCtx {
             STATUS_KEY_GENERATION_MODIFIED_UUIDS.to_string(),
             change_set.modified_uuid_entries().join(","),
         );
+
+        // Re-run tool selection so an infeasible job raises a blocking error before
+        // readiness is judged (a job with no tooling solution must not read as ready).
+        self.app.validate_tooling();
 
         let readiness = evaluate_generation_readiness(&self.app, self.stitched_board_data.as_ref());
         self.status.insert(

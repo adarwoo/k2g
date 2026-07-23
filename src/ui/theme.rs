@@ -1311,6 +1311,45 @@ body {
     text-align: right;
 }
 
+/* One line per tool within a requirement cell (an oblong/slot may list two). */
+.tooling-tool-line {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.tooling-role {
+    color: var(--text-subtle);
+    font-size: 11px;
+}
+
+/* Highlight a requirement that is milled by a router rather than drilled. */
+.tooling-req-routed {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.tooling-routed-badge {
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+/* Size delta colouring: within 2 % = good, beyond = attention. */
+.tooling-delta-ok {
+    color: var(--ok);
+}
+
+.tooling-delta-warn {
+    color: var(--warn);
+    font-weight: 600;
+}
+
 .tooling-error {
     border: 1px solid color-mix(in srgb, var(--err) 55%, var(--border));
     background: color-mix(in srgb, var(--err) 12%, var(--bg-elev));
@@ -1696,6 +1735,30 @@ p {
     display: flex;
     align-items: center;
     gap: 8px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    border-left: 3px solid transparent;
+}
+
+/* Slot state colours: assigned (fixed) = green, spare = neutral, do-not-use = red. */
+.rack-slot-fixed {
+    border-left-color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.rack-slot-spare {
+    border-left-color: color-mix(in srgb, var(--text-subtle) 45%, transparent);
+    background: color-mix(in srgb, var(--text-subtle) 6%, transparent);
+}
+
+.rack-slot-donotuse {
+    border-left-color: var(--err);
+    background: color-mix(in srgb, var(--err) 10%, transparent);
+    opacity: 0.7;
+}
+
+.rack-slot-donotuse .rack-slot-label {
+    color: var(--err);
 }
 
 .rack-slot-label {

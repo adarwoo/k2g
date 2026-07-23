@@ -887,11 +887,20 @@ fn RackSlotRow(
         && !tools.iter().any(|(tid, _)| Uuid::parse_str(tid).ok() == tool_id);
     let missing_value = tool_id.map(|t| format!("tool:{t}")).unwrap_or_default();
 
+    // State-coloured row: assigned (fixed) / spare / do-not-use.
+    let state_class = if mode == "do_not_use" {
+        "rack-slot-row rack-slot-donotuse"
+    } else if mode == "fixed" {
+        "rack-slot-row rack-slot-fixed"
+    } else {
+        "rack-slot-row rack-slot-spare"
+    };
+
     rsx! {
-        div { class: "rack-slot-row",
+        div { class: "{state_class}",
             span { class: "rack-slot-label", "T{index}" }
             select {
-                value: selected_value,
+                value: "{selected_value}",
                 onchange: move |evt| {
                     let value = evt.value();
                     if let Some(tid) = value.strip_prefix("tool:").and_then(|s| Uuid::parse_str(s).ok()) {
@@ -902,13 +911,18 @@ fn RackSlotRow(
                         set_toolset_slot_mode(id, pos, "spare", None);
                     }
                 },
-                option { value: "spare", "Spare" }
-                option { value: "do_not_use", "Do not use" }
+                // Dioxus does not reflect a <select>'s `value:` on first render, so each
+                // option carries an explicit `selected:`. Without it a persisted `fixed`
+                // (or `do_not_use`) slot falls back to the first option ("Spare") — the
+                // display-only bug that made saved fixed slots look unsaved. (Same fix as
+                // the machining-profile picker.)
+                option { value: "spare", selected: selected_value == "spare", "Spare" }
+                option { value: "do_not_use", selected: selected_value == "do_not_use", "Do not use" }
                 if tool_missing {
-                    option { value: "{missing_value}", "Missing tool" }
+                    option { value: "{missing_value}", selected: selected_value == missing_value, "Missing tool" }
                 }
                 for (tid , name) in tools {
-                    option { value: "tool:{tid}", "{name}" }
+                    option { value: "tool:{tid}", selected: selected_value == format!("tool:{tid}"), "{name}" }
                 }
             }
         }
