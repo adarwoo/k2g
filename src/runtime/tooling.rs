@@ -89,24 +89,25 @@ pub struct ResolvedTool {
 }
 
 /// Raw per-step data read from the datastore in one pass (owned so the `with_appdata`
-/// lock is released before the assigner runs).
-struct StepRaw {
-    name: String,
-    operations: Vec<String>,
-    cnc_id: Option<Uuid>,
-    toolset_id: Option<Uuid>,
-    drill: DrillConfigRaw,
+/// lock is released before the assigner runs). Shared with the operation-planner
+/// adapter ([`crate::runtime::machining_plan`]), which reads the same steps.
+pub(crate) struct StepRaw {
+    pub(crate) name: String,
+    pub(crate) operations: Vec<String>,
+    pub(crate) cnc_id: Option<Uuid>,
+    pub(crate) toolset_id: Option<Uuid>,
+    pub(crate) drill: DrillConfigRaw,
 }
 
 /// The step's drill `holes` config, defaulted when absent.
-struct DrillConfigRaw {
-    route_fallback: bool,
-    drill_first: bool,
-    pilot: bool,
+pub(crate) struct DrillConfigRaw {
+    pub(crate) route_fallback: bool,
+    pub(crate) drill_first: bool,
+    pub(crate) pilot: bool,
     /// Oblong-hole strategy: `route | drill_ends_then_route | drill_chain | drill_chain_then_route`.
-    oblong: String,
-    oversize: Allowance,
-    undersize: Allowance,
+    pub(crate) oblong: String,
+    pub(crate) oversize: Allowance,
+    pub(crate) undersize: Allowance,
 }
 
 impl Default for DrillConfigRaw {
@@ -158,7 +159,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
 }
 
 /// Reads every step's operations, bindings and drill config from the profile document.
-fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
+pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
     with_appdata(|data| {
         let Some(doc) = data.get(profile_id) else {
             return Vec::new();
@@ -452,18 +453,38 @@ fn unresolved_tool() -> ResolvedTool {
 }
 
 /// A distinct machining requirement (holes of one kind and size) with its count.
-struct HoleGroup {
-    kind: DemandKind,
+/// Shared with the operation-planner adapter ([`crate::runtime::machining_plan`]),
+/// which recomputes a single hole's group to match it back to the assignment.
+pub(crate) struct HoleGroup {
+    pub(crate) kind: DemandKind,
     /// The nominal size (the larger axis for an oblong).
-    target: Length,
+    pub(crate) target: Length,
     /// The minor axis for an oblong hole; `None` for a round hole.
-    minor: Option<Length>,
-    count: usize,
+    pub(crate) minor: Option<Length>,
+    pub(crate) count: usize,
 }
 
 impl HoleGroup {
+    /// Classifies a single board hole into its requirement group (count 1), or `None`
+    /// when the hole is not drilled by the enabled operations. This is the one place
+    /// the kind/oblong classification lives, so [`collect_hole_groups`] and the
+    /// operation-planner adapter agree on a hole's group (and thus its [`id`](Self::id)).
+    pub(crate) fn from_hole(hole: &pcb::BoardHole, has_pth: bool, has_npth: bool) -> Option<HoleGroup> {
+        let kind = match hole.kind {
+            pcb::HoleKind::PadPth | pcb::HoleKind::Via if has_pth => DemandKind::Pth,
+            pcb::HoleKind::PadNpth if has_npth => DemandKind::Npth,
+            _ => return None,
+        };
+        let dx = hole.drill_x.or(hole.drill_y)?;
+        let dy = hole.drill_y.or(hole.drill_x)?;
+        let (major, minor_val) = if dx.as_mm() >= dy.as_mm() { (dx, dy) } else { (dy, dx) };
+        let is_oblong = (micron(major) - micron(minor_val)).abs() > 1;
+        let minor = if is_oblong { Some(minor_val) } else { None };
+        Some(HoleGroup { kind, target: major, minor, count: 1 })
+    }
+
     /// A stable identity used to match the assigner's per-hole result back to a group.
-    fn id(&self) -> String {
+    pub(crate) fn id(&self) -> String {
         format!(
             "{}-{}-{}",
             kind_key(self.kind),
@@ -472,7 +493,7 @@ impl HoleGroup {
         )
     }
 
-    fn to_demand(&self) -> HoleDemand {
+    pub(crate) fn to_demand(&self) -> HoleDemand {
         HoleDemand {
             id: self.id(),
             kind: self.kind,
@@ -503,30 +524,20 @@ impl HoleGroup {
 
 /// Groups the board's drilled holes (filtered by the enabled drill operations) into
 /// distinct (kind, size) requirements with counts. A hole with unequal X/Y drill is an
-/// oblong (major = larger axis, minor = smaller).
-fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_npth: bool) -> Vec<HoleGroup> {
+/// oblong (major = larger axis, minor = smaller). Classification is delegated to
+/// [`HoleGroup::from_hole`] so grouping and the operation-planner adapter never drift.
+pub(crate) fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_npth: bool) -> Vec<HoleGroup> {
     let mut groups: Vec<HoleGroup> = Vec::new();
     for hole in holes {
-        let kind = match hole.kind {
-            pcb::HoleKind::PadPth | pcb::HoleKind::Via if has_pth => DemandKind::Pth,
-            pcb::HoleKind::PadNpth if has_npth => DemandKind::Npth,
-            _ => continue,
-        };
-        let dx = hole.drill_x.or(hole.drill_y);
-        let dy = hole.drill_y.or(hole.drill_x);
-        let (Some(dx), Some(dy)) = (dx, dy) else { continue };
-        let (major, minor_val) = if dx.as_mm() >= dy.as_mm() { (dx, dy) } else { (dy, dx) };
-        let is_oblong = (micron(major) - micron(minor_val)).abs() > 1;
-        let minor = if is_oblong { Some(minor_val) } else { None };
-
-        let target_um = micron(major);
-        let minor_um = minor.map(micron).unwrap_or(-1);
-        if let Some(group) = groups.iter_mut().find(|g| {
-            g.kind == kind && micron(g.target) == target_um && g.minor.map(micron).unwrap_or(-1) == minor_um
+        let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
+        let target_um = micron(group.target);
+        let minor_um = group.minor.map(micron).unwrap_or(-1);
+        if let Some(existing) = groups.iter_mut().find(|g| {
+            g.kind == group.kind && micron(g.target) == target_um && g.minor.map(micron).unwrap_or(-1) == minor_um
         }) {
-            group.count += 1;
+            existing.count += 1;
         } else {
-            groups.push(HoleGroup { kind, target: major, minor, count: 1 });
+            groups.push(group);
         }
     }
     groups
@@ -535,7 +546,7 @@ fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_npth: bool) 
 /// Picks a preliminary outline router: a routerbit/end-mill already pinned in the
 /// toolset's fixed slots, else the smallest in-stock router in the shop. Returns its
 /// stock-tool id.
-fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::ToolsetProfile) -> Option<String> {
+pub(crate) fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::ToolsetProfile) -> Option<String> {
     let is_router = |tool: &Tool| matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill);
 
     // Prefer a router already fixed in the toolset.
@@ -558,7 +569,7 @@ fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::ToolsetProf
 
 /// Maps a toolset + ATC count to the assigner's rack spec. Capacity = usable
 /// (non-disabled) slots, capped by the ATC size when the machine has one.
-fn build_rack_spec(
+pub(crate) fn build_rack_spec(
     toolset: &crate::data::model::ToolsetProfile,
     atc_slots: usize,
     outline_router: Option<&str>,

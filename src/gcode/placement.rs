@@ -118,6 +118,10 @@ impl Placement {
         self.z_retract
     }
 
+    /// Safe height clear of the work and fixtures. Part of the Placement's Z contract
+    /// (op-planner §6); consumed by the Coder handoff (§7) for rapid moves, which is
+    /// not wired yet — hence unused today.
+    #[allow(dead_code)]
     pub fn z_safe(&self) -> Length {
         self.z_safe
     }

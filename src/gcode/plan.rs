@@ -41,21 +41,16 @@ impl Point {
 /// is fully attached and flat, before any routing releases it. `Engrave` is reserved
 /// for the future copper phase (op-planner §9.5); ordering is by `derive(Ord)`, so
 /// the variant order *is* the phase order.
+///
+/// `Engrave` and `Route` are not emitted by the drill phase yet, but their ordinal
+/// positions define the precedence (`derive(Ord)`) the planner is built around, so
+/// they are declared now (op-planner §4, §9.5).
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase {
     Engrave,
     Drill,
     Route,
-}
-
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Phase::Engrave => "Engrave",
-            Phase::Drill => "Drill",
-            Phase::Route => "Route",
-        }
-    }
 }
 
 /// What an atomic op physically does — the discriminant the view and labels read.
@@ -64,14 +59,6 @@ impl Phase {
 pub enum OpKind {
     /// A point drill (`drill` primitive, G81). `entry == exit`.
     Drill,
-}
-
-impl OpKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            OpKind::Drill => "drill",
-        }
-    }
 }
 
 /// The Z parameters an op cuts at, in machine Z. `z_bottom` is the deepest cutting
@@ -146,10 +133,6 @@ pub struct StepPlan {
 impl StepPlan {
     pub fn op_count(&self) -> usize {
         self.blocks.iter().map(ToolBlock::op_count).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
     }
 }
 

@@ -140,6 +140,9 @@ include!("generation.rs");
 /// Per-step tooling plan for the Job screen's "Tooling" tab.
 pub mod tooling;
 
+/// Operation-planner adapter: the in-memory machining plan for the "Machining" tab.
+pub mod machining_plan;
+
 /// In-memory capture of `tracing`/`log` output for the Logs screen.
 pub mod log_capture;
 pub use log_capture::CaptureLayer;
