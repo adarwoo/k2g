@@ -88,7 +88,6 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
                 "/primitives/start_spindle",
                 "/primitives/stop_spindle",
                 "/primitives/drill",
-                "/primitives/peck_drill",
             ],
         ),
         group(

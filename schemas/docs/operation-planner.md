@@ -250,9 +250,9 @@ deterministic rule — no clock, no hash-map iteration order, no RNG.
    decomposition compute for a marginal gain (a slot router differing from the outline
    router), which one-router-for-all-routing already covers.
 4. **No peck.** PCBs are ≤ ~4 mm, so the planner **always emits `drill` (G81)** — the
-   drill-vs-peck decision is dropped. `peck_drill` stays in the schema (zero cost,
-   available for thick stock / manual use) but the planner never selects it; remove the
-   primitive entirely only if it proves truly dead.
+   drill-vs-peck decision is dropped. The `peck_drill` primitive has been **removed
+   entirely** from the schema, the CNC templates, and the profile crosswalk; reintroduce
+   it only if thick-stock support is ever needed.
 5. **Engraving phases first (future).** When added: `engrave → drill → route`, cutting
    copper while the board is intact — the §4 phase list is built to prepend it.
 6. **Routing keeps typed segments (arc-preserving), not G1 polylines** (§3). The stitched
@@ -275,7 +275,8 @@ deterministic rule — no clock, no hash-map iteration order, no RNG.
 7. **Bezier offset.** A bezier's offset isn't a bezier; approximate by biarc fit, or fall
    back to the `cut_bezier` primitive. Rare in Edge.Cuts — decide when one actually
    appears. (Lines and arcs, the 99 % case, offset exactly.)
-8. **Drill-vs-peck threshold** — moot under (4); revisit only if peck is reintroduced.
+8. **Drill-vs-peck threshold** — moot under (4); revisit only if `peck_drill` is
+   reintroduced into the schema.
 
 ---
 

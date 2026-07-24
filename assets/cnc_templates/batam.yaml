@@ -3,10 +3,8 @@
 # They use a TinyG motion controller and have some specific G-code requirements and limitations.
 #
 # Important notes for Bantam Tools:
-#  - The TinyG controller does not support canned cycles like G81 and G83. The
-#    peck_drill primitive below is expanded into explicit G0/G1 moves using a GTL
-#    script loop. The drill primitive still emits G81 and must be expanded by the
-#    application when used.
+#  - The TinyG controller does not support canned cycles like G81. The drill
+#    primitive still emits G81 and must be expanded by the application when used.
 #  - The machine defaults to the G55 coordinate system, unlike machines that use G54.
 #
 # Primitives use the GCode Template Language (see docs/gcode-template-language.md):
@@ -39,18 +37,6 @@ primitives:
     `M3
   stop_spindle: "`M5"
   drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
-  # TinyG has no G83 canned cycle: peck manually down to z_bottom, retracting to
-  # z_retract between passes. z/z_bottom/z_retract/peck are lengths, z_feedrate a
-  # feed, so the maths and comparisons below are unit-correct.
-  peck_drill: |
-    `G0 X{x} Y{y}
-    `G0 Z{z_retract}
-    let z = z_retract;
-    while z > z_bottom {
-        z = max(z - peck, z_bottom);
-        `G1 Z{z} F{z_feedrate}
-        `G0 Z{z_retract}
-    }
   cut_arc: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
     `; cut_bezier fallback

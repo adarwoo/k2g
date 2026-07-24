@@ -219,17 +219,17 @@ properties:
   #     initialise. That call fixes how every later value is formatted and
   #     mirrors the machine's own modal state, so the author never tracks units.
   #   - Display precision follows the active unit system automatically.
-  #   - Values keep their unit type in script logic, so `z - peck` and
+  #   - Values keep their unit type in script logic, so `z - z_step` and
   #     `z > z_bottom` are unit-correct; conversion to a number happens only at
   #     emit. Force a specific unit with an accessor: {z_safe.mm}, {z_safe.inch}.
   #
-  # Example (manual peck cycle for a controller without a canned G83):
+  # Example (a multi-pass depth loop, e.g. cutting to depth in steps):
   #
   #     `G0 X{x} Y{y}
   #     `G0 Z{z_retract}
   #     let z = z_retract;
   #     while z > z_bottom {
-  #         z = max(z - peck, z_bottom);
+  #         z = max(z - z_step, z_bottom);
   #         `G1 Z{z} F{z_feedrate}
   #         `G0 Z{z_retract}
   #     }
@@ -349,28 +349,6 @@ properties:
           - { name: z_feedrate, type: feed, description: "Plunge feed rate." }
         default: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
 
-      # Peck drill cycle primitive.
-      #
-      # Expected placeholders include:
-      #   {x}
-      #   {y}
-      #   {z_bottom}
-      #   {z_retract}
-      #   {peck}
-      #   {z_feedrate}
-      #
-      peck_drill:
-        description: Peck drill primitive template.
-        type: string
-        x-variables:
-          - { name: x, type: length, description: "Hole X coordinate." }
-          - { name: y, type: length, description: "Hole Y coordinate." }
-          - { name: z_bottom, type: length, description: "Z depth at the bottom of the hole." }
-          - { name: z_retract, type: length, description: "Z retract (R plane) between pecks." }
-          - { name: peck, type: length, description: "Depth of each peck increment." }
-          - { name: z_feedrate, type: feed, description: "Plunge feed rate." }
-        default: "`G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
-
       # Arc cutting primitive.
       #
       # Expected placeholders include:
@@ -468,7 +446,6 @@ properties:
       - start_spindle
       - stop_spindle
       - drill
-      - peck_drill
       - cut_arc
       - cut_bezier
       - change_tool

@@ -31,7 +31,6 @@ primitives:
     `M3
   stop_spindle: "`M5"
   drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
-  peck_drill: "`G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
   cut_arc: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
   cut_bezier: |
     `; cut_bezier fallback

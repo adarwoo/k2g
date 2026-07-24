@@ -990,7 +990,6 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "start_spindle": machine.drill_cycle_start,
             "stop_spindle": machine.drill_cycle_cancel,
             "drill": machine.drill_next_hole,
-            "peck_drill": machine.drill_cycle_mode_last,
             "cut_arc": machine.route_plunge_and_offset,
             "cut_bezier": machine.route_arc_up,
             "change_tool": machine.tool_change_command,
@@ -1025,7 +1024,6 @@ fn machine_required_paths() -> &'static [&'static str] {
         "primitives.start_spindle",
         "primitives.stop_spindle",
         "primitives.drill",
-        "primitives.peck_drill",
         "primitives.cut_arc",
         "primitives.cut_bezier",
         "primitives.change_tool",
@@ -1177,14 +1175,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .or_else(|| value.pointer("/templates/drill_first_move").and_then(Value::as_str))
             .or_else(|| value.pointer("/drill/first_move").and_then(Value::as_str))
             .or_else(|| value.get("drill_first_move").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_cycle_mode_last: value
-            .pointer("/primitives/peck_drill")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_cycle_mode_last").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/cycle_mode_last").and_then(Value::as_str))
-            .or_else(|| value.get("drill_cycle_mode_last").and_then(Value::as_str))
             .unwrap_or("")
             .to_string(),
         drill_cycle_mode_series: value
