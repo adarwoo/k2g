@@ -1,10 +1,11 @@
 # GCode Generation — orchestration & lifecycle
 
 Status: **design draft** — the loop *around* the engine. Where `gtl` +
-`gcode-engine.md` (the Coder) and the OperationPlanner do the work, this document
-covers **when** generation runs, **how** it runs (off the UI thread, cancellably),
-and **how** its results reach the UI. It refines `architecture.md` §Generator and
-records the concrete clean-up this pass is targeting.
+`gcode-engine.md` (the Coder) and the OperationPlanner (`operation-planner.md` —
+demand → ordered atomic ops) do the work, this document covers **when** generation
+runs, **how** it runs (off the UI thread, cancellably), and **how** its results reach
+the UI. It refines `architecture.md` §Generator and records the concrete clean-up this
+pass is targeting.
 
 ---
 
