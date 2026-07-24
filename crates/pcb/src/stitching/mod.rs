@@ -34,12 +34,74 @@ use crate::snapshot::{BoardEdgeShape, BoardPoint};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A closed, ordered polygon in nm coordinates.
+/// A single ordered move along a contour, preserving KiCad's original geometry type
+/// (operation-planner.md §3): a straight `Line`, a 3-point `Arc`, or a cubic `Bezier`.
+/// A contour is an ordered, closed loop of these; the routing phase renders each as its
+/// matching primitive (`linear_cut` / `cut_arc` / `cut_bezier`) so arcs stay arcs
+/// instead of being flattened into a fan of G1 chords. All coordinates are nm.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Segment {
+    Line { start: (i64, i64), end: (i64, i64) },
+    Arc { start: (i64, i64), mid: (i64, i64), end: (i64, i64) },
+    Bezier { start: (i64, i64), control1: (i64, i64), control2: (i64, i64), end: (i64, i64) },
+}
+
+impl Segment {
+    /// The point the move begins at.
+    pub fn start(&self) -> (i64, i64) {
+        match *self {
+            Segment::Line { start, .. }
+            | Segment::Arc { start, .. }
+            | Segment::Bezier { start, .. } => start,
+        }
+    }
+
+    /// The point the move ends at.
+    pub fn end(&self) -> (i64, i64) {
+        match *self {
+            Segment::Line { end, .. } | Segment::Arc { end, .. } | Segment::Bezier { end, .. } => end,
+        }
+    }
+
+    /// The same move traversed in the opposite direction — used when stitching has to
+    /// flip a fragment to chain it. Endpoints swap; an arc keeps its mid; a bezier
+    /// swaps its two control points.
+    fn reversed(self) -> Segment {
+        match self {
+            Segment::Line { start, end } => Segment::Line { start: end, end: start },
+            Segment::Arc { start, mid, end } => Segment::Arc { start: end, mid, end: start },
+            Segment::Bezier { start, control1, control2, end } => {
+                Segment::Bezier { start: end, control1: control2, control2: control1, end: start }
+            }
+        }
+    }
+
+    /// The move with its start point moved to `p` (endpoint snapping). The other
+    /// defining points are untouched, so a sub-tolerance snap barely perturbs an arc.
+    fn with_start(self, p: (i64, i64)) -> Segment {
+        match self {
+            Segment::Line { end, .. } => Segment::Line { start: p, end },
+            Segment::Arc { mid, end, .. } => Segment::Arc { start: p, mid, end },
+            Segment::Bezier { control1, control2, end, .. } => {
+                Segment::Bezier { start: p, control1, control2, end }
+            }
+        }
+    }
+}
+
+/// A closed, ordered contour in nm coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Contour {
-    /// Points in order (last point implicitly connects to first).
+    /// The **tessellated** polyline (curves flattened), last point implicitly closing
+    /// to the first. This is the topology substrate — used for nesting/containment and
+    /// the current clipper offset — kept even though `segments` carries the true shape.
     pub points: Vec<(i64, i64)>,
-    /// Derived from `PolyTree` depth: even → outer boundary, odd → hole.
+    /// The ordered, closed loop of **typed** moves (line/arc/bezier) that reproduces
+    /// this contour without flattening (operation-planner.md §3). Endpoints are snapped
+    /// for perfect continuity — `segments[i].end == segments[i+1].start` (wrapping) —
+    /// so the routing phase can emit G1/G2/G3 directly.
+    pub segments: Vec<Segment>,
+    /// Derived from nesting depth: even → outer boundary, odd → hole.
     pub is_hole: bool,
 }
 
@@ -88,10 +150,13 @@ fn close_enough(a: (i64, i64), b: (i64, i64)) -> bool {
 // Step 1: convert each BoardEdgeShape into a polyline segment
 // ---------------------------------------------------------------------------
 
-/// An open polyline fragment generated from a single `BoardEdgeShape`.
-/// For self-closing shapes (circles, full rectangles) `is_closed` is true.
+/// An open polyline fragment generated from a single `BoardEdgeShape`, carrying both
+/// its tessellated `points` (for stitching + topology) and its `segments` (the typed
+/// moves that reproduce it without flattening). For self-closing shapes (circles,
+/// rectangles) `is_closed` is true and `segments` already forms a closed loop.
 struct Fragment {
     points: Vec<(i64, i64)>,
+    segments: Vec<Segment>,
     is_closed: bool,
     label: String, // shape id or index, for warnings
 }
@@ -112,70 +177,66 @@ fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
     };
 
     let mut pts: Vec<(i64, i64)> = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
 
     match shape {
-        // --- open primitives ---
+        // --- open primitives: one typed segment each ---
         BoardEdgeShape::Track { start, end, .. }
         | BoardEdgeShape::GraphicSegment { start, end, .. } => {
-            pts.push(nm(start));
-            pts.push(nm(end));
+            let s = nm(start);
+            let e = nm(end);
+            pts.push(s);
+            pts.push(e);
+            segments.push(Segment::Line { start: s, end: e });
         }
 
         BoardEdgeShape::Arc { start, mid, end, .. }
         | BoardEdgeShape::GraphicArc { start, mid, end, .. } => {
-            let (sx, sy) = nm(start);
-            let (mx, my) = nm(mid);
-            let (ex, ey) = nm(end);
+            let s = nm(start);
+            let m = nm(mid);
+            let e = nm(end);
             tessellate::tessellate_arc(
                 &mut pts,
-                sx as f64, sy as f64,
-                mx as f64, my as f64,
-                ex as f64, ey as f64,
+                s.0 as f64, s.1 as f64,
+                m.0 as f64, m.1 as f64,
+                e.0 as f64, e.1 as f64,
             );
-            pts.push((ex, ey)); // include end point
+            pts.push(e); // include end point
+            segments.push(Segment::Arc { start: s, mid: m, end: e });
         }
 
         BoardEdgeShape::GraphicBezier { start, control1, control2, end, .. } => {
-            let (sx, sy) = nm(start);
-            let (c1x, c1y) = nm(control1);
-            let (c2x, c2y) = nm(control2);
-            let (ex, ey) = nm(end);
+            let s = nm(start);
+            let c1 = nm(control1);
+            let c2 = nm(control2);
+            let e = nm(end);
             tessellate::tessellate_bezier(
                 &mut pts,
-                sx as f64, sy as f64,
-                c1x as f64, c1y as f64,
-                c2x as f64, c2y as f64,
-                ex as f64, ey as f64,
+                s.0 as f64, s.1 as f64,
+                c1.0 as f64, c1.1 as f64,
+                c2.0 as f64, c2.1 as f64,
+                e.0 as f64, e.1 as f64,
             );
-            pts.push((ex, ey));
+            pts.push(e);
+            segments.push(Segment::Bezier { start: s, control1: c1, control2: c2, end: e });
         }
 
-        // --- self-closing primitives ---
+        // --- self-closing primitives: segments already form a closed loop ---
         BoardEdgeShape::GraphicCircle { center, radius_point, .. } => {
             let (cx, cy) = nm(center);
             let (rx, ry) = nm(radius_point);
-            tessellate::tessellate_circle(
-                &mut pts,
-                cx as f64, cy as f64,
-                rx as f64, ry as f64,
-            );
-            return Some(Fragment { points: pts, is_closed: true, label });
+            tessellate::tessellate_circle(&mut pts, cx as f64, cy as f64, rx as f64, ry as f64);
+            let segments = circle_segments(cx as f64, cy as f64, rx as f64, ry as f64);
+            return Some(Fragment { points: pts, segments, is_closed: true, label });
         }
 
         BoardEdgeShape::GraphicRectangle { top_left, bottom_right, corner_radius, .. } => {
             let (x0, y0) = nm(top_left);
             let (x1, y1) = nm(bottom_right);
-            let r = corner_radius
-                .as_ref()
-                .map(|l| l.as_nm() as f64)
-                .unwrap_or(0.0);
-            tessellate::tessellate_rectangle(
-                &mut pts,
-                x0 as f64, y0 as f64,
-                x1 as f64, y1 as f64,
-                r,
-            );
-            return Some(Fragment { points: pts, is_closed: true, label });
+            let r = corner_radius.as_ref().map(|l| l.as_nm() as f64).unwrap_or(0.0);
+            tessellate::tessellate_rectangle(&mut pts, x0 as f64, y0 as f64, x1 as f64, y1 as f64, r);
+            let segments = rect_segments(x0 as f64, y0 as f64, x1 as f64, y1 as f64, r);
+            return Some(Fragment { points: pts, segments, is_closed: true, label });
         }
 
         // Polygon: we have only a count, not the actual geometry — skip.
@@ -186,35 +247,84 @@ fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
         return None;
     }
 
-    Some(Fragment { points: pts, is_closed: false, label })
+    Some(Fragment { points: pts, segments, is_closed: false, label })
+}
+
+/// The two semicircle arcs that make up a full circle, going CCW from the east point.
+/// Used so a circular board edge stays two `cut_arc`s, not a flattened polygon.
+fn circle_segments(cx: f64, cy: f64, rx: f64, ry: f64) -> Vec<Segment> {
+    let r = (rx - cx).hypot(ry - cy).round();
+    let pt = |x: f64, y: f64| (x.round() as i64, y.round() as i64);
+    let east = pt(cx + r, cy);
+    let north = pt(cx, cy + r);
+    let west = pt(cx - r, cy);
+    let south = pt(cx, cy - r);
+    vec![
+        Segment::Arc { start: east, mid: north, end: west },
+        Segment::Arc { start: west, mid: south, end: east },
+    ]
+}
+
+/// The typed segments of a rectangle: four `Line`s when the corners are sharp, or four
+/// straight edges joined by four quarter-`Arc` corners when it is rounded. The corner
+/// layout mirrors [`tessellate::tessellate_rectangle`].
+fn rect_segments(x0: f64, y0: f64, x1: f64, y1: f64, corner_radius_nm: f64) -> Vec<Segment> {
+    use std::f64::consts::{PI, TAU};
+    let r = corner_radius_nm.clamp(0.0, ((x1 - x0).abs().min((y1 - y0).abs())) * 0.5);
+    let (lx, rx) = (x0.min(x1), x0.max(x1));
+    let (ty, by) = (y0.min(y1), y0.max(y1));
+    let pt = |x: f64, y: f64| (x.round() as i64, y.round() as i64);
+
+    if r <= 1.0 {
+        let corners = [pt(lx, ty), pt(rx, ty), pt(rx, by), pt(lx, by)];
+        return (0..4)
+            .map(|i| Segment::Line { start: corners[i], end: corners[(i + 1) % 4] })
+            .collect();
+    }
+
+    // A quarter-arc corner centred at (acx,acy), swept from t0 to t1.
+    let arc = |acx: f64, acy: f64, t0: f64, t1: f64| {
+        let p = |t: f64| pt(acx + r * t.cos(), acy + r * t.sin());
+        Segment::Arc { start: p(t0), mid: p((t0 + t1) * 0.5), end: p(t1) }
+    };
+    let tl = arc(lx + r, ty + r, PI, PI * 1.5);
+    let tr = arc(rx - r, ty + r, PI * 1.5, TAU);
+    let br = arc(rx - r, by - r, 0.0, PI * 0.5);
+    let bl = arc(lx + r, by - r, PI * 0.5, PI);
+    // Straight edges join each corner arc's end to the next arc's start.
+    let line = |a: Segment, b: Segment| Segment::Line { start: a.end(), end: b.start() };
+    vec![tl, line(tl, tr), tr, line(tr, br), br, line(br, bl), bl, line(bl, tl)]
 }
 
 // ---------------------------------------------------------------------------
 // Step 2: stitch open fragments into closed chains
 // ---------------------------------------------------------------------------
 
-fn stitch_fragments(
-    fragments: Vec<Fragment>,
-) -> (Vec<Vec<(i64, i64)>>, Vec<String>) {
-    let mut closed: Vec<Vec<(i64, i64)>> = Vec::new();
+/// A stitched closed loop: the tessellated `points` (topology) plus the ordered typed
+/// `segments` (line/arc/bezier) that reproduce it without flattening.
+struct Chain {
+    points: Vec<(i64, i64)>,
+    segments: Vec<Segment>,
+}
+
+fn stitch_fragments(fragments: Vec<Fragment>) -> (Vec<Chain>, Vec<String>) {
+    let mut closed: Vec<Chain> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    // Separate already-closed shapes from open ones.
-    let mut open: Vec<Vec<(i64, i64)>> = Vec::new();
-    let mut open_labels: Vec<String> = Vec::new();
-
+    // Separate already-closed shapes from open ones (keep the whole fragment so its
+    // segments travel with its points).
+    let mut open: Vec<Fragment> = Vec::new();
     for frag in fragments {
         if frag.is_closed {
-            closed.push(frag.points);
+            closed.push(Chain { points: frag.points, segments: frag.segments });
         } else {
-            open.push(frag.points);
-            open_labels.push(frag.label);
+            open.push(frag);
         }
     }
 
-    // Greedily chain open fragments.
-    // Each entry in `chains` is a sequence of points with known start/end.
-    let mut chains: Vec<Vec<(i64, i64)>> = Vec::new();
+    // Greedily chain open fragments, carrying points and segments together.
+    let mut chains: Vec<Chain> = Vec::new();
+    let mut chain_labels: Vec<String> = Vec::new();
     let mut used = vec![false; open.len()];
 
     for i in 0..open.len() {
@@ -222,36 +332,41 @@ fn stitch_fragments(
             continue;
         }
         used[i] = true;
-        let mut chain = open[i].clone();
+        let mut points = open[i].points.clone();
+        let mut segments = open[i].segments.clone();
+        let seed_label = open[i].label.clone();
 
         loop {
-            let head = *chain.first().unwrap();
-            let tail = *chain.last().unwrap();
+            let head = *points.first().unwrap();
+            let tail = *points.last().unwrap();
 
-            if close_enough(head, tail) && chain.len() > 2 {
-                // Already closed.
-                break;
+            if close_enough(head, tail) && points.len() > 2 {
+                break; // already closed
             }
 
-            // Try to find a fragment whose start or end matches our tail.
+            // Find a fragment whose start or end matches our tail.
             let mut found = false;
             for j in 0..open.len() {
                 if used[j] {
                     continue;
                 }
-                let fstart = *open[j].first().unwrap();
-                let fend   = *open[j].last().unwrap();
+                let fstart = *open[j].points.first().unwrap();
+                let fend = *open[j].points.last().unwrap();
 
                 if close_enough(tail, fstart) {
                     used[j] = true;
-                    chain.extend_from_slice(&open[j][1..]);
+                    points.extend_from_slice(&open[j].points[1..]);
+                    segments.extend(open[j].segments.iter().copied());
                     found = true;
                     break;
                 } else if close_enough(tail, fend) {
                     used[j] = true;
-                    let mut rev = open[j].clone();
+                    let mut rev = open[j].points.clone();
                     rev.reverse();
-                    chain.extend_from_slice(&rev[1..]);
+                    points.extend_from_slice(&rev[1..]);
+                    // A flipped fragment contributes its segments in reverse order, each
+                    // individually reversed, so the chain keeps a single direction.
+                    segments.extend(open[j].segments.iter().rev().map(|s| s.reversed()));
                     found = true;
                     break;
                 }
@@ -261,30 +376,48 @@ fn stitch_fragments(
             }
         }
 
-        chains.push(chain);
+        chains.push(Chain { points, segments });
+        chain_labels.push(seed_label);
     }
 
-    // Classify chains as closed or open.
-    for (idx, chain) in chains.into_iter().enumerate() {
-        let head = *chain.first().unwrap();
-        let tail = *chain.last().unwrap();
-        if close_enough(head, tail) || chain.len() < 3 {
-            // Treat very-short chains that happen to have matching endpoints as
-            // closed, but only if they have ≥3 distinct points.
-            if chain.len() >= 3 {
+    // Classify chains as closed or open; snap the closed ones' segment endpoints.
+    for (idx, mut chain) in chains.into_iter().enumerate() {
+        let head = *chain.points.first().unwrap();
+        let tail = *chain.points.last().unwrap();
+        if close_enough(head, tail) || chain.points.len() < 3 {
+            // Treat very-short chains with matching endpoints as closed, but only if
+            // they have ≥3 distinct points.
+            if chain.points.len() >= 3 {
+                snap_segment_endpoints(&mut chain.segments);
                 closed.push(chain);
             }
         } else {
             warnings.push(format!(
                 "open chain starting at fragment '{}' ({}pts, gap {:.1}µm)",
-                open_labels.get(idx).map(|s| s.as_str()).unwrap_or("?"),
-                chain.len(),
+                chain_labels.get(idx).map(|s| s.as_str()).unwrap_or("?"),
+                chain.points.len(),
                 (dist_sq(head, tail) as f64).sqrt() / 1_000.0,
             ));
         }
     }
 
     (closed, warnings)
+}
+
+/// Forces perfect endpoint continuity on a closed loop of segments: each segment's
+/// start is snapped to the previous segment's end, and the first is snapped to the last
+/// to close the loop. Snaps are within `STITCH_TOLERANCE_NM`, so geometry is preserved.
+fn snap_segment_endpoints(segments: &mut [Segment]) {
+    let n = segments.len();
+    if n < 2 {
+        return;
+    }
+    for i in 1..n {
+        let prev_end = segments[i - 1].end();
+        segments[i] = segments[i].with_start(prev_end);
+    }
+    let last_end = segments[n - 1].end();
+    segments[0] = segments[0].with_start(last_end);
 }
 
 // ---------------------------------------------------------------------------
@@ -319,11 +452,12 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
     }
 
     log::debug!("[stitch] raw closed chains: {}", closed_polys.len());
-    for (i, poly) in closed_polys.iter().enumerate() {
-        let (xmin, ymin, xmax, ymax) = bbox_nm(poly);
+    for (i, chain) in closed_polys.iter().enumerate() {
+        let (xmin, ymin, xmax, ymax) = bbox_nm(&chain.points);
         log::trace!(
-            "[stitch]   chain {i}: {} pts  bbox ({:.3},{:.3})-({:.3},{:.3}) mm",
-            poly.len(),
+            "[stitch]   chain {i}: {} pts / {} seg  bbox ({:.3},{:.3})-({:.3},{:.3}) mm",
+            chain.points.len(),
+            chain.segments.len(),
             xmin as f64 / 1_000_000.0, ymin as f64 / 1_000_000.0,
             xmax as f64 / 1_000_000.0, ymax as f64 / 1_000_000.0,
         );
@@ -334,32 +468,26 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         }
     }
 
-    // Nested contours must remain distinct. A boolean union would treat the
-    // outer board loop as a filled region and swallow any cutouts inside it.
-    let paths: Vec<Path64> = closed_polys
+    // Classify each chain's nesting depth by how many other chains contain its first
+    // point (an odd depth is a hole). The tessellated `points` drive the containment
+    // test; the typed `segments` are carried through untouched. Nested contours stay
+    // distinct — a boolean union would swallow cutouts inside the outer boundary.
+    let mut contours_with_depth: Vec<(usize, Contour)> = closed_polys
         .iter()
-        .map(|poly| {
-            poly.iter()
-                .map(|&(x, y)| Point64 { x, y })
-                .collect::<Path64>()
-        })
-        .collect();
-    log::debug!("[stitch] after nesting prep: {} contour(s)", paths.len());
-
-    let mut contours_with_depth: Vec<(usize, Contour)> = paths
-        .iter()
-        .map(|path| {
-            let pts: Vec<(i64, i64)> = path.iter().map(|p| (p.x, p.y)).collect();
-            let sample = pts[0];
-            let depth = paths
+        .enumerate()
+        .map(|(i, chain)| {
+            let sample = chain.points[0];
+            let depth = closed_polys
                 .iter()
-                .filter(|other| !std::ptr::eq(*other, path))
-                .filter(|other| point_in_polygon_nm(sample, other))
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .filter(|(_, other)| point_in_polygon_nm(sample, &other.points))
                 .count();
             (
                 depth,
                 Contour {
-                    points: pts,
+                    points: chain.points.clone(),
+                    segments: chain.segments.clone(),
                     is_hole: depth % 2 == 1,
                 },
             )
@@ -481,7 +609,7 @@ pub fn routing_offset(
 // Point-in-polygon test (ray casting, nm coordinates)
 // ---------------------------------------------------------------------------
 
-fn point_in_polygon_nm(pt: (i64, i64), poly: &Path64) -> bool {
+fn point_in_polygon_nm(pt: (i64, i64), poly: &[(i64, i64)]) -> bool {
     let n = poly.len();
     if n < 3 {
         return false;
@@ -490,12 +618,143 @@ fn point_in_polygon_nm(pt: (i64, i64), poly: &Path64) -> bool {
     let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
-        let (xi, yi) = (poly[i].x as f64, poly[i].y as f64);
-        let (xj, yj) = (poly[j].x as f64, poly[j].y as f64);
+        let (xi, yi) = (poly[i].0 as f64, poly[i].1 as f64);
+        let (xj, yj) = (poly[j].0 as f64, poly[j].1 as f64);
         if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
             inside = !inside;
         }
         j = i;
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use units::Length;
+
+    fn pt(x_mm: f64, y_mm: f64) -> BoardPoint {
+        BoardPoint { x: Length::from_mm(x_mm), y: Length::from_mm(y_mm) }
+    }
+
+    fn segment(id: &str, ax: f64, ay: f64, bx: f64, by: f64) -> BoardEdgeShape {
+        BoardEdgeShape::GraphicSegment { id: Some(id.into()), start: pt(ax, ay), end: pt(bx, by) }
+    }
+
+    /// Asserts the segments form a continuous, closed loop: each segment ends exactly
+    /// where the next begins (wrapping) — the post-snap continuity invariant.
+    fn assert_closed_loop(segments: &[Segment]) {
+        let n = segments.len();
+        assert!(n >= 2, "a loop needs at least two segments");
+        for i in 0..n {
+            let next = (i + 1) % n;
+            assert_eq!(
+                segments[i].end(),
+                segments[next].start(),
+                "segment {i} end must meet segment {next} start",
+            );
+        }
+    }
+
+    #[test]
+    fn four_line_edges_stitch_into_four_line_segments() {
+        // A unit square given with one edge (the top) reversed, so stitching must flip
+        // a fragment — the result is still four continuous Line segments.
+        let shapes = vec![
+            segment("bottom", 0.0, 0.0, 10.0, 0.0),
+            segment("right", 10.0, 0.0, 10.0, 10.0),
+            segment("top_rev", 0.0, 10.0, 10.0, 10.0), // reversed direction
+            segment("left", 0.0, 10.0, 0.0, 0.0),
+        ];
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.contours.len(), 1);
+        let contour = &result.contours[0];
+        assert_eq!(contour.segments.len(), 4, "one typed segment per edge, not flattened");
+        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Line { .. })));
+        assert_closed_loop(&contour.segments);
+    }
+
+    #[test]
+    fn an_arc_edge_survives_as_an_arc_segment() {
+        // A "D": a straight top edge and a semicircular arc below it, stitched into a
+        // closed loop that keeps one Line and one Arc (not a fan of chords).
+        let shapes = vec![
+            segment("top", 0.0, 0.0, 10.0, 0.0),
+            BoardEdgeShape::GraphicArc {
+                id: Some("bow".into()),
+                start: pt(10.0, 0.0),
+                mid: pt(5.0, -5.0),
+                end: pt(0.0, 0.0),
+            },
+        ];
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.contours.len(), 1);
+        let contour = &result.contours[0];
+        assert_eq!(contour.segments.len(), 2);
+        assert_eq!(contour.segments.iter().filter(|s| matches!(s, Segment::Arc { .. })).count(), 1);
+        assert_eq!(contour.segments.iter().filter(|s| matches!(s, Segment::Line { .. })).count(), 1);
+        assert_closed_loop(&contour.segments);
+    }
+
+    #[test]
+    fn a_sharp_rectangle_is_four_line_segments() {
+        let shapes = vec![BoardEdgeShape::GraphicRectangle {
+            id: Some("rect".into()),
+            top_left: pt(0.0, 0.0),
+            bottom_right: pt(10.0, 6.0),
+            corner_radius: None,
+        }];
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.contours.len(), 1);
+        let contour = &result.contours[0];
+        assert_eq!(contour.segments.len(), 4);
+        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Line { .. })));
+        assert_closed_loop(&contour.segments);
+    }
+
+    #[test]
+    fn a_circle_is_two_arc_segments() {
+        let shapes = vec![BoardEdgeShape::GraphicCircle {
+            id: Some("hole".into()),
+            center: pt(5.0, 5.0),
+            radius_point: pt(9.0, 5.0),
+        }];
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty());
+        assert_eq!(result.contours.len(), 1);
+        let contour = &result.contours[0];
+        assert_eq!(contour.segments.len(), 2);
+        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Arc { .. })));
+        assert_closed_loop(&contour.segments);
+    }
+
+    #[test]
+    fn nesting_marks_the_inner_rectangle_as_a_hole() {
+        // An outer boundary with a rectangular cutout inside it — the containment test
+        // (now on point slices) still classifies the inner one as a hole, and both keep
+        // their typed segments.
+        let shapes = vec![
+            BoardEdgeShape::GraphicRectangle {
+                id: Some("outer".into()),
+                top_left: pt(0.0, 0.0),
+                bottom_right: pt(20.0, 20.0),
+                corner_radius: None,
+            },
+            BoardEdgeShape::GraphicRectangle {
+                id: Some("inner".into()),
+                top_left: pt(5.0, 5.0),
+                bottom_right: pt(15.0, 15.0),
+                corner_radius: None,
+            },
+        ];
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.contours.len(), 2);
+        assert!(result.contours.iter().any(|c| !c.is_hole), "one outer boundary");
+        assert!(result.contours.iter().any(|c| c.is_hole), "one inner hole");
+        assert!(result.contours.iter().all(|c| c.segments.len() == 4), "typed segments kept");
+    }
 }

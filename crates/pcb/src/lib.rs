@@ -49,4 +49,4 @@ pub use kicad::{KiCad, PcbInfo};
 pub use snapshot::{
     BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind,
 };
-pub use stitching::{routing_offset, stitch_edge_shapes, Contour, StitchResult};
+pub use stitching::{routing_offset, stitch_edge_shapes, Contour, Segment, StitchResult};

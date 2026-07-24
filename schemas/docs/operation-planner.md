@@ -84,13 +84,12 @@ still owns a whole path internally.
 
 ## 3. Decomposition — demand → atomic ops
 
-For the step's enabled operations, map each feature to op(s). The drill-vs-peck choice
-is the planner's (a hole whose depth ÷ diameter exceeds a threshold pecks to clear
-chips — `drill` = G81 vs `peck_drill` = G83).
+For the step's enabled operations, map each feature to op(s). Every round hole drills
+with a single `drill` op (G81 — no peck, decision 4).
 
 | Feature | Ops emitted |
 |---|---|
-| **Round hole / via** (`drill_pth`/`drill_npth`) | one **drill** op at `(x,y)`; `drill` or `peck_drill` by aspect ratio |
+| **Round hole / via** (`drill_pth`/`drill_npth`) | one **drill** op at `(x,y)` (`drill`, G81) |
 | **Oblong — `route`** | one **route** op (mill the slot, router) |
 | **Oblong — `drill_ends_then_route`** | two **drill** ops (the end centres) **+** one **route** op (mill the web) |
 | **Oblong — `drill_chain`** | N overlapping **drill** ops along the major axis |
@@ -111,8 +110,10 @@ from the rack's mandatory router.
 > **typed segments** (line / arc / bezier), and a route op expands to the matching
 > primitives — `linear_cut` (G1), `cut_arc` (G2/G3), `cut_bezier` — so arcs stay arcs.
 > Rationale: one CNC arc is far more accurate and faster than the *n* × G1 chords a
-> tessellation emits. **This reworks today's stitcher** (§9.6), whose
-> `pcb::Contour.points: Vec<(i64,i64)>` currently discards the segment types.
+> tessellation emits. **The stitcher now carries this** (§9.6): `pcb::Contour` keeps
+> both `points` (tessellation, for topology/containment) and an ordered `segments`
+> loop (`Segment::{Line,Arc,Bezier}`, endpoints snapped for continuity). The remaining
+> piece is the **segment-wise offset** that turns a contour into a toolpath.
 
 ---
 
@@ -260,10 +261,11 @@ deterministic rule — no clock, no hash-map iteration order, no RNG.
    continuity), and routing emits G1/G2/G3 accordingly — one CNC arc beats *n* chords on
    both accuracy and speed. Two pieces of work this implies, flagged so we go in
    eyes-open:
-   - **Stitcher output model** — `pcb::Contour` changes from `points: Vec<(i64,i64)>` to
-     an ordered `Vec<Segment>` (Line / Arc / Bezier); tessellation stays *internal* to the
-     connectivity + nesting tests, not the result.
-   - **Segment-wise offset** — the toolpath is the contour offset by the tool radius, so
+   - **Stitcher output model** — *done.* `pcb::Contour` now carries an ordered
+     `Vec<Segment>` (Line / Arc / Bezier, endpoints snapped) alongside the tessellated
+     `points`; tessellation stays *internal* to the connectivity + nesting tests. The
+     chainer reverses a flipped fragment's segments (and swaps arc/bezier control points).
+   - **Segment-wise offset** — *pending.* The toolpath is the contour offset by the tool radius, so
      the offset must be computed **per segment** (line → parallel line, arc → concentric
      arc) with join handling (fillet arc at convex vertices, trim at concave), **not** via
      clipper2's point-polygon offset (which reflattens to G1). This is standard 2D cutter
