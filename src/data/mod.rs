@@ -1052,6 +1052,108 @@ mod tests {
         datastore::validate_schemas(SCHEMAS).expect("all embedded schemas valid");
     }
 
+    /// Build guard (schema-centric app): every bundled catalog under
+    /// `assets/catalogs`, once run through the app's own `normalize_catalog_fields`
+    /// enricher (which backfills id/sku/point_angle/z_min_depth/schema_version —
+    /// the bundled catalogs are intentionally terse), validates cleanly against
+    /// `catalog.yaml`. This exercises the real seed+backfill pipeline, so a source
+    /// catalog the enricher can't rescue (bad unit, unknown tool type, structural
+    /// error) fails here — at `cargo test` / CI — instead of degrading into a
+    /// silent load-time warning (see `AppData::load`).
+    #[test]
+    fn bundled_catalogs_validate_against_the_schema() {
+        let store = build_datastore();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("catalogs");
+
+        let mut checked = 0usize;
+        for entry in fs::read_dir(&dir).expect("assets/catalogs is readable") {
+            let path = entry.expect("readable dir entry").path();
+            if !is_yaml(&path) {
+                continue; // skip the .xlsx / .txt reference material alongside the YAML
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("catalog");
+
+            let text = fs::read_to_string(&path).expect("catalog file is readable");
+            let mut value = parse_yaml_value(&text)
+                .unwrap_or_else(|| panic!("catalog {} is not valid YAML", path.display()));
+            // Same enrichment the seeding path applies via `backfill_catalog_fields`
+            // (inject missing, don't canonicalize typed values).
+            crate::catalog_io::normalize_catalog_fields(&mut value, stem, true, false);
+
+            let json = serde_json::to_string(&value).expect("serialize normalized catalog");
+            let outcome = store.parse(&[ParseInput {
+                schema_id: "catalog.yaml",
+                source: Some(path.clone()),
+                text: &json,
+            }]);
+            assert!(
+                outcome.errors.is_empty(),
+                "catalog {} failed validation after normalization:\n{:#?}",
+                path.display(),
+                outcome.errors
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "found no catalog YAML under {}", dir.display());
+    }
+
+    /// Build guard: every bundled CNC template instantiates into a *complete*,
+    /// schema-valid `cnc.yaml` profile and every one of its GTL primitive
+    /// templates compiles. Catches a template that has drifted from the schema, or
+    /// ships broken GTL, before it can reach a user's "create CNC from template".
+    #[test]
+    fn bundled_cnc_templates_validate_and_compile() {
+        let store = build_datastore();
+        // A bare GTL engine is enough for a syntax check: compilation is parse-only,
+        // so unresolved calls like `metric()` are fine — we only assert the template
+        // grammar and embedded Rhai parse.
+        let engine = gtl::Gtl::new();
+
+        for (key, text) in CNC_TEMPLATES {
+            let seed = parse_yaml_value(text)
+                .unwrap_or_else(|| panic!("CNC template '{key}' is not valid YAML"));
+
+            // Seeds intentionally omit id/schema_version; `instantiate_from` fills
+            // those and the schema defaults, then overlays the template body — the
+            // same path `create_cnc_from_template` takes.
+            let node = store
+                .instantiate_from("cnc.yaml", &seed)
+                .unwrap_or_else(|| panic!("CNC template '{key}' did not instantiate"));
+            assert!(
+                node.status.is_complete(),
+                "CNC template '{key}' is incomplete after instantiation: {:?}",
+                node.status
+            );
+
+            let value = node.to_value();
+
+            // Re-validate the materialised profile so bad enums/units on template
+            // fields (which survive instantiation) are caught, not just missing keys.
+            let json = serde_json::to_string(&value).expect("serialize instantiated node");
+            let outcome = store.parse(&[ParseInput {
+                schema_id: "cnc.yaml",
+                source: Some(PathBuf::from(format!("{key} (cnc template)"))),
+                text: &json,
+            }]);
+            assert!(
+                outcome.errors.is_empty(),
+                "CNC template '{key}' failed schema validation:\n{:#?}",
+                outcome.errors
+            );
+
+            // Syntax-check each GTL primitive template.
+            if let Some(primitives) = value.get("primitives").and_then(Value::as_object) {
+                for (name, primitive) in primitives {
+                    if let Some(source) = primitive.as_str() {
+                        if let Err(err) = engine.compile(name, source) {
+                            panic!("CNC template '{key}' primitive '{name}' has invalid GTL: {err}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn load_seeds_singletons_on_a_fresh_dir() {
         let dir = tempdir().unwrap();

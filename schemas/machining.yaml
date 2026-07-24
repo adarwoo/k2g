@@ -129,20 +129,16 @@ $defs:
             $ref: "units.yaml#/$defs/size"
             default: 2.0mm
           bite_holes: { type: integer, minimum: 1, default: 3 }
+          # Only meaningful when `cut: vgroove`; ignored otherwise. It carries a
+          # default and — like every per-operation field — is always materialised
+          # by the loader (see the note at the foot of this file), so it must NOT
+          # be gated behind a conditional-presence rule: an `if cut != vgroove then
+          # vgroove_depth absent` constraint would fail against the materialised
+          # default on every non-vgroove edge.
           vgroove_depth:
             $ref: "units.yaml#/$defs/percent_50_100"
             default: 80%
         required: [cut]
-        allOf:
-          - if:
-              required: [cut]
-              properties:
-                cut: { const: vgroove }
-            then:
-              required: [vgroove_depth]
-            else:
-              not:
-                required: [vgroove_depth]
         additionalProperties: false
       finishing:
         type: object

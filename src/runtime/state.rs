@@ -44,7 +44,10 @@ impl AppState {
                 mouse_bite_pitch: Length::from_mm(0.8),
                 mouse_bite_drill_tool_id: None,
             },
-            gcode: sample_gcode(),
+            // No program until generation actually runs (kicked at launch when the
+            // job is ready; re-run on every mutation). Seeding a canned sample here
+            // made the Code view show fake GCode that was never generated.
+            gcode: String::new(),
             gcode_modified: false,
             suppress_persistence: false,
             show_first_launch: true,
@@ -1923,24 +1926,6 @@ fn load_persisted_theme() -> Theme {
         .unwrap_or("dark");
 
     Theme::from_str(&theme_mode.to_ascii_lowercase())
-}
-
-pub fn sample_gcode() -> String {
-    "; KiCad CNC Generator - GCode Output\n\
-; Generated from Dioxus UI\n\
-G21\n\
-G90\n\
-M3 S12000\n\
-G0 Z5.0\n\
-G0 X20.0 Y20.0\n\
-G1 Z-1.6 F200\n\
-G0 Z5.0\n\
-G0 X180.0 Y130.0\n\
-G1 Z-1.6 F200\n\
-G0 Z5.0\n\
-M5\n\
-M30\n"
-        .to_string()
 }
 
 #[cfg(test)]

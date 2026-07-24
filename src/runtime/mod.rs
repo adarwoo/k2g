@@ -140,6 +140,10 @@ include!("generation.rs");
 /// Per-step tooling plan for the Job screen's "Tooling" tab.
 pub mod tooling;
 
+/// In-memory capture of `tracing`/`log` output for the Logs screen.
+pub mod log_capture;
+pub use log_capture::CaptureLayer;
+
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
 
@@ -256,6 +260,16 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     // Start the background generation worker now that the global ctx exists (the
     // worker publishes results into it). See `docs/gcode-generation.md` §6.
     start_generation_service();
+
+    // If the launched job is already ready, generate once now — the mutation-driven
+    // regeneration trigger never fires at launch, so without this the Code view would
+    // sit empty until the first edit. Done via a direct lock (not `with_ctx_mut`) so
+    // it does not re-run the whole post-mutation reconciliation for a no-op diff.
+    if let Some(lock) = GLOBAL_CTX.get() {
+        if let Ok(mut ctx) = lock.write() {
+            ctx.kick_initial_generation();
+        }
+    }
 }
 
 /// Connect to KiCad and collect the reachable instance's open board. There is at
@@ -265,21 +279,48 @@ pub fn initialize_ctx(boot: UiLaunchData) {
 /// and the board (if any). Stitching happens once when the board is cached in the
 /// ctx (see `sync_after_mutation`), not here.
 pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
-    match KiCad::connect() {
-        Ok(client) => {
-            let status = match client.version() {
-                Ok(version) => format!("KiCad {version}"),
-                Err(_) => "connected".to_string(),
-            };
-            let board = client
-                .enumerate_pcbs()
-                .ok()
-                .and_then(|pcbs| pcbs.into_iter().next())
-                .and_then(|pcb| client.collect_snapshot(&pcb).ok());
-            (status, board)
+    // The connection is attempted only here — at startup and from the status-bar
+    // Refresh button. Every failure below is otherwise invisible (the return type
+    // is a display string + optional board), so log the underlying `PcbError`: it
+    // is frequently the only clue a user has for *why* KiCad won't connect (IPC
+    // API server disabled, socket/pipe unavailable, version mismatch, no PCB open).
+    let client = match KiCad::connect() {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("KiCad connect failed: {err}");
+            return ("not connected".to_string(), None);
         }
-        Err(_) => ("not connected".to_string(), None),
-    }
+    };
+
+    let status = match client.version() {
+        Ok(version) => format!("KiCad {version}"),
+        Err(err) => {
+            warn!("KiCad connected but version query failed: {err}");
+            "connected".to_string()
+        }
+    };
+
+    let board = match client.enumerate_pcbs() {
+        Ok(pcbs) => match pcbs.into_iter().next() {
+            Some(pcb) => match client.collect_snapshot(&pcb) {
+                Ok(snapshot) => Some(snapshot),
+                Err(err) => {
+                    warn!("KiCad board snapshot collection failed: {err}");
+                    None
+                }
+            },
+            None => {
+                log::info!("KiCad connected but no PCB is open");
+                None
+            }
+        },
+        Err(err) => {
+            warn!("KiCad PCB enumeration failed: {err}");
+            None
+        }
+    };
+
+    (status, board)
 }
 
 #[allow(dead_code)]

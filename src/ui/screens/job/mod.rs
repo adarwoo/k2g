@@ -10,6 +10,7 @@ use crate::ui::navigation::*;
 
 mod board;
 mod code;
+mod gcode_highlight;
 mod machining;
 mod rack;
 mod sidebar;

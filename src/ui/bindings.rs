@@ -976,6 +976,8 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
     // return so the hook order stays stable.
     let mut editing = use_signal(|| false);
     let mut buffer = use_signal(String::new);
+    // Whether the primitive-template modal editor is open (primitive fields only).
+    let mut modal_open = use_signal(|| false);
 
     subscribe();
     let Some(field) = addr_field(addr, &ptr) else {
@@ -1041,19 +1043,81 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
                 }
             }
         }
-        // Multi-line string (e.g. a G-code primitive) → textarea (live commit,
-        // since Enter must insert a newline rather than commit). CNC primitives
-        // always use the textarea; other strings switch to it once they wrap.
-        _ if matches!(&field.value, NodeValue::Str(s) if is_primitive_template || s.contains('\n')) => {
-            let value = field.display.clone();
-            let ptr = ptr.clone();
-            let rows = field.display.lines().count().clamp(3, 16);
+        // CNC primitive template → a compact summary + an "Edit…" button that opens
+        // the modal editor (GTL editor + the primitive's variable reference + a live
+        // validate/preview). Editing inline made every keystroke commit and
+        // re-trigger generation; the modal commits once, on Save.
+        _ if is_primitive_template && matches!(&field.value, NodeValue::Str(_)) => {
+            let primitive = crate::gcode::primitive_vars::primitive_name_from_pointer(&ptr)
+                .unwrap_or("")
+                .to_string();
+            let text = field.display.clone();
+            let is_empty = text.trim().is_empty();
+            let ptr_modal = ptr.clone();
+            rsx! {
+                div { class: "primitive-field",
+                    if is_empty {
+                        code { class: "primitive-summary primitive-summary-empty", "(empty)" }
+                    } else {
+                        // Read-only review of the template: grows to fit up to five
+                        // lines, then scrolls — so the primitive can be read in place
+                        // without opening the editor.
+                        pre { class: "primitive-summary", "{text}" }
+                    }
+                    button {
+                        class: "btn btn-secondary primitive-edit-btn",
+                        r#type: "button",
+                        onclick: move |_| modal_open.set(true),
+                        "Edit…"
+                    }
+                    if *modal_open.read() {
+                        PrimitiveEditorModal {
+                            addr,
+                            ptr: ptr_modal.clone(),
+                            primitive: primitive.clone(),
+                            open: modal_open,
+                        }
+                    }
+                }
+            }
+        }
+        // Other multi-line string → textarea. Buffered exactly like the single-line
+        // editor below: edits accumulate in `buffer` and commit only on blur — Enter
+        // inserts a newline here, so it cannot commit — while Escape reverts.
+        _ if matches!(&field.value, NodeValue::Str(s) if s.contains('\n')) => {
+            let display = if *editing.read() {
+                buffer.read().clone()
+            } else {
+                field.display.clone()
+            };
+            let seed = field.display.clone();
+            let rows = display.lines().count().clamp(3, 16);
+            let ptr_blur = ptr.clone();
             rsx! {
                 textarea {
                     class: "gcode-editor cnc-template-editor",
                     rows: "{rows}",
-                    value: "{value}",
-                    oninput: move |evt| addr_set_input(addr, &ptr, &evt.value()),
+                    value: "{display}",
+                    onfocusin: move |_| {
+                        buffer.set(seed.clone());
+                        editing.set(true);
+                    },
+                    oninput: move |evt| buffer.set(evt.value()),
+                    onkeydown: move |evt| {
+                        let key = evt.key().to_string().to_ascii_lowercase();
+                        if key == "escape" || key == "esc" {
+                            // Revert: leaving edit mode falls the value back to the
+                            // last committed `field.display`.
+                            editing.set(false);
+                        }
+                    },
+                    onfocusout: move |_| {
+                        if *editing.read() {
+                            let buf = buffer.read().clone();
+                            addr_set_input(addr, &ptr_blur, &buf);
+                            editing.set(false);
+                        }
+                    },
                 }
             }
         }
@@ -1147,6 +1211,140 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
             }
             if let Some(desc) = field.description.clone() {
                 p { class: "field-hint", "{desc}" }
+            }
+        }
+    }
+}
+
+/// Modal editor for a CNC primitive's GTL template. Three panes: the GTL editor,
+/// a **reference** of the variables in scope for this primitive (from the schema's
+/// `x-variables` — see [`crate::gcode::primitive_vars`]), and a **live
+/// validate/preview** that renders the template against representative sample
+/// values. The preview surfaces both syntax errors and references to variables the
+/// primitive does not declare (the `z_safe`-not-found class) *before* the template
+/// is ever generated. Edits are local until **Save**; Cancel / Escape / clicking
+/// the backdrop discard them.
+#[component]
+fn PrimitiveEditorModal(
+    addr: FieldAddr,
+    ptr: String,
+    primitive: String,
+    open: Signal<bool>,
+) -> Element {
+    let mut open = open;
+    let current = addr_field(addr, &ptr).map(|field| field.display).unwrap_or_default();
+    let mut buffer = use_signal(|| current.clone());
+
+    let vars = crate::gcode::primitive_vars::variables_for(&primitive);
+    let source = buffer.read().clone();
+    // Live validate + preview against a sample scope holding only the declared
+    // variables — rebuilt each keystroke so feedback is immediate.
+    let preview = crate::gcode::coder::Coder::new().preview(&primitive, &source, &vars);
+
+    let save = {
+        let ptr = ptr.clone();
+        move |_| {
+            let value = buffer.read().clone();
+            addr_set_input(addr, &ptr, &value);
+            open.set(false);
+        }
+    };
+
+    rsx! {
+        div {
+            // A dedicated fixed-position overlay (not the screen-rooted
+            // `.wizard-overlay`): this modal renders deep inside a nested field, so
+            // it must be viewport-anchored to escape any positioned ancestor.
+            class: "primitive-modal-overlay",
+            onclick: move |_| open.set(false),
+            onkeydown: move |evt| {
+                if evt.key().to_string().eq_ignore_ascii_case("escape") {
+                    open.set(false);
+                }
+            },
+            div {
+                class: "catalog-picker-dialog primitive-modal",
+                // Clicks inside the dialog must not fall through to the backdrop.
+                onclick: move |evt| evt.stop_propagation(),
+                div { class: "primitive-modal-head",
+                    h2 { "Edit primitive" }
+                    code { class: "primitive-modal-name", "{primitive}" }
+                }
+
+                div { class: "primitive-modal-body",
+                    div { class: "primitive-editor-pane",
+                        label { class: "primitive-pane-label", "Template" }
+                        textarea {
+                            class: "gcode-editor primitive-modal-editor",
+                            value: "{source}",
+                            onmounted: move |evt| async move {
+                                let _ = evt.set_focus(true).await;
+                            },
+                            oninput: move |evt| buffer.set(evt.value()),
+                        }
+                        match &preview {
+                            Ok(rendered) => rsx! {
+                                div { class: "primitive-preview ok",
+                                    div { class: "primitive-preview-head", "Preview · sample values" }
+                                    pre { class: "primitive-preview-body", "{rendered}" }
+                                }
+                            },
+                            Err(err) => rsx! {
+                                div { class: "primitive-preview err",
+                                    div { class: "primitive-preview-head", "Invalid template" }
+                                    div { class: "primitive-preview-error", "{err}" }
+                                }
+                            },
+                        }
+                    }
+
+                    aside { class: "primitive-vars-pane",
+                        div { class: "primitive-pane-label", "Variables in scope" }
+                        if vars.is_empty() {
+                            div { class: "primitive-vars-empty", "This primitive takes no variables." }
+                        } else {
+                            ul { class: "primitive-vars-list",
+                                for var in vars.iter() {
+                                    li { key: "{var.name}", class: "primitive-var",
+                                        div { class: "primitive-var-head",
+                                            code { class: "primitive-var-name", "{var.name}" }
+                                            span { class: "primitive-var-type", "{var.var_type.label()}" }
+                                        }
+                                        div { class: "primitive-var-desc", "{var.description}" }
+                                    }
+                                }
+                            }
+                        }
+                        div { class: "primitive-pane-label", "Always available" }
+                        ul { class: "primitive-vars-list",
+                            li { class: "primitive-var",
+                                code { class: "primitive-var-name", "metric() / imperial()" }
+                                div { class: "primitive-var-desc", "Set the output unit (emit G21 / G20)." }
+                            }
+                            li { class: "primitive-var",
+                                code { class: "primitive-var-name", "`…`  ·  {{expr}}" }
+                                div { class: "primitive-var-desc",
+                                    "Backtick lines emit GCode; {{expr}} is evaluated and unit-formatted."
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div { class: "wizard-actions",
+                    button {
+                        class: "btn btn-secondary",
+                        r#type: "button",
+                        onclick: move |_| open.set(false),
+                        "Cancel"
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        r#type: "button",
+                        onclick: save,
+                        "Save"
+                    }
+                }
             }
         }
     }

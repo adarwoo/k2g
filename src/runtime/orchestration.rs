@@ -21,6 +21,20 @@ impl AppCtx {
             .map(|board| stitch_edge_shapes(&board.edge_shapes));
         let job_references = collect_job_references(&app);
 
+        // Evaluate the readiness gate at startup too, so the pill/banner reflect a
+        // board-less or infeasible job from the very first frame — not only after the
+        // first mutation runs `sync_after_mutation`. Without this the gate string is
+        // absent and the pill would fall back to stale/placeholder gcode.
+        let readiness = evaluate_generation_readiness(&app, stitched_board_data.as_ref());
+        status.insert(
+            STATUS_KEY_GENERATION_READINESS.to_string(),
+            readiness.is_ready.to_string(),
+        );
+        status.insert(
+            STATUS_KEY_GENERATION_NOGO_REASONS.to_string(),
+            readiness.nogo_reasons.join(" | "),
+        );
+
         Self {
             app,
             stitched_board_data,
@@ -154,6 +168,26 @@ impl AppCtx {
         enqueue_generation(input);
     }
 
+    /// Launch-time generation: if the job is already ready, snapshot it and
+    /// enqueue one run so the Code view shows a real program immediately, without
+    /// waiting for the first mutation trigger (which never fires at startup). A
+    /// no-op when the readiness gate is closed — the Code view then shows its
+    /// empty state until the job becomes ready.
+    fn kick_initial_generation(&mut self) {
+        let readiness = evaluate_generation_readiness(&self.app, self.stitched_board_data.as_ref());
+        if !readiness.is_ready {
+            log::info!(
+                "Launch generation skipped — job not ready: {}",
+                readiness.nogo_reasons.join("; ")
+            );
+            return;
+        }
+        let input = self.build_generation_input();
+        self.app.generation_state = GenerationState::Running;
+        log::info!("Generation enqueued: cause=launch");
+        enqueue_generation(input);
+    }
+
     /// Snapshot the resolved job into an immutable [`GenerationInput`] for the
     /// worker. The Coder never sees the ctx or AppData — only this snapshot.
     fn build_generation_input(&self) -> GenerationInput {
@@ -161,15 +195,19 @@ impl AppCtx {
         let process_profile_name = process
             .map(|profile| profile.name.clone())
             .unwrap_or_default();
-        let cnc_profile_name = process
-            .and_then(|profile| {
-                self.app
-                    .machines
-                    .iter()
-                    .find(|machine| machine.id == profile.cnc_profile_id)
-            })
-            .map(|machine| machine.name.clone())
-            .unwrap_or_default();
+        let machine = process.and_then(|profile| {
+            self.app
+                .machines
+                .iter()
+                .find(|machine| machine.id == profile.cnc_profile_id)
+        });
+        let cnc_profile_name = machine.map(|machine| machine.name.clone()).unwrap_or_default();
+        // The CNC's preamble templates (the legacy `gcode_header`/`gcode_footer`
+        // fields carry the `initialise`/`conclude` primitives — see the crosswalk in
+        // `machine_profile_from_value`).
+        let initialise_template = machine.map(|machine| machine.gcode_header.clone()).unwrap_or_default();
+        let conclude_template = machine.map(|machine| machine.gcode_footer.clone()).unwrap_or_default();
+
         let operations = self
             .app
             .project_config
@@ -177,12 +215,24 @@ impl AppCtx {
             .iter()
             .map(|op| op.label().to_string())
             .collect();
+
+        let pcb_filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        // TODO: `z_safe` should come from the CNC profile (a field or custom
+        // attribute); defaulted until that source exists.
+        let z_safe = Length::from_mm(5.0);
+
         GenerationInput {
             board: self.app.board.clone(),
             stitched: self.stitched_board_data.clone(),
             process_profile_name,
             cnc_profile_name,
             operations,
+            initialise_template,
+            conclude_template,
+            pcb_filename,
+            timestamp,
+            z_safe,
         }
     }
 

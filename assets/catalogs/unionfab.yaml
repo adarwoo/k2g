@@ -1,4 +1,5 @@
 $schema: catalog.yaml
+schema_version: 1
 
 name: UnionFab
 description: >

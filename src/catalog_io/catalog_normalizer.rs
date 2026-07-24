@@ -55,6 +55,18 @@ pub fn normalize_catalog_fields(
         }
     }
 
+    // Backfill the schema version alongside `$schema`. Terse hand-authored and
+    // externally imported catalogs omit it, which trips the datastore version gate
+    // (catalog.yaml declares `x-schema-version: 1`) on the reference-resolution
+    // load pass — the source of the "missing schema_version" load warnings. The
+    // value mirrors the schema's `const`; it is injected, not derived.
+    if inject_missing && root.get("schema_version").is_none() {
+        if let Some(obj) = root.as_object_mut() {
+            obj.insert("schema_version".to_string(), Value::from(1));
+            changed = true;
+        }
+    }
+
     let Some(sections) = root.get_mut("sections").and_then(Value::as_array_mut) else {
         return false;
     };

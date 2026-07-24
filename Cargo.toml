@@ -3,6 +3,10 @@ name = "k2g"
 version = "0.1.0"
 edition = "2021"
 description = "GCode generator"
+authors = ["Bill Arreckx <software@arreckx.com>"]
+homepage = "https://github.com/adarwoo/k2g"
+repository = "https://github.com/adarwoo/k2g"
+license = "MIT"
 
 [workspace]
 members = [
@@ -18,6 +22,7 @@ members = [
 units = { path = "crates/units" }
 pcb = { path = "crates/pcb" }
 datastore = { path = "crates/datastore" }
+gtl = { path = "crates/gtl" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 dioxus = { version = "0.7", features = ["desktop"] }
@@ -37,6 +42,7 @@ dioxus-logger = "0.7.9"
 tracing = "0.1.44"
 tracing-subscriber = { version="0.3.23", features = ["env-filter"] }
 chrono = "0.4"
+synoptic = "2"
 
 [dev-dependencies]
 tempfile = "3"

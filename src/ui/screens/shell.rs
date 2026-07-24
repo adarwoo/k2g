@@ -37,18 +37,34 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
     // blocking error (e.g. no tooling solution) means the job cannot be machined, so
     // the program is not "ready" regardless of any stale output.
     let has_blocking_error = snapshot.errors.iter().any(|error| error.is_error);
+    // The readiness gate (orchestration) is the authority on whether the job *can*
+    // be machined: it captures preconditions the pill can't infer from
+    // `generation_state` alone — no board loaded, incomplete profiles, open
+    // contours. A closed gate must never read as "Program ready", even when stale or
+    // placeholder gcode is still in view. Absent (defensive) ⇒ treat as not ready.
+    let is_ready = snapshot
+        .status
+        .get(crate::runtime::STATUS_KEY_GENERATION_READINESS)
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    let not_ready = has_blocking_error || !is_ready;
     let status_label = match snapshot.generation_state {
-        GenerationState::Running => "Generating…".to_string(),
-        GenerationState::Failed => "Generation failed".to_string(),
-        _ if has_blocking_error => "Not ready".to_string(),
-        GenerationState::Idle if snapshot.gcode.is_empty() => "No program".to_string(),
-        GenerationState::Idle if snapshot.gcode_modified => "Program edited".to_string(),
-        GenerationState::Idle => "Program ready".to_string(),
+        GenerationState::Running => "Generating…",
+        GenerationState::Failed => "Generation failed",
+        _ if not_ready => "Not ready",
+        GenerationState::Idle if snapshot.gcode.is_empty() => "No program",
+        GenerationState::Idle if snapshot.gcode_modified => "Program edited",
+        GenerationState::Idle => "Program ready",
     };
 
     rsx! {
         header { class: "shell-topbar",
-            div { class: "brand-block",
+            button {
+                class: "brand-block",
+                r#type: "button",
+                title: "About K2G",
+                "aria-label": "About K2G",
+                onclick: move |_| super::mutate_ctx(state, |s| s.select_screen(Screen::About)),
                 img {
                     class: "brand-mark-image",
                     src: app_icon_data_url(),
@@ -123,7 +139,7 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
                     class: match snapshot.generation_state {
                         GenerationState::Running => "status-pill status-warn",
                         GenerationState::Failed => "status-pill status-err",
-                        _ if has_blocking_error => "status-pill status-err",
+                        _ if not_ready => "status-pill status-err",
                         GenerationState::Idle if snapshot.gcode.is_empty() => "status-pill status-warn",
                         GenerationState::Idle if snapshot.gcode_modified => "status-pill status-warn",
                         GenerationState::Idle => "status-pill status-ok",
@@ -261,6 +277,9 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
         None,
         Some(Screen::Stock),
         Some(Screen::Catalog),
+        None,
+        Some(Screen::Logs),
+        Some(Screen::About),
     ];
 
     rsx! {
@@ -372,6 +391,29 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M12 6C9 4.5 6 4.5 4 6v12c2-1.5 5-1.5 8 0" }
                 path { d: "M12 6c3-1.5 6-1.5 8 0v12c-2-1.5-5-1.5-8 0" }
                 path { d: "M12 6v12" }
+            }
+        },
+        Screen::Logs => rsx! {
+            // Lines of text on a page — the log stream.
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                rect { x: "4", y: "3", width: "16", height: "18", rx: "2" }
+                path { d: "M8 8h8" }
+                path { d: "M8 12h8" }
+                path { d: "M8 16h5" }
+            }
+        },
+        Screen::About => rsx! {
+            // An info circle — application details.
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                circle { cx: "12", cy: "12", r: "9" }
+                path { d: "M12 11v5" }
+                circle { cx: "12", cy: "7.5", r: "0.6" }
             }
         },
     }

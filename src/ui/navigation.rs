@@ -28,6 +28,8 @@ pub enum Screen {
     ToolsetProfiles,
     Stock,
     Catalog,
+    Logs,
+    About,
 }
 
 impl Screen {
@@ -40,6 +42,8 @@ impl Screen {
             Self::ToolsetProfiles => "Toolset",
             Self::Stock => "Stock",
             Self::Catalog => "Catalog",
+            Self::Logs => "Logs",
+            Self::About => "About",
         }
     }
 
@@ -52,6 +56,8 @@ impl Screen {
             Self::ToolsetProfiles => "toolset-profiles",
             Self::Stock => "stock",
             Self::Catalog => "catalog",
+            Self::Logs => "logs",
+            Self::About => "about",
         }
     }
 }

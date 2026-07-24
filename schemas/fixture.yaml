@@ -450,14 +450,18 @@ properties:
     default: "0.5 mm"
     $ref: "units.yaml#/$defs/size"
 
+# Only the fields the app currently populates are mandatory. `locating_pins`,
+# `keep_out_zones` and `occupancy` remain optional properties: they model
+# fixture features not yet sourced by the app (Phase 3 — see the assigner plan)
+# and the create/instantiate flow provides no defaults for them, so requiring
+# them would make every fixture file load with spurious warnings.
+# (`machining_plate_clearance` was a stale required key with no property
+# definition — unsatisfiable by construction — and is superseded by
+# `bed_clearance` above.)
 required:
   - id
   - name
   - board_holding_method
   - work_origin_reference
-  - locating_pins
-  - keep_out_zones
-  - occupancy
-  - machining_plate_clearance
 
 additionalProperties: false

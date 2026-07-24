@@ -18,6 +18,13 @@ pub struct GenerationInput {
     pub process_profile_name: String,
     pub cnc_profile_name: String,
     pub operations: Vec<String>,
+    // Program-preamble (header phase): the CNC's `initialise`/`conclude` primitive
+    // templates and the program-layer values they read.
+    pub initialise_template: String,
+    pub conclude_template: String,
+    pub pcb_filename: String,
+    pub timestamp: String,
+    pub z_safe: Length,
 }
 
 /// A successful run's output, published atomically into `AppState`.
@@ -115,9 +122,11 @@ fn enqueue_generation(input: GenerationInput) {
     let _ = tx.send(GenerationRequest { id, cancel, input });
 }
 
-/// Produce the program for one request. **Placeholder** until the OperationPlanner
-/// and Coder land: it emits a deterministic header program and honours the cancel
-/// flag at checkpoints, so the worker/cancellation contract is exercised now.
+/// Produce the program for one request. **Header phase:** the program is the
+/// CNC's real `initialise` and `conclude` primitives rendered through the Coder,
+/// with an (as-yet empty) machining body between them. The body sections — tool
+/// changes, drilling, routing — are filled in by later phases. The cancel flag is
+/// honoured at checkpoints, exercising the worker/cancellation contract.
 fn run_generation(
     input: &GenerationInput,
     cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -137,36 +146,64 @@ fn run_generation(
         ));
     }
 
-    let hole_count = input.board.as_ref().map(|board| board.holes.len()).unwrap_or(0);
-    let contour_count = input
-        .stitched
-        .as_ref()
-        .map(|stitched| stitched.contours.len())
-        .unwrap_or(0);
-    let operations = input.operations.join(", ");
+    // Phase 1 — the program preamble: render the CNC's `initialise` header and
+    // `conclude` footer through the Coder. The machining body (tool changes,
+    // drilling, routing) slots between them in later phases.
+    let coder = crate::gcode::coder::Coder::new();
 
-    let mut gcode = String::new();
-    gcode.push_str("(k2g generated program — placeholder)\n");
-    gcode.push_str(&format!("(machining profile: {})\n", input.process_profile_name));
-    gcode.push_str(&format!("(cnc profile: {})\n", input.cnc_profile_name));
-    gcode.push_str(&format!("(board: {hole_count} holes, {contour_count} contours)\n"));
-    gcode.push_str(&format!("(operations: {operations})\n"));
-    gcode.push_str("M2\n");
+    let mut header_scope = gtl::Scope::new();
+    header_scope.push("pcb_filename", input.pcb_filename.clone());
+    header_scope.push("timestamp", input.timestamp.clone());
+    header_scope.push("z_safe", input.z_safe);
+    let header = coder
+        .render("initialise", &input.initialise_template, &mut header_scope)
+        .map_err(|err| GenerationAbort::Failed(format!("initialise: {err}")))?;
 
     if cancel.load(Ordering::SeqCst) {
         return Err(GenerationAbort::Cancelled);
     }
 
+    let mut footer_scope = gtl::Scope::new();
+    let footer = coder
+        .render("conclude", &input.conclude_template, &mut footer_scope)
+        .map_err(|err| GenerationAbort::Failed(format!("conclude: {err}")))?;
+
+    // Assemble the program from its ordered sections. The machining body (tool
+    // changes, drilling, routing) is appended between the preamble and postamble
+    // as those phases land; today the body is empty, so the program is the CNC's
+    // real `initialise` followed by its `conclude` — no placeholder. Sections are
+    // joined with a single newline (trailing newlines trimmed) so appending a body
+    // section later never introduces stray blank lines.
+    let mut sections: Vec<String> = vec![header];
+    // (body sections are pushed here in later phases)
+    sections.push(footer);
+    let gcode = sections
+        .iter()
+        .map(|section| section.trim_end_matches('\n'))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // The board/stitched inputs are the substrate the drilling/routing phases will
+    // consume; note them in the log summary so the header run is informative while
+    // the body is still pending (this is the log, not the program — the program
+    // itself carries no placeholder).
+    let hole_count = input.board.as_ref().map(|board| board.holes.len()).unwrap_or(0);
+    let contour_count = input.stitched.as_ref().map(|stitched| stitched.contours.len()).unwrap_or(0);
+    let operations = input.operations.join(", ");
     let summary = format!(
-        "Generated {} operation(s), {} line(s)",
-        input.operations.len(),
-        gcode.lines().count()
+        "Program for '{}' ({}): {} lines · body pending [{operations}] ({hole_count} holes, {contour_count} contours)",
+        input.process_profile_name,
+        input.cnc_profile_name,
+        gcode.lines().count(),
     );
     Ok(GenerationOutput { gcode, summary })
 }
 
 /// Commit a successful run into the ctx and settle to Idle.
 fn publish_success(output: GenerationOutput) {
+    // Mirror the summary into the tracing log so it lands in the Logs screen, not
+    // only the transient event toast.
+    log::info!("{}", output.summary);
     with_ctx_mut(|ctx| {
         ctx.app.generation_state = GenerationState::Idle;
         ctx.app.gcode = output.gcode;
@@ -179,6 +216,10 @@ fn publish_success(output: GenerationOutput) {
 /// stale program) and surface the diagnostic.
 fn publish_failure(message: &str) {
     let message = message.to_string();
+    // Log at WARN so the failure is captured by the Logs screen and stdout — not
+    // only the transient toast/banner. This is the diagnostic a user needs when a
+    // primitive template references an unknown variable (e.g. `z_safe`).
+    log::warn!("Generation failed: {message}");
     with_ctx_mut(|ctx| {
         ctx.app.generation_state = GenerationState::Failed;
         ctx.app.gcode.clear();
@@ -216,19 +257,28 @@ mod tests {
             process_profile_name: "Proto".to_string(),
             cnc_profile_name: "Genmitsu".to_string(),
             operations: vec!["Drill PTH".to_string(), "Route outline".to_string()],
+            initialise_template: "`(k2g {pcb_filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}".to_string(),
+            conclude_template: "`(end of file)".to_string(),
+            pcb_filename: "demo.kicad_pcb".to_string(),
+            timestamp: "2026-01-01 00:00:00".to_string(),
+            z_safe: units::Length::from_mm(5.0),
         }
     }
 
     #[test]
-    fn placeholder_run_is_deterministic_and_summarises() {
+    fn header_run_is_deterministic_and_renders_the_preamble() {
         let cancel = Arc::new(AtomicBool::new(false));
-        let a = run_generation(&sample_input(), &cancel);
-        let b = run_generation(&sample_input(), &cancel);
-        let (a, b) = (a.ok().unwrap(), b.ok().unwrap());
+        let a = run_generation(&sample_input(), &cancel).ok().unwrap();
+        let b = run_generation(&sample_input(), &cancel).ok().unwrap();
         assert_eq!(a.gcode, b.gcode, "same input must yield identical program");
-        assert!(a.gcode.contains("(machining profile: Proto)"));
-        assert!(a.gcode.contains("(operations: Drill PTH, Route outline)"));
-        assert!(a.summary.contains("2 operation(s)"));
+        assert!(a.gcode.contains("(k2g demo.kicad_pcb - 2026-01-01 00:00:00)"), "header comment");
+        assert!(a.gcode.contains("G21"), "metric() emitted the modal word");
+        assert!(a.gcode.contains("(end of file)"), "footer rendered");
+        // The program is the real rendered preamble + postamble — no mockup filler.
+        assert!(!a.gcode.contains("body pending"), "no placeholder in the program");
+        let header_pos = a.gcode.find("G0 Z5").expect("initialise rendered");
+        let footer_pos = a.gcode.find("(end of file)").expect("conclude rendered");
+        assert!(header_pos < footer_pos, "initialise precedes conclude");
     }
 
     #[test]

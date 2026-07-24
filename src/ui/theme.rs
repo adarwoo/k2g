@@ -111,6 +111,27 @@ body {
     align-items: center;
     gap: 10px;
     min-width: max-content;
+    /* Rendered as a <button> (opens the About screen); strip the native chrome. */
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 4px 6px;
+    margin: -4px -6px;
+    border-radius: 10px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 120ms ease;
+}
+
+.brand-block:hover {
+    background: var(--bg-hover);
+}
+
+.brand-block:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
 }
 
 .brand-mark-image {
@@ -2502,6 +2523,91 @@ th {
     resize: none;
 }
 
+/* Syntax-highlighted, read-only program listing (the Code tab). */
+.gcode-view {
+    flex: 1;
+    min-height: 280px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    line-height: 1.55;
+    padding: 8px 0;
+}
+
+.gcode-line {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding: 0 12px;
+}
+
+.gcode-line:hover {
+    background: var(--bg-hover);
+}
+
+.gcode-lineno {
+    flex: 0 0 auto;
+    width: 3.5em;
+    text-align: right;
+    color: var(--text-subtle);
+    opacity: 0.55;
+    user-select: none;
+    font-variant-numeric: tabular-nums;
+}
+
+.gcode-line-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    font-family: inherit;
+}
+
+/* Token colours — drawn from the theme palette so both themes read well. */
+.gcode-comment { color: var(--text-subtle); font-style: italic; }
+.gcode-gword { color: var(--accent); font-weight: 600; }
+.gcode-mword { color: var(--err); font-weight: 600; }
+.gcode-linenum { color: var(--text-subtle); }
+.gcode-tool { color: var(--ok); font-weight: 600; }
+.gcode-axis { color: var(--text); }
+.gcode-param { color: var(--warn); }
+
+.gcode-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 13px;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 40px;
+    margin-bottom: 10px;
+}
+
+.gcode-empty-block {
+    max-width: 520px;
+    text-align: left;
+}
+
+.gcode-empty-title {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+}
+
+.gcode-empty-reasons {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--warn);
+}
+
 .cnc-template-editor {
     min-height: 0;
     flex: initial;
@@ -3056,6 +3162,518 @@ summary {
     padding: 4px 14px;
     border-left: 3px solid var(--border);
     color: var(--text-subtle);
+}
+
+/* ------------------------------------------------------------------ About --- */
+
+.about-screen {
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 32px 24px;
+    overflow: auto;
+}
+
+.about-card {
+    width: 100%;
+    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+    padding: 28px 32px 32px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    text-align: center;
+}
+
+.about-logo {
+    width: 100%;
+    max-width: 300px;
+    height: auto;
+    object-fit: contain;
+    /* The mark is a black silhouette on transparency, so it needs a light plate
+       to stay legible on the dark theme's dark card (and it matches the logo's
+       intended black-on-white look on light theme too). */
+    background: #ffffff;
+    padding: 18px 24px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+}
+
+.about-headline {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.about-title {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text);
+}
+
+.about-tagline {
+    margin: 0;
+    color: var(--text-subtle);
+    font-size: 14px;
+}
+
+.about-codename {
+    margin-top: 2px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 0.04em;
+}
+
+.about-facts {
+    width: 100%;
+    margin: 4px 0 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 18px;
+    text-align: left;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 4px;
+}
+
+.about-fact {
+    display: contents;
+}
+
+.about-fact dt {
+    color: var(--text-subtle);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    align-self: center;
+}
+
+.about-fact dd {
+    margin: 0;
+    color: var(--text);
+    font-size: 14px;
+    word-break: break-word;
+}
+
+.about-link {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.about-link:hover {
+    text-decoration: underline;
+}
+
+.about-note {
+    margin: 0;
+    color: var(--text-subtle);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.about-note strong {
+    color: var(--text);
+    font-style: normal;
+}
+
+.about-credits {
+    width: 100%;
+    text-align: left;
+}
+
+.about-credits-title {
+    margin: 0 0 8px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-subtle);
+}
+
+.about-credits-list {
+    margin: 0;
+    padding-left: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--text);
+    font-size: 13px;
+}
+
+/* ------------------------------------------------------------------- Logs --- */
+
+.logs-screen {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px 20px;
+    min-height: 0;
+}
+
+.logs-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.logs-title-group {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.logs-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.logs-count {
+    color: var(--text-subtle);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.logs-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.log-filter-group {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.log-filter-btn {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--border);
+    padding: 5px 12px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--text-subtle);
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+}
+
+.log-filter-btn:last-child {
+    border-right: 0;
+}
+
+.log-filter-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+}
+
+.log-filter-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.logs-list {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.log-row {
+    display: grid;
+    grid-template-columns: max-content max-content max-content 1fr;
+    gap: 12px;
+    align-items: baseline;
+    padding: 3px 12px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.log-row:last-child {
+    border-bottom: 0;
+}
+
+.log-time {
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.log-level {
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    min-width: 42px;
+}
+
+.log-error { color: var(--err); }
+.log-warn { color: var(--warn); }
+.log-info { color: var(--accent); }
+.log-debug { color: var(--text-subtle); }
+.log-trace { color: var(--text-subtle); }
+
+.log-target {
+    color: var(--text-subtle);
+    white-space: nowrap;
+}
+
+.log-message {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.logs-empty {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-subtle);
+    font-size: 13px;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 40px;
+}
+
+/* -------------------------------------------------- Primitive editor modal --- */
+
+/* Viewport-anchored overlay (the modal is rendered deep in the field tree). */
+.primitive-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 200;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+/* Inline primitive field: a compact summary + an Edit button (the real editing
+   happens in the modal). */
+.primitive-field {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    width: 100%;
+}
+
+/* Read-only review box: as tall as its content up to five lines, then scrolls
+   (both axes as needed). Lets the user read a primitive without opening the
+   editor. */
+.primitive-summary {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    box-sizing: border-box;
+    max-height: calc(5 * 1.5em + 14px);
+    overflow: auto;
+    white-space: pre;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+}
+
+.primitive-summary-empty {
+    color: var(--text-subtle);
+    font-style: italic;
+}
+
+.primitive-edit-btn {
+    flex: 0 0 auto;
+}
+
+.primitive-modal {
+    width: min(980px, 94vw);
+    max-height: 88vh;
+    gap: 14px;
+}
+
+.primitive-modal-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.primitive-modal-head h2 {
+    margin: 0;
+    font-size: 17px;
+}
+
+.primitive-modal-name {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 13px;
+    color: var(--accent);
+}
+
+.primitive-modal-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(240px, 0.9fr);
+    gap: 16px;
+    min-height: 0;
+    flex: 1;
+}
+
+.primitive-editor-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+}
+
+.primitive-pane-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-subtle);
+}
+
+.primitive-modal-editor {
+    flex: 1;
+    min-height: 200px;
+    resize: none;
+    width: 100%;
+}
+
+.primitive-preview {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    flex: 0 0 auto;
+    max-height: 34%;
+    display: flex;
+    flex-direction: column;
+}
+
+.primitive-preview.ok {
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+
+.primitive-preview.err {
+    border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+}
+
+.primitive-preview-head {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 6px 10px;
+    background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+}
+
+.primitive-preview.ok .primitive-preview-head {
+    color: var(--ok);
+}
+
+.primitive-preview.err .primitive-preview-head {
+    color: var(--err);
+}
+
+.primitive-preview-body {
+    margin: 0;
+    padding: 8px 10px;
+    overflow: auto;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: pre;
+}
+
+.primitive-preview-error {
+    padding: 8px 10px;
+    overflow: auto;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    color: var(--err);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.primitive-vars-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 0;
+    overflow: auto;
+    border-left: 1px solid var(--border);
+    padding-left: 16px;
+}
+
+.primitive-vars-list {
+    list-style: none;
+    margin: 0 0 6px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.primitive-var {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: var(--bg);
+}
+
+.primitive-var-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 3px;
+}
+
+.primitive-var-name {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    word-break: break-word;
+}
+
+.primitive-var-type {
+    flex: 0 0 auto;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-subtle);
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 1px 7px;
+}
+
+.primitive-var-desc {
+    font-size: 12px;
+    color: var(--text-subtle);
+    line-height: 1.4;
+}
+
+.primitive-vars-empty {
+    font-size: 12px;
+    color: var(--text-subtle);
+    font-style: italic;
 }
 "#;
 

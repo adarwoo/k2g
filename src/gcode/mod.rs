@@ -6,4 +6,6 @@
 //! generation path yet; see the notes in each module.
 
 pub mod assigner;
+pub mod coder;
+pub mod primitive_vars;
 pub mod template;

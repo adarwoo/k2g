@@ -4,9 +4,11 @@ use crate::ui::navigation::*;
 use super::theme::APP_STYLE;
 use crate::runtime::{ctx_snapshot, with_ctx_mut};
 
+mod about;
 mod cnc;
 mod catalog;
 mod fixture;
+mod logs;
 mod profile_manager;
 mod profiles_common;
 mod job;
@@ -15,9 +17,11 @@ mod shell;
 mod stock;
 mod toolset;
 
+use about::AboutScreen;
 use cnc::CncScreen;
 use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
+use logs::LogsScreen;
 use job::JobScreen;
 use machining::MachiningProfilesScreen;
 use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar};
@@ -89,6 +93,12 @@ pub fn AppRoot() -> Element {
                             },
                             Screen::Catalog => rsx! {
                                 CatalogScreen { state }
+                            },
+                            Screen::Logs => rsx! {
+                                LogsScreen { state }
+                            },
+                            Screen::About => rsx! {
+                                AboutScreen { state }
                             },
                         }
                     }
