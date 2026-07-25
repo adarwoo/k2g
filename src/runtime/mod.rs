@@ -16,7 +16,7 @@ use crate::data::model::state::RackSlot;
 use crate::data::model::stock::{stock_value_from_tools, tools_from_stock_value};
 use crate::data::model::{
     CascadeDeleteImpact, CatalogStockCatalog, CatalogStockSection, CatalogStockTool,
-    CutDepthStrategy, FixtureProfile, JobConfig, JobProfile, MachineProfile,
+    FixtureProfile, JobConfig, JobProfile, MachineProfile,
     ProductionOperation, Side, Tool, ToolPreference, ToolStatus, ToolsetGenerationPolicy,
     ToolsetProfile, UserUnitSystem,
 };

@@ -48,34 +48,6 @@ impl ProductionOperation {
     }
 }
 
-/// Cut depth strategy for board machining.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CutDepthStrategy {
-    Automatic,
-    SinglePass,
-    MultiPass,
-}
-
-impl CutDepthStrategy {
-    #[allow(dead_code)]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Automatic => "automatic",
-            Self::SinglePass => "single_pass",
-            Self::MultiPass => "multi_pass",
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Automatic => "Automatic (recommended)",
-            Self::SinglePass => "Single Pass",
-            Self::MultiPass => "Multi-pass",
-        }
-    }
-}
-
 /// Aggregate job configuration used by the job screen and generation context.
 #[allow(dead_code)]
 #[derive(Clone)]

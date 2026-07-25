@@ -1380,8 +1380,6 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
             .map(|op| operation_to_key(*op))
             .collect::<Vec<_>>(),
         "routing": {
-            "cut_depth_strategy": profile.cut_depth_strategy.as_str(),
-            "multi_pass_max_depth": profile.multi_pass_max_depth.to_string(),
         },
     });
 
@@ -1452,22 +1450,6 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         "bottom" => Side::Bottom,
         _ => Side::Top,
     };
-
-    let cut_depth_strategy = match value
-        .pointer("/routing/cut_depth_strategy")
-        .and_then(Value::as_str)
-        .unwrap_or("automatic")
-    {
-        "single_pass" => CutDepthStrategy::SinglePass,
-        "multi_pass" => CutDepthStrategy::MultiPass,
-        _ => CutDepthStrategy::Automatic,
-    };
-    let multi_pass_max_depth = value
-        .pointer("/routing/multi_pass_max_depth")
-        .and_then(Value::as_str)
-        .and_then(|raw| units::Length::from_string(raw, Some(units::LengthUnit::Mm)).ok())
-        .or_else(|| value.pointer("/routing/multi_pass_max_depth").and_then(value_to_length_mm).map(units::Length::from_mm))
-        .unwrap_or_else(|| units::Length::from_mm(1.0));
 
     let cnc_profile_id = value
         .pointer("/cnc/default")
@@ -1628,8 +1610,6 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         toolset_profile_choices,
         side,
         default_operations,
-        cut_depth_strategy,
-        multi_pass_max_depth,
         operation_setups,
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
@@ -1892,18 +1872,6 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
         "mill_board" => Some(ProductionOperation::MillBoard),
         _ => None,
     }
-}
-
-fn value_to_length(value: &Value) -> Option<Length> {
-    match value {
-        Value::String(v) => Length::from_string(v, None).ok(),
-        Value::Number(v) => v.as_f64().map(Length::from_mm),
-        _ => None,
-    }
-}
-
-fn value_to_length_mm(value: &Value) -> Option<f64> {
-    value_to_length(value).map(Length::as_mm)
 }
 
 fn load_persisted_unit_system() -> UserUnitSystem {

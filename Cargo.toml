@@ -54,3 +54,13 @@ synoptic = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Windows-only: `build.rs` compiles the app icon into the `.exe` as a Windows
+# resource. Cargo matches `[target.*.build-dependencies]` against the **host**, so
+# these are fetched only when building on Windows; the build script additionally
+# checks the target OS so a cross-compile off Windows skips the resource.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+# Renders the multi-size `.ico` from the single PNG source, so there is no second
+# icon file to keep in sync.
+image = "0.24"

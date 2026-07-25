@@ -1217,7 +1217,6 @@ mod tests {
              fixture: {{ default: '', choices: [''] }}\n\
              toolset: {{ default: '', choices: [''] }}\n\
              operations: [drill_pth]\n\
-             routing: {{ cut_depth_strategy: automatic, multi_pass_max_depth: 1mm }}\n\
              drill_locating_pins: {{ enabled: false }}\n\
              drill_pth: {{ enabled: true, holes: {{ route_fallback: false, drill_first: true, pilot: false, oblong: drill_ends_then_route, oversize: {{ relative: 8%, max: 0.20mm }}, undersize: {{ relative: 8%, max: 0.20mm }} }} }}\n\
              drill_npth: {{ enabled: false }}\n\

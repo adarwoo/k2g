@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use units::{Length, RotationalSpeed};
 
-use super::job::{CutDepthStrategy, ProductionOperation, Side};
+use super::job::{ProductionOperation, Side};
 use super::state::RackSlot;
 
 /// CNC profile persisted with the CNC schema.
@@ -98,8 +98,6 @@ pub struct JobProfile {
     pub toolset_profile_choices: Vec<String>,
     pub side: Side,
     pub default_operations: Vec<ProductionOperation>,
-    pub cut_depth_strategy: CutDepthStrategy,
-    pub multi_pass_max_depth: Length,
     pub operation_setups: BTreeMap<String, Value>,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,

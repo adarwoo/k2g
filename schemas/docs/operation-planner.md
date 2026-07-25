@@ -68,7 +68,7 @@ still owns a whole path internally.
 - **JobInstance for this step** — the effective (defaults + overrides) step config:
   which `operations` are enabled, `drill_pth`/`drill_npth` `holes` settings (incl. the
   `oblong` strategy and `pilot`), `route_board` edge/finishing, `routing`
-  `cut_depth_strategy` + `multi_pass_max_depth`, `side_to_machine`, board orientation.
+  `side_to_machine`, board orientation.
 - **ToolAssignment** (`src/gcode/assigner.rs`) — per-hole `tool_id` (+ optional
   `pilot_tool_id`, `strategy`, `z_bottom`/`z_retract`), and the `rack` (slot → tool).
   Feeds/speeds/rpm and geometry (point angle, flute) come from the tool's stock/catalog

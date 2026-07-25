@@ -14,7 +14,7 @@ pub mod tool_core;
 // unit-display layer); re-exported here so runtime/UI keep one import path.
 pub use units::UserUnitSystem;
 pub use catalog::{CatalogStockCatalog, CatalogStockSection, CatalogStockTool};
-pub use job::{CutDepthStrategy, JobConfig, ProductionOperation, Side};
+pub use job::{JobConfig, ProductionOperation, Side};
 pub use profiles::{
     CascadeDeleteImpact, FixtureProfile, JobProfile, MachineProfile, ToolsetGenerationPolicy,
     ToolsetProfile,

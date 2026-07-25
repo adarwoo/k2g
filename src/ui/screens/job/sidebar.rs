@@ -65,14 +65,7 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                 ("Toolset", toolset_name),
                 ("Side", side),
                 ("Operations", operations),
-                ("Cut depth", active_profile.cut_depth_strategy.label().to_string()),
             ];
-            if active_profile.cut_depth_strategy == CutDepthStrategy::MultiPass {
-                rows.push((
-                    "Max depth/pass",
-                    unit_format::format_length_display(active_profile.multi_pass_max_depth, snapshot.unit_system),
-                ));
-            }
             rows.push((
                 "Board thickness",
                 board_thickness_pcb_label.clone().unwrap_or_else(|| "—".to_string()),
