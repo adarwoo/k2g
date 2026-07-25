@@ -180,18 +180,23 @@ machining + CNC + board bounds) and is a pure function of them.
 
 **XY** — a composed affine `board → machine`:
 - **orientation** — the step's board rotation (`board_orientation`).
-- **fixture origin** — where the board sits and which corner is X0/Y0
-  (`work_origin_reference` x0/y0 = Left/Right/Front/Back).
+- **fixture origin** — where the board sits and which corner is X0/Y0 (the fixture
+  `origin` x0/y0 = Left/Right/Front/Back).
 - **CNC scaling** — per-axis calibration (`machine.scaling.x/y`).
 - *(the work-coordinate-system origin — G54/G55 — is set in `initialise`; the Placement
   produces coordinates **relative to** that WCS.)*
 
-**Z** — reference plane and depth math:
-- **reference** — `fixture.z0_reference` (machine bed / spoilboard top / board top); Z0
-  is the bed for k2g, so heights are bed-relative.
-- **surfaces** — board-top = f(fixture backboard thickness, board thickness).
-- **depths** — through-hole `z_bottom = surface − (thickness + breakthrough)`, bounded by
-  `bed_clearance`; `z_retract` and `z_safe` from the fixture.
+**Z** — the datum is fixed: **Z0 is always the top of the PCB.** There is no
+`z0_reference` toggle; what varies by machine is only *how* that zero is established
+(a per-job surface touch-off, or a computed/persisted bed reference), which is a
+**CNC-profile capability** (`machine.has_repeatable_home`, `machine.tool_length_measurement`),
+not a fixture setting.
+- **depths** — through-hole `z_bottom = −(board_thickness + breakthrough)` below the
+  surface; `board_thickness` comes from the KiCad stackup, `breakthrough` from the fixture.
+- **safety** — the plunge is bounded so the tip stays above the bed: the fixture's
+  `backboard_thickness` and `bed_clearance` gate it (cut into the martyr board, never the bed).
+- **heights** — `z_retract` (R-plane) and `z_safe` (travel) from the fixture, measured
+  from the board top.
 
 The Placement exposes the primitives the planner needs — `xy(board_pt) → (mx,my)`,
 `z_bottom(through)`, `z_retract()`, `z_safe()` — so the planner emits ready-to-render

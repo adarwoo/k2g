@@ -73,15 +73,27 @@ struct MessageVisitor {
     fields: String,
 }
 
+/// Whether a structured field is call-site plumbing that should not appear in the
+/// user-facing log line. The `tracing-log` bridge attaches synthetic `log.*`
+/// metadata (`log.target`, `log.module_path`, `log.file`, `log.line`) to every
+/// event that originates from the `log` crate; the stdout `fmt` layer hides these
+/// via `NormalizeEvent`, so the viewer must too. `message` is handled separately.
+fn is_hidden_field(name: &str) -> bool {
+    name.starts_with("log.")
+}
+
 impl MessageVisitor {
     fn note_field(&mut self, field: &Field, rendered: String) {
-        if field.name() == "message" {
+        let name = field.name();
+        if name == "message" {
             self.message = rendered;
+        } else if is_hidden_field(name) {
+            // Call-site plumbing — dropped, matching the stdout formatter.
         } else {
             if !self.fields.is_empty() {
                 self.fields.push(' ');
             }
-            self.fields.push_str(&format!("{}={}", field.name(), rendered));
+            self.fields.push_str(&format!("{}={}", name, rendered));
         }
     }
 
@@ -150,5 +162,18 @@ mod tests {
         assert_eq!(snap.last().unwrap().message, format!("line {}", LOG_CAPACITY + 4));
         clear();
         assert!(snapshot().is_empty(), "clear empties the buffer");
+    }
+
+    #[test]
+    fn hidden_fields_are_the_log_bridge_metadata_only() {
+        // The `tracing-log` bridge's synthetic fields are call-site plumbing and
+        // must be dropped from the on-screen line...
+        for name in ["log.target", "log.module_path", "log.file", "log.line"] {
+            assert!(is_hidden_field(name), "{name} should be hidden");
+        }
+        // ...while real message fields survive.
+        for name in ["message", "cause", "nogo_reasons", "modified"] {
+            assert!(!is_hidden_field(name), "{name} should be shown");
+        }
     }
 }

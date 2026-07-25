@@ -46,6 +46,7 @@ properties:
   name:
     type: string
     minLength: 1
+    default: "My fixture profile"
     description: Fixture profile name.
 
   # ---------------------------------------------------------------------------
@@ -87,63 +88,21 @@ properties:
   #   board_holding_method: "clamps"
   #   board_holding_method: "tape"
   #
+  # A default is supplied so a freshly-created fixture is immediately usable
+  # (`board_holding_method` is required; without a default the profile loads
+  # incomplete and blocks generation — the same trap `name` had). The datastore
+  # fills this on load, so existing files missing the key become usable too. The
+  # user can change it to match their setup.
   board_holding_method:
     type: string
     minLength: 1
+    default: clamps
     description: Supported board holding method.
 
-  # ---------------------------------------------------------------------------
-  # work_origin_reference
-  # ---------------------------------------------------------------------------
-  # Defines how the fixture establishes the CAM work origin.
-  #
-  work_origin_reference:
-    type: object
-    description: Work origin/reference definition.
-    properties:
-
-      # X origin side.
-      #
-      # Valid examples:
-      #   x0: Left
-      #   x0: Right
-      #   x0: Front
-      #   x0: Back
-      #
-      x0:
-        type: string
-        enum: [Left, Right, Front, Back]
-        description: Reference side used for the X origin.
-
-      # Y origin side.
-      #
-      # Valid examples:
-      #   y0: Front
-      #   y0: Back
-      #   y0: Left
-      #   y0: Right
-      #
-      y0:
-        type: string
-        enum: [Front, Back, Left, Right]
-        description: Reference side used for the Y origin.
-
-      # Z origin reference.
-      #
-      # Intentionally free-form for now because fixture Z reference conventions
-      # may be application-specific.
-      #
-      # Valid examples:
-      #   z0_reference: "machine_bed"
-      #   z0_reference: "spoilboard_top"
-      #   z0_reference: "board_top"
-      #
-      z0_reference:
-        type: string
-        description: Reference used for the Z origin.
-
-    required: [x0, y0]
-    additionalProperties: false
+  # The board work origin (which corner is X0/Y0) is defined by `origin`, below.
+  # There is deliberately no "Z origin reference" field: Z0 is ALWAYS the top of
+  # the PCB. What differs between machines is only *how* that zero is established,
+  # which is a CNC-profile capability (`has_repeatable_home`), not a fixture toggle.
 
   # ---------------------------------------------------------------------------
   # locating_pins
@@ -263,44 +222,9 @@ properties:
           description: Height of the keep-out zone.
           $ref: "units.yaml#/$defs/size"
 
-        # Safe Z retract height for transitions between machining operations.
-        #
-        # Valid examples:
-        #   z_safe_height: "20 mm"
-        #   z_safe_height: "0.75 in"
-        #
-        # WARNING:
-        #   Z0 corresponds to the machining bed. This value can be set from
-        #   machine coordinates and does not need board-thickness adjustment.
-        #
-        z_safe_height:
-          description: >
-            Z distance to retract to between machining operations. This distance
-            should be well clear of fixtures on the machining table to avoid
-            collisions. WARNING: Z0 corresponds to the machining bed, so it can
-            be set from machine coordinates and does not need adjusting.
-          default: "20mm"
-          $ref: "units.yaml#/$defs/size"
-
-        # Drill retract height, also known as the drilling R value.
-        #
-        # Valid examples:
-        #   z_drill_retract_height: "10 mm"
-        #   z_drill_retract_height: "0.5 in"
-        #
-        # This is measured upward from the machining bed.
-        #
-        z_drill_retract_height:
-          description: >
-            Known as R value, the distance to retract to between drilling
-            operations, measured from the top of the machining bed upwards. If a
-            pressure plate is used, this distance should allow the plate to
-            spring back to neutral position and allow hovering over any fixtures
-            on the table.
-          default: "10mm"
-          $ref: "units.yaml#/$defs/size"
-
-      required: [x, y, width, height, z_safe_height, z_drill_retract_height]
+      # Retract/safe heights are fixture-global (`z_retract` / `z_safe` below), not
+      # per keep-out zone — a zone only describes an XY region to avoid.
+      required: [x, y, width, height]
       additionalProperties: false
 
   # ---------------------------------------------------------------------------
@@ -403,10 +327,13 @@ properties:
   # ---------------------------------------------------------------------------
   # origin
   # ---------------------------------------------------------------------------
-  # Machine coordinate origin orientation.
+  # The board's work origin in XY: which corner is X0/Y0. The board is registered
+  # to this corner in the fixture (e.g. pushed into a right-angle corner stop), and
+  # the emitted G-code is written relative to it. Z0 is always the board top (see
+  # the "Z model" section), so there is deliberately no Z entry here.
   #
   origin:
-    description: Machine coordinate origin orientation.
+    description: Board work-origin corner — which side is X0 and which is Y0.
     type: object
     properties:
 
@@ -450,6 +377,72 @@ properties:
     default: "0.5 mm"
     $ref: "units.yaml#/$defs/size"
 
+  # ===========================================================================
+  # Z model — how the emitted G-code depths are produced.
+  # ===========================================================================
+  # The work Z origin is ALWAYS the top of the PCB (Z0 = board top); the G-code
+  # never carries a "what is zero" toggle. What varies by machine is only how the
+  # operator/controller establishes that zero — a per-job surface touch-off on the
+  # cheapest machines, or a computed/persisted reference on machines that home
+  # repeatably — which is a CNC-profile capability (`has_repeatable_home`), not a
+  # fixture setting. The fields below (plus `backboard_thickness` and
+  # `bed_clearance` above) are the physical stack the depth math and bed-safety
+  # checks need. Board thickness itself comes from the KiCad stackup, not here.
+
+  # ---------------------------------------------------------------------------
+  # breakthrough
+  # ---------------------------------------------------------------------------
+  # How far the tool travels past the underside of the board to guarantee a clean
+  # through-hole or cut. It is bounded by `backboard_thickness` so the tool never
+  # reaches the machine bed.
+  #
+  # Valid examples:
+  #   breakthrough: "0.5 mm"
+  #   breakthrough: "0.02 in"
+  #
+  breakthrough:
+    description: >
+      Distance the tool passes below the board's underside to fully clear a
+      through-hole or cut. Kept small; bounded by the backboard thickness so the
+      tool never reaches the machine bed.
+    default: "0.5mm"
+    $ref: "units.yaml#/$defs/size"
+
+  # ---------------------------------------------------------------------------
+  # z_retract
+  # ---------------------------------------------------------------------------
+  # The drilling R-plane: the height above the board surface the tool retracts to
+  # between holes/features. Measured from the board top (Z0).
+  #
+  # Valid examples:
+  #   z_retract: "5 mm"
+  #   z_retract: "0.2 in"
+  #
+  z_retract:
+    description: >
+      Retract height above the board surface between features (the drilling R
+      value). Measured from the board top (Z0).
+    default: "5mm"
+    $ref: "units.yaml#/$defs/size"
+
+  # ---------------------------------------------------------------------------
+  # z_safe
+  # ---------------------------------------------------------------------------
+  # The travel/clearance height for rapid moves across the work — high enough to
+  # clear clamps, pins and any fixture hardware on the table. Measured from the
+  # board top (Z0).
+  #
+  # Valid examples:
+  #   z_safe: "20 mm"
+  #   z_safe: "1 in"
+  #
+  z_safe:
+    description: >
+      Safe travel height for rapid moves across the work, clear of clamps and any
+      fixture hardware. Measured from the board top (Z0).
+    default: "20mm"
+    $ref: "units.yaml#/$defs/size"
+
 # Only the fields the app currently populates are mandatory. `locating_pins`,
 # `keep_out_zones` and `occupancy` remain optional properties: they model
 # fixture features not yet sourced by the app (Phase 3 — see the assigner plan)
@@ -462,6 +455,6 @@ required:
   - id
   - name
   - board_holding_method
-  - work_origin_reference
+  - origin
 
 additionalProperties: false

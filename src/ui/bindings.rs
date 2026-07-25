@@ -265,6 +265,22 @@ pub fn refresh_legacy_cnc() {
     crate::runtime::with_ctx_mut(|ctx| ctx.refresh_machines(&values));
 }
 
+/// Rebuilds the legacy in-memory `fixtures` projection from the AppData-owned
+/// fixture documents. AppData is the file writer for the fixture realm; this
+/// mirrors the data back into the legacy copy read by the current-job reference
+/// check and the setup screen, so a session stays coherent. Without it, a fixture
+/// added mid-session is invisible to the runtime and its machining reference reads
+/// as broken. Does not persist (AppData already wrote the files).
+pub fn refresh_legacy_fixtures() {
+    let values: Vec<Value> = with_appdata(|data| {
+        data.list(crate::data::Profile::Fixture)
+            .into_iter()
+            .map(|(_, doc)| doc.to_value())
+            .collect()
+    });
+    crate::runtime::with_ctx_mut(|ctx| ctx.refresh_fixtures(&values));
+}
+
 /// Rebuilds the legacy in-memory `process_profiles` projection from the
 /// AppData-owned machining documents, keeping the GCode generator and the active
 /// selection coherent. Does not persist (AppData already wrote the files).
@@ -295,7 +311,7 @@ const MACHINING_OPERATIONS: &[(&str, &str)] = &[
     ("drill_pth", "Drill plated holes (PTH)"),
     ("drill_npth", "Drill non-plated holes (NPTH)"),
     ("route_board", "Route board edge"),
-    ("mill_board", "Mill board edge"),
+    ("mill_board", "Mill board"),
 ];
 
 /// The machining operations as `(key, label)` pairs, for screens that lay out
@@ -941,7 +957,7 @@ fn node_display(value: &NodeValue) -> String {
     }
 }
 
-/// `max_feed_rate` → `Max feed rate`, used when a schema field has no `title`.
+/// `spindle_rpm_min` → `Spindle rpm min`, used when a schema field has no `title`.
 fn titleize(name: &str) -> String {
     let mut spaced = name.replace('_', " ");
     if let Some(first) = spaced.get_mut(0..1) {

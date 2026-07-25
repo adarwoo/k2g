@@ -67,15 +67,15 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
     vec![
         group("", &["/name", "/machine/atc_slot_count"]),
         group(
-            "Feed & spindle",
-            &[
-                "/machine/max_feed_rate",
-                "/machine/spindle_rpm_min",
-                "/machine/spindle_rpm_max",
-            ],
+            "Spindle",
+            &["/machine/spindle_rpm_min", "/machine/spindle_rpm_max"],
         ),
         group("Axis scaling", &["/machine/scaling/x", "/machine/scaling/y"]),
         group("Line numbering", &["/machine/line_numbering_increment"]),
+        group(
+            "Zeroing & tool length",
+            &["/machine/has_repeatable_home", "/machine/tool_length_measurement"],
+        ),
         group(
             "Program lifecycle",
             &["/primitives/initialise", "/primitives/conclude"],

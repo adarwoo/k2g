@@ -3,7 +3,9 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 use uuid::Uuid;
 
-use super::profiles_common::{slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog};
+use super::profiles_common::{
+    slug_file_name, suggested_profile_name, ProfileLifecycleToolbar, ProfileNameDialog,
+};
 use crate::data::Profile;
 use crate::ui::bindings::{
     add_step, clone_named, create_named, data_revision, export_yaml, import_yaml,
@@ -38,7 +40,7 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
-    let mut dialog_name = use_signal(|| "My machining profile".to_string());
+    let mut dialog_name = use_signal(|| "My machining".to_string());
     let mut selected = use_signal(|| None::<Uuid>);
 
     let profiles = use_profiles(Profile::Machining);
@@ -49,6 +51,7 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
         .iter()
         .map(|(id, name)| (id.to_string(), name.clone()))
         .collect::<Vec<_>>();
+    let existing_names = profiles.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -65,10 +68,13 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
                     selected_profile_id: current.map(|id| id.to_string()),
                     can_export: current.is_some(),
                     on_select: move |id: String| selected.set(Uuid::parse_str(&id).ok()),
-                    on_add: move |_| {
-                        dialog_is_clone.set(false);
-                        dialog_name.set(String::new());
-                        show_name_dialog.set(true);
+                    on_add: {
+                        let existing = existing_names.clone();
+                        move |_| {
+                            dialog_is_clone.set(false);
+                            dialog_name.set(suggested_profile_name("Machining", &existing));
+                            show_name_dialog.set(true);
+                        }
                     },
                     on_clone: {
                         let current_name = current_name.clone();

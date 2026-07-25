@@ -129,6 +129,101 @@ pub fn plan_drilling(
         .collect()
 }
 
+/// One round hole to mill by spiralling a router (the assigner's route-fallback: too
+/// big to drill, or a drill point that would reach the bed). Not a drill target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteTarget {
+    /// Feature id (board hole id or a synthesised index), carried onto the op.
+    pub source: String,
+    /// Hole centre in board coordinates.
+    pub at: pcb::BoardPoint,
+    /// The router performing the cut (the block's tool).
+    pub tool_id: String,
+    /// Router diameter — the block diameter and the spiral's cutter width.
+    pub tool_diameter: Length,
+    /// Finished hole diameter — the spiral sweeps out to `(hole − tool)/2`.
+    pub hole_diameter: Length,
+    /// Plunge past the top surface (`T + m`) from the assignment — a positive distance;
+    /// the op stores it as a negative machine-Z depth.
+    pub z_bottom: Length,
+}
+
+/// Plans the route-hole phase: one block per router, small→large, TSP-ordered within.
+/// Mirrors [`plan_drilling`] but emits [`OpKind::RouteHole`] ops in the `Route` phase —
+/// each expands to a spiral pocket at render time (`super::routing`). Runs after
+/// drilling so the board stays rigid while every drilled hole is made (op-planner §4).
+pub fn plan_routing(
+    targets: &[RouteTarget],
+    placement: &Placement,
+    start: Point,
+    slots: &BTreeMap<String, u8>,
+) -> Vec<ToolBlock> {
+    struct Placed {
+        entry: Point,
+        z_bottom: Length,
+        hole_diameter: Length,
+        source: String,
+    }
+    let mut by_tool: BTreeMap<String, (Length, Vec<Placed>)> = BTreeMap::new();
+    for target in targets {
+        let entry = placement.xy(&target.at);
+        let slot_entry = by_tool
+            .entry(target.tool_id.clone())
+            .or_insert_with(|| (target.tool_diameter, Vec::new()));
+        slot_entry.1.push(Placed {
+            entry,
+            z_bottom: target.z_bottom,
+            hole_diameter: target.hole_diameter,
+            source: target.source.clone(),
+        });
+    }
+
+    let mut ordered: Vec<(String, Length, Vec<Placed>)> = by_tool
+        .into_iter()
+        .map(|(tool_id, (diameter, placed))| (tool_id, diameter, placed))
+        .collect();
+    ordered.sort_by(|a, b| micron(a.1).cmp(&micron(b.1)).then_with(|| a.0.cmp(&b.0)));
+
+    ordered
+        .into_iter()
+        .map(|(tool_id, diameter, placed)| {
+            let points: Vec<Point> = placed.iter().map(|p| p.entry).collect();
+            let order = tsp_order(start, &points);
+            let travel_mm = route_length(start, &points, &order);
+
+            let ops: Vec<AtomicOp> = order
+                .iter()
+                .map(|&i| {
+                    let p = &placed[i];
+                    AtomicOp {
+                        phase: Phase::Route,
+                        kind: OpKind::RouteHole { hole_diameter: p.hole_diameter },
+                        tool_id: tool_id.clone(),
+                        entry: p.entry,
+                        exit: p.entry,
+                        z: ZProfile {
+                            // Negative machine-Z depth (board top is Z0; op-planner §6).
+                            z_bottom: Length::from_mm(-p.z_bottom.as_mm()),
+                            z_retract: placement.z_retract(),
+                            z_feed: None,
+                        },
+                        primitive: "route_hole",
+                        source: p.source.clone(),
+                    }
+                })
+                .collect();
+
+            ToolBlock {
+                slot: slots.get(&tool_id).copied(),
+                tool_id,
+                diameter,
+                ops,
+                travel_mm,
+            }
+        })
+        .collect()
+}
+
 /// A length quantised to whole micrometres (matches the assigner's precision), for
 /// deterministic diameter ordering.
 fn micron(length: Length) -> i64 {
@@ -304,5 +399,25 @@ mod tests {
         slots.insert("t".to_string(), 3u8);
         let blocks = plan_drilling(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &slots);
         assert_eq!(blocks[0].slot, Some(3));
+    }
+
+    #[test]
+    fn route_holes_land_in_the_route_phase_carrying_the_hole_diameter() {
+        let targets = vec![RouteTarget {
+            source: "h1".to_string(),
+            at: pcb::BoardPoint { x: Length::from_mm(3.0), y: Length::from_mm(4.0) },
+            tool_id: "router".to_string(),
+            tool_diameter: Length::from_mm(1.0),
+            hole_diameter: Length::from_mm(3.2),
+            z_bottom: Length::from_mm(2.1),
+        }];
+        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].diameter.as_mm(), 1.0, "block diameter is the router");
+        let op = &blocks[0].ops[0];
+        assert_eq!(op.phase, Phase::Route);
+        assert_eq!(op.kind, OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) });
+        assert_eq!(op.primitive, "route_hole");
+        assert!(op.z.z_bottom.as_mm() < 0.0, "cut depth is below the surface");
     }
 }

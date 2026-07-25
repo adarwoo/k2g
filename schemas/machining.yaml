@@ -48,7 +48,7 @@ $defs:
     type: object
     default:
       holes:
-        route_fallback: false
+        route_fallback: true
         drill_first: true
         pilot: false
         oblong: drill_ends_then_route
@@ -62,7 +62,7 @@ $defs:
       holes:
         type: object
         default:
-          route_fallback: false
+          route_fallback: true
           drill_first: true
           pilot: false
           oblong: drill_ends_then_route
@@ -73,23 +73,35 @@ $defs:
             relative: 6%
             max: 0.08mm
         properties:
-          route_fallback: { type: boolean, default: false }
+          # ON by default: an oversized hole (or one whose drill point would reach the
+          # bed) is milled with a router instead of erroring. The Tooling tab shows each
+          # routed hole, so this is transparent, not silent.
+          route_fallback: { type: boolean, default: true }
           drill_first: { type: boolean, default: true }
           pilot: { type: boolean, default: false }
-          oblong:
-            type: string
-            default: drill_ends_then_route
-            enum: [route, drill_ends_then_route, drill_chain, drill_chain_then_route]
+          # Diameter substitution tolerances applied to EVERY hole (round and
+          # oblong alike), not just the oblong strategy below. They bound how far a
+          # stock drill may differ from the requested finished size. Listed before
+          # `oblong` so they don't read as belonging to the oblong-only option.
           oversize:
+            title: Oversize allowance (all holes)
             $ref: "#/$defs/allowance"
             default:
               relative: 8%
               max: 0.10mm
           undersize:
+            title: Undersize allowance (all holes)
             $ref: "#/$defs/allowance"
             default:
               relative: 6%
               max: 0.08mm
+          # Applies ONLY to oblong (slotted) holes: how a slot longer than it is
+          # wide is produced. Round holes ignore this.
+          oblong:
+            title: Oblong hole strategy
+            type: string
+            default: drill_ends_then_route
+            enum: [route, drill_ends_then_route, drill_chain, drill_chain_then_route]
         additionalProperties: false
     required: [holes]
     additionalProperties: false
@@ -265,7 +277,7 @@ $defs:
         $ref: "#/$defs/drill_holes_common"
         default:
           holes:
-            route_fallback: false
+            route_fallback: true
             drill_first: true
             pilot: false
             oblong: drill_ends_then_route
@@ -274,7 +286,7 @@ $defs:
         $ref: "#/$defs/drill_holes_common"
         default:
           holes:
-            route_fallback: false
+            route_fallback: true
             drill_first: true
             pilot: false
             oblong: drill_ends_then_route

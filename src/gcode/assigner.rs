@@ -218,12 +218,36 @@ pub enum FaultReason {
     DepthInfeasible,
 }
 
+/// The measured detail behind a [`FaultReason::DepthInfeasible`], for the closest-fit
+/// size-matching drill that failed — so the diagnostic can name **which** half of
+/// Z-feasibility failed (reach vs. bed) and by how much, rather than "one or the
+/// other". All lengths in millimetres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthDetail {
+    /// Usable length reached the required plunge.
+    pub reach_ok: bool,
+    /// Breakthrough stayed within the below-board space.
+    pub bed_ok: bool,
+    /// The plunge the tool must reach: `board_thickness + point + margin`.
+    pub needed_plunge_mm: f64,
+    /// The tool's usable flute length, when the stock entry declares one.
+    pub flute_mm: Option<f64>,
+    /// How far the tool passes below the board underside: `point + margin`.
+    pub breakthrough_mm: f64,
+    /// The below-board space available: `backboard_thickness − bed_clearance`.
+    pub bed_space_mm: f64,
+    pub diameter_mm: f64,
+    pub point_angle_deg: f64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct HoleFault {
     pub hole_id: String,
     pub kind: DemandKind,
     pub target_um: i64,
     pub reason: FaultReason,
+    /// Present for [`FaultReason::DepthInfeasible`]: which constraint failed + numbers.
+    pub depth: Option<DepthDetail>,
     /// Closest in-stock drills, for actionable diagnostics.
     pub nearest: Vec<String>,
 }
@@ -375,23 +399,26 @@ fn is_router(tool: &Tool) -> bool {
     matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill)
 }
 
-/// Builds the candidate list for one hole. Returns the candidates plus a flag: a
-/// size-matching drill existed but every one failed Z-feasibility (so an empty list
-/// means *depth-infeasible* rather than *no size match*).
+/// Builds the candidate list for one hole. Returns the candidates plus, when the list
+/// is empty *because* a size-matching drill existed but failed Z-feasibility, the
+/// detail of the closest-fit failing drill (so the caller reports *depth-infeasible*
+/// with a specific reason rather than *no size match*).
 fn build_candidates<'a>(
     hole: &HoleDemand,
     tools: &'a [Tool],
     cfg: &AssignConfig,
     setup: &Setup,
     reuse_set: &BTreeSet<String>,
-) -> (Vec<Candidate<'a>>, bool) {
+) -> (Vec<Candidate<'a>>, Option<DepthDetail>) {
     let match_mm = hole.match_length().as_mm();
     let match_um = micron(hole.match_length());
     let lower = match_mm - cfg.undersize.effective_mm(match_mm);
     let upper = match_mm + cfg.oversize.effective_mm(match_mm);
 
     let mut candidates = Vec::new();
-    let mut size_matched_but_infeasible = false;
+    // The closest-fit size-matching drill that failed Z-feasibility, kept for the
+    // diagnostic (smallest size error wins — the tool the operator would expect).
+    let mut best_infeasible: Option<(i64, DepthDetail)> = None;
 
     for (index, tool) in tools.iter().enumerate() {
         if tool.status != ToolStatus::InStock {
@@ -404,9 +431,9 @@ fn build_candidates<'a>(
             // A drill matches when it lands in the allowance window.
             if diameter_mm >= lower - EPS_MM && diameter_mm <= upper + EPS_MM {
                 let z = z_feasibility(diameter_mm, angle, tool.flute_length.map(Length::as_mm), setup);
+                let tool_um = micron(tool.diameter);
+                let fit_um = (tool_um - match_um).abs();
                 if z.feasible {
-                    let tool_um = micron(tool.diameter);
-                    let fit_um = (tool_um - match_um).abs();
                     let score = score_candidate(tool, Strategy::Drill, fit_um, match_um, &cfg.weights, reuse_set);
                     candidates.push(Candidate {
                         tool,
@@ -418,8 +445,20 @@ fn build_candidates<'a>(
                         reach_unverified: z.reach_unverified,
                         score,
                     });
-                } else {
-                    size_matched_but_infeasible = true;
+                } else if best_infeasible.as_ref().map_or(true, |(f, _)| fit_um < *f) {
+                    best_infeasible = Some((
+                        fit_um,
+                        DepthDetail {
+                            reach_ok: z.reach_ok,
+                            bed_ok: z.bed_ok,
+                            needed_plunge_mm: z.z_bottom_mm,
+                            flute_mm: tool.flute_length.map(Length::as_mm),
+                            breakthrough_mm: z.z_bottom_mm - setup.board_thickness.as_mm(),
+                            bed_space_mm: setup.bed_clearance.as_mm(),
+                            diameter_mm,
+                            point_angle_deg: angle,
+                        },
+                    ));
                 }
             }
         }
@@ -447,7 +486,7 @@ fn build_candidates<'a>(
     }
 
     candidates.sort_by(better_first);
-    (candidates, size_matched_but_infeasible)
+    (candidates, best_infeasible.map(|(_, detail)| detail))
 }
 
 /// The closest in-stock drills to `target`, formatted for a fault diagnostic.
@@ -489,18 +528,19 @@ pub fn assign(
     let mut works: Vec<HoleWork> = Vec::with_capacity(holes.len());
     let mut faults: Vec<HoleFault> = Vec::new();
     for hole in holes {
-        let (candidates, size_matched_but_infeasible) =
+        let (candidates, depth_detail) =
             build_candidates(hole, tools, cfg, setup, &reuse_set);
         if candidates.is_empty() {
             faults.push(HoleFault {
                 hole_id: hole.id.clone(),
                 kind: hole.kind,
                 target_um: micron(hole.match_length()),
-                reason: if size_matched_but_infeasible {
+                reason: if depth_detail.is_some() {
                     FaultReason::DepthInfeasible
                 } else {
                     FaultReason::NoSizeMatch
                 },
+                depth: depth_detail,
                 nearest: nearest_drills(tools, hole.match_length()),
             });
             continue;
@@ -945,7 +985,14 @@ mod tests {
         let holes = vec![round_hole("h1", 1.0)];
         let err = assign(&holes, &[short_flute], &config(false), &rack(4), &roomy_setup()).unwrap_err();
         match err {
-            AssignError::UncoverableHoles(faults) => assert_eq!(faults[0].reason, FaultReason::DepthInfeasible),
+            AssignError::UncoverableHoles(faults) => {
+                assert_eq!(faults[0].reason, FaultReason::DepthInfeasible);
+                // The detail pins the failing half to *reach*, not the bed.
+                let detail = faults[0].depth.expect("depth detail present");
+                assert!(!detail.reach_ok, "reach is the failing constraint");
+                assert!(detail.bed_ok, "the bed is not the problem here");
+                assert_eq!(detail.flute_mm, Some(1.0));
+            }
             other => panic!("expected DepthInfeasible, got {other:?}"),
         }
     }
@@ -958,7 +1005,17 @@ mod tests {
         let tight_bed = Setup { bed_clearance: Length::from_mm(0.1), ..roomy_setup() };
         let holes = vec![round_hole("h1", 1.0)];
         let err = assign(&holes, &tools, &config(false), &rack(4), &tight_bed).unwrap_err();
-        assert!(matches!(err, AssignError::UncoverableHoles(_)));
+        match err {
+            AssignError::UncoverableHoles(faults) => {
+                assert_eq!(faults[0].reason, FaultReason::DepthInfeasible);
+                // The detail pins the failing half to the *bed*, with reach intact.
+                let detail = faults[0].depth.expect("depth detail present");
+                assert!(!detail.bed_ok, "the bed is the failing constraint");
+                assert!(detail.reach_ok, "reach is fine (ample flute)");
+                assert!(detail.breakthrough_mm > detail.bed_space_mm, "breakthrough exceeds the space");
+            }
+            other => panic!("expected UncoverableHoles, got {other:?}"),
+        }
     }
 
     #[test]

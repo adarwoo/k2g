@@ -190,6 +190,42 @@ impl AppCtx {
 
     /// Snapshot the resolved job into an immutable [`GenerationInput`] for the
     /// worker. The Coder never sees the ctx or AppData — only this snapshot.
+    /// The per-step body render context from the step's CNC profile: its operation
+    /// primitive templates (the legacy field names carry them — see the crosswalk in
+    /// `machine_profile_to_value`), the spindle range for the feed/speed clamp, and the
+    /// ATC flag (a manual machine gets an operator prompt). Empty templates when the
+    /// step has no resolvable CNC — a case the readiness gate already blocks.
+    fn build_step_render_ctx(machine: Option<&MachineProfile>) -> crate::gcode::program::StepRender {
+        use crate::gcode::feeds::SpindleRange;
+        match machine {
+            Some(m) => crate::gcode::program::StepRender {
+                drill_tpl: m.drill_next_hole.clone(),
+                change_tool_tpl: m.tool_change_command.clone(),
+                start_spindle_tpl: m.drill_cycle_start.clone(),
+                stop_spindle_tpl: m.drill_cycle_cancel.clone(),
+                rapid_move_tpl: m.drill_first_move.clone(),
+                linear_cut_tpl: m.drill_cycle_mode_series.clone(),
+                cut_arc_tpl: m.route_plunge_and_offset.clone(),
+                spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
+                is_atc: m.atc_slot_count > 0,
+            },
+            None => crate::gcode::program::StepRender {
+                drill_tpl: String::new(),
+                change_tool_tpl: String::new(),
+                start_spindle_tpl: String::new(),
+                stop_spindle_tpl: String::new(),
+                rapid_move_tpl: String::new(),
+                linear_cut_tpl: String::new(),
+                cut_arc_tpl: String::new(),
+                spindle: SpindleRange::new(
+                    units::RotationalSpeed::from_rpm(1_000.0),
+                    units::RotationalSpeed::from_rpm(24_000.0),
+                ),
+                is_atc: false,
+            },
+        }
+    }
+
     fn build_generation_input(&self) -> GenerationInput {
         let process = selected_process_profile_from_app(&self.app);
         let process_profile_name = process
@@ -218,13 +254,55 @@ impl AppCtx {
 
         let pcb_filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        // TODO: `z_safe` should come from the CNC profile (a field or custom
-        // attribute); defaulted until that source exists.
-        let z_safe = Length::from_mm(5.0);
+        // `z_safe` is the fixture's safe travel height (clear of clamps and fixture
+        // hardware) per the Z-model — the header/footer retract to it. Falls back to a
+        // conservative 5 mm only when no fixture resolves (an incomplete job, which the
+        // reference check already flags).
+        let z_safe = process
+            .and_then(|profile| {
+                self.app
+                    .fixtures
+                    .iter()
+                    .find(|fixture| fixture.id == profile.fixture_profile_id)
+            })
+            .map(|fixture| fixture.z_safe)
+            .unwrap_or(Length::from_mm(5.0));
+
+        // Body-phase inputs: the resolved drill plan, the per-step CNC render context
+        // (`step_render[i]` matches `plan.steps[i]`), and the tool→feed/speed lookup.
+        // Built here on the main thread; the worker only renders.
+        let plan = machining_plan::plan_machining(&self.app);
+        let step_render = process
+            .and_then(|profile| Uuid::parse_str(&profile.id).ok())
+            .map(|profile_id| {
+                tooling::read_steps(profile_id)
+                    .iter()
+                    .map(|raw| {
+                        let machine = raw
+                            .cnc_id
+                            .and_then(|id| self.app.machines.iter().find(|m| m.id == id.to_string()));
+                        Self::build_step_render_ctx(machine)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let tool_feeds = self
+            .app
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.id.clone(),
+                    crate::gcode::program::ToolFeed {
+                        name: tool.display_name(),
+                        feed: tool.feed_rate,
+                        speed: tool.spindle_speed,
+                    },
+                )
+            })
+            .collect();
 
         GenerationInput {
-            board: self.app.board.clone(),
-            stitched: self.stitched_board_data.clone(),
             process_profile_name,
             cnc_profile_name,
             operations,
@@ -233,6 +311,10 @@ impl AppCtx {
             pcb_filename,
             timestamp,
             z_safe,
+            plan,
+            step_render,
+            tool_feeds,
+            line_numbering_increment: machine.map(|m| m.line_numbering_increment).unwrap_or(0),
         }
     }
 

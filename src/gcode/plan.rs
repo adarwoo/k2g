@@ -53,12 +53,19 @@ pub enum Phase {
     Route,
 }
 
-/// What an atomic op physically does — the discriminant the view and labels read.
-/// The GTL primitive that renders it is [`AtomicOp::primitive`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What an atomic op physically does — the discriminant the view and body renderer
+/// read. For a [`OpKind::Drill`] the single [`AtomicOp::primitive`] renders it; a
+/// [`OpKind::RouteHole`] expands into a sequence of moves (rapid/plunge/arc), so its
+/// `primitive` is only a display label.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum OpKind {
     /// A point drill (`drill` primitive, G81). `entry == exit`.
     Drill,
+    /// A hole milled by spiralling a router from the centre outward — the assigner's
+    /// route-fallback, when no drill can make the hole (too big, or its point would
+    /// reach the bed). Carries the finished hole diameter; the router diameter comes
+    /// from the enclosing block. Expanded by the body renderer via `super::routing`.
+    RouteHole { hole_diameter: Length },
 }
 
 /// The Z parameters an op cuts at, in machine Z. `z_bottom` is the deepest cutting

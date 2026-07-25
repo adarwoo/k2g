@@ -12,7 +12,7 @@
 //! stack-up (fixture backboard + board thickness, bed-relative Z0) firms up when the
 //! fixture model gains that geometry (op-planner §6, and the plan's Phase-3 gaps).
 //! Until then the origin corner is the board's own min corner (a sane default) — the
-//! fixture-selectable corner (`work_origin_reference`) is not yet in the runtime
+//! fixture-selectable corner (the fixture `origin`) is not yet in the runtime
 //! fixture model.
 
 use pcb::{BoardBoundingBox, BoardPoint};

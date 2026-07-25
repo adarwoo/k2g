@@ -16,18 +16,21 @@ use uuid::Uuid;
 use units::Length;
 
 use crate::data::{appdata_ready, with_appdata};
-use crate::gcode::assigner::{self, AssignConfig, AssignError, Setup, Strategy, Weights};
+use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
 use crate::gcode::placement::Placement;
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
-use crate::gcode::planner::{plan_drilling, DrillTarget};
+use crate::gcode::planner::{plan_drilling, plan_routing, DrillTarget, RouteTarget};
 use crate::runtime::tooling::{
-    build_rack_spec, collect_hole_groups, pick_outline_router, read_steps, HoleGroup, StepRaw,
+    build_rack_spec, build_setup, collect_hole_groups, pick_outline_router, read_steps, HoleGroup,
+    StepRaw,
 };
 use crate::runtime::AppState;
 
-/// Provisional R-plane retract until the fixture model carries it (mm).
+/// R-plane retract used only when a step has no resolvable fixture (the fixture now
+/// carries `z_retract`); keeps the Machining view planning mid-configuration (mm).
 const DEFAULT_Z_RETRACT_MM: f64 = 2.0;
-/// Provisional safe height until the fixture model carries it (mm).
+/// Safe height used only when a step has no resolvable fixture (the fixture now
+/// carries `z_safe`); keeps the Machining view planning mid-configuration (mm).
 const DEFAULT_Z_SAFE_MM: f64 = 5.0;
 
 /// Builds the machining plan for the current context: one [`StepPlan`] per machining
@@ -88,6 +91,9 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     };
     let cnc = raw.cnc_id.and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
     let atc_slots = cnc.map(|m| m.atc_slot_count as usize).unwrap_or(0);
+    let fixture = raw
+        .fixture_id
+        .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
 
     let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
@@ -119,12 +125,8 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
         undersize: raw.drill.undersize,
         weights: Weights::default(),
     };
-    let setup = Setup {
-        board_thickness: ctx.board.as_ref().and_then(|b| b.thickness).unwrap_or(Length::from_mm(1.6)),
-        // Relaxed until the fixture models the under-board space; reach is still enforced.
-        bed_clearance: Length::from_mm(1_000.0),
-        breakthrough_margin: Length::from_mm(0.5),
-    };
+    // Shared with the Tooling tab so the two views agree on tool feasibility.
+    let setup = build_setup(ctx, raw.fixture_id);
     let rack = build_rack_spec(toolset, atc_slots, outline_router.as_deref());
 
     let assignment = match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
@@ -136,11 +138,12 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     let slots: std::collections::BTreeMap<String, u8> =
         assignment.rack.iter().map(|s| (s.tool_id.clone(), s.slot)).collect();
 
-    // Turn each round, drill-assigned hole into a point-drill target; count what is
-    // deferred (oblong slots, routed holes) for the notes.
-    let mut targets: Vec<DrillTarget> = Vec::new();
+    // Turn each round hole into a target: a point-drill when a drill was assigned, or a
+    // spiral route when the assigner fell back to a router (too big to drill, or a drill
+    // point that would reach the bed). Oblong slots are still deferred.
+    let mut drill_targets: Vec<DrillTarget> = Vec::new();
+    let mut route_targets: Vec<RouteTarget> = Vec::new();
     let mut oblong_features = 0usize;
-    let mut routed_holes = 0usize;
     for (i, hole) in holes.iter().enumerate() {
         let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
         if group.minor.is_some() {
@@ -148,47 +151,52 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
             continue;
         }
         let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else { continue };
-        if assigned.strategy != Strategy::Drill {
-            routed_holes += 1;
-            continue;
-        }
-        let Some(diameter) = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter) else {
+        let Some(tool_diameter) = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter) else {
             continue;
         };
-        targets.push(DrillTarget {
-            source: hole.id.clone().unwrap_or_else(|| format!("hole#{i}")),
-            at: hole.position.clone(),
-            tool_id: assigned.tool_id.clone(),
-            diameter,
-            z_bottom: assigned.z_bottom,
-        });
+        let source = hole.id.clone().unwrap_or_else(|| format!("hole#{i}"));
+        if assigned.strategy == Strategy::Drill {
+            drill_targets.push(DrillTarget {
+                source,
+                at: hole.position.clone(),
+                tool_id: assigned.tool_id.clone(),
+                diameter: tool_diameter,
+                z_bottom: assigned.z_bottom,
+            });
+        } else {
+            route_targets.push(RouteTarget {
+                source,
+                at: hole.position.clone(),
+                tool_id: assigned.tool_id.clone(),
+                tool_diameter,
+                hole_diameter: group.target,
+                z_bottom: assigned.z_bottom,
+            });
+        }
     }
 
-    // Place ops in machine space and order the drill phase.
+    // Place ops in machine space and order each phase: drilling first (board rigid),
+    // then the route-hole phase (op-planner §4).
     let placement = Placement::new(
         ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
         orientation,
         cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
         cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
-        Length::from_mm(DEFAULT_Z_RETRACT_MM),
-        Length::from_mm(DEFAULT_Z_SAFE_MM),
+        fixture.map(|f| f.z_retract).unwrap_or(Length::from_mm(DEFAULT_Z_RETRACT_MM)),
+        fixture.map(|f| f.z_safe).unwrap_or(Length::from_mm(DEFAULT_Z_SAFE_MM)),
     );
     let start = Point::new(Length::from_mm(0.0), Length::from_mm(0.0));
-    let blocks = plan_drilling(&targets, &placement, start, &slots);
+    let mut blocks = plan_drilling(&drill_targets, &placement, start, &slots);
+    blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
 
     // Record what this step's plan does not yet cover.
     if oblong_features > 0 {
         notes.push(format!(
-            "{oblong_features} oblong slot(s) not yet planned — the route phase awaits the stitcher rework."
-        ));
-    }
-    if routed_holes > 0 {
-        notes.push(format!(
-            "{routed_holes} hole(s) resolved to routing (see the Tooling tab) — the route phase awaits the stitcher rework."
+            "{oblong_features} oblong slot(s) not yet planned — awaits the oblong route phase."
         ));
     }
     if has_route {
-        notes.push("Board-outline routing not yet planned — the route phase awaits the stitcher rework.".into());
+        notes.push("Board-outline routing not yet planned — awaits the outline route phase.".into());
     }
     if has_locating {
         notes.push("Locating pins are not yet planned.".into());

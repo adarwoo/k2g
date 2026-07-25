@@ -146,10 +146,18 @@ mod tests {
 
     #[test]
     fn a_primitive_with_no_variables_yields_an_empty_list() {
-        assert!(variables_for("conclude").is_empty());
         assert!(variables_for("stop_spindle").is_empty());
         // Unknown primitives are empty, not a panic.
         assert!(variables_for("does_not_exist").is_empty());
+    }
+
+    #[test]
+    fn conclude_declares_the_program_layer_variables() {
+        // The footer retracts to `z_safe` (and may echo the file/timestamp), so it
+        // shares `initialise`'s program-layer scope. Generation must provide these.
+        let vars = variables_for("conclude");
+        let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["pcb_filename", "timestamp", "z_safe"]);
     }
 
     #[test]

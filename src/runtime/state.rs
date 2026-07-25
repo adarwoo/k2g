@@ -742,6 +742,28 @@ impl AppState {
         self.machines = machines;
     }
 
+    /// Rebuilds the in-memory fixture list from the `AppData`-owned fixture
+    /// documents. AppData persists that realm; this projection keeps the legacy
+    /// consumers — the current-job reference check and the setup screen — coherent
+    /// while the two layers coexist. Without it, a fixture created mid-session
+    /// (the launch-time `PERSISTENCE_STATE` snapshot is frozen) never reaches
+    /// `self.fixtures`, so a machining profile that references it is wrongly
+    /// reported as a broken fixture reference. A selection whose fixture no longer
+    /// exists is repointed. Does not itself persist (AppData already wrote the file).
+    pub fn refresh_fixtures(&mut self, values: &[Value]) {
+        let fixtures: Vec<FixtureProfile> =
+            values.iter().filter_map(fixture_profile_from_value).collect();
+
+        let ids: BTreeSet<String> = fixtures.iter().map(|f| f.id.clone()).collect();
+        if let Some(selected) = self.selected_fixture_id.clone() {
+            if !ids.contains(&selected) {
+                self.selected_fixture_id = fixtures.first().map(|f| f.id.clone());
+            }
+        }
+
+        self.fixtures = fixtures;
+    }
+
     /// Rebuilds the in-memory machining (process) profile list from the
     /// `AppData`-owned machining documents. AppData persists that realm; this
     /// projection keeps the legacy consumers — the GCode generator and the active
@@ -973,7 +995,6 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
         "schema_version": 1,
         "id": machine.id,
         "machine": {
-            "max_feed_rate": machine.max_feed_rate.to_string(),
             "spindle_rpm_min": machine.spindle_rpm_min.to_string(),
             "spindle_rpm_max": machine.spindle_rpm_max.to_string(),
             "atc_slot_count": machine.atc_slot_count,
@@ -1011,7 +1032,6 @@ fn has_path(value: &Value, path: &str) -> bool {
 fn machine_required_paths() -> &'static [&'static str] {
     &[
         "id",
-        "machine.max_feed_rate",
         "machine.spindle_rpm_min",
         "machine.spindle_rpm_max",
         "machine.atc_slot_count",
@@ -1036,7 +1056,7 @@ fn fixture_required_paths() -> &'static [&'static str] {
         "id",
         "name",
         "board_holding_method",
-        "work_origin_reference",
+        "origin",
     ]
 }
 
@@ -1096,13 +1116,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         .map(ToString::to_string)
         .unwrap_or_else(|| "Unnamed CNC profile".to_string());
 
-    let max_feed_rate = value
-        .pointer("/machine/max_feed_rate")
-        .and_then(Value::as_str)
-        .and_then(|raw| units::FeedRate::from_string(raw, Some(units::FeedRateUnit::MmPerMin)).ok())
-        .or_else(|| value.get("max_feed_rate_mm_per_min").and_then(Value::as_u64).map(|v| units::FeedRate::from_mm_per_min(v as f64)))
-        .unwrap_or_else(|| units::FeedRate::from_mm_per_min(2000.0));
-
     let spindle_rpm_min = value
         .pointer("/machine/spindle_rpm_min")
         .and_then(Value::as_str)
@@ -1141,7 +1154,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
     Some(MachineProfile {
         id,
         name,
-        max_feed_rate,
         spindle_rpm_min,
         spindle_rpm_max,
         atc_slot_count,
@@ -1255,17 +1267,23 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
 }
 
 fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
+    // Change-detection fingerprint (not the persistence writer — AppData owns the
+    // file). It must include every field generation depends on, so editing a Z value
+    // re-triggers a run; the Z fields feed the depth math and bed-safety check.
     json!({
         "schema_version": 1,
         "id": fixture.id,
         "name": fixture.name,
         "board_holding_method": fixture.backing_board,
-        "work_origin_reference": {
-            "x0": "Left",
-            "y0": "Front",
-            "z0_reference": fixture.coordinate_context,
+        "origin": {
+            "x0": "left",
+            "y0": "front",
         },
-        "backboard_thickness": "2.5mm",
+        "backboard_thickness": fixture.backboard_thickness.to_string(),
+        "bed_clearance": fixture.bed_clearance.to_string(),
+        "breakthrough": fixture.breakthrough.to_string(),
+        "z_retract": fixture.z_retract.to_string(),
+        "z_safe": fixture.z_safe.to_string(),
     })
 }
 
@@ -1292,21 +1310,34 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
     Some(FixtureProfile {
         id,
         name,
-        coordinate_context: value
-            .pointer("/work_origin_reference/z0_reference")
-            .and_then(Value::as_str)
-            .or_else(|| value.get("coordinate_context").and_then(Value::as_str))
-            .unwrap_or("Fixture-defined board origin")
-            .to_string(),
         backing_board: value
             .get("board_holding_method")
             .and_then(Value::as_str)
             .or_else(|| value.get("backing_board").and_then(Value::as_str))
             .unwrap_or("MDF spoilboard")
             .to_string(),
+        // The Z model (schemas/fixture.yaml): all measured from the board top (Z0).
+        // Each carries a schema default the datastore materialises on load, so the
+        // mm fallbacks here are only a guard against a hand-edited file.
+        backboard_thickness: size_at(value, "/backboard_thickness", 2.5),
+        bed_clearance: size_at(value, "/bed_clearance", 0.5),
+        breakthrough: size_at(value, "/breakthrough", 0.5),
+        z_retract: size_at(value, "/z_retract", 5.0),
+        z_safe: size_at(value, "/z_safe", 20.0),
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
     })
+}
+
+/// Reads a size (length) at `pointer`, falling back to `default_mm` when the field is
+/// absent or unparseable. Used for the fixture Z fields, which all carry schema
+/// defaults (so the fallback rarely fires).
+fn size_at(value: &Value, pointer: &str, default_mm: f64) -> Length {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .and_then(|raw| units::Length::from_string(raw, Some(units::LengthUnit::Mm)).ok())
+        .unwrap_or_else(|| Length::from_mm(default_mm))
 }
 
 fn process_profile_to_value(profile: &JobProfile) -> Value {

@@ -7,11 +7,13 @@
 //! reads `/steps/{i}/…` directly via [`with_appdata`], resolves the CNC/toolset, maps
 //! the board holes to the assigner's `HoleDemand`, and calls `assign()`.
 //!
-//! Scope note: outline **routing tool selection** is preliminary (a heuristic pick of
-//! an available router), and the **bed-collision** half of Z-feasibility is relaxed
-//! here — the fixture model does not yet carry the board-to-bed space, so only the
-//! *reach* check (flute length vs. required plunge) is enforced. Both firm up when the
-//! geometry pre-pass and fixture geometry land (see the plan's later phases).
+//! Bed-safety: the fixture now carries the board-to-bed geometry, so both halves of
+//! Z-feasibility are live — see [`build_setup`], shared with the Machining plan so the
+//! two views agree. A step with no resolvable fixture relaxes the bed check (reach is
+//! always enforced).
+//!
+//! Scope note: outline **routing tool selection** is still preliminary (a heuristic
+//! pick of an available router); it firms up when the geometry pre-pass lands.
 
 use uuid::Uuid;
 
@@ -23,8 +25,8 @@ use crate::data::model::tool_core::ToolKind;
 use crate::data::model::{Tool, ToolsetGenerationPolicy};
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{
-    self, Allowance, AssignConfig, AssignError, DemandKind, FaultReason, HoleDemand, OverflowPolicy,
-    RackSpec, Setup, Strategy, ToolAssignment, Weights,
+    self, Allowance, AssignConfig, AssignError, DemandKind, DepthDetail, FaultReason, HoleDemand,
+    OverflowPolicy, RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
 use crate::runtime::AppState;
 
@@ -33,6 +35,47 @@ pub struct ToolingPlan {
     pub steps: Vec<StepPlan>,
     /// A top-level note when there is nothing to plan (no profile / no board).
     pub note: Option<String>,
+    /// The cross-step rack schedule (slots × steps) driving the Rack view. `None` when
+    /// no step resolves to a rack. Built once across all resolved steps so each tool
+    /// keeps a stable slot and inter-step changes are minimised.
+    pub rack_schedule: Option<RackSchedule>,
+}
+
+/// The rack schedule for the Rack view: a matrix of physical slots (rows) × resolved
+/// steps (columns), each cell the tool loaded and whether that slot must change.
+pub struct RackSchedule {
+    /// Column headers — one per resolved step, in order.
+    pub steps: Vec<String>,
+    /// One row per physical (non-disabled) slot, in `T`-order.
+    pub slots: Vec<RackSlotSchedule>,
+}
+
+pub struct RackSlotSchedule {
+    /// Slot label, e.g. `T1`.
+    pub slot: String,
+    /// A toolset-pinned slot — the operator set it up and it never changes.
+    pub fixed: bool,
+    /// One cell per step, aligned with [`RackSchedule::steps`].
+    pub cells: Vec<RackCell>,
+}
+
+pub struct RackCell {
+    /// The tool in this slot for this step, or `None` when the slot is empty.
+    pub tool: Option<String>,
+    pub status: SlotChange,
+}
+
+/// Whether a slot must be changed before a step — the Rack view's colour code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotChange {
+    /// Toolset-pinned: present from the start, never changes.
+    Fixed,
+    /// The operator must load or swap this tool into the slot before this step.
+    Load,
+    /// Carried over from the previous step in the same slot — no action.
+    Kept,
+    /// Unused this step.
+    Empty,
 }
 
 pub struct StepPlan {
@@ -56,6 +99,9 @@ pub struct StepResolved {
     pub rack: Vec<RackRow>,
     pub requirements: Vec<RequirementRow>,
     pub warnings: Vec<String>,
+    /// Distinct tool ids the step loads, in slot order — the input the cross-step rack
+    /// scheduler needs (the display rows carry labels, not ids).
+    pub(crate) tool_ids: Vec<String>,
 }
 
 pub struct RackRow {
@@ -95,6 +141,7 @@ pub(crate) struct StepRaw {
     pub(crate) name: String,
     pub(crate) operations: Vec<String>,
     pub(crate) cnc_id: Option<Uuid>,
+    pub(crate) fixture_id: Option<Uuid>,
     pub(crate) toolset_id: Option<Uuid>,
     pub(crate) drill: DrillConfigRaw,
 }
@@ -131,31 +178,163 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
     else {
-        return ToolingPlan { steps: vec![], note: Some("Select a machining profile to plan tooling.".into()) };
+        return ToolingPlan { steps: vec![], note: Some("Select a machining profile to plan tooling.".into()), rack_schedule: None };
     };
     if ctx.board.is_none() {
-        return ToolingPlan { steps: vec![], note: Some("No board loaded — nothing to machine.".into()) };
+        return ToolingPlan { steps: vec![], note: Some("No board loaded — nothing to machine.".into()), rack_schedule: None };
     }
     if !appdata_ready() {
-        return ToolingPlan { steps: vec![], note: Some("Configuration store is not ready.".into()) };
+        return ToolingPlan { steps: vec![], note: Some("Configuration store is not ready.".into()), rack_schedule: None };
     }
 
     let raw_steps = read_steps(profile_id);
     if raw_steps.is_empty() {
-        return ToolingPlan { steps: vec![], note: Some("The machining profile has no steps.".into()) };
+        return ToolingPlan { steps: vec![], note: Some("The machining profile has no steps.".into()), rack_schedule: None };
     }
 
-    let steps = raw_steps
+    // The physical rack is the first resolvable step's toolset (jobs share one toolset
+    // in the common case; a later step on a different toolset still schedules into this
+    // layout). Collect each resolved step's tools for the cross-step schedule as we go.
+    let mut schedule_input: Vec<(String, Vec<String>)> = Vec::new();
+    let mut schedule_toolset: Option<crate::data::model::ToolsetProfile> = None;
+
+    let steps: Vec<StepPlan> = raw_steps
         .into_iter()
         .enumerate()
-        .map(|(index, raw)| StepPlan {
-            index,
-            name: raw.name.clone(),
-            outcome: plan_step(ctx, &raw),
+        .map(|(index, raw)| {
+            let outcome = plan_step(ctx, &raw);
+            if let StepOutcome::Resolved(resolved) = &outcome {
+                if !resolved.tool_ids.is_empty() {
+                    schedule_input.push((raw.name.clone(), resolved.tool_ids.clone()));
+                    if schedule_toolset.is_none() {
+                        schedule_toolset = raw
+                            .toolset_id
+                            .and_then(|id| ctx.toolsets.iter().find(|t| t.id == id.to_string()))
+                            .cloned();
+                    }
+                }
+            }
+            StepPlan { index, name: raw.name.clone(), outcome }
         })
         .collect();
 
-    ToolingPlan { steps, note: None }
+    let rack_schedule = schedule_toolset
+        .as_ref()
+        .filter(|_| !schedule_input.is_empty())
+        .map(|toolset| build_rack_schedule(ctx, toolset, &schedule_input));
+
+    ToolingPlan { steps, note: None, rack_schedule }
+}
+
+/// Builds the cross-step rack schedule: each physical slot's tool per step, with the
+/// change status. A dynamic tool keeps a **stable slot** — loaded once (`Load`) and
+/// `Kept` afterwards — so inter-step changes are minimised. Empty spare slots are used
+/// before any tool is evicted; only when every spare slot holds a still-needed tool is
+/// one reused (that reload shows as `Load`). Fixed (toolset-pinned) slots never change.
+fn build_rack_schedule(
+    ctx: &AppState,
+    toolset: &crate::data::model::ToolsetProfile,
+    steps: &[(String, Vec<String>)],
+) -> RackSchedule {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Classify the physical (non-disabled) slots into fixed (pinned tool) and spare.
+    let mut fixed: BTreeMap<u8, String> = BTreeMap::new();
+    let mut spare_slots: Vec<u8> = Vec::new();
+    for (index, slot) in toolset.slots.iter() {
+        if slot.disabled {
+            continue;
+        }
+        match (slot.locked, slot.tool_id.as_ref()) {
+            (true, Some(tool)) => {
+                fixed.insert(*index, tool.clone());
+            }
+            (true, None) => {} // reserved-but-empty: shown as a fixed empty row below
+            (false, _) => spare_slots.push(*index),
+        }
+    }
+    spare_slots.sort_unstable();
+    let fixed_tools: BTreeSet<String> = fixed.values().cloned().collect();
+
+    let snapshots = schedule_spare_slots(&spare_slots, &fixed_tools, steps);
+
+    // Build one row per physical slot (fixed first, then spare — both in index order).
+    let mut rows: Vec<RackSlotSchedule> = Vec::new();
+    let mut all_slots: Vec<(u8, bool)> =
+        fixed.keys().map(|s| (*s, true)).chain(spare_slots.iter().map(|s| (*s, false))).collect();
+    all_slots.sort_by_key(|(index, _)| *index);
+
+    for (index, is_fixed) in all_slots {
+        let cells: Vec<RackCell> = snapshots
+            .iter()
+            .map(|(state, changed)| {
+                if is_fixed {
+                    RackCell {
+                        tool: fixed.get(&index).map(|id| tool_label(ctx, id)),
+                        status: SlotChange::Fixed,
+                    }
+                } else {
+                    match state.get(&index) {
+                        Some(id) => RackCell {
+                            tool: Some(tool_label(ctx, id)),
+                            status: if changed.contains(&index) { SlotChange::Load } else { SlotChange::Kept },
+                        },
+                        None => RackCell { tool: None, status: SlotChange::Empty },
+                    }
+                }
+            })
+            .collect();
+        rows.push(RackSlotSchedule { slot: format!("T{index}"), fixed: is_fixed, cells });
+    }
+
+    RackSchedule { steps: steps.iter().map(|(name, _)| name.clone()).collect(), slots: rows }
+}
+
+/// The core cross-step spare-slot schedule (ctx-free, so it is unit-testable): for each
+/// step, the resulting spare-slot → tool-id state and the set of slots changed that
+/// step. A tool already loaded is kept in place; a new one takes an empty slot, or
+/// evicts a not-needed one. Fixed tools are excluded (they never occupy a spare slot).
+fn schedule_spare_slots(
+    spare_slots: &[u8],
+    fixed_tools: &std::collections::BTreeSet<String>,
+    steps: &[(String, Vec<String>)],
+) -> Vec<(std::collections::BTreeMap<u8, String>, std::collections::BTreeSet<u8>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut loaded: BTreeMap<u8, String> = BTreeMap::new();
+    let mut snapshots = Vec::new();
+    for (_, step_tools) in steps {
+        let dynamic: Vec<&String> = step_tools.iter().filter(|t| !fixed_tools.contains(*t)).collect();
+        let needed: BTreeSet<&String> = dynamic.iter().copied().collect();
+        let mut changed: BTreeSet<u8> = BTreeSet::new();
+        for tool in dynamic {
+            if loaded.values().any(|t| t == tool) {
+                continue; // already in the rack — kept
+            }
+            if let Some(slot) = pick_slot(spare_slots, &loaded, &needed) {
+                loaded.insert(slot, tool.clone());
+                changed.insert(slot);
+            }
+        }
+        snapshots.push((loaded.clone(), changed));
+    }
+    snapshots
+}
+
+/// Picks a spare slot for a tool that must be loaded: an empty slot first (so nothing
+/// is disturbed), else a slot whose current tool is not needed this step (safe to
+/// evict). `None` when every spare slot holds a still-needed tool (capacity overflow).
+fn pick_slot(
+    spare_slots: &[u8],
+    loaded: &std::collections::BTreeMap<u8, String>,
+    needed: &std::collections::BTreeSet<&String>,
+) -> Option<u8> {
+    if let Some(&empty) = spare_slots.iter().find(|s| !loaded.contains_key(s)) {
+        return Some(empty);
+    }
+    spare_slots
+        .iter()
+        .find(|s| loaded.get(s).map(|t| !needed.contains(t)).unwrap_or(false))
+        .copied()
 }
 
 /// Reads every step's operations, bindings and drill config from the profile document.
@@ -191,6 +370,7 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                         .unwrap_or_else(|| format!("Step {}", i + 1)),
                     operations,
                     cnc_id: node_ref(root, &format!("/steps/{i}/cnc/default")),
+                    fixture_id: node_ref(root, &format!("/steps/{i}/fixture/default")),
                     toolset_id: node_ref(root, &format!("/steps/{i}/toolset/default")),
                     drill,
                 }
@@ -217,6 +397,33 @@ fn read_allowance(root: &Node, base: &str, fallback: Allowance) -> Allowance {
     Allowance {
         relative: node_percent_fraction(root, &format!("{base}/relative")).unwrap_or(fallback.relative),
         max: node_length(root, &format!("{base}/max")).unwrap_or(fallback.max),
+    }
+}
+
+/// Builds the assigner's Z-feasibility [`Setup`] from the board + the step's fixture.
+///
+/// Shared by the Tooling tab and the Machining plan so the two **agree** on which
+/// tools are feasible (the same assignment must back both views). Board thickness
+/// comes from the KiCad stackup; the below-board space the tool tip may use is the
+/// martyr-board thickness minus the safety margin kept off the bed
+/// (`backboard_thickness − bed_clearance`), and the breakthrough margin is the
+/// fixture's `breakthrough`. With no fixture resolved the bed check is relaxed (so a
+/// mid-configuration view still plans); the reach check is always enforced.
+pub(crate) fn build_setup(ctx: &AppState, fixture_id: Option<Uuid>) -> Setup {
+    let fixture =
+        fixture_id.and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
+    Setup {
+        board_thickness: ctx
+            .board
+            .as_ref()
+            .and_then(|b| b.thickness)
+            .unwrap_or(Length::from_mm(1.6)),
+        bed_clearance: fixture
+            .map(|f| {
+                Length::from_mm((f.backboard_thickness.as_mm() - f.bed_clearance.as_mm()).max(0.0))
+            })
+            .unwrap_or(Length::from_mm(1_000.0)),
+        breakthrough_margin: fixture.map(|f| f.breakthrough).unwrap_or(Length::from_mm(0.5)),
     }
 }
 
@@ -279,13 +486,7 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
         undersize: raw.drill.undersize,
         weights: Weights::default(),
     };
-    let setup = Setup {
-        board_thickness: ctx.board.as_ref().and_then(|b| b.thickness).unwrap_or(Length::from_mm(1.6)),
-        // Bed-collision is relaxed until the fixture models the under-board space; the
-        // reach check (below) still enforces that a bit can plunge through the board.
-        bed_clearance: Length::from_mm(1_000.0),
-        breakthrough_margin: Length::from_mm(0.5),
-    };
+    let setup = build_setup(ctx, raw.fixture_id);
     let rack = build_rack_spec(toolset, atc_slots, outline_router.as_deref());
 
     match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
@@ -334,11 +535,22 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                 warnings.push(diagnostic.message.clone());
             }
 
+            // Distinct tools this step loads (a tool fixed in several slots appears
+            // once), in slot order — for the cross-step rack schedule.
+            let mut seen = std::collections::BTreeSet::new();
+            let tool_ids: Vec<String> = assignment
+                .rack
+                .iter()
+                .map(|s| s.tool_id.clone())
+                .filter(|id| seen.insert(id.clone()))
+                .collect();
+
             StepOutcome::Resolved(StepResolved {
                 summary: machine_summary(rack_rows.len(), atc_slots),
                 rack: rack_rows,
                 requirements,
                 warnings,
+                tool_ids,
             })
         }
         Err(error) => StepOutcome::Failed(format_error(ctx, &error)),
@@ -632,6 +844,29 @@ fn map_policy(policy: ToolsetGenerationPolicy) -> OverflowPolicy {
     }
 }
 
+/// A specific, numeric reason for a depth-infeasible drill — names *which* half of
+/// Z-feasibility failed so the operator knows what to change (a longer bit vs. more
+/// below-board space). Lengths are in mm (the CAM working unit).
+fn depth_reason(d: DepthDetail) -> String {
+    if !d.bed_ok {
+        // Bed safety: the point + breakthrough would drive past the usable space.
+        format!(
+            "would reach the machine bed — a \u{2300}{:.2}mm {:.0}\u{00b0} drill breaks through {:.2}mm below the board but only {:.2}mm of below-board space is available (raise the backboard thickness, lower the bed clearance, or route it)",
+            d.diameter_mm, d.point_angle_deg, d.breakthrough_mm, d.bed_space_mm
+        )
+    } else {
+        // Reach: the flute cannot plunge deep enough to finish the hole.
+        let flute = d
+            .flute_mm
+            .map(|f| format!("{f:.2}mm"))
+            .unwrap_or_else(|| "unset".to_string());
+        format!(
+            "the drill is too short — a \u{2300}{:.2}mm bit needs {:.2}mm of reach to break through but its flute is only {flute} (use a longer bit or route it)",
+            d.diameter_mm, d.needed_plunge_mm
+        )
+    }
+}
+
 /// Formats an assigner error into displayable diagnostic lines.
 fn format_error(ctx: &AppState, error: &AssignError) -> Vec<String> {
     match error {
@@ -645,8 +880,11 @@ fn format_error(ctx: &AppState, error: &AssignError) -> Vec<String> {
                     DemandKind::CornerRelief => "Corner-relief",
                 };
                 let reason = match fault.reason {
-                    FaultReason::NoSizeMatch => "no in-stock drill matches within the allowance and routing is unavailable",
-                    FaultReason::DepthInfeasible => "the matching drill is too short to reach through (or would hit the bed)",
+                    FaultReason::NoSizeMatch => "no in-stock drill matches within the allowance and routing is unavailable".to_string(),
+                    FaultReason::DepthInfeasible => fault
+                        .depth
+                        .map(depth_reason)
+                        .unwrap_or_else(|| "the matching drill is too short to reach through, or would hit the bed".to_string()),
                 };
                 let nearest = if fault.nearest.is_empty() {
                     String::new()
@@ -777,6 +1015,45 @@ mod tests {
         assert_eq!(g08.count, 2);
         assert!(g08.minor.is_none());
         assert_eq!(g08.kind, DemandKind::Pth);
+    }
+
+    #[test]
+    fn cross_step_schedule_keeps_reused_tools_in_the_same_slot() {
+        use std::collections::BTreeSet;
+        // Spare slots T2/T3/T4; a tool "fix" is pinned (fixed) elsewhere.
+        let fixed: BTreeSet<String> = ["fix".to_string()].into_iter().collect();
+        let steps = vec![
+            ("s1".to_string(), vec!["fix".into(), "A".into(), "B".into()]),
+            ("s2".to_string(), vec!["fix".into(), "B".into(), "C".into()]),
+        ];
+        let snaps = schedule_spare_slots(&[2, 3, 4], &fixed, &steps);
+
+        // Step 1 loads A→T2 and B→T3 (both changed).
+        let (state1, changed1) = &snaps[0];
+        assert_eq!(state1.get(&2), Some(&"A".to_string()));
+        assert_eq!(state1.get(&3), Some(&"B".to_string()));
+        assert_eq!(changed1, &BTreeSet::from([2, 3]));
+
+        // Step 2: B keeps T3 (the optimisation), C takes the empty T4; A idles in T2.
+        let (state2, changed2) = &snaps[1];
+        assert_eq!(state2.get(&3), Some(&"B".to_string()), "B stays put across steps");
+        assert_eq!(state2.get(&4), Some(&"C".to_string()));
+        assert_eq!(state2.get(&2), Some(&"A".to_string()), "idle tool is left loaded");
+        assert_eq!(changed2, &BTreeSet::from([4]), "only the new tool's slot changes");
+    }
+
+    #[test]
+    fn overflow_reuses_a_slot_by_evicting_a_tool_not_needed_this_step() {
+        use std::collections::BTreeSet;
+        // Only one spare slot: step 2's tool must evict step 1's (no longer needed).
+        let snaps = schedule_spare_slots(
+            &[1],
+            &BTreeSet::new(),
+            &[("s1".into(), vec!["A".into()]), ("s2".into(), vec!["B".into()])],
+        );
+        assert_eq!(snaps[0].0.get(&1), Some(&"A".to_string()));
+        assert_eq!(snaps[1].0.get(&1), Some(&"B".to_string()), "B evicts the idle A");
+        assert!(snaps[1].1.contains(&1), "the reload counts as a change");
     }
 
     #[test]

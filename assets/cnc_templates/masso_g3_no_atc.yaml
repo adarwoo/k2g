@@ -9,7 +9,6 @@
 name: "Masso G3 - Manual Tool Change"
 
 machine:
-  max_feed_rate: "2500mm/min"
   spindle_rpm_min: "5000rpm"
   spindle_rpm_max: "24000rpm"
   atc_slot_count: 0

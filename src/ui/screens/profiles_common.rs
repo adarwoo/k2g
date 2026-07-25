@@ -15,6 +15,28 @@ pub fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> Stri
     lines.join("\n")
 }
 
+/// The default name to suggest when adding a new profile: `My <type>`, or the next
+/// free `My <type> N` when that base is taken (e.g. `My fixture`, then `My fixture 2`).
+///
+/// A profile whose required `name` is left blank is unusable and blocks generation, so
+/// the add dialog is pre-filled with this instead of an empty field. `existing` is the
+/// current profile names of that kind; matching is on the trimmed name.
+pub fn suggested_profile_name(type_label: &str, existing: &[String]) -> String {
+    let base = format!("My {}", type_label.to_lowercase());
+    let taken = |candidate: &str| existing.iter().any(|name| name.trim() == candidate);
+    if !taken(&base) {
+        return base;
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base} {n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 pub fn slug_file_name(value: &str, fallback: &str) -> String {
     let mut out = String::new();
     let mut last_dash = false;

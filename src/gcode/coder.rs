@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gtl::{Gtl, GtlError, Scope};
-use units::{Length, UserUnitSystem};
+use units::{FeedRate, Length, RotationalSpeed, UserUnitSystem};
 
 use crate::gcode::primitive_vars::{PrimitiveVar, VarType};
 
@@ -58,6 +58,21 @@ impl Coder {
         let mode = unit_system.clone();
         gtl.engine_mut().register_fn("fmt", move |length: Length| {
             units::machine::number_length(length, mode.get())
+        });
+
+        // Feed rates and spindle speeds format like lengths: a bare number in the
+        // active machine system (feed converts mm/min↔in/min; rpm is system-invariant).
+        // The body phase (drilling, routing) pushes these into `{z_feedrate}`/`{rpm}`.
+        gtl.engine_mut().register_type::<FeedRate>();
+        let mode = unit_system.clone();
+        gtl.engine_mut().register_fn("fmt", move |feed: FeedRate| {
+            units::machine::number_feed(feed, mode.get())
+        });
+
+        gtl.engine_mut().register_type::<RotationalSpeed>();
+        let mode = unit_system.clone();
+        gtl.engine_mut().register_fn("fmt", move |rpm: RotationalSpeed| {
+            units::machine::number_speed(rpm, mode.get())
         });
 
         Self { gtl }

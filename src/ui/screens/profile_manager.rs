@@ -12,7 +12,9 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 use uuid::Uuid;
 
-use super::profiles_common::{slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog};
+use super::profiles_common::{
+    slug_file_name, suggested_profile_name, ProfileLifecycleToolbar, ProfileNameDialog,
+};
 use crate::data::Profile;
 use crate::ui::bindings::{
     clone_named, create_named, create_named_from_template, export_yaml, import_yaml,
@@ -62,7 +64,7 @@ pub fn ProfileManager(
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
-    let mut dialog_name = use_signal(|| format!("My {} profile", type_label.to_lowercase()));
+    let mut dialog_name = use_signal(|| format!("My {}", type_label.to_lowercase()));
     let default_template = templates.first().map(|(k, _)| k.clone()).unwrap_or_default();
     let mut selected_template = use_signal(|| default_template);
     let mut selected = use_signal(|| None::<Uuid>);
@@ -76,6 +78,7 @@ pub fn ProfileManager(
         .iter()
         .map(|(id, name)| (id.to_string(), name.clone()))
         .collect::<Vec<_>>();
+    let existing_names = profiles.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
 
     rsx! {
         div { class: "screen single stock-shell",
@@ -92,10 +95,14 @@ pub fn ProfileManager(
                     selected_profile_id: current.map(|id| id.to_string()),
                     can_export: current.is_some(),
                     on_select: move |id: String| selected.set(Uuid::parse_str(&id).ok()),
-                    on_add: move |_| {
-                        dialog_is_clone.set(false);
-                        dialog_name.set(String::new());
-                        show_name_dialog.set(true);
+                    on_add: {
+                        let type_label = type_label.clone();
+                        let existing = existing_names.clone();
+                        move |_| {
+                            dialog_is_clone.set(false);
+                            dialog_name.set(suggested_profile_name(&type_label, &existing));
+                            show_name_dialog.set(true);
+                        }
                     },
                     on_clone: {
                         let current_name = current_name.clone();

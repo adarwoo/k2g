@@ -14,7 +14,6 @@
 name: "Bantam Tools Desktop PCB Milling Machine"
 
 machine:
-  max_feed_rate: "1000mm/min"
   spindle_rpm_min: "10000rpm"
   spindle_rpm_max: "28000rpm"
   atc_slot_count: 0

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use serde_json::Value;
-use units::{FeedRate, Length, RotationalSpeed};
+use units::{Length, RotationalSpeed};
 
 use super::job::{CutDepthStrategy, ProductionOperation, Side};
 use super::state::RackSlot;
@@ -11,7 +11,6 @@ use super::state::RackSlot;
 pub struct MachineProfile {
     pub id: String,
     pub name: String,
-    pub max_feed_rate: FeedRate,
     pub spindle_rpm_min: RotationalSpeed,
     pub spindle_rpm_max: RotationalSpeed,
     pub atc_slot_count: u8,
@@ -39,7 +38,6 @@ impl Default for MachineProfile {
         Self {
             id: String::new(),
             name: String::new(),
-            max_feed_rate: FeedRate::from_mm_per_min(0.0),
             spindle_rpm_min: RotationalSpeed::from_rpm(0.0),
             spindle_rpm_max: RotationalSpeed::from_rpm(0.0),
             atc_slot_count: 0,
@@ -69,8 +67,19 @@ impl Default for MachineProfile {
 pub struct FixtureProfile {
     pub id: String,
     pub name: String,
-    pub coordinate_context: String,
     pub backing_board: String,
+    /// Thickness of the martyr/backing board under the PCB (`backboard_thickness`).
+    pub backboard_thickness: Length,
+    /// Minimum tip-to-bed clearance kept below the board (`bed_clearance`) — the
+    /// Z-feasibility bed-safety limit.
+    pub bed_clearance: Length,
+    /// How far the tool passes below the board underside to fully clear a through
+    /// feature (`breakthrough`), bounded by the backing board.
+    pub breakthrough: Length,
+    /// R-plane retract above the board top between features (`z_retract`).
+    pub z_retract: Length,
+    /// Safe travel height for rapids, clear of clamps and fixture hardware (`z_safe`).
+    pub z_safe: Length,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,
 }

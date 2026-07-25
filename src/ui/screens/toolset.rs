@@ -3,7 +3,9 @@ use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 use uuid::Uuid;
 
-use super::profiles_common::{slug_file_name, ProfileLifecycleToolbar, ProfileNameDialog};
+use super::profiles_common::{
+    slug_file_name, suggested_profile_name, ProfileLifecycleToolbar, ProfileNameDialog,
+};
 use crate::data::Profile;
 use crate::ui::bindings::{
     clone_named, create_named, data_revision, export_yaml, import_yaml, refresh_legacy_toolsets,
@@ -31,7 +33,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
-    let mut dialog_name = use_signal(|| "My toolset profile".to_string());
+    let mut dialog_name = use_signal(|| "My toolset".to_string());
     let mut selected = use_signal(|| None::<Uuid>);
 
     let profiles = use_profiles(Profile::Toolset);
@@ -42,6 +44,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
         .iter()
         .map(|(id, name)| (id.to_string(), name.clone()))
         .collect::<Vec<_>>();
+    let existing_names = profiles.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
 
     // In-stock tools for the rack picker (stock is not on the datastore yet, so
     // the options come from the legacy snapshot).
@@ -68,10 +71,13 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                     selected_profile_id: current.map(|id| id.to_string()),
                     can_export: current.is_some(),
                     on_select: move |id: String| selected.set(Uuid::parse_str(&id).ok()),
-                    on_add: move |_| {
-                        dialog_is_clone.set(false);
-                        dialog_name.set(String::new());
-                        show_name_dialog.set(true);
+                    on_add: {
+                        let existing = existing_names.clone();
+                        move |_| {
+                            dialog_is_clone.set(false);
+                            dialog_name.set(suggested_profile_name("Toolset", &existing));
+                            show_name_dialog.set(true);
+                        }
                     },
                     on_clone: {
                         let current_name = current_name.clone();

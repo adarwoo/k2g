@@ -13,8 +13,6 @@
 /// the OperationPlanner + Coder land; today it feeds the placeholder run.
 #[derive(Clone)]
 pub struct GenerationInput {
-    pub board: Option<BoardSnapshot>,
-    pub stitched: Option<StitchResult>,
     pub process_profile_name: String,
     pub cnc_profile_name: String,
     pub operations: Vec<String>,
@@ -25,6 +23,15 @@ pub struct GenerationInput {
     pub pcb_filename: String,
     pub timestamp: String,
     pub z_safe: Length,
+    // Body phase: the resolved drill plan (one entry per machining step) plus the
+    // per-step render context and the tool→feed/speed lookup, built on the main thread
+    // (the worker has no ctx access). `step_render[i]` matches `plan.steps[i]`.
+    pub plan: crate::gcode::plan::MachiningPlan,
+    pub step_render: Vec<crate::gcode::program::StepRender>,
+    pub tool_feeds: std::collections::BTreeMap<String, crate::gcode::program::ToolFeed>,
+    /// The CNC's `N`-number step (0 disables line numbering). Applied once to the
+    /// assembled program.
+    pub line_numbering_increment: u16,
 }
 
 /// A successful run's output, published atomically into `AppState`.
@@ -163,35 +170,73 @@ fn run_generation(
         return Err(GenerationAbort::Cancelled);
     }
 
+    // The conclude footer is a program-layer primitive like `initialise`: it sees
+    // the same values (a footer typically retracts to `z_safe`, and may echo the
+    // source file / timestamp). Its scope must carry them or a `{z_safe}` retract
+    // fails with "Variable not found". A fresh scope is used, but the Coder's unit
+    // mode persists on the engine from `initialise`, so lengths still format right.
+    // Phase 2 — the machining body: walk each step's drill plan through the Coder
+    // (change_tool → start_spindle → drill×N → stop_spindle, per operation-planner
+    // §7). The same `coder` renders it, so the modal unit state set in `initialise`
+    // carries through. A tool missing feed/speed fails the run with a named message.
+    // One program per step is the eventual model (§9.2); until the output model
+    // carries multiple programs, the steps' bodies are concatenated in order.
+    let mut body_sections: Vec<String> = Vec::new();
+    for (index, step) in input.plan.steps.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(GenerationAbort::Cancelled);
+        }
+        let Some(render) = input.step_render.get(index) else { continue };
+        let body =
+            crate::gcode::program::render_step_body(&coder, step, render, &input.tool_feeds)
+                .map_err(|err| GenerationAbort::Failed(err.message()))?;
+        if !body.trim().is_empty() {
+            body_sections.push(body);
+        }
+    }
+
     let mut footer_scope = gtl::Scope::new();
+    footer_scope.push("pcb_filename", input.pcb_filename.clone());
+    footer_scope.push("timestamp", input.timestamp.clone());
+    footer_scope.push("z_safe", input.z_safe);
     let footer = coder
         .render("conclude", &input.conclude_template, &mut footer_scope)
         .map_err(|err| GenerationAbort::Failed(format!("conclude: {err}")))?;
 
-    // Assemble the program from its ordered sections. The machining body (tool
-    // changes, drilling, routing) is appended between the preamble and postamble
-    // as those phases land; today the body is empty, so the program is the CNC's
-    // real `initialise` followed by its `conclude` — no placeholder. Sections are
-    // joined with a single newline (trailing newlines trimmed) so appending a body
-    // section later never introduces stray blank lines.
+    // Assemble the program: preamble, the machining body, postamble. Sections are
+    // joined with a single newline (trailing newlines trimmed) so an empty or
+    // multi-line body never introduces stray blank lines.
     let mut sections: Vec<String> = vec![header];
-    // (body sections are pushed here in later phases)
+    sections.extend(body_sections);
     sections.push(footer);
     let gcode = sections
         .iter()
         .map(|section| section.trim_end_matches('\n'))
+        .filter(|section| !section.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
 
-    // The board/stitched inputs are the substrate the drilling/routing phases will
-    // consume; note them in the log summary so the header run is informative while
-    // the body is still pending (this is the log, not the program — the program
-    // itself carries no placeholder).
-    let hole_count = input.board.as_ref().map(|board| board.holes.len()).unwrap_or(0);
-    let contour_count = input.stitched.as_ref().map(|stitched| stitched.contours.len()).unwrap_or(0);
-    let operations = input.operations.join(", ");
+    // Line numbering is a whole-program pass over the assembled sections (the CNC's
+    // `N`-number step), applied last so header, body and footer share one sequence.
+    let gcode = crate::gcode::program::number_lines(&gcode, input.line_numbering_increment);
+
+    // Summarise what the body actually machined, plus what the plan deferred (oblong
+    // slots, routing, locating pins — the notes the Machining view carries).
+    let drilled = input.plan.total_ops();
+    let blocks: usize = input.plan.steps.iter().map(|s| s.blocks.len()).sum();
+    let deferred: usize = input.plan.steps.iter().map(|s| s.notes.len()).sum();
+    let deferred_note = if deferred > 0 {
+        format!(" · {deferred} item(s) deferred — see the Machining view")
+    } else {
+        String::new()
+    };
+    let multi_step = if input.plan.steps.len() > 1 {
+        format!(" · {} steps concatenated (per-step programs pending)", input.plan.steps.len())
+    } else {
+        String::new()
+    };
     let summary = format!(
-        "Program for '{}' ({}): {} lines · body pending [{operations}] ({hole_count} holes, {contour_count} contours)",
+        "Program for '{}' ({}): {} lines · {drilled} hole(s) in {blocks} tool block(s){deferred_note}{multi_step}",
         input.process_profile_name,
         input.cnc_profile_name,
         gcode.lines().count(),
@@ -252,16 +297,18 @@ mod tests {
 
     fn sample_input() -> GenerationInput {
         GenerationInput {
-            board: None,
-            stitched: None,
             process_profile_name: "Proto".to_string(),
             cnc_profile_name: "Genmitsu".to_string(),
             operations: vec!["Drill PTH".to_string(), "Route outline".to_string()],
-            initialise_template: "`(k2g {pcb_filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}".to_string(),
-            conclude_template: "`(end of file)".to_string(),
+            initialise_template: crate::gcode::program::sample_initialise_tpl(),
+            conclude_template: crate::gcode::program::sample_conclude_tpl(),
             pcb_filename: "demo.kicad_pcb".to_string(),
             timestamp: "2026-01-01 00:00:00".to_string(),
             z_safe: units::Length::from_mm(5.0),
+            plan: crate::gcode::plan::MachiningPlan::default(),
+            step_render: Vec::new(),
+            tool_feeds: std::collections::BTreeMap::new(),
+            line_numbering_increment: 0,
         }
     }
 
@@ -279,6 +326,92 @@ mod tests {
         let header_pos = a.gcode.find("G0 Z5").expect("initialise rendered");
         let footer_pos = a.gcode.find("(end of file)").expect("conclude rendered");
         assert!(header_pos < footer_pos, "initialise precedes conclude");
+    }
+
+    #[test]
+    fn a_drill_plan_renders_a_full_program_body_between_header_and_footer() {
+        use crate::gcode::plan::{
+            AtomicOp, MachiningPlan, OpKind, Phase, Point, StepPlan, ToolBlock, ZProfile,
+        };
+        use crate::gcode::program::{sample_step_render, ToolFeed};
+        use units::{FeedRate, RotationalSpeed};
+
+        let op = AtomicOp {
+            phase: Phase::Drill,
+            kind: OpKind::Drill,
+            tool_id: "t1".to_string(),
+            entry: Point::new(units::Length::from_mm(3.0), units::Length::from_mm(4.0)),
+            exit: Point::new(units::Length::from_mm(3.0), units::Length::from_mm(4.0)),
+            z: ZProfile {
+                z_bottom: units::Length::from_mm(-2.4),
+                z_retract: units::Length::from_mm(5.0),
+                z_feed: None,
+            },
+            primitive: "drill",
+            source: "h1".to_string(),
+        };
+        let plan = MachiningPlan {
+            steps: vec![StepPlan {
+                index: 0,
+                name: "Step 1".to_string(),
+                blocks: vec![ToolBlock {
+                    tool_id: "t1".to_string(),
+                    slot: Some(1),
+                    diameter: units::Length::from_mm(1.0),
+                    ops: vec![op],
+                    travel_mm: 0.0,
+                }],
+                notes: vec![],
+            }],
+            note: None,
+        };
+        // Templates come from the shared test fixture, not hand-written GCode here —
+        // production sources them from the CNC profile (build_step_render_ctx).
+        let step_render = vec![sample_step_render(true)];
+        let mut tool_feeds = std::collections::BTreeMap::new();
+        tool_feeds.insert(
+            "t1".to_string(),
+            ToolFeed {
+                name: "1mm drill".to_string(),
+                feed: Some(FeedRate::from_mm_per_min(600.0)),
+                speed: Some(RotationalSpeed::from_rpm(12_000.0)),
+            },
+        );
+
+        let input = GenerationInput {
+            plan,
+            step_render,
+            tool_feeds,
+            ..sample_input()
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = run_generation(&input, &cancel).ok().unwrap();
+        let g = &out.gcode;
+
+        // header (G21) → tool change → drill cycle → spindle stop → footer, in order.
+        let header = g.find("G21").expect("header rendered");
+        let change = g.find("T1 M06").expect("tool change emitted");
+        let drill = g.find("G81 X3 Y4 Z-2.4 R5 F600").expect("drill cycle with negative depth + feed");
+        let stop = g.find("M05").expect("spindle stopped");
+        let footer = g.find("(end of file)").expect("footer rendered");
+        assert!(
+            header < change && change < drill && drill < stop && stop < footer,
+            "sections out of order:\n{g}"
+        );
+        assert!(out.summary.contains("1 hole(s) in 1 tool block(s)"), "summary: {}", out.summary);
+    }
+
+    #[test]
+    fn line_numbers_are_applied_to_the_assembled_program_by_the_cnc_increment() {
+        let input = GenerationInput { line_numbering_increment: 10, ..sample_input() };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let out = run_generation(&input, &cancel).ok().unwrap();
+        let lines: Vec<&str> = out.gcode.lines().collect();
+        assert!(lines[0].starts_with("N10 "), "first line numbered: {:?}", lines[0]);
+        assert!(lines[1].starts_with("N20 "), "second steps by the increment: {:?}", lines[1]);
+        assert!(!lines.iter().any(|l| l.trim().is_empty()), "no blank lines remain");
+        // The header content is intact behind the number.
+        assert!(out.gcode.contains("G21"), "modal word still present:\n{}", out.gcode);
     }
 
     #[test]

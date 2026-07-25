@@ -105,7 +105,7 @@ impl ResolvedStore {
         Some(result)
     }
 
-    /// Convenience edit: replaces the value at `pointer` (e.g. `/machine/max_feed_rate`)
+    /// Convenience edit: replaces the value at `pointer` (e.g. `/machine/spindle_rpm_min`)
     /// and schedules the write. Returns `Some(true)` if the field existed,
     /// `Some(false)` if the pointer did not resolve, `None` if `source` is unknown.
     pub fn set_value(

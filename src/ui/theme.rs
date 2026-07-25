@@ -1332,6 +1332,119 @@ body {
     text-align: right;
 }
 
+/* --- Job Rack schedule: slots (rows) × steps (columns) matrix -------------- */
+.rack-view {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.rack-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    font-size: 12px;
+    color: var(--text-subtle);
+}
+
+.rack-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.rack-swatch {
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    display: inline-block;
+}
+
+.rack-matrix {
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.rack-matrix th,
+.rack-matrix td {
+    padding: 7px 11px;
+    border: 1px solid var(--border);
+    text-align: left;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.rack-matrix thead th {
+    font-size: 11px;
+    color: var(--text-subtle);
+    background: var(--bg-subtle);
+}
+
+.rack-matrix .rack-slot-col {
+    width: 4.5rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    background: var(--bg-subtle);
+    position: sticky;
+    left: 0;
+}
+
+.rack-step-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.rack-step-title {
+    color: var(--text);
+    font-weight: 600;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.rack-step-changes {
+    font-size: 10px;
+    color: var(--text-subtle);
+}
+
+.rack-step-changes.has-changes {
+    color: var(--warn);
+    font-weight: 700;
+}
+
+.rack-cell {
+    font-variant-numeric: tabular-nums;
+}
+
+.rack-pin {
+    opacity: 0.75;
+}
+
+.rack-dash {
+    color: var(--text-subtle);
+}
+
+/* The colour code — cell backgrounds are shared with the legend swatches. */
+.rack-fixed {
+    background: color-mix(in srgb, var(--text-subtle) 15%, transparent);
+    color: var(--text-subtle);
+}
+
+.rack-kept {
+    background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+
+.rack-load {
+    background: color-mix(in srgb, var(--warn) 26%, transparent);
+    box-shadow: inset 3px 0 0 var(--warn);
+    font-weight: 700;
+}
+
+.rack-empty {
+    background: transparent;
+}
+
 /* One line per tool within a requirement cell (an oblong/slot may list two). */
 .tooling-tool-line {
     white-space: nowrap;
