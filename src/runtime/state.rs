@@ -54,6 +54,9 @@ impl AppState {
             rack_slots: BTreeMap::new(),
             board: boot.board_snapshot.clone(),
             kicad_status: boot.kicad_status.clone(),
+            gcode_save_directory: load_persisted_gcode_save_directory(),
+            job_view_pinned: load_persisted_flag("job_view_pinned"),
+            job_pin_width: load_persisted_job_pin_width(),
         };
 
         state.hydrate_from_persistence();
@@ -261,6 +264,9 @@ impl AppState {
             "selected_cnc_profile_id": self.selected_machine_id,
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
+            "gcode_save_directory": self.gcode_save_directory,
+            "job_view_pinned": self.job_view_pinned,
+            "job_pin_width": self.job_pin_width,
         })
     }
 
@@ -351,6 +357,61 @@ impl AppState {
             self.rack_slots.clear();
         }
         self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Where a G-code Save dialog should open.
+    ///
+    /// The remembered directory wins, but only while it still exists — a folder that
+    /// has since been deleted, renamed, or lived on a drive that is no longer mounted
+    /// would otherwise open the dialog somewhere useless. Anything else (including the
+    /// very first save) falls back to the host's download folder, which is where a
+    /// desktop user expects a generated file to land.
+    pub fn gcode_save_directory_or_default(&self) -> std::path::PathBuf {
+        resolve_save_directory(self.gcode_save_directory.as_deref())
+    }
+
+    /// Toggles the docked Job view and persists the choice.
+    pub fn toggle_job_view_pinned(&mut self) {
+        self.job_view_pinned = !self.job_view_pinned;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records the docked column's width after a split-handle drag. Called on release
+    /// rather than on every mouse move, so a drag is one settings write, not hundreds.
+    pub fn set_job_pin_width(&mut self, width: i64) {
+        let width = width.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH);
+        if self.job_pin_width == width {
+            return;
+        }
+        self.job_pin_width = width;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records the directory a save wrote to and mirrors it to `global.setting.yaml`.
+    /// A no-op when the directory is unchanged, so re-saving the same file does not
+    /// churn the settings write.
+    pub fn remember_gcode_save_directory(&mut self, directory: &std::path::Path) {
+        let directory = directory.to_string_lossy().into_owned();
+        if self.gcode_save_directory.as_deref() == Some(directory.as_str()) {
+            return;
+        }
+        self.gcode_save_directory = Some(directory);
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// The file name a G-code Save should offer: the board's name (KiCad's file stem,
+    /// so `panel.kicad_pcb` becomes `panel`) plus the program extension. Falls back to
+    /// a generic stem when no board is loaded, so the dialog is never blank.
+    pub fn gcode_default_file_name(&self) -> String {
+        let stem = self
+            .board
+            .as_ref()
+            .map(|board| board.name.trim())
+            .filter(|name| !name.is_empty())
+            .map(sanitize_file_stem)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "program".to_string());
+        format!("{stem}.{GCODE_FILE_EXTENSION}")
     }
 
     pub fn select_fixture_profile_by_id(&mut self, id: Option<String>) {
@@ -1895,6 +1956,66 @@ fn load_persisted_unit_system() -> UserUnitSystem {
     UserUnitSystem::from_settings_str(units_value)
 }
 
+/// Picks the directory a Save dialog opens in: the remembered one while it still
+/// exists, else the host default. Split out from [`AppState`] so the "destination has
+/// gone away" path is testable without building a whole app state.
+fn resolve_save_directory(remembered: Option<&str>) -> std::path::PathBuf {
+    remembered
+        .filter(|dir| !dir.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|dir| dir.is_dir())
+        .unwrap_or_else(host_default_save_directory)
+}
+
+/// The host's default place for a user-generated file. `dirs` resolves this properly
+/// per platform — Windows reads the `Downloads` known folder from the shell rather
+/// than assuming `%USERPROFILE%\Downloads` (it is relocatable), macOS gives
+/// `~/Downloads`, and Linux honours `XDG_DOWNLOAD_DIR`. Falls back to the home
+/// directory, then the working directory, so this always yields *somewhere*.
+fn host_default_save_directory() -> std::path::PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Strips characters Windows forbids in a file name (and that the other platforms are
+/// merely unhappy about), so a board named `panel v2: rev/3` still yields a usable
+/// default. Only the *stem* is sanitised; the extension is added by the caller.
+fn sanitize_file_stem(stem: &str) -> String {
+    stem.chars()
+        .map(|c| if r#"<>:"/\|?*"#.contains(c) || c.is_control() { '_' } else { c })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.') // Windows silently drops a trailing dot
+        .to_string()
+}
+
+/// A persisted boolean settings flag, defaulting to false when absent.
+fn load_persisted_flag(key: &str) -> bool {
+    persistence_state()
+        .and_then(|state| state.global_settings.get(key).and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+/// The persisted docked-column width, clamped to the handle's bounds so a hand-edited
+/// settings file cannot produce an unusable layout.
+fn load_persisted_job_pin_width() -> i64 {
+    persistence_state()
+        .and_then(|state| state.global_settings.get("job_pin_width").and_then(Value::as_i64))
+        .unwrap_or(DEFAULT_JOB_PIN_WIDTH)
+        .clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH)
+}
+
+/// The remembered G-code save directory, if the settings file carries one.
+fn load_persisted_gcode_save_directory() -> Option<String> {
+    persistence_state()?
+        .global_settings
+        .get("gcode_save_directory")
+        .and_then(Value::as_str)
+        .filter(|dir| !dir.trim().is_empty())
+        .map(str::to_string)
+}
+
 fn load_persisted_theme() -> Theme {
     let Some(state) = persistence_state() else {
         return Theme::Dark;
@@ -1957,5 +2078,94 @@ mod step_projection_tests {
         assert_eq!(profile.cnc_profile_id, cnc);
         assert!(profile.default_operations.contains(&ProductionOperation::DrillPth));
         assert!(profile.default_operations.contains(&ProductionOperation::RouteBoard));
+    }
+}
+
+#[cfg(test)]
+mod gcode_save_tests {
+    use super::*;
+
+    /// The remembered directory is honoured while it exists — that is the whole point
+    /// of persisting it.
+    #[test]
+    fn an_existing_remembered_directory_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let remembered = dir.path().to_string_lossy().into_owned();
+        assert_eq!(resolve_save_directory(Some(&remembered)), dir.path());
+    }
+
+    /// The first save (nothing remembered) and a destination that has since been
+    /// deleted both land on the host default rather than a path that no longer exists.
+    #[test]
+    fn a_missing_or_absent_destination_falls_back_to_the_host_default() {
+        let host = host_default_save_directory();
+        assert_eq!(resolve_save_directory(None), host, "first save");
+        assert_eq!(resolve_save_directory(Some("")), host, "blank setting");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        drop(dir); // the folder is gone, as if the user deleted or unmounted it
+        assert_eq!(resolve_save_directory(Some(&path)), host, "destination removed");
+    }
+
+    /// A file path is not a directory — a stale setting pointing at one must not be
+    /// handed to the dialog as a starting folder.
+    #[test]
+    fn a_remembered_path_that_is_a_file_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory.nc");
+        std::fs::write(&file, "G21").unwrap();
+        let as_str = file.to_string_lossy().into_owned();
+        assert_eq!(resolve_save_directory(Some(&as_str)), host_default_save_directory());
+    }
+
+    /// The default name is the board's own, with characters Windows rejects folded to
+    /// underscores so the dialog never opens with an unusable suggestion.
+    #[test]
+    fn the_default_file_stem_is_sanitised() {
+        assert_eq!(sanitize_file_stem("panel"), "panel");
+        assert_eq!(sanitize_file_stem("panel v2: rev/3"), "panel v2_ rev_3");
+        assert_eq!(sanitize_file_stem(r#"a<b>c"d\e|f?g*h"#), "a_b_c_d_e_f_g_h");
+        // Windows silently drops trailing dots and spaces from a name.
+        assert_eq!(sanitize_file_stem("  board.  "), "board");
+    }
+
+    /// The host default must always resolve to something usable, even on a machine
+    /// with no Downloads folder — the dialog cannot be handed an empty path.
+    #[test]
+    fn the_host_default_is_always_a_path() {
+        assert!(!host_default_save_directory().as_os_str().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod job_dock_tests {
+    use super::*;
+
+    /// The dock is only offered where an edit can actually change what it shows. The
+    /// Job screen already *is* the view, and Logs/About feed nothing into the plan.
+    #[test]
+    fn only_the_profile_and_inventory_screens_carry_the_dock() {
+        for screen in [
+            Screen::CncProfiles,
+            Screen::FixtureProfiles,
+            Screen::MachiningProfiles,
+            Screen::ToolsetProfiles,
+            Screen::Stock,
+            Screen::Catalog,
+        ] {
+            assert!(screen.shows_pinned_job(), "{:?} should carry the dock", screen.label());
+        }
+        for screen in [Screen::Job, Screen::Logs, Screen::About] {
+            assert!(!screen.shows_pinned_job(), "{:?} should not", screen.label());
+        }
+    }
+
+    /// A hand-edited or stale settings file cannot produce an unusable column.
+    #[test]
+    fn the_persisted_dock_width_is_clamped_to_the_handle_bounds() {
+        assert!(MIN_JOB_PIN_WIDTH < DEFAULT_JOB_PIN_WIDTH && DEFAULT_JOB_PIN_WIDTH < MAX_JOB_PIN_WIDTH);
+        assert_eq!((-500i64).clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
+        assert_eq!(99_999i64.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MAX_JOB_PIN_WIDTH);
     }
 }

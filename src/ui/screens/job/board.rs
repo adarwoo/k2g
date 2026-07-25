@@ -27,6 +27,15 @@ use units::user_format as unit_format;
 /// routed", not "this exact tool cuts it".
 const OUTLINE_ROUTE_WIDTH_MM: f64 = 2.0;
 
+/// Smallest drill-marker radius, in view units at zoom 1 (~2 screen px). Only so a hole
+/// that would land under a pixel still leaves a mark — it is deliberately tiny, because
+/// markers are drawn **true to size**: a 0.3 mm via should read as smaller than the
+/// 0.8 mm pad beside it, not be inflated to match it.
+const MIN_MARKER_RADIUS_UNITS: f64 = 2.0;
+
+/// Largest drill-marker radius, so one oversize drill cannot swamp the render.
+const MAX_MARKER_RADIUS_UNITS: f64 = 28.0;
+
 /// Hatch line pitch expressed in board mm, so the texture keeps a constant physical
 /// scale whatever the board's size.
 const HATCH_PITCH_MM: f64 = 0.35;
@@ -262,9 +271,8 @@ fn resolve_board_features(
         ..BoardFeatures::default()
     };
 
-    // Legibility floor: never draw a drill marker smaller than a 2 mm hole would be at
-    // this zoom, so dense fields of tiny vias stay distinguishable.
-    let min_marker_radius = ((2.0 / width) * view_width * 0.5) / zoom.max(1.0);
+    // The floor shrinks as you zoom in, so zooming always reveals true relative sizes.
+    let min_marker_radius = MIN_MARKER_RADIUS_UNITS / zoom.max(1.0);
 
     for hole in &board.holes {
         let x = ((hole.position.x.as_mm() - min_x) / width).clamp(0.0, 1.0) * view_width;
@@ -302,7 +310,7 @@ fn resolve_board_features(
         let hole_diameter = major.max(0.05);
         let marker_radius = ((hole_diameter / width) * view_width * 0.5)
             .max(min_marker_radius)
-            .clamp((1.5 / zoom).max(0.5), 28.0);
+            .min(MAX_MARKER_RADIUS_UNITS);
         let class_idx = drill_size_classes
             .iter()
             .position(|d| (*d - hole_diameter).abs() < 1e-6)
@@ -887,7 +895,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     for (idx , marker) in board_hole_markers.iter().enumerate() {
                                                         {
                                                             let r = marker.marker_radius;
-                                                            let stroke_width = 1.8_f64;
+                                                            let stroke_width = 1.0_f64;
                                                             let symbol_class = hole_marker_class(&marker.kind);
                                                             let half_fill_w = r;
                                                             let quarter_fill_w = r;

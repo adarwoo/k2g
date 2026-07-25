@@ -944,6 +944,14 @@ fn normalize_step_value(step: &mut Value) {
         }
     }
 
+    // The retired `routing` block (`cut_depth_strategy` / `multi_pass_max_depth`).
+    // Routing is single-pass at the tool's rated feed — the feed rating already
+    // assumes cutting a board's full thickness — so the setting was removed rather
+    // than left as a knob that changed nothing. Every profile written before that
+    // still carries the block, and `additionalProperties: false` would reject it on
+    // load, so it is dropped here.
+    obj.remove("routing");
+
     for key in ["cnc", "fixture", "toolset"] {
         let Some(binding) = obj.get_mut(key).and_then(Value::as_object_mut) else {
             continue;
@@ -1683,6 +1691,82 @@ mod tests {
         assert!(
             matches!(settings.root.get_pointer("/schema_version").map(|n| &n.value), Some(NodeValue::Int(1))),
             "schema_version should have been injected"
+        );
+    }
+
+    /// A settings file predating `gcode_save_directory` must still load. Validation
+    /// runs before schema defaults are injected, so listing an added key under
+    /// `required` would lock every existing user out of their settings — this pins
+    /// that it stays optional.
+    #[test]
+    fn settings_written_before_the_save_directory_existed_still_load() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let previous = "schema_version: 1\n\
+                        units: mm\n\
+                        theme: Dark\n\
+                        selected_process_profile_id: null\n\
+                        selected_cnc_profile_id: null\n\
+                        selected_fixture_profile_id: null\n\
+                        selected_toolset_profile_id: null\n";
+        fs::write(data_dir.join(SETTINGS_FILE), previous).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "settings without the key should load: {errors:#?}");
+
+        // And the first save can then record a directory that survives a reload.
+        let saved = dir.path().join("out").to_string_lossy().into_owned();
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["gcode_save_directory"] = Value::String(saved.clone());
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| p.is_empty()),
+            "recording the save directory should not error"
+        );
+        data.flush();
+
+        let (reloaded, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "reload should be clean: {errors:#?}");
+        let node = reloaded
+            .settings()
+            .and_then(|doc| doc.root.get_pointer("/gcode_save_directory"))
+            .map(|node| node.value.clone());
+        assert!(
+            matches!(node, Some(NodeValue::Str(ref s)) if *s == saved),
+            "the save directory should round-trip, got {node:?}"
+        );
+    }
+
+    /// A machining profile written before the `routing` block was retired must still
+    /// load: `additionalProperties: false` would otherwise reject the stale key and
+    /// warn on every launch. Caught from a real user profile on disk.
+    #[test]
+    fn a_machining_profile_with_the_retired_routing_block_still_loads() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let machining_dir = data_dir.join(Profile::Machining.dir_name());
+        fs::create_dir_all(&machining_dir).unwrap();
+        let previous = r#"schema_version: 3
+id: 018f0000-0000-7000-8000-0000000000aa
+name: Legacy routing
+steps:
+  - name: Step 1
+    operations: [drill_pth]
+    routing: { cut_depth_strategy: automatic, multi_pass_max_depth: 1.0mm }
+"#;
+        fs::write(machining_dir.join("legacy.yaml"), previous).unwrap();
+
+        let (data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(
+            errors.iter().all(|e| !format!("{e:?}").contains("routing")),
+            "the retired routing block must not surface as a load error: {errors:#?}"
+        );
+        let loaded = data.list(Profile::Machining);
+        assert_eq!(loaded.len(), 1, "the profile should still load");
+        let doc = loaded[0].1;
+        assert!(
+            doc.root.get_pointer("/steps/0/routing").is_none(),
+            "the retired block should have been dropped, not carried forward"
         );
     }
 

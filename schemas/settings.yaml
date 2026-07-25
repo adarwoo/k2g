@@ -53,6 +53,36 @@ properties:
     type: [string, "null"]
     default: null
 
+  # The keys below are deliberately NOT in `required`: validation runs before schema
+  # defaults are injected, so requiring an added key would reject every settings file
+  # written before that key existed.
+
+  job_view_pinned:
+    description: |
+      Whether the Job view stays docked on the left of the profile screens, so edits
+      to a profile or to stock can be seen taking effect without navigating back.
+      Ignored when the window is too narrow to hold both columns.
+    type: boolean
+    default: false
+
+  job_pin_width:
+    description: |
+      Width in pixels of the docked Job column, as left by the split handle. Treated
+      as a preference, not a guarantee — the layout still caps it against the window
+      so the screen beside it stays usable.
+    type: integer
+    minimum: 320
+    maximum: 1200
+    default: 560
+
+  gcode_save_directory:
+    description: |
+      Directory the last G-code save wrote to, so the next Save opens where the
+      previous one left off. Null until the first save; a directory that has since
+      been moved or deleted falls back to the host's default download location.
+    type: [string, "null"]
+    default: null
+
 required:
   [
     units,

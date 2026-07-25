@@ -373,6 +373,127 @@ body {
     margin: 2px 4px;
 }
 
+/*
+ * Docked Job view: the pinned Job column, a drag handle, and the active screen.
+ *
+ * The column width comes in as `--job-dock-width` from the split handle, but the
+ * track is `min(var(...), 46%)` so a stored width can never crowd out the screen
+ * beside it however the window is resized — the stored value is a preference, the
+ * cap is the guarantee.
+ */
+.dock-layout {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.dock-layout.is-docked {
+    display: grid;
+    grid-template-columns: min(var(--job-dock-width, 560px), 46%) 8px minmax(0, 1fr);
+    align-items: stretch;
+    gap: 0;
+}
+
+/* The dock is a peer of the screen, so it needs the padding `.screen` would give. */
+.job-panel-docked {
+    margin: 14px 0 14px 14px;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* Names the column, so it reads as the Job view rather than part of the screen. */
+.job-dock-caption {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-subtle);
+    margin-right: 2px;
+}
+
+.dock-handle {
+    cursor: col-resize;
+    background: transparent;
+    position: relative;
+}
+
+/* The grab target is the full 8px column; the visible rule is a hairline in it. */
+.dock-handle::after {
+    content: "";
+    position: absolute;
+    top: 14px;
+    bottom: 14px;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: var(--border);
+    transition: background 140ms ease, width 140ms ease;
+}
+
+.dock-handle:hover::after,
+.dock-handle.is-dragging::after {
+    background: var(--accent);
+    width: 2px;
+}
+
+/* The pin toggle sits at the far end of the view-tab row. */
+.job-pin-toggle {
+    flex: 0 0 auto;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    padding: 5px 9px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    filter: grayscale(1);
+    opacity: 0.55;
+    transition: opacity 140ms ease, filter 140ms ease, border-color 140ms ease;
+}
+
+.job-pin-toggle:hover {
+    opacity: 0.9;
+    border-color: var(--border);
+}
+
+.job-pin-toggle.active {
+    filter: none;
+    opacity: 1;
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+/*
+ * Below this the two columns cannot both stay usable: 132px rail + the 380px minimum
+ * dock + ~700px for the screen beside it, plus padding. Note this is CSS pixels — on
+ * a 150%-scaled display a 2000px window is only ~1360 CSS px, so a threshold set by
+ * eye from a device-pixel window size locks the feature out of ordinary setups.
+ *
+ * The dock collapses here but `job_view_pinned` is left set, so widening the window
+ * brings it straight back with nothing to re-enable.
+ */
+@media (max-width: 1250px) {
+    .dock-layout.is-docked {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .dock-layout.is-docked > .job-panel-docked,
+    .dock-handle {
+        display: none;
+    }
+
+    .job-pin-toggle {
+        display: none;
+    }
+}
+
+
+
 .shell-content {
     flex: 1;
     min-width: 0;
@@ -1229,11 +1350,34 @@ body {
     min-height: 0;
 }
 
+/*
+ * A job view is not a screen. Each renders *inside* this panel, beneath the view
+ * tabs, but they all carry `.screen` for its flex/gap defaults — and `.screen` sets
+ * `height: 100%`, which sizes the view to the whole panel with the tab row still
+ * above it. The panel then overflows by exactly the tab height at every window size,
+ * putting a second scrollbar beside the view's own. Inside the panel the view fills
+ * what the tabs leave instead, so the only scrollbar is the content's.
+ */
+.project-main > .screen {
+    height: auto;
+    flex: 1;
+    min-height: 0;
+}
+
 .project-view-tabs {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+/* The tabs themselves; the pin toggle is the row's other child. */
+.project-view-tab-group {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+    min-width: 0;
 }
 
 .project-view-tab {
@@ -2431,11 +2575,22 @@ th {
     background: color-mix(in srgb, var(--err) 14%, transparent);
 }
 
+/*
+ * The board render scales with the window. It used to be a fixed 760px canvas inside a
+ * 1040px layout, centred, so a wider window only added empty margin.
+ *
+ * The canvas is sized directly in viewport units rather than by flexing to fill its
+ * parent: the view's rsx wraps this content in conditional blocks, and relying on an
+ * unbroken `flex: 1 / min-height: 0` chain through them proved fragile — the height
+ * silently fell back to the SVG's intrinsic ratio and ran off the bottom. A viewport
+ * height needs no chain, and still grows with the window.
+ */
 .board-preview {
-    display: grid;
-    place-items: center;
+    display: flex;
+    flex-direction: column;
     text-align: center;
     gap: 10px;
+    min-width: 0;
 }
 
 .board-view-controls {
@@ -2453,7 +2608,21 @@ th {
 }
 
 .board-canvas {
-    width: min(760px, 95%);
+    display: flex;
+    width: 100%;
+    /*
+     * Fills the window height less the chrome stacked around it. Measured against the
+     * running app rather than summed from the rules: 257px sits above the canvas (top
+     * bar, screen and panel padding, tab row, zoom controls and their gaps) and ~86px
+     * below (stats line, paddings, status bar).
+     *
+     * A fixed `62vh` left a growing band of dead space below the board as the window
+     * grew, because it is a share of the window rather than what the panel actually
+     * has left over. Rounded up slightly, so a small chrome change leaves a thin gap
+     * rather than an overflow — and the panel scrolls if it ever does overflow.
+     */
+    height: calc(100vh - 345px);
+    min-width: 0;
     border-radius: 0;
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
@@ -2467,13 +2636,14 @@ th {
 
 .board-preview-layout {
     display: grid;
-    grid-template-columns: minmax(420px, 1fr) 260px;
+    grid-template-columns: minmax(0, 1fr) 260px;
     gap: 12px;
-    width: min(1040px, 98%);
-    align-items: start;
+    width: 100%;
+    align-items: stretch;
 }
 
 .board-drill-legend-panel {
+    overflow: auto;
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
     padding: 10px;
@@ -2509,9 +2679,15 @@ th {
     color: var(--text-subtle);
 }
 
+/*
+ * Width follows the canvas; height follows the board's aspect ratio. The cap stops a
+ * wide window turning a tall board into a drawing taller than the screen — the
+ * element's `preserveAspectRatio="xMidYMid meet"` letterboxes inside the capped box
+ * rather than distorting.
+ */
 .board-svg {
     width: 100%;
-    height: auto;
+    height: 100%;
     display: block;
 }
 
@@ -2523,7 +2699,9 @@ th {
 
 .board-hole-cross {
     stroke: currentColor;
-    stroke-width: 2;
+    /* Non-scaling, so this is screen pixels at any zoom. 2px swamped the small
+       markers now that they are drawn true to size. */
+    stroke-width: 1.1;
     stroke-linecap: round;
     vector-effect: non-scaling-stroke;
     opacity: 0.95;
@@ -2830,6 +3008,19 @@ th {
 .program-stats {
     display: flex;
     gap: 18px;
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
+/* Save affordance above the program listing. */
+.gcode-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.gcode-save-status {
     font-size: 11px;
     color: var(--text-subtle);
 }

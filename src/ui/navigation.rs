@@ -33,6 +33,23 @@ pub enum Screen {
 }
 
 impl Screen {
+    /// Whether the docked Job view may appear beside this screen.
+    ///
+    /// The profile and inventory screens only: those are what feed the plan, so
+    /// seeing the Code/Tooling/Rack result react while editing them is the point.
+    /// `Job` already *is* the view, and `Logs`/`About` change nothing it shows.
+    pub fn shows_pinned_job(self) -> bool {
+        matches!(
+            self,
+            Self::CncProfiles
+                | Self::FixtureProfiles
+                | Self::MachiningProfiles
+                | Self::ToolsetProfiles
+                | Self::Stock
+                | Self::Catalog
+        )
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Job => "Job",

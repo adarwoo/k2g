@@ -34,6 +34,21 @@ use pcb::stitch_edge_shapes;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+/// Extension for a saved G-code program. `.nc` is the flavour every common sender
+/// recognises (Candle, bCNC, UGS, LinuxCNC); the Save dialog offers the other usual
+/// suffixes as filters.
+pub const GCODE_FILE_EXTENSION: &str = "nc";
+
+/// Default width of the docked Job column, in pixels. Comfortable for the Code,
+/// Tooling and Rack views at the 1400px minimum the dock needs overall.
+pub const DEFAULT_JOB_PIN_WIDTH: i64 = 560;
+
+/// Bounds the split handle honours. Below the minimum a G-code line wraps and the
+/// dock stops being readable; the maximum stops a stored width from crowding out the
+/// screen beside it (the layout also caps it proportionally — see the CSS).
+pub const MIN_JOB_PIN_WIDTH: i64 = 380;
+pub const MAX_JOB_PIN_WIDTH: i64 = 1000;
+
 pub const STATUS_KEY_REGENERATION: &str = "regeneration.status";
 pub const STATUS_KEY_KICAD: &str = "kicad.status";
 pub const STATUS_KEY_PROJECT_HAS_BOARD: &str = "project.has_board";
@@ -102,6 +117,15 @@ pub struct AppState {
     pub board: Option<BoardSnapshot>,
     /// Clean KiCad connection status for the status bar.
     pub kicad_status: String,
+    /// Directory the last G-code save wrote to, mirrored to `global.setting.yaml`.
+    /// `None` until the first save; see [`AppState::gcode_save_directory_or_default`].
+    pub gcode_save_directory: Option<String>,
+    /// Keep the Job view docked beside the profile screens (see
+    /// [`Screen::shows_pinned_job`]). The flag is kept even while the window is too
+    /// narrow to honour it, so widening restores the layout without re-pinning.
+    pub job_view_pinned: bool,
+    /// Width of the docked Job column in pixels, as left by the split handle.
+    pub job_pin_width: i64,
 }
 
 include!("state.rs");
@@ -244,6 +268,9 @@ fn default_global_settings() -> Value {
         "selected_cnc_profile_id": Value::Null,
         "selected_fixture_profile_id": Value::Null,
         "selected_toolset_profile_id": Value::Null,
+        "gcode_save_directory": Value::Null,
+        "job_view_pinned": false,
+        "job_pin_width": DEFAULT_JOB_PIN_WIDTH,
     })
 }
 
