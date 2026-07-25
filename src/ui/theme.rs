@@ -2576,6 +2576,98 @@ th {
     opacity: 0.85;
 }
 
+/*
+ * Routed features. Anything a router makes removes a swept band of material rather
+ * than a point, so it is drawn as that band filled with a diagonal hatch — the hatch
+ * is the cutting tool path. Band widths come from the geometry (the slot's own width;
+ * a fixed nominal kerf for the outline), so they are set inline, never here.
+ */
+
+/*
+ * Hatch lines paint with currentColor, so the <pattern> carries a colour class and the
+ * hole-kind classes below drive the texture directly — a routed slot hatches in the same
+ * PTH / NPTH / via colour its drilled symbol would carry.
+ */
+.board-hatch-line {
+    stroke: currentColor;
+    opacity: 0.85;
+}
+
+.board-hatch-outline {
+    color: color-mix(in srgb, var(--ok) 70%, var(--accent));
+}
+
+/* An oblong slot: the hatched stadium the cutter sweeps out, per hole kind. */
+.board-route-band-via {
+    fill: url(#board-route-hatch-via);
+    stroke: none;
+}
+
+.board-route-band-pth {
+    fill: url(#board-route-hatch-pth);
+    stroke: none;
+}
+
+.board-route-band-npth {
+    fill: url(#board-route-hatch-npth);
+    stroke: none;
+}
+
+.board-route-band-via-legend {
+    fill: url(#board-route-hatch-via-legend);
+    stroke: none;
+}
+
+.board-route-band-pth-legend {
+    fill: url(#board-route-hatch-pth-legend);
+    stroke: none;
+}
+
+.board-route-band-npth-legend {
+    fill: url(#board-route-hatch-npth-legend);
+    stroke: none;
+}
+
+/*
+ * The board outline: the kerf lies wholly outside the edge cut, so the finished board
+ * keeps its nominal size. The band is stroked at twice the kerf and its inner half
+ * masked away, which is why nothing here sets a stroke width.
+ */
+.board-outline-band {
+    fill: none;
+    stroke: url(#board-outline-hatch);
+    stroke-linecap: butt;
+    stroke-linejoin: round;
+    opacity: 0.9;
+}
+
+.board-outline-band-legend {
+    fill: none;
+    stroke: url(#board-outline-hatch-legend);
+    stroke-linecap: butt;
+}
+
+/* The slot's true boundary, in its hole-kind colour. */
+.board-route-outline {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.4;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+    opacity: 0.95;
+}
+
+/* The cutter-centre path through a slot. */
+.board-route-centerline {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1;
+    stroke-dasharray: 4 3;
+    stroke-linecap: butt;
+    vector-effect: non-scaling-stroke;
+    opacity: 0.7;
+}
+
 .board-legend {
     display: flex;
     flex-wrap: wrap;

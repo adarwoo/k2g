@@ -12,8 +12,13 @@
 //! two views agree. A step with no resolvable fixture relaxes the bed check (reach is
 //! always enforced).
 //!
-//! Scope note: outline **routing tool selection** is still preliminary (a heuristic
-//! pick of an available router); it firms up when the geometry pre-pass lands.
+//! Routing tools come from [`plan_routers`]: the board outline takes the smallest
+//! available cutter, while each slot takes the largest that *fits it* — a cutter wider
+//! than a slot cannot enter it, so the outline's choice is no guide. The same plan feeds
+//! the Machining view's rack, keeping slot numbers identical across the two views.
+//!
+//! Scope note: outline router selection is still a heuristic pick of an available
+//! router (size aside); it firms up when the geometry pre-pass lands.
 
 use uuid::Uuid;
 
@@ -155,6 +160,56 @@ pub(crate) struct DrillConfigRaw {
     pub(crate) oblong: String,
     pub(crate) oversize: Allowance,
     pub(crate) undersize: Allowance,
+}
+
+/// How a step makes an oblong hole — the schema's `holes.oblong` enum, resolved once so
+/// the Tooling tab and the Machining plan cannot read the same key differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OblongStrategy {
+    /// Mill the whole slot with a router.
+    Route,
+    /// Drill the two end centres, then mill the web between them.
+    DrillEndsThenRoute,
+    /// A chain of overlapping drills — the scallops between them are the finished wall.
+    DrillChain,
+    /// A chain of overlapping drills, then a router cleanup pass on the walls.
+    DrillChainThenRoute,
+}
+
+impl OblongStrategy {
+    /// Parses the schema key, falling back to the schema's own default so an unknown or
+    /// missing value machines conservatively rather than not at all.
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "route" => Self::Route,
+            "drill_chain" => Self::DrillChain,
+            "drill_chain_then_route" => Self::DrillChainThenRoute,
+            _ => Self::DrillEndsThenRoute,
+        }
+    }
+
+    /// Whether the strategy puts a drill in the slot at all.
+    pub(crate) fn drills(self) -> bool {
+        !matches!(self, Self::Route)
+    }
+
+    /// Whether the strategy needs a router — and so a cutter that fits the slot width.
+    pub(crate) fn routes(self) -> bool {
+        !matches!(self, Self::DrillChain)
+    }
+
+    /// The chain's pitch ceiling as a fraction of the drill diameter, or `None` when the
+    /// strategy drills only the two end centres. Callers gate on [`Self::drills`] first.
+    pub(crate) fn chain_pitch_fraction(self) -> Option<f64> {
+        match self {
+            // The chain is the finished wall, so the scallops must stay small.
+            Self::DrillChain => Some(crate::gcode::oblong::CHAIN_PITCH_FINISH),
+            // A router cleans up after, so the chain only has to remove bulk.
+            Self::DrillChainThenRoute => Some(crate::gcode::oblong::CHAIN_PITCH_ROUGH),
+            // Ends only — the web between them is the router's job.
+            Self::Route | Self::DrillEndsThenRoute => None,
+        }
+    }
 }
 
 impl Default for DrillConfigRaw {
@@ -453,20 +508,17 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
 
     // A router is needed for the board outline and/or for oblong slots that route.
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
-    let oblong_drills = matches!(
-        raw.drill.oblong.as_str(),
-        "drill_ends_then_route" | "drill_chain" | "drill_chain_then_route"
-    );
-    let oblong_routes = matches!(
-        raw.drill.oblong.as_str(),
-        "route" | "drill_ends_then_route" | "drill_chain_then_route"
-    );
-    let needs_router = has_route || (has_oblongs && oblong_routes);
+    let oblong = OblongStrategy::from_key(&raw.drill.oblong);
+    let (oblong_drills, oblong_routes) = (oblong.drills(), oblong.routes());
+    let routes_slots = has_oblongs && oblong_routes;
 
     let mut warnings: Vec<String> = Vec::new();
-    let outline_router = if needs_router { pick_outline_router(ctx, toolset) } else { None };
-    if needs_router && outline_router.is_none() {
-        warnings.push("No router in stock for routing (board outline / slots) — routing is unresolved.".into());
+    let routers = plan_routers(&ctx.tools, toolset, &groups, has_route, routes_slots);
+    if has_route && routers.outline.is_none() {
+        warnings.push("No router in stock for the board outline — outline routing is unresolved.".into());
+    }
+    for width in &routers.unroutable_widths {
+        warnings.push(unroutable_slot_warning(ctx, *width));
     }
     if has_locating {
         warnings.push("Locating pins are not yet planned (no board metadata for locating holes).".into());
@@ -487,7 +539,7 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
         weights: Weights::default(),
     };
     let setup = build_setup(ctx, raw.fixture_id);
-    let rack = build_rack_spec(toolset, atc_slots, outline_router.as_deref());
+    let rack = build_rack_spec(toolset, atc_slots, &routers.mandatory_ids());
 
     match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
         Ok(assignment) => {
@@ -513,14 +565,15 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                         &number_of,
                         oblong_drills,
                         oblong_routes,
-                        outline_router.as_deref(),
+                        routers.for_group(group),
                     );
                     RequirementRow { label: group.label(ctx), count: group.count, tools }
                 })
                 .collect();
 
             if has_route {
-                let router = outline_router
+                let router = routers
+                    .outline
                     .as_ref()
                     .map(|id| resolve_router_tool(ctx, id, &number_of, None))
                     .unwrap_or_else(unresolved_tool);
@@ -567,7 +620,7 @@ fn resolve_group_tools(
     number_of: &std::collections::BTreeMap<&str, u8>,
     oblong_drills: bool,
     oblong_routes: bool,
-    outline_router: Option<&str>,
+    slot_router: Option<&str>,
 ) -> Vec<ResolvedTool> {
     if group.minor.is_none() {
         return vec![resolve_drill_tool(ctx, assignment, group, number_of, None)];
@@ -578,8 +631,12 @@ fn resolve_group_tools(
         tools.push(resolve_drill_tool(ctx, assignment, group, number_of, Some("drill")));
     }
     if oblong_routes {
-        if let Some(router) = outline_router {
-            tools.push(resolve_router_tool(ctx, router, number_of, None));
+        match slot_router {
+            Some(router) => tools.push(resolve_router_tool(ctx, router, number_of, Some("route"))),
+            // No cutter fits this slot. Show the route step unresolved rather than
+            // dropping it: the requirement is real, and the step warning says why it
+            // cannot be met.
+            None => tools.push(ResolvedTool { role: Some("route"), ..unresolved_tool() }),
         }
     }
     if tools.is_empty() {
@@ -687,11 +744,11 @@ impl HoleGroup {
             pcb::HoleKind::PadNpth if has_npth => DemandKind::Npth,
             _ => return None,
         };
-        let dx = hole.drill_x.or(hole.drill_y)?;
-        let dy = hole.drill_y.or(hole.drill_x)?;
-        let (major, minor_val) = if dx.as_mm() >= dy.as_mm() { (dx, dy) } else { (dy, dx) };
-        let is_oblong = (micron(major) - micron(minor_val)).abs() > 1;
-        let minor = if is_oblong { Some(minor_val) } else { None };
+        let (major, _) = hole.drill_axes()?;
+        // `BoardHole::slot` is the single oblong classification for the whole app, so
+        // this group and the machining plan's chain geometry can never disagree about
+        // which holes are slots.
+        let minor = hole.slot().map(|slot| slot.width);
         Some(HoleGroup { kind, target: major, minor, count: 1 })
     }
 
@@ -758,25 +815,151 @@ pub(crate) fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_n
 /// Picks a preliminary outline router: a routerbit/end-mill already pinned in the
 /// toolset's fixed slots, else the smallest in-stock router in the shop. Returns its
 /// stock-tool id.
-pub(crate) fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::ToolsetProfile) -> Option<String> {
-    let is_router = |tool: &Tool| matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill);
-
+fn pick_outline_router(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+) -> Option<String> {
     // Prefer a router already fixed in the toolset.
-    let fixed_router = toolset
-        .slots
-        .values()
-        .filter_map(|slot| slot.tool_id.as_ref())
-        .find_map(|id| ctx.tools.iter().find(|t| &t.id == id && is_router(t)));
-    if let Some(tool) = fixed_router {
+    if let Some(tool) = fixed_routers(tools, toolset).next() {
         return Some(tool.id.clone());
     }
 
     // Else the smallest in-stock router (safest for internal corners).
-    ctx.tools
-        .iter()
-        .filter(|t| is_router(t) && t.status == crate::data::model::ToolStatus::InStock)
+    stock_routers(tools)
         .min_by_key(|t| micron(t.diameter))
         .map(|t| t.id.clone())
+}
+
+/// Whether a tool can mill (as opposed to drill).
+fn is_router_tool(tool: &Tool) -> bool {
+    matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill)
+}
+
+/// Routers pinned in the toolset's slots, in slot order. These are already in the rack,
+/// so choosing one costs no slot.
+fn fixed_routers<'a>(
+    tools: &'a [Tool],
+    toolset: &'a crate::data::model::ToolsetProfile,
+) -> impl Iterator<Item = &'a Tool> + 'a {
+    toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_ref())
+        .filter_map(|id| tools.iter().find(|t| &t.id == id && is_router_tool(t)))
+}
+
+/// Every in-stock router.
+fn stock_routers(tools: &[Tool]) -> impl Iterator<Item = &Tool> {
+    tools
+        .iter()
+        .filter(|t| is_router_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
+}
+
+/// The router that mills a slot `width` across: the **largest** cutter that still fits.
+///
+/// `diameter <= width` is a hard constraint, not a preference — a cutter wider than the
+/// slot cannot enter it at all, so the board-outline router is no guide here (a 1.2 mm
+/// outline cutter cannot touch a 0.4 mm slot). Among those that do fit, the largest is
+/// the stiffest and needs the fewest passes; one exactly the slot width mills it in a
+/// single pass down the centre line. A toolset-fixed router that fits beats a larger
+/// in-stock one, since it is already in the rack.
+fn pick_slot_router(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    width: Length,
+) -> Option<String> {
+    let limit_um = micron(width);
+    if let Some(tool) = fixed_routers(tools, toolset).find(|t| micron(t.diameter) <= limit_um) {
+        return Some(tool.id.clone());
+    }
+    stock_routers(tools)
+        .filter(|t| micron(t.diameter) <= limit_um)
+        .max_by_key(|t| micron(t.diameter))
+        .map(|t| t.id.clone())
+}
+
+/// Which router each of a step's routed features needs.
+///
+/// Resolved once and shared by the Tooling tab and the Machining plan: both build the
+/// rack from [`RouterPlan::mandatory_ids`], so the two views cannot disagree about which
+/// tools are loaded or which slot each lands in.
+#[derive(Default)]
+pub(crate) struct RouterPlan {
+    /// The board-outline router, when the step routes the outline.
+    pub(crate) outline: Option<String>,
+    /// Slot width (µm) → the router that mills it. A width is absent when nothing fits.
+    by_slot_width_um: std::collections::BTreeMap<i64, String>,
+    /// Slot widths no available router is small enough to mill.
+    pub(crate) unroutable_widths: Vec<Length>,
+}
+
+impl RouterPlan {
+    /// The router milling this group's slot — `None` for a round hole, and also for a
+    /// slot too narrow for every available cutter (see [`Self::unroutable_widths`]).
+    pub(crate) fn for_group(&self, group: &HoleGroup) -> Option<&str> {
+        let width = group.minor?;
+        self.by_slot_width_um.get(&micron(width)).map(String::as_str)
+    }
+
+    /// Every router the rack must hold, deduplicated and in a stable order.
+    pub(crate) fn mandatory_ids(&self) -> Vec<String> {
+        let mut ids: std::collections::BTreeSet<String> =
+            self.by_slot_width_um.values().cloned().collect();
+        ids.extend(self.outline.clone());
+        ids.into_iter().collect()
+    }
+}
+
+/// Resolves a step's routing tools: the outline router (when it routes the outline) and
+/// one router per distinct slot width (when its oblong strategy mills slots).
+pub(crate) fn plan_routers(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    groups: &[HoleGroup],
+    has_route: bool,
+    oblong_routes: bool,
+) -> RouterPlan {
+    let mut plan = RouterPlan::default();
+
+    if has_route {
+        plan.outline = pick_outline_router(tools, toolset);
+    }
+
+    if oblong_routes {
+        // One lookup per distinct width — a board typically has a handful of slot sizes
+        // and they very often share a cutter.
+        let mut seen = std::collections::BTreeSet::new();
+        for group in groups {
+            let Some(width) = group.minor else { continue };
+            if !seen.insert(micron(width)) {
+                continue;
+            }
+            match pick_slot_router(tools, toolset, width) {
+                Some(id) => {
+                    plan.by_slot_width_um.insert(micron(width), id);
+                }
+                None => plan.unroutable_widths.push(width),
+            }
+        }
+    }
+
+    plan
+}
+
+/// Why a slot could not be milled, naming the width and the closest cutter so the fix —
+/// stock a smaller router, or switch the step to a drill-only oblong strategy — is
+/// readable straight off the message.
+fn unroutable_slot_warning(ctx: &AppState, width: Length) -> String {
+    match stock_routers(&ctx.tools).min_by_key(|t| micron(t.diameter)) {
+        Some(smallest) => format!(
+            "Slot {} is narrower than the smallest router in stock ({}), so it cannot be milled. \
+             Stock a router no larger than {}, or set this step's oblong strategy to drill only.",
+            fmt_len(ctx, width),
+            fmt_len(ctx, smallest.diameter),
+            fmt_len(ctx, width),
+        ),
+        None => format!("Slot {} cannot be milled — no router in stock.", fmt_len(ctx, width)),
+    }
 }
 
 /// Maps a toolset + ATC count to the assigner's rack spec. Capacity = usable
@@ -784,7 +967,7 @@ pub(crate) fn pick_outline_router(ctx: &AppState, toolset: &crate::data::model::
 pub(crate) fn build_rack_spec(
     toolset: &crate::data::model::ToolsetProfile,
     atc_slots: usize,
-    outline_router: Option<&str>,
+    mandatory: &[String],
 ) -> RackSpec {
     let fixed: Vec<(u8, String)> = toolset
         .slots
@@ -820,9 +1003,13 @@ pub(crate) fn build_rack_spec(
     let placeable = distinct_fixed + spare_slots.len();
     let capacity = if atc_slots > 0 { placeable.min(atc_slots) } else { placeable };
 
-    let mandatory = outline_router.map(|id| vec![id.to_string()]).unwrap_or_default();
-
-    RackSpec { capacity, fixed, spare_slots, mandatory, policy: map_policy(toolset.generation_policy) }
+    RackSpec {
+        capacity,
+        fixed,
+        spare_slots,
+        mandatory: mandatory.to_vec(),
+        policy: map_policy(toolset.generation_policy),
+    }
 }
 
 /// A one-line context for a resolved step: tool count and how tools are changed.
@@ -999,6 +1186,7 @@ mod tests {
             drill_x: Some(Length::from_mm(dx_mm)),
             drill_y: Some(Length::from_mm(dy_mm)),
             plated: None,
+            orientation_deg: None,
         }
     }
 
@@ -1015,6 +1203,143 @@ mod tests {
         assert_eq!(g08.count, 2);
         assert!(g08.minor.is_none());
         assert_eq!(g08.kind, DemandKind::Pth);
+    }
+
+    // --- routing tool selection -------------------------------------------
+
+    /// A stock router of the given diameter.
+    fn router(id: &str, diameter_mm: f64) -> Tool {
+        Tool {
+            id: id.to_string(),
+            composite_name: format!("Router {diameter_mm}mm"),
+            name: format!("Router {diameter_mm}mm"),
+            kind: "Router".to_string(),
+            diameter: Length::from_mm(diameter_mm),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(180.0),
+            catalog_point_angle: None,
+            flute_length: Some(Length::from_mm(30.0)),
+            feed_rate: None,
+            catalog_feed_rate: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: crate::data::model::ToolStatus::InStock,
+            preference: crate::data::model::ToolPreference::Neutral,
+            source_catalog: "Test".to_string(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    /// A toolset with the given tools pinned in slots (empty = nothing fixed).
+    fn toolset_with_fixed(fixed: &[&str]) -> crate::data::model::ToolsetProfile {
+        crate::data::model::ToolsetProfile {
+            id: "ts".into(),
+            name: "Test".into(),
+            description: String::new(),
+            generation_policy: ToolsetGenerationPolicy::AllowReload,
+            slots: fixed
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    (
+                        i as u8 + 1,
+                        crate::data::model::state::RackSlot {
+                            tool_id: Some((*id).to_string()),
+                            locked: true,
+                            disabled: false,
+                        },
+                    )
+                })
+                .collect(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }
+    }
+
+    fn slot_group(width_mm: f64, length_mm: f64) -> HoleGroup {
+        HoleGroup {
+            kind: DemandKind::Pth,
+            target: Length::from_mm(length_mm),
+            minor: Some(Length::from_mm(width_mm)),
+            count: 1,
+        }
+    }
+
+    /// The reported bug: a 1.2 mm cutter cannot enter a 0.4 mm slot, so it must not be
+    /// selected for one no matter what the board outline uses.
+    #[test]
+    fn a_router_wider_than_the_slot_is_never_selected() {
+        let tools = vec![router("wide", 1.2)];
+        let toolset = toolset_with_fixed(&[]);
+        let groups = vec![slot_group(0.4, 3.0)];
+
+        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        assert_eq!(plan.for_group(&groups[0]), None, "1.2mm cutter rejected for a 0.4mm slot");
+        assert_eq!(plan.unroutable_widths.len(), 1, "and the slot is reported unroutable");
+        assert!(plan.mandatory_ids().is_empty(), "no router is reserved in the rack for it");
+    }
+
+    /// Among cutters that fit, the largest wins: fewest passes and the stiffest tool,
+    /// with one exactly the slot width milling it in a single pass.
+    #[test]
+    fn the_slot_router_is_the_largest_that_fits() {
+        let tools = vec![router("tiny", 0.2), router("exact", 0.4), router("wide", 1.2)];
+        let toolset = toolset_with_fixed(&[]);
+        let groups = vec![slot_group(0.4, 3.0)];
+
+        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        assert_eq!(plan.for_group(&groups[0]), Some("exact"));
+        assert!(plan.unroutable_widths.is_empty());
+    }
+
+    /// A toolset-pinned router that fits beats a larger in-stock one — it is already in
+    /// the rack, so it costs no slot.
+    #[test]
+    fn a_fixed_router_that_fits_beats_a_larger_stock_one() {
+        let tools = vec![router("fixed", 0.3), router("bigger", 0.4)];
+        let toolset = toolset_with_fixed(&["fixed"]);
+        let groups = vec![slot_group(0.4, 3.0)];
+
+        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        assert_eq!(plan.for_group(&groups[0]), Some("fixed"));
+    }
+
+    /// The outline cutter and the slot cutter are independent: the outline takes the
+    /// smallest available (safest for internal corners) while each slot takes the
+    /// largest that fits, and the rack must reserve both.
+    #[test]
+    fn the_outline_and_slot_routers_are_chosen_separately() {
+        let tools = vec![router("small", 0.4), router("big", 2.0)];
+        let toolset = toolset_with_fixed(&[]);
+        let groups = vec![slot_group(1.0, 4.0)];
+
+        let plan = plan_routers(&tools, &toolset, &groups, true, true);
+        assert_eq!(plan.outline.as_deref(), Some("small"), "outline prefers the smallest");
+        assert_eq!(plan.for_group(&groups[0]), Some("small"), "2.0mm will not enter a 1.0mm slot");
+
+        // A wider slot can use the big cutter, and then both must be in the rack.
+        let wide = vec![slot_group(2.5, 8.0)];
+        let plan = plan_routers(&tools, &toolset, &wide, true, true);
+        assert_eq!(plan.for_group(&wide[0]), Some("big"));
+        assert_eq!(plan.mandatory_ids(), vec!["big".to_string(), "small".to_string()]);
+    }
+
+    /// A round hole has no slot router, and slots are only resolved when the step's
+    /// oblong strategy actually mills them.
+    #[test]
+    fn slot_routers_are_only_resolved_when_the_strategy_routes() {
+        let tools = vec![router("fits", 0.4)];
+        let toolset = toolset_with_fixed(&[]);
+        let groups = vec![slot_group(0.4, 3.0)];
+
+        let plan = plan_routers(&tools, &toolset, &groups, false, false);
+        assert_eq!(plan.for_group(&groups[0]), None, "drill-only strategy reserves no router");
+        assert!(plan.unroutable_widths.is_empty(), "and reports nothing unroutable");
+
+        let round = HoleGroup { kind: DemandKind::Pth, target: Length::from_mm(0.8), minor: None, count: 1 };
+        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        assert_eq!(plan.for_group(&round), None, "a round hole is drilled, not milled");
     }
 
     #[test]

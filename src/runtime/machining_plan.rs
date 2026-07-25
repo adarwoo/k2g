@@ -19,10 +19,11 @@ use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
 use crate::gcode::placement::Placement;
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
+use crate::gcode::oblong;
 use crate::gcode::planner::{plan_drilling, plan_routing, DrillTarget, RouteTarget};
 use crate::runtime::tooling::{
-    build_rack_spec, build_setup, collect_hole_groups, pick_outline_router, read_steps, HoleGroup,
-    StepRaw,
+    build_rack_spec, build_setup, collect_hole_groups, plan_routers, read_steps, HoleGroup,
+    OblongStrategy, StepRaw,
 };
 use crate::runtime::AppState;
 
@@ -98,15 +99,14 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
 
-    // The rack must reserve a router when routing is required — mirror the tooling
-    // adapter so the two produce the same rack (and thus the same slot numbers).
+    // The rack must reserve every router routing requires — the outline cutter and one
+    // per slot width, since a cutter wider than a slot cannot mill it. Resolved by the
+    // shared planner so this and the Tooling tab produce the same rack, and thus the
+    // same slot numbers.
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
-    let oblong_routes = matches!(
-        raw.drill.oblong.as_str(),
-        "route" | "drill_ends_then_route" | "drill_chain_then_route"
-    );
-    let needs_router = has_route || (has_oblongs && oblong_routes);
-    let outline_router = if needs_router { pick_outline_router(ctx, toolset) } else { None };
+    let oblong = OblongStrategy::from_key(&raw.drill.oblong);
+    let routers =
+        plan_routers(&ctx.tools, toolset, &groups, has_route, has_oblongs && oblong.routes());
 
     if groups.is_empty() && !has_route {
         if has_locating {
@@ -127,7 +127,7 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     };
     // Shared with the Tooling tab so the two views agree on tool feasibility.
     let setup = build_setup(ctx, raw.fixture_id);
-    let rack = build_rack_spec(toolset, atc_slots, outline_router.as_deref());
+    let rack = build_rack_spec(toolset, atc_slots, &routers.mandatory_ids());
 
     let assignment = match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
         Ok(assignment) => assignment,
@@ -143,18 +143,41 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     // point that would reach the bed). Oblong slots are still deferred.
     let mut drill_targets: Vec<DrillTarget> = Vec::new();
     let mut route_targets: Vec<RouteTarget> = Vec::new();
-    let mut oblong_features = 0usize;
+    let mut pending_slot_routes = 0usize;
     for (i, hole) in holes.iter().enumerate() {
         let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
-        if group.minor.is_some() {
-            oblong_features += 1;
-            continue;
-        }
         let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else { continue };
         let Some(tool_diameter) = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter) else {
             continue;
         };
         let source = hole.id.clone().unwrap_or_else(|| format!("hole#{i}"));
+
+        // An oblong made by drilling: the assigner sized the drill to the slot's minor
+        // axis, so that same drill walks the major axis. The slot's *route* half (the
+        // web, or the wall cleanup) still belongs to the route phase.
+        if let Some(slot) = hole.slot() {
+            if oblong.drills() && assigned.strategy == Strategy::Drill {
+                let positions =
+                    oblong::chain_positions(&slot, tool_diameter, oblong.chain_pitch_fraction());
+                for (n, at) in positions.into_iter().enumerate() {
+                    drill_targets.push(DrillTarget {
+                        source: format!("{source}.{n}"),
+                        at,
+                        tool_id: assigned.tool_id.clone(),
+                        diameter: tool_diameter,
+                        z_bottom: assigned.z_bottom,
+                        // One run: the chain order is already chosen, so the TSP must
+                        // place the chain without resequencing inside it.
+                        chain: Some(source.clone()),
+                    });
+                }
+            }
+            if oblong.routes() {
+                pending_slot_routes += 1;
+            }
+            continue;
+        }
+
         if assigned.strategy == Strategy::Drill {
             drill_targets.push(DrillTarget {
                 source,
@@ -162,6 +185,7 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
                 tool_id: assigned.tool_id.clone(),
                 diameter: tool_diameter,
                 z_bottom: assigned.z_bottom,
+                chain: None,
             });
         } else {
             route_targets.push(RouteTarget {
@@ -190,9 +214,18 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
 
     // Record what this step's plan does not yet cover.
-    if oblong_features > 0 {
+    if pending_slot_routes > 0 {
         notes.push(format!(
-            "{oblong_features} oblong slot(s) not yet planned — awaits the oblong route phase."
+            "{pending_slot_routes} oblong slot(s) still need their route pass — awaits the route phase. \
+             Any drilling their strategy calls for is planned."
+        ));
+    }
+    // Surface unmillable slots here too: when the oblong phase lands these are the
+    // features that will have no tool, and the Tooling tab carries the full detail.
+    if !routers.unroutable_widths.is_empty() {
+        notes.push(format!(
+            "{} slot width(s) are narrower than any available router — see the Tooling tab.",
+            routers.unroutable_widths.len()
         ));
     }
     if has_route {

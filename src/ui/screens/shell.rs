@@ -446,7 +446,11 @@ pub fn EventNotifications(state: Signal<crate::runtime::AppCtx>) -> Element {
 #[component]
 pub fn StatusBar(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let connected = snapshot.kicad_status != "not connected";
+    // Only a resolved version string means KiCad answered; "not connected" and
+    // "not responding" are both red.
+    let connected = snapshot
+        .kicad_status
+        .starts_with(crate::runtime::KICAD_STATUS_OK_PREFIX);
 
     // Program availability now lives in the top-bar pill; board geometry lives in
     // the Board view. The status bar owns the KiCad connection state.

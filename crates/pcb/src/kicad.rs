@@ -84,7 +84,7 @@ impl KiCad {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
 
-        for instance in self.list_instances() {
+        for instance in self.list_instances()? {
             for doc in instance.docs {
                 if seen.insert(dedup_key(&doc)) {
                     out.push(pcb_info_from(doc, instance.socket.clone()));
@@ -123,19 +123,24 @@ impl KiCad {
 
     /// The instance we connected to, plus (unless single-instance is forced)
     /// every other live instance found on the well-known socket directory.
-    fn list_instances(&self) -> Vec<Instance> {
+    ///
+    /// The connected instance's query is **not** allowed to fail silently: a dropped
+    /// or timed-out reply there is indistinguishable from "no documents", and callers
+    /// turn an empty list into "no PCB is open" — which is a lie the user then has to
+    /// debug against a KiCad that plainly does have a board open. Sibling sockets are
+    /// different: those are speculative probes of files that may be stale, so a failure
+    /// on one only skips that instance.
+    fn list_instances(&self) -> Result<Vec<Instance>, PcbError> {
         let current_socket = self.current_socket_path();
 
-        let mut instances = vec![Instance {
-            socket: current_socket.clone(),
-            docs: self
-                .inner
-                .get_open_documents(DocumentType::Pcb)
-                .unwrap_or_default(),
-        }];
+        let docs = self
+            .inner
+            .get_open_documents(DocumentType::Pcb)
+            .map_err(|e| PcbError::Connection(e.to_string()))?;
+        let mut instances = vec![Instance { socket: current_socket.clone(), docs }];
 
         if !should_scan_all_instances() {
-            return instances;
+            return Ok(instances);
         }
 
         let mut connected: BTreeSet<String> = current_socket.into_iter().collect();
@@ -161,7 +166,7 @@ impl KiCad {
             });
         }
 
-        instances
+        Ok(instances)
     }
 
     /// A client pointed at the instance owning `pcb`: the current connection

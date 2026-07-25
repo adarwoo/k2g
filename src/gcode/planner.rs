@@ -28,9 +28,9 @@ const IMPROVE_EPS_MM: f64 = 1e-9;
 /// guards against a pathological non-converging input.
 const MAX_TWO_OPT_PASSES: usize = 8;
 
-/// One round hole to drill: where it is (board space), which tool drills it, and the
-/// plunge depth the assigner computed for that tool/hole. Oblongs and routes are not
-/// drill targets — they decompose in the (future) route phase.
+/// One plunge to drill: where it is (board space), which tool drills it, and the plunge
+/// depth the assigner computed for that tool/hole. A round hole is one target; an oblong
+/// made by drilling is a chain of them (see [`DrillTarget::chain`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DrillTarget {
     /// Feature id (board hole id or a synthesised index), carried onto the op.
@@ -42,6 +42,15 @@ pub struct DrillTarget {
     /// Plunge past the top surface (`T + Lp + m`) from the assignment — a positive
     /// distance; the op stores it as a negative machine-Z depth.
     pub z_bottom: Length,
+    /// Chain id when this plunge is one of a slot's drill chain, whose order the caller
+    /// has already chosen ([`crate::gcode::oblong::chain_order`]) so no bit is ever
+    /// loaded on one flank only.
+    ///
+    /// Consecutive targets sharing an id are one **run**: the TSP orders runs, never
+    /// their contents. Without this the tour would shorten a chain into a left-to-right
+    /// sweep — the exact order the chain geometry exists to avoid. `None` for a round
+    /// hole, which is a run of one.
+    pub chain: Option<String>,
 }
 
 /// Plans the drill phase: one tool block per tool, small→large, TSP-ordered within.
@@ -62,6 +71,7 @@ pub fn plan_drilling(
         entry: Point,
         z_bottom: Length,
         source: String,
+        chain: Option<String>,
     }
     let mut by_tool: BTreeMap<String, (Length, Vec<Placed>)> = BTreeMap::new();
     for target in targets {
@@ -73,6 +83,7 @@ pub fn plan_drilling(
             entry,
             z_bottom: target.z_bottom,
             source: target.source.clone(),
+            chain: target.chain.clone(),
         });
     }
 
@@ -91,8 +102,17 @@ pub fn plan_drilling(
     ordered
         .into_iter()
         .map(|(tool_id, diameter, placed)| {
+            // Order runs, not plunges: a drill chain's internal order is already fixed,
+            // so the TSP sees each chain as one node at its first plunge.
+            let runs = contiguous_runs(placed.len(), |i| placed[i].chain.as_deref());
+            let heads: Vec<Point> = runs.iter().map(|run| placed[run.start].entry).collect();
+            let run_order = tsp_order(start, &heads);
+            let order: Vec<usize> = run_order
+                .iter()
+                .flat_map(|&r| runs[r].clone())
+                .collect();
+
             let points: Vec<Point> = placed.iter().map(|p| p.entry).collect();
-            let order = tsp_order(start, &points);
             let travel_mm = route_length(start, &points, &order);
 
             let ops: Vec<AtomicOp> = order
@@ -233,6 +253,32 @@ fn micron(length: Length) -> i64 {
 /// A deterministic visit order for `points`, starting from `start`: nearest-neighbour
 /// seeding, then 2-opt refinement. Ties break on the lower index, so the result is a
 /// total function of the inputs.
+/// Splits `0..len` into the runs the TSP may reorder: maximal spans of consecutive
+/// indices sharing the same `Some` chain id. Anything with no chain id is a run of one,
+/// so a board of plain round holes gets exactly the per-hole ordering it had before.
+///
+/// Chained targets arrive consecutively because one slot's chain is pushed in one go; a
+/// second chain with the same id (impossible today — ids are per-hole) would simply
+/// become a second run rather than silently merging.
+fn contiguous_runs<'a>(
+    len: usize,
+    chain_of: impl Fn(usize) -> Option<&'a str>,
+) -> Vec<std::ops::Range<usize>> {
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut i = 0;
+    while i < len {
+        let mut end = i + 1;
+        if let Some(id) = chain_of(i) {
+            while end < len && chain_of(end) == Some(id) {
+                end += 1;
+            }
+        }
+        runs.push(i..end);
+        i = end;
+    }
+    runs
+}
+
 fn tsp_order(start: Point, points: &[Point]) -> Vec<usize> {
     let n = points.len();
     if n <= 1 {
@@ -337,7 +383,13 @@ mod tests {
             tool_id: tool.to_string(),
             diameter: Length::from_mm(dia),
             z_bottom: Length::from_mm(2.4),
+            chain: None,
         }
+    }
+
+    /// A plunge belonging to a named drill chain.
+    fn chained(chain: &str, n: usize, x: f64, y: f64, tool: &str, dia: f64) -> DrillTarget {
+        DrillTarget { chain: Some(chain.to_string()), ..target(&format!("{chain}.{n}"), x, y, tool, dia) }
     }
 
     #[test]
@@ -390,6 +442,52 @@ mod tests {
         assert!(a[0].travel_mm <= naive_travel + 1e-9, "ordering is no worse than input order");
         // The optimal tour over 0..4 from the origin is a straight sweep of length 4.
         assert!((a[0].travel_mm - 4.0).abs() < 1e-6, "sorts the collinear points, travel = 4mm");
+    }
+
+    /// A drill chain's order is chosen for tool safety, not travel, so the TSP must
+    /// place the chain as a unit and leave its interior untouched. Left to itself the
+    /// tour would sort these collinear points into a sweep — the very order the chain
+    /// geometry exists to avoid.
+    #[test]
+    fn the_tsp_never_resequences_a_drill_chain() {
+        // Ends first, then the middle — the bisection order, deliberately not sorted.
+        let targets = vec![
+            chained("slot", 0, 0.0, 0.0, "t", 0.4),
+            chained("slot", 1, 4.0, 0.0, "t", 0.4),
+            chained("slot", 2, 2.0, 0.0, "t", 0.4),
+        ];
+        let blocks = plan_drilling(
+            &targets,
+            &placement_identity(),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        );
+        let sources: Vec<&str> = blocks[0].ops.iter().map(|op| op.source.as_str()).collect();
+        assert_eq!(sources, vec!["slot.0", "slot.1", "slot.2"], "chain order preserved verbatim");
+    }
+
+    /// Chains are still ordered *against each other*, and against loose holes, by
+    /// travel — only their interiors are fixed.
+    #[test]
+    fn chains_are_ordered_among_themselves_by_travel() {
+        // A far chain listed first, a near loose hole listed last.
+        let targets = vec![
+            chained("far", 0, 50.0, 0.0, "t", 0.4),
+            chained("far", 1, 52.0, 0.0, "t", 0.4),
+            target("near", 1.0, 0.0, "t", 0.4),
+        ];
+        let blocks = plan_drilling(
+            &targets,
+            &placement_identity(),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        );
+        let sources: Vec<&str> = blocks[0].ops.iter().map(|op| op.source.as_str()).collect();
+        assert_eq!(
+            sources,
+            vec!["near", "far.0", "far.1"],
+            "the near hole is visited first, then the chain intact"
+        );
     }
 
     #[test]

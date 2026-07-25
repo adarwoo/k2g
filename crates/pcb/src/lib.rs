@@ -47,6 +47,6 @@ mod stitching;
 pub use error::PcbError;
 pub use kicad::{KiCad, PcbInfo};
 pub use snapshot::{
-    BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind,
+    BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind, Slot,
 };
 pub use stitching::{routing_offset, stitch_edge_shapes, Contour, Segment, StitchResult};

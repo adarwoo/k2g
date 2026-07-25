@@ -1,16 +1,52 @@
 //! Job "Board" view — the PCB visualization: renders the active board's edge
-//! graph and drill holes as pan/zoom-able SVG, with a drill-size legend. Reads
-//! the active board snapshot; all view state (zoom, pan, selected document) is
-//! local to this component.
+//! graph, drill holes and routed features as pan/zoom-able SVG, with a legend.
+//! Reads the active board snapshot; all view state (zoom, pan, selected document)
+//! is local to this component.
+//!
+//! **Drilled vs routed.** A round hole is made by plunging a drill, so it is drawn
+//! as a symbol keyed to its size class. Everything a *router* makes — an oblong
+//! slot, the board outline — removes a swept band of material, so it is drawn as
+//! that band, hatched: the hatch is the cutting tool path, and its width is the
+//! feature's own width (the slot width; a fixed nominal kerf for the outline,
+//! whose router is a per-step choice this view cannot see).
 
 use dioxus::prelude::*;
 use std::path::Path;
 
-use pcb::{BoardEdgeShape, HoleKind};
+use pcb::{BoardEdgeShape, BoardSnapshot, Contour, HoleKind};
 use units::Length;
 
 use crate::runtime::AppCtx;
 use units::user_format as unit_format;
+
+/// Nominal kerf width drawn for the board-outline route, in mm.
+///
+/// The outline router is a per-step tool choice this view has no access to — it renders
+/// raw board geometry, not a machining plan — so the outside-route band uses a fixed
+/// nominal width (2 mm is the usual PCB outline cutter). It states "this edge is
+/// routed", not "this exact tool cuts it".
+const OUTLINE_ROUTE_WIDTH_MM: f64 = 2.0;
+
+/// Hatch line pitch expressed in board mm, so the texture keeps a constant physical
+/// scale whatever the board's size.
+const HATCH_PITCH_MM: f64 = 0.35;
+
+/// View-unit floor on the hatch pitch: a very large board would otherwise hatch below a
+/// pixel and read as a flat tint.
+const HATCH_PITCH_MIN_UNITS: f64 = 1.2;
+
+/// View-unit ceiling on the hatch pitch: a very small board would otherwise hatch
+/// coarser than its own slots.
+const HATCH_PITCH_MAX_UNITS: f64 = 6.0;
+
+/// Hatch pitch inside the 24×24 legend swatches, which have their own user space.
+const HATCH_PITCH_LEGEND: f64 = 3.0;
+
+/// The hole kinds, as the slug used to build their per-kind hatch pattern ids and CSS
+/// classes. One list keeps the pattern defs, the band fills and the legend swatches in
+/// lockstep — a routed slot hatches in its own PTH/NPTH/via colour, exactly as a drilled
+/// hole's symbol does.
+const HOLE_KIND_SLUGS: [&str; 3] = ["via", "pth", "npth"];
 
 fn board_display_label(board_filename: &str) -> String {
     Path::new(board_filename)
@@ -70,6 +106,52 @@ struct DrillLegendEntry {
     rotation_deg: f64,
 }
 
+/// A routed oblong hole ("slot"), pre-resolved into view space.
+///
+/// A slot is milled, not drilled: the cutter's centre sweeps the long axis between the
+/// two end centres, and the material it removes is exactly the stadium of the slot
+/// outline. The view therefore hatches that stadium — the hatched band *is* the cutting
+/// tool path, and its width is the slot width by construction.
+#[derive(Clone)]
+struct BoardSlotFeature {
+    /// Slot centre, in view units.
+    x: f64,
+    y: f64,
+    /// SVG rotation (degrees) laying the slot's long axis on the local +X axis.
+    rotation_deg: f64,
+    /// Half the cutter-centre travel along the long axis, in view units.
+    half_travel: f64,
+    /// The stadium outline, in the slot's own (unrotated) frame.
+    outline_path: String,
+    /// Hole kind, for the boundary colour.
+    kind: HoleKind,
+}
+
+/// One distinct slot size present on the board, for the legend. Keyed by kind as well
+/// as size: the hatch is kind-coloured, so the same size plated and unplated are two
+/// visually different things and each earns its own key entry.
+#[derive(Clone)]
+struct SlotLegendEntry {
+    length_mm: f64,
+    width_mm: f64,
+    kind: HoleKind,
+}
+
+/// Everything the SVG render needs from the board's holes, resolved into view units.
+/// Both legends are built from the same classification as the markers, so the picture
+/// and the key can never disagree.
+#[derive(Default)]
+struct BoardFeatures {
+    /// Round drilled holes, as symbol markers.
+    holes: Vec<BoardHoleMarker>,
+    /// Oblong holes, as routed (hatched) slot bands.
+    slots: Vec<BoardSlotFeature>,
+    /// Distinct round-drill diameters, in symbol-class order.
+    drill_legend: Vec<DrillLegendEntry>,
+    /// Distinct slot sizes, smallest first.
+    slot_legend: Vec<SlotLegendEntry>,
+}
+
 fn drill_symbol_from_index(index: usize) -> (DrillBaseShape, DrillModifier, f64) {
     const BASE_SHAPES: [DrillBaseShape; 5] = [
         DrillBaseShape::Circle,
@@ -102,6 +184,259 @@ fn hole_marker_class(kind: &HoleKind) -> &'static str {
         HoleKind::Via => "board-hole-cross board-hole-via",
         HoleKind::PadPth => "board-hole-cross board-hole-pth",
         HoleKind::PadNpth => "board-hole-cross board-hole-npth",
+    }
+}
+
+/// The colour-only class for a hole kind. Routed slots bring their own stroke geometry
+/// (a thin non-scaling boundary), so they take the kind colour without the marker
+/// stroke rules that [`hole_marker_class`] carries.
+fn hole_kind_class(kind: &HoleKind) -> &'static str {
+    match kind {
+        HoleKind::Via => "board-hole-via",
+        HoleKind::PadPth => "board-hole-pth",
+        HoleKind::PadNpth => "board-hole-npth",
+    }
+}
+
+/// The [`HOLE_KIND_SLUGS`] entry for a kind — the stem of its hatch pattern id and band
+/// class.
+fn hole_kind_slug(kind: &HoleKind) -> &'static str {
+    match kind {
+        HoleKind::Via => HOLE_KIND_SLUGS[0],
+        HoleKind::PadPth => HOLE_KIND_SLUGS[1],
+        HoleKind::PadNpth => HOLE_KIND_SLUGS[2],
+    }
+}
+
+/// The stadium swept by a cutter of width `2 * half_width` travelling `2 * half_travel`
+/// along the local +X axis — that is, the slot outline in the slot's own frame. Both
+/// arcs sweep the same way round so the path closes as one convex region.
+fn stadium_path(half_travel: f64, half_width: f64) -> String {
+    let (h, r) = (half_travel, half_width);
+    let (nh, nr) = (-half_travel, -half_width);
+    format!("M {nh} {nr} L {h} {nr} A {r} {r} 0 0 1 {h} {r} L {nh} {r} A {r} {r} 0 0 1 {nh} {nr} Z")
+}
+
+/// Resolves the board's holes into view-space render features: round holes become drill
+/// symbols keyed by a size class, oblong holes become routed slot bands.
+///
+/// `zoom` only feeds the drill-symbol legibility floor; slot bands stay geometrically
+/// true at every zoom, since their whole point is showing the real swept area.
+fn resolve_board_features(
+    board: &BoardSnapshot,
+    view_width: f64,
+    view_height: f64,
+    zoom: f64,
+) -> BoardFeatures {
+    let Some(bbox) = board.bounding_box.as_ref() else {
+        return BoardFeatures::default();
+    };
+    let (min_x, min_y) = (bbox.x.as_mm(), bbox.y.as_mm());
+    let (width, height) = (bbox.width.as_mm(), bbox.height.as_mm());
+    if width <= 0.0 || height <= 0.0 {
+        return BoardFeatures::default();
+    }
+    let units_per_mm = view_width / width;
+
+    // Size classes cover *drilled* holes only — a slot is milled to size, so it carries
+    // no drill symbol and gets its own legend below.
+    let mut drill_size_classes = board
+        .holes
+        .iter()
+        .filter(|hole| hole.slot().is_none())
+        .filter_map(|hole| hole.drill_axes())
+        .map(|(major, _)| major.as_mm())
+        .collect::<Vec<_>>();
+    drill_size_classes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    drill_size_classes.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+
+    let mut features = BoardFeatures {
+        drill_legend: drill_size_classes
+            .iter()
+            .enumerate()
+            .map(|(class_idx, diameter_mm)| {
+                let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
+                DrillLegendEntry { diameter_mm: *diameter_mm, base, modifier, rotation_deg }
+            })
+            .collect(),
+        ..BoardFeatures::default()
+    };
+
+    // Legibility floor: never draw a drill marker smaller than a 2 mm hole would be at
+    // this zoom, so dense fields of tiny vias stay distinguishable.
+    let min_marker_radius = ((2.0 / width) * view_width * 0.5) / zoom.max(1.0);
+
+    for hole in &board.holes {
+        let x = ((hole.position.x.as_mm() - min_x) / width).clamp(0.0, 1.0) * view_width;
+        let y = ((hole.position.y.as_mm() - min_y) / height).clamp(0.0, 1.0) * view_height;
+        // A milled slot: the band is the material the cutter sweeps. `Slot` carries the
+        // board-frame axis angle, which in this Y-down view is directly an SVG rotation.
+        if let Some(slot) = hole.slot() {
+            let (length_mm, width_mm) = (slot.length.as_mm(), slot.width.as_mm());
+            let half_width = width_mm * 0.5 * units_per_mm;
+            let half_travel = slot.travel().as_mm() * 0.5 * units_per_mm;
+            features.slots.push(BoardSlotFeature {
+                x,
+                y,
+                rotation_deg: slot.angle_deg,
+                half_travel,
+                outline_path: stadium_path(half_travel, half_width),
+                kind: hole.kind.clone(),
+            });
+            if !features.slot_legend.iter().any(|entry| {
+                (entry.length_mm - length_mm).abs() < 1e-6
+                    && (entry.width_mm - width_mm).abs() < 1e-6
+                    && entry.kind == hole.kind
+            }) {
+                features.slot_legend.push(SlotLegendEntry {
+                    length_mm,
+                    width_mm,
+                    kind: hole.kind.clone(),
+                });
+            }
+            continue;
+        }
+
+        // A hole with no drill data at all still gets a marker, at a token size.
+        let major = hole.drill_axes().map(|(major, _)| major.as_mm()).unwrap_or(0.1);
+        let hole_diameter = major.max(0.05);
+        let marker_radius = ((hole_diameter / width) * view_width * 0.5)
+            .max(min_marker_radius)
+            .clamp((1.5 / zoom).max(0.5), 28.0);
+        let class_idx = drill_size_classes
+            .iter()
+            .position(|d| (*d - hole_diameter).abs() < 1e-6)
+            .unwrap_or(0);
+        let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
+        features.holes.push(BoardHoleMarker {
+            x,
+            y,
+            marker_radius,
+            rotation_deg,
+            kind: hole.kind.clone(),
+            base,
+            modifier,
+        });
+    }
+
+    features.slot_legend.sort_by(|a, b| {
+        a.length_mm
+            .partial_cmp(&b.length_mm)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.width_mm.partial_cmp(&b.width_mm).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    features
+}
+
+/// One hatch pattern, tiled in the user space of whichever SVG references it — so the
+/// board render and the legend swatches each get a tile sized for their own coordinate
+/// system.
+///
+/// `colour_class` goes on the `<pattern>` itself and only needs to set `color`: pattern
+/// content inherits from the pattern element, and the hatch lines paint with
+/// `currentColor`. That lets the existing hole-kind colour classes drive the hatch
+/// directly, so a routed slot is hatched in its own PTH/NPTH/via colour.
+///
+/// `cross` adds the perpendicular family. Slots hatch in one direction (the tile rotates
+/// with the slot, so it can never align with the band), but the outline band follows
+/// arbitrary edge angles — a single family would run lengthwise along a 45° chamfer and
+/// stop reading as a hatch, so the outline cross-hatches.
+fn hatch_pattern(
+    id: &str,
+    colour_class: &str,
+    pitch: f64,
+    line_width: f64,
+    cross: bool,
+) -> Element {
+    rsx! {
+        pattern {
+            id: "{id}",
+            class: "{colour_class}",
+            pattern_units: "userSpaceOnUse",
+            width: "{pitch}",
+            height: "{pitch}",
+            pattern_transform: "rotate(45)",
+            line {
+                x1: "0",
+                y1: "0",
+                x2: "0",
+                y2: "{pitch}",
+                class: "board-hatch-line",
+                stroke_width: "{line_width}",
+            }
+            if cross {
+                line {
+                    x1: "0",
+                    y1: "0",
+                    x2: "{pitch}",
+                    y2: "0",
+                    class: "board-hatch-line",
+                    stroke_width: "{line_width}",
+                }
+            }
+        }
+    }
+}
+
+/// The stitched board outline as one SVG path, every contour a closed subpath, in view
+/// units. `None` when the stitcher has not produced a usable result.
+///
+/// This is what makes the outside-route band possible: the raw `edge_shapes` are
+/// unordered fragments, so there is no "inside" to offset away from, whereas a stitched
+/// contour is a closed, nested loop. The tessellated polyline is enough here — the true
+/// arcs still draw the nominal cut line on top.
+fn stitched_outline_path(
+    contours: &[Contour],
+    to_view: impl Fn(f64, f64) -> (f64, f64),
+) -> Option<String> {
+    let mut path = String::new();
+    for contour in contours {
+        let mut points = contour.points.iter();
+        let Some((first_x, first_y)) = points.next() else { continue };
+        let (x, y) = to_view(*first_x as f64 / 1e6, *first_y as f64 / 1e6);
+        path.push_str(&format!("M {x} {y}"));
+        for (px, py) in points {
+            let (x, y) = to_view(*px as f64 / 1e6, *py as f64 / 1e6);
+            path.push_str(&format!(" L {x} {y}"));
+        }
+        path.push_str(" Z ");
+    }
+    (!path.is_empty()).then_some(path)
+}
+
+/// Renders one edge-shape primitive. Called twice per shape: once as the hatched
+/// outside-route band (an explicit `stroke_width`, in view units so it scales with the
+/// geometry), then as the nominal cut line on top (`None` — its class carries a
+/// non-scaling stroke width).
+fn edge_shape_element(shape: &SvgShape, class: &str, stroke_width: Option<f64>) -> Element {
+    match shape {
+        SvgShape::Line { x1, y1, x2, y2 } => rsx! {
+            line {
+                x1: "{x1}",
+                y1: "{y1}",
+                x2: "{x2}",
+                y2: "{y2}",
+                class: "{class}",
+                stroke_width: stroke_width,
+            }
+        },
+        SvgShape::Path(d) => rsx! {
+            path { d: "{d}", class: "{class}", stroke_width: stroke_width }
+        },
+        SvgShape::Rect { x, y, w, h, rx } => rsx! {
+            rect {
+                x: "{x}",
+                y: "{y}",
+                width: "{w}",
+                height: "{h}",
+                rx: "{rx}",
+                class: "{class}",
+                stroke_width: stroke_width,
+            }
+        },
+        SvgShape::Circle { cx, cy, r } => rsx! {
+            circle { cx: "{cx}", cy: "{cy}", r: "{r}", class: "{class}", stroke_width: stroke_width }
+        },
     }
 }
 
@@ -174,93 +509,54 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let zoom_value = *board_zoom.read();
     let pan_x_value = *board_pan_x.read();
     let pan_y_value = *board_pan_y.read();
-    let viewport_w = (board_view_width / zoom_value).clamp(10.0, board_view_width);
-    let viewport_h = (board_view_height / zoom_value).clamp(10.0, board_view_height);
-    let max_pan_x = (board_view_width - viewport_w).max(0.0);
-    let max_pan_y = (board_view_height - viewport_h).max(0.0);
-    let view_x = pan_x_value.clamp(0.0, max_pan_x);
-    let view_y = pan_y_value.clamp(0.0, max_pan_y);
+
+    // View units per board mm. `tx`/`ty` scale both axes by the same factor (the view
+    // height is the width times the board aspect), so one factor serves both — it turns
+    // physical widths (hatch pitch, the outline kerf) into view units.
+    let units_per_mm = snapshot
+        .board
+        .as_ref()
+        .and_then(|board| board.bounding_box.as_ref())
+        .map(|bbox| bbox.width.as_mm())
+        .filter(|width| *width > 0.0)
+        .map(|width| board_view_width / width)
+        .unwrap_or(1.0);
+    let hatch_pitch =
+        (HATCH_PITCH_MM * units_per_mm).clamp(HATCH_PITCH_MIN_UNITS, HATCH_PITCH_MAX_UNITS);
+    let hatch_line_width = hatch_pitch * 0.4;
+    let outline_band_width = OUTLINE_ROUTE_WIDTH_MM * units_per_mm;
+
+    // The outside-route band lies wholly beyond the edge cut, so the drawing is the
+    // board's bounds grown by one kerf on every side. Pan/zoom work over this content
+    // box, not the bare board box, or the band would be clipped at full extent.
+    let content_x = -outline_band_width;
+    let content_y = -outline_band_width;
+    let content_w = board_view_width + 2.0 * outline_band_width;
+    let content_h = board_view_height + 2.0 * outline_band_width;
+
+    let viewport_w = (content_w / zoom_value).clamp(10.0, content_w);
+    let viewport_h = (content_h / zoom_value).clamp(10.0, content_h);
+    let max_pan_x = (content_w - viewport_w).max(0.0);
+    let max_pan_y = (content_h - viewport_h).max(0.0);
+    // Pan is stored relative to the content box's top-left, so the offset only enters
+    // when the viewBox is written.
+    let pan_x_clamped = pan_x_value.clamp(0.0, max_pan_x);
+    let pan_y_clamped = pan_y_value.clamp(0.0, max_pan_y);
+    let view_x = content_x + pan_x_clamped;
+    let view_y = content_y + pan_y_clamped;
     let board_view_box = format!("{view_x} {view_y} {viewport_w} {viewport_h}");
     let zoom_percent = (zoom_value * 100.0).round() as i32;
-    let (board_hole_markers, drill_size_legend): (Vec<BoardHoleMarker>, Vec<DrillLegendEntry>) = if let Some(board) = snapshot.board.as_ref() {
-        if let Some(bbox) = board.bounding_box.as_ref() {
-            let min_x = bbox.x.as_mm();
-            let min_y = bbox.y.as_mm();
-            let width = bbox.width.as_mm();
-            let height = bbox.height.as_mm();
-
-            if width > 0.0 && height > 0.0 {
-                let mut drill_size_classes = board
-                    .holes
-                    .iter()
-                    .filter_map(|hole| hole.drill_x.as_ref().or(hole.drill_y.as_ref()))
-                    .map(|d| d.as_mm())
-                    .collect::<Vec<_>>();
-                drill_size_classes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                drill_size_classes.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-
-                let legend_entries = drill_size_classes
-                    .iter()
-                    .enumerate()
-                    .map(|(class_idx, diameter_mm)| {
-                        let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
-                        DrillLegendEntry {
-                            diameter_mm: *diameter_mm,
-                            base,
-                            modifier,
-                            rotation_deg,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                (board
-                    .holes
-                    .iter()
-                    .map(|hole| {
-                        let x = ((hole.position.x.as_mm() - min_x) / width).clamp(0.0, 1.0)
-                            * board_view_width;
-                        let y = ((hole.position.y.as_mm() - min_y) / height).clamp(0.0, 1.0)
-                            * board_view_height;
-                        let hole_diameter = hole
-                            .drill_x
-                            .as_ref()
-                            .or(hole.drill_y.as_ref())
-                            .map(|d| d.as_mm())
-                            .unwrap_or(0.1)
-                            .max(0.05);
-
-                        let min_marker_radius = ((2.0 / width) * board_view_width * 0.5)
-                            / zoom_value.max(1.0);
-                        let marker_radius = ((hole_diameter / width) * board_view_width * 0.5)
-                            .max(min_marker_radius)
-                            .clamp((1.5 / zoom_value).max(0.5), 28.0);
-
-                        let class_idx = drill_size_classes
-                            .iter()
-                            .position(|d| (*d - hole_diameter).abs() < 1e-6)
-                            .unwrap_or(0);
-                        let (base, modifier, rotation_deg) = drill_symbol_from_index(class_idx);
-                        BoardHoleMarker {
-                            x,
-                            y,
-                            marker_radius,
-                            rotation_deg,
-                            kind: hole.kind.clone(),
-                            base,
-                            modifier,
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                legend_entries)
-            } else {
-                (Vec::new(), Vec::new())
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        }
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    let features = snapshot
+        .board
+        .as_ref()
+        .map(|board| {
+            resolve_board_features(board, board_view_width, board_view_height, zoom_value)
+        })
+        .unwrap_or_default();
+    let board_hole_markers = &features.holes;
+    let board_slot_features = &features.slots;
+    let drill_size_legend = &features.drill_legend;
+    let slot_size_legend = &features.slot_legend;
 
     let board_edge_shapes_svg: Vec<SvgShape> = if let Some(board) = snapshot.board.as_ref() {
         if let Some(bbox) = board.bounding_box.as_ref() {
@@ -340,6 +636,28 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
         Vec::new()
     };
 
+    // The stitched contours, in view units — the source for the outside-route band.
+    // Only a clean stitch is usable: with errors the contours are not closed, so there
+    // is no reliable inside to keep the band out of.
+    let stitched_outline = snapshot
+        .stitched_board_data
+        .as_ref()
+        .filter(|stitched| stitched.errors.is_empty())
+        .zip(snapshot.board.as_ref().and_then(|b| b.bounding_box.as_ref()))
+        .filter(|(_, bbox)| bbox.width.as_mm() > 0.0 && bbox.height.as_mm() > 0.0)
+        .and_then(|(stitched, bbox)| {
+            let min_x = bbox.x.as_mm();
+            let min_y = bbox.y.as_mm();
+            let width = bbox.width.as_mm();
+            let height = bbox.height.as_mm();
+            stitched_outline_path(&stitched.contours, |px, py| {
+                (
+                    ((px - min_x) / width) * board_view_width,
+                    ((py - min_y) / height) * board_view_height,
+                )
+            })
+        });
+
     rsx! {
                             div { class: "board-preview",
                                 if !open_board_filenames_value.is_empty() {
@@ -396,7 +714,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                             }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
                                             span { class: "board-view-status",
-                                                "{board.holes.len()} holes · {board.edge_shapes.len()} edges"
+                                                "{board_hole_markers.len()} drilled · {board_slot_features.len()} routed slots · {board.edge_shapes.len()} edges"
                                             }
                                         }
                                         div { class: "board-preview-layout",
@@ -423,8 +741,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
 
                                                     let dx = p.x - last_x;
                                                     let dy = p.y - last_y;
-                                                    let unit_per_px_x = viewport_w / board_view_width;
-                                                    let unit_per_px_y = viewport_h / board_view_height;
+                                                    let unit_per_px_x = viewport_w / content_w;
+                                                    let unit_per_px_y = viewport_h / content_h;
 
                                                     let next_x = (*board_pan_x.read() - dx * unit_per_px_x).clamp(0.0, max_pan_x);
                                                     let next_y = (*board_pan_y.read() - dy * unit_per_px_y).clamp(0.0, max_pan_y);
@@ -440,14 +758,16 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         return;
                                                     }
 
-                                                    let old_vw = (board_view_width / old_zoom).clamp(10.0, board_view_width);
-                                                    let old_vh = (board_view_height / old_zoom).clamp(10.0, board_view_height);
-                                                    let new_vw = (board_view_width / new_zoom).clamp(10.0, board_view_width);
-                                                    let new_vh = (board_view_height / new_zoom).clamp(10.0, board_view_height);
-                                                    let center_x = view_x + old_vw * 0.5;
-                                                    let center_y = view_y + old_vh * 0.5;
-                                                    let new_max_pan_x = (board_view_width - new_vw).max(0.0);
-                                                    let new_max_pan_y = (board_view_height - new_vh).max(0.0);
+                                                    // Keep the viewport's centre fixed across the zoom. Pan is
+                                                    // content-box-relative, so the centre is too.
+                                                    let old_vw = (content_w / old_zoom).clamp(10.0, content_w);
+                                                    let old_vh = (content_h / old_zoom).clamp(10.0, content_h);
+                                                    let new_vw = (content_w / new_zoom).clamp(10.0, content_w);
+                                                    let new_vh = (content_h / new_zoom).clamp(10.0, content_h);
+                                                    let center_x = pan_x_clamped + old_vw * 0.5;
+                                                    let center_y = pan_y_clamped + old_vh * 0.5;
+                                                    let new_max_pan_x = (content_w - new_vw).max(0.0);
+                                                    let new_max_pan_y = (content_h - new_vh).max(0.0);
                                                     board_zoom.set(new_zoom);
                                                     board_pan_x.set((center_x - new_vw * 0.5).clamp(0.0, new_max_pan_x));
                                                     board_pan_y.set((center_y - new_vh * 0.5).clamp(0.0, new_max_pan_y));
@@ -457,6 +777,47 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     view_box: "{board_view_box}",
                                                     preserve_aspect_ratio: "xMidYMid meet",
 
+                                                    // Hatch textures for the routed bands: one per hole kind, so a
+                                                    // routed slot hatches in the same colour its drilled symbol
+                                                    // would carry. Board-scale tiles are pitched in board mm; the
+                                                    // `-legend` tiles are pitched for the 24×24 swatch user space
+                                                    // (pattern ids resolve document-wide).
+                                                    defs {
+                                                        for slug in HOLE_KIND_SLUGS {
+                                                            {hatch_pattern(&format!("board-route-hatch-{slug}"), &format!("board-hole-{slug}"), hatch_pitch, hatch_line_width, false)}
+                                                        }
+                                                        for slug in HOLE_KIND_SLUGS {
+                                                            {hatch_pattern(&format!("board-route-hatch-{slug}-legend"), &format!("board-hole-{slug}"), HATCH_PITCH_LEGEND, HATCH_PITCH_LEGEND * 0.4, false)}
+                                                        }
+                                                        {hatch_pattern("board-outline-hatch", "board-hatch-outline", hatch_pitch, hatch_line_width, true)}
+                                                        {hatch_pattern("board-outline-hatch-legend", "board-hatch-outline", HATCH_PITCH_LEGEND, HATCH_PITCH_LEGEND * 0.4, true)}
+
+                                                        // Keeps the outside-route band out of the board: white is
+                                                        // kept, and the stitched material region is painted black.
+                                                        // Stroking the contours at twice the kerf then masking the
+                                                        // inner half leaves exactly one kerf outside the edge cut —
+                                                        // and it falls out the right way for interior cut-outs too,
+                                                        // where "outside the board" is inside the opening.
+                                                        if let Some(outline) = stitched_outline.as_ref() {
+                                                            mask {
+                                                                id: "board-outside-route-mask",
+                                                                mask_units: "userSpaceOnUse",
+                                                                x: "{content_x}",
+                                                                y: "{content_y}",
+                                                                width: "{content_w}",
+                                                                height: "{content_h}",
+                                                                rect {
+                                                                    x: "{content_x}",
+                                                                    y: "{content_y}",
+                                                                    width: "{content_w}",
+                                                                    height: "{content_h}",
+                                                                    fill: "white",
+                                                                }
+                                                                path { d: "{outline}", fill: "black", fill_rule: "evenodd", stroke: "none" }
+                                                            }
+                                                        }
+                                                    }
+
                                                     rect {
                                                         x: "0",
                                                         y: "0",
@@ -465,38 +826,61 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         class: "board-svg-frame",
                                                     }
 
+                                                    // Outside routing: the kerf the outline cutter sweeps. It lies
+                                                    // wholly beyond the edge cut, so the finished board keeps its
+                                                    // nominal size. Without a clean stitch there is no inside to
+                                                    // keep out of, so fall back to a band centred on the raw edge
+                                                    // fragments — still "this edge is routed", just unsided.
+                                                    if let Some(outline) = stitched_outline.as_ref() {
+                                                        {
+                                                            let double_kerf = outline_band_width * 2.0;
+                                                            rsx! {
+                                                                path {
+                                                                    d: "{outline}",
+                                                                    class: "board-outline-band",
+                                                                    stroke_width: "{double_kerf}",
+                                                                    mask: "url(#board-outside-route-mask)",
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        for shape in board_edge_shapes_svg.iter() {
+                                                            {edge_shape_element(shape, "board-outline-band", Some(outline_band_width))}
+                                                        }
+                                                    }
                                                     for shape in board_edge_shapes_svg.iter() {
-                                                        match shape {
-                                                            SvgShape::Line { x1, y1, x2, y2 } => rsx! {
-                                                                line {
-                                                                    x1: "{x1}",
-                                                                    y1: "{y1}",
-                                                                    x2: "{x2}",
-                                                                    y2: "{y2}",
-                                                                    class: "board-edge-shape",
+                                                        {edge_shape_element(shape, "board-edge-shape", None)}
+                                                    }
+
+                                                    // Routed slots: the hatched stadium is the swept material,
+                                                    // the dashed centreline the cutter's own path through it.
+                                                    for (idx , slot) in board_slot_features.iter().enumerate() {
+                                                        {
+                                                            let kind_class = hole_kind_class(&slot.kind);
+                                                            let band_class = format!("board-route-band-{}", hole_kind_slug(&slot.kind));
+                                                            let travel_start = -slot.half_travel;
+                                                            let travel_end = slot.half_travel;
+                                                            rsx! {
+                                                                g {
+                                                                    key: "board-slot-{idx}",
+                                                                    transform: "translate({slot.x} {slot.y}) rotate({slot.rotation_deg})",
+
+                                                                    path { d: "{slot.outline_path}", class: "{band_class}" }
+                                                                    path {
+                                                                        d: "{slot.outline_path}",
+                                                                        class: "board-route-outline {kind_class}",
+                                                                    }
+                                                                    if slot.half_travel > 0.0 {
+                                                                        line {
+                                                                            x1: "{travel_start}",
+                                                                            y1: "0",
+                                                                            x2: "{travel_end}",
+                                                                            y2: "0",
+                                                                            class: "board-route-centerline {kind_class}",
+                                                                        }
+                                                                    }
                                                                 }
-                                                            },
-                                                            SvgShape::Path(d) => rsx! {
-                                                                path { d: "{d}", class: "board-edge-shape" }
-                                                            },
-                                                            SvgShape::Rect { x, y, w, h, rx } => rsx! {
-                                                                rect {
-                                                                    x: "{x}",
-                                                                    y: "{y}",
-                                                                    width: "{w}",
-                                                                    height: "{h}",
-                                                                    rx: "{rx}",
-                                                                    class: "board-edge-shape",
-                                                                }
-                                                            },
-                                                            SvgShape::Circle { cx, cy, r } => rsx! {
-                                                                circle {
-                                                                    cx: "{cx}",
-                                                                    cy: "{cy}",
-                                                                    r: "{r}",
-                                                                    class: "board-edge-shape",
-                                                                }
-                                                            },
+                                                            }
                                                         }
                                                     }
 
@@ -648,7 +1032,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                             aside { class: "board-drill-legend-panel",
                                                 h4 { "Drill size legend" }
                                                 if drill_size_legend.is_empty() {
-                                                    p { class: "diag-status", "No drilled holes detected" }
+                                                    p { class: "diag-status", "No round drilled holes detected" }
                                                 } else {
                                                     for (legend_idx , entry) in drill_size_legend.iter().enumerate() {
                                                         {
@@ -796,8 +1180,70 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                 }
                                                 div { class: "board-drill-legend-note",
-                                                    "Size classes are ordered by drill diameter and reuse symbol patterns after 120 combinations."
+                                                    "Size classes cover round drilled holes only; they are ordered by diameter and reuse symbol patterns after 120 combinations."
                                                 }
+
+                                                h4 { "Routed features" }
+                                                div { class: "board-drill-legend-note",
+                                                    "Hatched bands are material a router removes — the hatch is the cutting tool path, in the feature's own hole-type colour."
+                                                }
+                                                if slot_size_legend.is_empty() {
+                                                    p { class: "diag-status", "No oblong slots detected" }
+                                                } else {
+                                                    for (slot_idx , entry) in slot_size_legend.iter().enumerate() {
+                                                        {
+                                                            // A swatch at the entry's own aspect, clamped so a long
+                                                            // slot still fits the 24×24 icon.
+                                                            let half_width = 4.0_f64;
+                                                            let half_travel = (half_width
+                                                                * (entry.length_mm / entry.width_mm.max(1e-6) - 1.0))
+                                                                .clamp(0.0, 7.0);
+                                                            let outline = stadium_path(half_travel, half_width);
+                                                            let slug = hole_kind_slug(&entry.kind);
+                                                            let band_class = format!("board-route-band-{slug}-legend");
+                                                            let kind_class = hole_kind_class(&entry.kind);
+                                                            let kind_label = slug.to_uppercase();
+                                                            let length_text = unit_format::format_length_display(
+                                                                Length::from_mm(entry.length_mm),
+                                                                snapshot.unit_system,
+                                                            );
+                                                            let width_text = unit_format::format_length_display(
+                                                                Length::from_mm(entry.width_mm),
+                                                                snapshot.unit_system,
+                                                            );
+                                                            rsx! {
+                                                                div {
+                                                                    key: "slot-legend-entry-{slot_idx}",
+                                                                    class: "board-drill-legend-item",
+                                                                    svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                                        g { transform: "translate(12 12)",
+                                                                            path { d: "{outline}", class: "{band_class}" }
+                                                                            path {
+                                                                                d: "{outline}",
+                                                                                class: "board-route-outline {kind_class}",
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    span { "{kind_label} slot {length_text} × {width_text}" }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div { class: "board-drill-legend-item",
+                                                    svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                        // The kerf sits wholly on one side of the cut line, as it
+                                                        // does on the board.
+                                                        path {
+                                                            d: "M 2 9 L 22 9",
+                                                            class: "board-outline-band-legend",
+                                                            stroke_width: "6",
+                                                        }
+                                                        path { d: "M 2 12 L 22 12", class: "board-edge-shape" }
+                                                    }
+                                                    span { "Outside route ({OUTLINE_ROUTE_WIDTH_MM} mm nominal, outside the edge)" }
+                                                }
+
                                                 div { class: "board-drill-legend-note", "Hole type colors" }
                                                 div { class: "board-drill-legend-item",
                                                     svg {
@@ -851,11 +1297,13 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                             class: "board-edge-shape",
                                                         }
                                                     }
-                                                    span { "Edge cuts" }
+                                                    span { "Edge cut line" }
                                                 }
                                             }
                                         }
-                                        p { "Board edge shapes: {board.edge_shapes.len()} · Holes: {board.holes.len()}" }
+                                        p {
+                                            "Board edge shapes: {board.edge_shapes.len()} · Drilled holes: {board_hole_markers.len()} · Routed slots: {board_slot_features.len()}"
+                                        }
                                     } else {
                                         div { class: "canvas-mock", "Board bounding box unavailable" }
                                         p { "Open a board in KiCad to render the board graph." }
@@ -865,5 +1313,91 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                     p { "Click 'Refresh Board Snapshot' while a PCB is open in KiCad." }
                                 }
                             }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pcb::{BoardHole, BoardPoint};
+
+    /// A hole at the origin with the given drill axes and pad angle.
+    fn hole(drill_x_mm: f64, drill_y_mm: f64, angle_deg: Option<f64>) -> BoardHole {
+        BoardHole {
+            id: None,
+            kind: HoleKind::PadPth,
+            position: BoardPoint { x: Length::from_mm(0.0), y: Length::from_mm(0.0) },
+            drill_x: Some(Length::from_mm(drill_x_mm)),
+            drill_y: Some(Length::from_mm(drill_y_mm)),
+            plated: Some(true),
+            orientation_deg: angle_deg,
+        }
+    }
+
+    /// The hatched band is the material the cutter sweeps: as long as the slot and
+    /// exactly as wide, so the "hatch width == slot width" contract holds by geometry.
+    #[test]
+    fn the_stadium_band_spans_the_whole_slot() {
+        // 3.2 × 1.6 mm slot at 10 view units/mm → half-width 8, half-travel 8.
+        let half_width = 1.6 * 0.5 * 10.0;
+        let half_travel = (3.2 - 1.6) * 0.5 * 10.0;
+        assert_eq!(
+            stadium_path(half_travel, half_width),
+            "M -8 -8 L 8 -8 A 8 8 0 0 1 8 8 L -8 8 A 8 8 0 0 1 -8 -8 Z"
+        );
+        // Overall extents: length = 2*travel + 2*radius = 32 units = 3.2 mm; the band's
+        // thickness = 2*radius = 16 units = 1.6 mm.
+        assert!((2.0 * half_travel + 2.0 * half_width - 32.0).abs() < 1e-9);
+        assert!((2.0 * half_width - 16.0).abs() < 1e-9);
+    }
+
+    /// Every contour becomes one closed subpath in view units. Closing each subpath is
+    /// what lets the mask fill the material region with an even-odd rule, which is in
+    /// turn what keeps the outside-route band out of the board.
+    #[test]
+    fn each_stitched_contour_becomes_one_closed_subpath() {
+        // 1 mm square at the bbox origin; the transform below is 10 view units per mm.
+        let square = Contour {
+            points: vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000), (0, 1_000_000)],
+            segments: Vec::new(),
+            is_hole: false,
+        };
+        let path = stitched_outline_path(&[square.clone(), square], |x, y| (x * 10.0, y * 10.0))
+            .expect("two contours produce a path");
+        assert_eq!(path.matches('M').count(), 2, "one subpath per contour");
+        assert_eq!(path.matches('Z').count(), 2, "each subpath is closed");
+        assert!(path.starts_with("M 0 0 L 10 0 L 10 10 L 0 10 Z"), "scaled to view units: {path}");
+    }
+
+    /// No contours (an unstitchable board) yields no path, so the caller falls back to
+    /// the unsided band instead of emitting an empty mask.
+    #[test]
+    fn an_empty_stitch_yields_no_outline_path() {
+        assert!(stitched_outline_path(&[], |x, y| (x, y)).is_none());
+    }
+
+    /// Slots never reach the drill legend, and round holes never reach the slot legend —
+    /// the two keys partition the board's holes.
+    #[test]
+    fn the_two_legends_partition_the_holes() {
+        let board = BoardSnapshot {
+            name: "t".into(),
+            thickness: None,
+            bounding_box: Some(pcb::BoardBoundingBox {
+                x: Length::from_mm(0.0),
+                y: Length::from_mm(0.0),
+                width: Length::from_mm(100.0),
+                height: Length::from_mm(100.0),
+            }),
+            edge_shapes: Vec::new(),
+            holes: vec![hole(0.8, 0.8, None), hole(3.2, 1.6, Some(0.0)), hole(0.8, 0.8, None)],
+        };
+        let features = resolve_board_features(&board, 1000.0, 1000.0, 1.0);
+        assert_eq!(features.holes.len(), 2, "two round holes get drill symbols");
+        assert_eq!(features.slots.len(), 1, "the oblong becomes a routed band");
+        assert_eq!(features.drill_legend.len(), 1, "one 0.8 mm size class, no slot entry");
+        assert_eq!(features.slot_legend.len(), 1);
+        assert!((features.slot_legend[0].length_mm - 3.2).abs() < 1e-9);
+        assert!((features.slot_legend[0].width_mm - 1.6).abs() < 1e-9);
     }
 }

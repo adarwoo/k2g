@@ -281,6 +281,11 @@ pub fn initialize_ctx(boot: UiLaunchData) {
 /// `kicad-multi-instance` reference). Returns a clean connection status for display
 /// and the board (if any). Stitching happens once when the board is cached in the
 /// ctx (see `sync_after_mutation`), not here.
+/// Prefix of the only [`acquire_board`] status that means KiCad is answering — it is
+/// followed by the version it reported. Every other status is a failure state, so the
+/// UI tests for this rather than enumerating the failures and missing a new one.
+pub const KICAD_STATUS_OK_PREFIX: &str = "KiCad ";
+
 pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
     // The connection is attempted only here — at startup and from the status-bar
     // Refresh button. Every failure below is otherwise invisible (the return type
@@ -295,11 +300,16 @@ pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
         }
     };
 
+    // `connect` only dials the socket, and nng's dial is asynchronous — it succeeds
+    // even when nothing is listening, so this is the first call that proves KiCad is
+    // actually answering. A failure here therefore means "dialed but not responding",
+    // never "connected": reporting the latter sends the user hunting for a board
+    // problem when the API server is the thing that is not there.
     let status = match client.version() {
-        Ok(version) => format!("KiCad {version}"),
+        Ok(version) => format!("{KICAD_STATUS_OK_PREFIX}{version}"),
         Err(err) => {
-            warn!("KiCad connected but version query failed: {err}");
-            "connected".to_string()
+            warn!("KiCad socket dialled but the version query failed: {err}");
+            return ("not responding".to_string(), None);
         }
     };
 

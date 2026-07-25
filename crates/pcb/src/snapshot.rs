@@ -111,6 +111,93 @@ pub struct BoardHole {
     pub drill_x: Option<Length>,
     pub drill_y: Option<Length>,
     pub plated: Option<bool>,
+    /// Absolute board orientation of the drill, in degrees, when KiCad reports
+    /// one. For an **oblong** hole (`drill_x != drill_y`) this is the rotation
+    /// of the slot on the board: `drill_x`/`drill_y` give the slot's size in the
+    /// pad's own frame, so both are needed to machine a rotated slot. Round
+    /// holes and vias leave this `None` — orientation is immaterial to them.
+    pub orientation_deg: Option<f64>,
+}
+
+/// Two drill axes closer than this are the same size. KiCad reports drills in nm, so a
+/// nominally round hole can carry sub-micron noise between its axes; a genuine slot is
+/// never this close to round.
+pub const OBLONG_TOLERANCE_UM: f64 = 1.0;
+
+/// A milled slot — an oblong hole resolved into the geometry every consumer needs.
+///
+/// `angle_deg` is the long axis in the **board frame**, measured from +X toward +Y. The
+/// board frame is Y-down, the same as SVG's, so this angle is directly an SVG
+/// `rotate()`; in board millimetres the axis unit vector is `(cos, sin)` of it.
+///
+/// Two conversions happen here and nowhere else. KiCad reports the pad angle
+/// counter-clockwise *as displayed*, which is the opposite sense in a Y-down frame, so
+/// it is negated. And `drill_x`/`drill_y` are the slot's size in the pad's **own** frame,
+/// so a slot running along the pad's local Y stands a quarter turn off the pad angle.
+/// Resolving both once, here, is what keeps the board preview and the machining plan
+/// pointing the same way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slot {
+    /// Slot centre, in board coordinates.
+    pub center_x: Length,
+    pub center_y: Length,
+    /// The long axis, end to end (the major drill axis).
+    pub length: Length,
+    /// The across-axis width (the minor drill axis) — the widest cutter that fits.
+    pub width: Length,
+    /// Board-frame angle of the long axis, in degrees.
+    pub angle_deg: f64,
+}
+
+impl Slot {
+    /// How far the cutter/drill centre travels along the axis: the length less one
+    /// width, since the end features are centred a half-width in from each end.
+    pub fn travel(&self) -> Length {
+        Length::from_mm((self.length.as_mm() - self.width.as_mm()).max(0.0))
+    }
+
+    /// A point `offset` along the long axis from the centre, in board coordinates.
+    /// Negative offsets run toward the other end.
+    pub fn point_at(&self, offset: Length) -> BoardPoint {
+        let (sin, cos) = self.angle_deg.to_radians().sin_cos();
+        BoardPoint {
+            x: Length::from_mm(self.center_x.as_mm() + offset.as_mm() * cos),
+            y: Length::from_mm(self.center_y.as_mm() + offset.as_mm() * sin),
+        }
+    }
+}
+
+impl BoardHole {
+    /// The hole's drill axes as `(major, minor)`, or `None` when it reports no drill.
+    /// A hole reporting only one axis is round on that axis.
+    pub fn drill_axes(&self) -> Option<(Length, Length)> {
+        let dx = self.drill_x.or(self.drill_y)?;
+        let dy = self.drill_y.or(self.drill_x)?;
+        Some(if dx.as_mm() >= dy.as_mm() { (dx, dy) } else { (dy, dx) })
+    }
+
+    /// This hole as a milled [`Slot`], or `None` when it is round. The single place a
+    /// hole is classified oblong, so the tooling adapter, the machining plan and the
+    /// board preview cannot disagree about which holes are slots.
+    pub fn slot(&self) -> Option<Slot> {
+        let (major, minor) = self.drill_axes()?;
+        if major.as_um() - minor.as_um() <= OBLONG_TOLERANCE_UM {
+            return None;
+        }
+        // Negated: KiCad's pad angle is CCW as displayed, the board frame is Y-down.
+        let mut angle_deg = -self.orientation_deg.unwrap_or(0.0);
+        // The long axis is the pad's local Y when `drill_y` is the major one.
+        if self.drill_y.zip(self.drill_x).is_some_and(|(dy, dx)| dy.as_mm() > dx.as_mm()) {
+            angle_deg += 90.0;
+        }
+        Some(Slot {
+            center_x: self.position.x,
+            center_y: self.position.y,
+            length: major,
+            width: minor,
+            angle_deg,
+        })
+    }
 }
 
 /// Collect a [`BoardSnapshot`] from one KiCad instance client.
@@ -160,6 +247,9 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
                 drill_x,
                 drill_y,
                 plated: Some(true),
+                // KiCad only supports circular via drills, so a via has no
+                // meaningful slot orientation.
+                orientation_deg: None,
             });
         }
     }
@@ -175,6 +265,8 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
                 };
                 if let Some((kind, plated)) = kind {
                     let (drill_x, drill_y) = extract_drill_diameter(&pad.pad_stack);
+                    let orientation_deg =
+                        oblong_orientation(extract_pad_angle(&pad.pad_stack), drill_x, drill_y);
                     holes.push(BoardHole {
                         id: pad.id,
                         kind,
@@ -182,6 +274,7 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
                         drill_x,
                         drill_y,
                         plated,
+                        orientation_deg,
                     });
                 }
             }
@@ -368,6 +461,37 @@ fn extract_drill_diameter(pad_stack: &Option<PcbPadStack>) -> (Option<Length>, O
     }
 }
 
+/// The pad-stack orientation of a pad, in degrees, or `None`.
+///
+/// Reads the pad orientation surfaced by our kicad-ipc-rs fork
+/// (`PcbPadStack.angle_degrees`); returns `None` when the pad reports none.
+fn extract_pad_angle(pad_stack: &Option<PcbPadStack>) -> Option<f64> {
+    pad_stack.as_ref().and_then(|s| s.angle_degrees)
+}
+
+/// The slot orientation for an **oblong** pad, in degrees (absolute board
+/// frame), or `None` for a round drill.
+///
+/// KiCad reports a pad-stack angle for *every* pad — including round ones on a
+/// rotated footprint — but the angle only matters for a milled slot, whose
+/// length runs along the pad's local X (`drill_x`) rotated by it. We therefore
+/// keep the orientation only when the drill is genuinely oblong (both axes
+/// known and unequal), leaving round holes orientation-free per
+/// [`BoardHole::orientation_deg`]. Kept pure (no KiCad types) so it is unit
+/// testable.
+fn oblong_orientation(
+    angle_deg: Option<f64>,
+    drill_x: Option<Length>,
+    drill_y: Option<Length>,
+) -> Option<f64> {
+    let is_oblong = drill_x.is_some() && drill_y.is_some() && drill_x != drill_y;
+    if is_oblong {
+        angle_deg
+    } else {
+        None
+    }
+}
+
 fn edge_shape_from_graphic(
     id: &Option<String>,
     geometry: &Option<PcbGraphicShapeGeometry>,
@@ -427,5 +551,102 @@ fn edge_shape_from_graphic(
                 polygon_count: *polygon_count,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mm(v: f64) -> Option<Length> {
+        Some(Length::from_mm(v))
+    }
+
+    #[test]
+    fn a_round_drill_stays_orientation_free_even_when_the_pad_is_rotated() {
+        // Equal axes → round; a rotated footprint still reports an angle, but it
+        // is meaningless for a round hole, so we drop it.
+        assert_eq!(oblong_orientation(Some(90.0), mm(1.0), mm(1.0)), None);
+    }
+
+    #[test]
+    fn an_oblong_drill_keeps_its_reported_orientation() {
+        assert_eq!(oblong_orientation(Some(37.5), mm(3.0), mm(1.2)), Some(37.5));
+    }
+
+    #[test]
+    fn an_oblong_drill_without_a_reported_angle_is_none() {
+        assert_eq!(oblong_orientation(None, mm(3.0), mm(1.2)), None);
+    }
+
+    #[test]
+    fn incomplete_drill_dimensions_are_not_treated_as_oblong() {
+        // A single known axis is not enough to call it a slot.
+        assert_eq!(oblong_orientation(Some(45.0), mm(3.0), None), None);
+        assert_eq!(oblong_orientation(Some(45.0), None, mm(1.2)), None);
+    }
+
+    // --- BoardHole::drill_axes / slot -------------------------------------
+
+    fn hole(drill_x_mm: f64, drill_y_mm: f64, angle_deg: Option<f64>) -> BoardHole {
+        BoardHole {
+            id: None,
+            kind: HoleKind::PadPth,
+            position: BoardPoint { x: Length::from_mm(0.0), y: Length::from_mm(0.0) },
+            drill_x: mm(drill_x_mm),
+            drill_y: mm(drill_y_mm),
+            plated: Some(true),
+            orientation_deg: angle_deg,
+        }
+    }
+
+    /// The axes come back largest-first whichever way round KiCad reports them, so the
+    /// long axis is always the slot's length.
+    #[test]
+    fn drill_axes_are_ordered_major_then_minor() {
+        for (x, y) in [(3.2, 1.6), (1.6, 3.2)] {
+            let (major, minor) = hole(x, y, None).drill_axes().expect("both axes known");
+            assert_eq!((major.as_mm(), minor.as_mm()), (3.2, 1.6));
+        }
+    }
+
+    /// A via reporting only one axis is round on that axis, not a hair-thin slot.
+    #[test]
+    fn a_single_reported_axis_reads_as_round() {
+        let mut via = hole(0.6, 0.6, None);
+        via.drill_y = None;
+        assert!(via.drill_axes().is_some(), "one axis is enough to size it");
+        assert!(via.slot().is_none(), "and it is not a slot");
+    }
+
+    /// Equal axes are round even carrying the sub-micron noise KiCad's nm units allow.
+    #[test]
+    fn near_equal_axes_are_not_slots() {
+        assert!(hole(1.0, 1.0, None).slot().is_none());
+        assert!(hole(1.0, 1.0 - OBLONG_TOLERANCE_UM / 2000.0, None).slot().is_none());
+        assert!(hole(3.2, 1.6, None).slot().is_some());
+    }
+
+    /// The pad angle is negated into the board's Y-down frame, and a slot whose length
+    /// runs along the pad's local Y stands a quarter turn off it.
+    #[test]
+    fn the_slot_axis_folds_in_the_pad_angle_and_the_long_axis() {
+        assert_eq!(hole(3.2, 1.6, Some(30.0)).slot().unwrap().angle_deg, -30.0);
+        assert_eq!(hole(1.6, 3.2, Some(30.0)).slot().unwrap().angle_deg, 60.0);
+        // No reported angle → axis-aligned, not a silent rotation.
+        assert_eq!(hole(3.2, 1.6, None).slot().unwrap().angle_deg, 0.0);
+    }
+
+    /// Travel is the length less one width — the end features are centred a half-width
+    /// in from each end — and points walk the slot's own axis.
+    #[test]
+    fn slot_travel_and_points_follow_the_axis() {
+        let slot = hole(3.2, 1.6, Some(-90.0)).slot().expect("oblong");
+        assert!((slot.travel().as_mm() - 1.6).abs() < 1e-9);
+
+        // -90° in KiCad negates to +90° in the board frame: the axis runs along +Y.
+        let end = slot.point_at(Length::from_mm(0.8));
+        assert!(end.x.as_mm().abs() < 1e-9, "x is unchanged: {}", end.x.as_mm());
+        assert!((end.y.as_mm() - 0.8).abs() < 1e-9);
     }
 }
