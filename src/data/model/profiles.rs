@@ -85,6 +85,11 @@ pub struct FixtureProfile {
     pub z_retract: Length,
     /// Safe travel height for rapids, clear of clamps and fixture hardware (`z_safe`).
     pub z_safe: Length,
+    /// Which board edge is X0 (`left`/`right`) and which is Y0 (`front`/`back`) — the
+    /// corner the board is registered against in this fixture. Kept as the schema's own
+    /// words so the crosswalk stays a copy; `BoardOrigin::from_edges` interprets them.
+    pub origin_x0: String,
+    pub origin_y0: String,
     /// Which of the machine's stored zero points this fixture occupies, from 1. An
     /// ordinal: the CNC profile's `initialise` template names it (`G53 + n` on most
     /// controllers, `G54 + n` on a Bantam, whose G54 is reserved).

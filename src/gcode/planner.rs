@@ -471,7 +471,7 @@ mod tests {
     use super::*;
 
     fn placement_identity() -> Placement {
-        Placement::new(None, 0.0, 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0))
+        Placement::new(None, 0.0, Default::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0))
     }
 
     fn target(source: &str, x: f64, y: f64, tool: &str, dia: f64) -> DrillTarget {

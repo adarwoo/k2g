@@ -169,226 +169,6 @@ properties:
     enum: [x, y]
 
   # ---------------------------------------------------------------------------
-  # locating_pins
-  # ---------------------------------------------------------------------------
-  # Locating pin strategy and geometry.
-  #
-  locating_pins:
-    type: object
-    description: Locating pin strategy and geometry.
-    properties:
-
-      # Locating pin strategy.
-      #
-      # Valid examples:
-      #   strategy: "none"
-      #   strategy: "two_pins"
-      #   strategy: "three_pins"
-      #
-      strategy:
-        type: string
-        description: Locating pin strategy.
-
-      # Locating pin diameter.
-      #
-      # Valid examples:
-      #   pin_diameter: "3 mm"
-      #   pin_diameter: "1/8""
-      #
-      pin_diameter:
-        description: Diameter of locating pins.
-        $ref: "units.yaml#/$defs/size"
-
-      # Locating pin positions in the fixture coordinate system.
-      #
-      pin_positions:
-        type: array
-        description: Locating pin positions.
-        items:
-          type: object
-          properties:
-
-            # X coordinate of the locating pin.
-            #
-            # Valid examples:
-            #   x: "10 mm"
-            #   x: "0.5 in"
-            #
-            x:
-              description: X coordinate of the locating pin.
-              $ref: "units.yaml#/$defs/size"
-
-            # Y coordinate of the locating pin.
-            #
-            # Valid examples:
-            #   y: "20 mm"
-            #   y: "1 in"
-            #
-            y:
-              description: Y coordinate of the locating pin.
-              $ref: "units.yaml#/$defs/size"
-
-          required: [x, y]
-          additionalProperties: false
-
-    additionalProperties: true
-
-  # ---------------------------------------------------------------------------
-  # keep_out_zones
-  # ---------------------------------------------------------------------------
-  # Keep-out or clamp zones where machining motion must be avoided or where
-  # additional Z clearance is required.
-  #
-  keep_out_zones:
-    type: array
-    description: Keep-out or clamp zones.
-    items:
-      type: object
-      properties:
-
-        # X coordinate of the keep-out zone origin.
-        #
-        # Valid examples:
-        #   x: "0 mm"
-        #   x: "1.25 in"
-        #
-        x:
-          description: X coordinate of the keep-out zone origin.
-          $ref: "units.yaml#/$defs/size"
-
-        # Y coordinate of the keep-out zone origin.
-        #
-        # Valid examples:
-        #   y: "0 mm"
-        #   y: "2 in"
-        #
-        y:
-          description: Y coordinate of the keep-out zone origin.
-          $ref: "units.yaml#/$defs/size"
-
-        # Width of the keep-out zone.
-        #
-        # Valid examples:
-        #   width: "50 mm"
-        #   width: "2 in"
-        #
-        width:
-          description: Width of the keep-out zone.
-          $ref: "units.yaml#/$defs/size"
-
-        # Height of the keep-out zone.
-        #
-        # Valid examples:
-        #   height: "25 mm"
-        #   height: "1 in"
-        #
-        height:
-          description: Height of the keep-out zone.
-          $ref: "units.yaml#/$defs/size"
-
-      # Retract/safe heights are fixture-global (`z_retract` / `z_safe` below), not
-      # per keep-out zone — a zone only describes an XY region to avoid.
-      required: [x, y, width, height]
-      additionalProperties: false
-
-  # ---------------------------------------------------------------------------
-  # occupancy
-  # ---------------------------------------------------------------------------
-  # Describes the fixture occupancy impact on the usable board size range.
-  #
-  occupancy:
-    type: object
-    description: Fixture occupancy impact on board size range.
-    properties:
-
-      # Maximum usable board size along X.
-      #
-      # Valid examples:
-      #   max_board_x: "300 mm"
-      #   max_board_x: "12 in"
-      #
-      max_board_x:
-        description: Maximum usable board size along X.
-        $ref: "units.yaml#/$defs/size"
-
-      # Maximum usable board size along Y.
-      #
-      # Valid examples:
-      #   max_board_y: "200 mm"
-      #   max_board_y: "8 in"
-      #
-      max_board_y:
-        description: Maximum usable board size along Y.
-        $ref: "units.yaml#/$defs/size"
-
-      # Optional blocked regions.
-      #
-      # Kept generic for now because blocked-region modelling may evolve.
-      #
-      blocked_regions:
-        type: array
-        description: Generic blocked regions occupied by the fixture.
-        items:
-          type: object
-
-    additionalProperties: true
-
-  # ---------------------------------------------------------------------------
-  # probing_alignment
-  # ---------------------------------------------------------------------------
-  # Optional probing/alignment parameters.
-  #
-  probing_alignment:
-    type: object
-    description: Optional probing/alignment parameters.
-    properties:
-
-      # Enables or disables probing alignment.
-      #
-      # Valid examples:
-      #   enabled: true
-      #   enabled: false
-      #
-      enabled:
-        type: boolean
-        default: false
-        description: Enable probing alignment.
-
-      # List of probing points in the fixture coordinate system.
-      #
-      probe_points:
-        type: array
-        description: Probing points used for alignment.
-        items:
-          type: object
-          properties:
-
-            # X coordinate of the probe point.
-            #
-            # Valid examples:
-            #   x: "10 mm"
-            #   x: "0.5 in"
-            #
-            x:
-              description: X coordinate of the probe point.
-              $ref: "units.yaml#/$defs/size"
-
-            # Y coordinate of the probe point.
-            #
-            # Valid examples:
-            #   y: "20 mm"
-            #   y: "1 in"
-            #
-            y:
-              description: Y coordinate of the probe point.
-              $ref: "units.yaml#/$defs/size"
-
-          required: [x, y]
-          additionalProperties: false
-
-    additionalProperties: true
-
-  # ---------------------------------------------------------------------------
   # origin
   # ---------------------------------------------------------------------------
   # The board's work origin in XY: which corner is X0/Y0. The board is registered
@@ -396,37 +176,44 @@ properties:
   # the emitted G-code is written relative to it. Z0 is always the board top (see
   # the "Z model" section), so there is deliberately no Z entry here.
   #
+  # The axes keep the machine's own directions — X grows to the right, Y away from
+  # the operator — so this moves the *zero*, it does not mirror anything. With
+  # `x0: right` the board therefore occupies negative X, which is exactly what you
+  # want when the fixture references off a right-hand stop.
+  #
+  # Both fields were once `[left, right, front, back]`, which allowed `x0: front`
+  # and `x0: left` with `y0: left` — combinations that mean nothing. X can only be
+  # zeroed on a left or right edge and Y on a front or back one, so the enums now
+  # say so and the impossible values are corrected on load.
+  #
+  # Not to be confused with `work_coordinate_system` above: that picks which of the
+  # machine's stored zeros to use, this picks where on the board that zero lands.
   origin:
-    description: Board work-origin corner — which side is X0 and which is Y0.
+    description: Board work-origin corner — which edge is X0 and which is Y0.
     type: object
+    default:
+      x0: left
+      y0: front
     properties:
 
-      # X axis zero orientation.
-      #
       # Valid examples:
       #   x0: left
       #   x0: right
-      #   x0: front
-      #   x0: back
       #
       x0:
-        description: X axis zero orientation.
+        description: Which edge of the board is X zero.
         type: string
-        enum: [left, right, front, back]
+        enum: [left, right]
         default: left
 
-      # Y axis zero orientation.
-      #
       # Valid examples:
       #   y0: front
       #   y0: back
-      #   y0: left
-      #   y0: right
       #
       y0:
-        description: Y axis zero orientation.
+        description: Which edge of the board is Y zero.
         type: string
-        enum: [front, back, left, right]
+        enum: [front, back]
         default: front
 
     required: [x0, y0]
@@ -507,11 +294,17 @@ properties:
     default: "20mm"
     $ref: "units.yaml#/$defs/size"
 
-# Only the fields the app currently populates are mandatory. `locating_pins`,
-# `keep_out_zones` and `occupancy` remain optional properties: they model
-# fixture features not yet sourced by the app (Phase 3 — see the assigner plan)
-# and the create/instantiate flow provides no defaults for them, so requiring
-# them would make every fixture file load with spurious warnings.
+# Only the fields the app actually populates are mandatory.
+#
+# `locating_pins`, `keep_out_zones`, `occupancy` and `probing_alignment` used to
+# live here as fully-specified but entirely inert blocks: never shown in the UI,
+# never read by any code, and optional so that nothing complained. They are
+# deleted (2026-07-26) rather than left as furniture nobody could tell was
+# furniture — a schema that describes features the app does not have is worse
+# than one that is honestly small. They can come back with a decision about what
+# they should actually mean; `normalize_fixture_value` drops them on load so an
+# existing fixture file still validates.
+#
 # (`machining_plate_clearance` was a stale required key with no property
 # definition — unsatisfiable by construction — and is superseded by
 # `bed_clearance` above.)

@@ -204,7 +204,8 @@ impl AppData {
             let normalize = match profile {
                 Profile::Machining => Some(normalize_machining_file as fn(&mut Value, &Path)),
                 Profile::Cnc => Some(normalize_cnc_value as fn(&mut Value, &Path)),
-                Profile::Fixture | Profile::Toolset => None,
+                Profile::Fixture => Some(normalize_fixture_value as fn(&mut Value, &Path)),
+                Profile::Toolset => None,
             };
             match normalize {
                 Some(normalize) => {
@@ -1106,6 +1107,49 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
             {
                 primitives.insert("line_number".into(), Value::from(seeded));
             }
+        }
+    }
+}
+
+/// Fixture blocks that were declared in full but never shown, never read and never
+/// implemented. Removed rather than left as furniture nobody could tell was inert; the
+/// shape can come back when there is a decision about what it should be.
+const RETIRED_FIXTURE_KEYS: &[&str] =
+    &["locating_pins", "keep_out_zones", "occupancy", "probing_alignment"];
+
+/// Brings a fixture file onto the current schema.
+///
+/// Two repairs, both of which `additionalProperties: false` and the tightened `origin`
+/// enums would otherwise turn into a rejected profile on load:
+///
+/// - The [retired blocks](RETIRED_FIXTURE_KEYS) are dropped.
+/// - `origin.x0`/`origin.y0` both used to accept all four of `left|right|front|back`,
+///   which allowed `x0: front` and even `x0: left` with `y0: left` — combinations with
+///   no meaning. X can only be zeroed on a left or right edge and Y on a front or back
+///   one. Anything outside the new enums is corrected to the default rather than
+///   rejected, because a nonsense value was the schema's fault, not the operator's.
+fn normalize_fixture_value(value: &mut Value, path: &Path) {
+    let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("fixture.yaml").to_string();
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+
+    for key in RETIRED_FIXTURE_KEYS {
+        if obj.remove(*key).is_some() {
+            warn!("[{file}] dropped the retired fixture block '{key}'");
+        }
+    }
+
+    let Some(origin) = obj.get_mut("origin").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for (axis, allowed, fallback) in
+        [("x0", ["left", "right"], "left"), ("y0", ["front", "back"], "front")]
+    {
+        let current = origin.get(axis).and_then(Value::as_str).unwrap_or(fallback);
+        if !allowed.contains(&current) {
+            warn!("[{file}] origin.{axis} was '{current}', which is not an {axis} edge; using '{fallback}'");
+            origin.insert(axis.to_string(), Value::from(fallback));
         }
     }
 }
@@ -2096,6 +2140,45 @@ mod tests {
         let mut bare = serde_json::json!({ "name": "no primitives" });
         normalize_cnc_value(&mut bare, Path::new("machine.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "no primitives" }));
+    }
+
+    /// Four fixture blocks were declared in full but never shown, never read and never
+    /// implemented; they are gone, and `additionalProperties: false` would reject every
+    /// existing fixture that still carries them.
+    ///
+    /// `origin` was also loosened: both axes accepted all four edge names, so `x0: front`
+    /// validated and meant nothing. X can only be zeroed on a left or right edge and Y on
+    /// a front or back one — and a value outside that is the schema's old fault, so it is
+    /// corrected rather than made to reject the profile.
+    #[test]
+    fn a_fixture_with_the_retired_blocks_and_a_nonsense_origin_still_loads() {
+        let mut value = serde_json::json!({
+            "name": "Vice",
+            "locating_pins": { "strategy": "two_pin" },
+            "keep_out_zones": [{ "x": "0mm" }],
+            "occupancy": { "min_board": "10mm" },
+            "probing_alignment": { "enabled": true },
+            "origin": { "x0": "front", "y0": "left" },
+        });
+        normalize_fixture_value(&mut value, Path::new("vice.yaml"));
+
+        for key in RETIRED_FIXTURE_KEYS {
+            assert!(value.get(*key).is_none(), "'{key}' must not survive into validation");
+        }
+        assert_eq!(value.pointer("/origin/x0").and_then(Value::as_str), Some("left"));
+        assert_eq!(value.pointer("/origin/y0").and_then(Value::as_str), Some("front"));
+        assert_eq!(value.get("name").and_then(Value::as_str), Some("Vice"), "the rest is untouched");
+
+        // A fixture that already says something sensible keeps saying it.
+        let mut kept = serde_json::json!({ "origin": { "x0": "right", "y0": "back" } });
+        normalize_fixture_value(&mut kept, Path::new("vice.yaml"));
+        assert_eq!(kept.pointer("/origin/x0").and_then(Value::as_str), Some("right"));
+        assert_eq!(kept.pointer("/origin/y0").and_then(Value::as_str), Some("back"));
+
+        // And one with no origin block at all must not panic.
+        let mut bare = serde_json::json!({ "name": "Tape" });
+        normalize_fixture_value(&mut bare, Path::new("tape.yaml"));
+        assert_eq!(bare, serde_json::json!({ "name": "Tape" }));
     }
 
     /// `initialise` naming `G54` outright silently overrode the step fixture's own work

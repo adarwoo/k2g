@@ -4,9 +4,10 @@
 //! lives here instead of scattering through the planner and the Coder.
 //!
 //! **XY** is a composed affine: flip the board's Y-down frame into the machine's Y-up
-//! one, rotate by the job's board orientation, translate the rotated board's min corner
-//! to the work origin, then apply the CNC's per-axis scaling calibration. Because ops
-//! are placed here, the ordering TSP (op-planner §4) minimises *physical* travel.
+//! one, rotate by the job's board orientation, translate the corner the fixture
+//! registers against onto the work zero, then apply the CNC's per-axis scaling
+//! calibration. Because ops are placed here, the ordering TSP (op-planner §4) minimises
+//! *physical* travel.
 //!
 //! **The Y flip is not optional.** KiCad's board frame is Y-**down** (it is a screen
 //! frame — [`pcb::Slot`] documents the same convention, and the board preview renders
@@ -20,14 +21,47 @@
 //! **Z** context (retract / safe heights) is carried for op building; the full Z
 //! stack-up (fixture backboard + board thickness, bed-relative Z0) firms up when the
 //! fixture model gains that geometry (op-planner §6, and the plan's Phase-3 gaps).
-//! Until then the origin corner is the board's own min corner (a sane default) — the
-//! fixture-selectable corner (the fixture `origin`) is not yet in the runtime
-//! fixture model.
+//! The **origin corner** now comes from the fixture (`origin.x0`/`origin.y0`) — see
+//! [`BoardOrigin`]. It moves the zero only; the axes keep the machine's directions, so a
+//! board registered against a right-hand stop legitimately runs into negative X.
 
 use pcb::{BoardBoundingBox, BoardPoint};
 use units::Length;
 
 use super::plan::Point;
+
+/// Which corner of the board the work origin sits on (the fixture's `origin`).
+///
+/// This moves the **zero**, it does not mirror anything: the axes keep the machine's own
+/// directions, X growing right and Y away from the operator. So a board zeroed on its
+/// right edge occupies negative X — which is exactly right when the fixture registers
+/// against a right-hand stop, and would be wrong if the axis flipped with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoardOrigin {
+    /// `false` = the left edge is X0, `true` = the right edge.
+    pub x_at_right: bool,
+    /// `false` = the front edge is Y0, `true` = the back edge.
+    pub y_at_back: bool,
+}
+
+impl Default for BoardOrigin {
+    /// Front-left, which is what every program emitted before the fixture could say
+    /// otherwise — so a fixture that does not care keeps its existing output.
+    fn default() -> Self {
+        Self { x_at_right: false, y_at_back: false }
+    }
+}
+
+impl BoardOrigin {
+    /// Reads the fixture's two edge names, defaulting anything unrecognised to
+    /// front-left.
+    pub fn from_edges(x0: &str, y0: &str) -> Self {
+        Self {
+            x_at_right: x0.eq_ignore_ascii_case("right"),
+            y_at_back: y0.eq_ignore_ascii_case("back"),
+        }
+    }
+}
 
 /// The board→machine affine + the step's Z reference heights. A pure value: same
 /// inputs → same transform (op-planner §8 determinism).
@@ -41,10 +75,11 @@ pub struct Placement {
     /// about the bounds' own centre line.
     center_x_mm: f64,
     center_y_mm: f64,
-    /// The rotated board's min corner, in board mm — subtracted so it lands on the
-    /// work origin.
-    min_x_mm: f64,
-    min_y_mm: f64,
+    /// The rotated board's **origin corner**, in board mm — subtracted so it lands on
+    /// the work zero. Which corner that is comes from the fixture; for the front-left
+    /// default it is the rotated bounds' minimum, as it always used to be.
+    origin_x_mm: f64,
+    origin_y_mm: f64,
     /// Whether to flip the board's Y-down frame into the machine's Y-up one.
     ///
     /// True whenever there are bounds — that is, whenever there is a real board. With
@@ -63,13 +98,15 @@ pub struct Placement {
 
 impl Placement {
     /// Builds the placement from the board bounds, the job's board orientation
-    /// (degrees), the CNC's per-axis scaling, and the step's retract/safe heights.
+    /// (degrees), the fixture's work-origin corner, the CNC's per-axis scaling, and the
+    /// step's retract/safe heights.
     ///
     /// With no bounds (no board), XY is identity save for scaling — enough for the
     /// pure planner tests and a graceful no-board path.
     pub fn new(
         bounds: Option<&BoardBoundingBox>,
         orientation_deg: f64,
+        origin: BoardOrigin,
         scale_x: f64,
         scale_y: f64,
         z_retract: Length,
@@ -79,7 +116,7 @@ impl Placement {
         let cos = theta.cos();
         let sin = theta.sin();
 
-        let (center_x_mm, center_y_mm, min_x_mm, min_y_mm) = match bounds {
+        let (center_x_mm, center_y_mm, origin_x_mm, origin_y_mm) = match bounds {
             Some(b) => {
                 let x0 = b.x.as_mm();
                 let y0 = b.y.as_mm();
@@ -87,17 +124,34 @@ impl Placement {
                 let y1 = y0 + b.height.as_mm();
                 let cx = (x0 + x1) / 2.0;
                 let cy = (y0 + y1) / 2.0;
-                // Rotate the four corners about the centre and take the min per axis,
-                // so the rotated bounding box hugs the work origin after translation.
+                // Rotate the four corners about the centre, then take the extent the
+                // fixture registers against. Corners are taken *after* rotation because
+                // a turned board's "left edge" is whichever edge ends up leftmost.
                 let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
-                let mut min_x = f64::INFINITY;
-                let mut min_y = f64::INFINITY;
+                let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+                let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
                 for (px, py) in corners {
                     let (rx, ry) = rotate_about(px, py, cx, cy, cos, sin);
                     min_x = min_x.min(rx);
                     min_y = min_y.min(ry);
+                    max_x = max_x.max(rx);
+                    max_y = max_y.max(ry);
                 }
-                (cx, cy, min_x, min_y)
+                // These extents are of the *transformed* board even though the flip is
+                // not applied here: mirroring about the bounds' own centre line maps the
+                // four corners onto each other, so the set — and hence its min and max —
+                // is unchanged. Which is the whole reason the flip is about the centre.
+                //
+                // So this is simply the machine frame: X grows right, Y away from the
+                // operator. Left/front are the minima, right/back the maxima. Zeroing on
+                // a maximum puts the board in negative coordinates, which is correct —
+                // the axis directions belong to the machine, not to the fixture.
+                (
+                    cx,
+                    cy,
+                    if origin.x_at_right { max_x } else { min_x },
+                    if origin.y_at_back { max_y } else { min_y },
+                )
             }
             None => (0.0, 0.0, 0.0, 0.0),
         };
@@ -107,8 +161,8 @@ impl Placement {
             sin,
             center_x_mm,
             center_y_mm,
-            min_x_mm,
-            min_y_mm,
+            origin_x_mm,
+            origin_y_mm,
             flip_y: bounds.is_some(),
             scale_x,
             scale_y,
@@ -137,8 +191,8 @@ impl Placement {
             self.cos,
             self.sin,
         );
-        let mx = (rx - self.min_x_mm) * self.scale_x;
-        let my = (ry - self.min_y_mm) * self.scale_y;
+        let mx = (rx - self.origin_x_mm) * self.scale_x;
+        let my = (ry - self.origin_y_mm) * self.scale_y;
         Point::new(Length::from_mm(mx), Length::from_mm(my))
     }
 
@@ -150,8 +204,8 @@ impl Placement {
     /// placed toolpath, then handed to the drill planner, which places its own targets.
     /// A round trip through both is the identity, which is what the test asserts.
     pub fn unplace(&self, p: &Point) -> BoardPoint {
-        let rx = p.x.as_mm() / self.scale_x + self.min_x_mm;
-        let ry = p.y.as_mm() / self.scale_y + self.min_y_mm;
+        let rx = p.x.as_mm() / self.scale_x + self.origin_x_mm;
+        let ry = p.y.as_mm() / self.scale_y + self.origin_y_mm;
         // Rotate back: the inverse rotation is the same matrix with sin negated.
         let (bx, by) = rotate_about(rx, ry, self.center_x_mm, self.center_y_mm, self.cos, -self.sin);
         let unflipped = if self.flip_y { 2.0 * self.center_y_mm - by } else { by };
@@ -201,7 +255,7 @@ mod tests {
         // offset; Y is measured from the board's *bottom* edge, because board Y counts
         // downward and machine Y counts up. The point sits 4 mm below the top edge, so
         // 40 − 4 = 36 mm above the bottom.
-        let p = Placement::new(Some(&bounds(10.0, 20.0, 30.0, 40.0)), 0.0, 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
+        let p = Placement::new(Some(&bounds(10.0, 20.0, 30.0, 40.0)), 0.0, BoardOrigin::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
         let out = p.xy(&pt(13.0, 24.0));
         assert!((out.x.as_mm() - 3.0).abs() < 1e-6, "x: {}", out.x.as_mm());
         assert!((out.y.as_mm() - 36.0).abs() < 1e-6, "y: {}", out.y.as_mm());
@@ -212,7 +266,7 @@ mod tests {
     /// side. Getting this backwards mirrors every hole.
     #[test]
     fn the_y_down_board_frame_is_flipped_into_the_machines_y_up_one() {
-        let p = Placement::new(Some(&bounds(0.0, 0.0, 20.0, 10.0)), 0.0, 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
+        let p = Placement::new(Some(&bounds(0.0, 0.0, 20.0, 10.0)), 0.0, BoardOrigin::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
         // Board (0,0) is the top-left corner; on the machine that is the far-left one.
         let top_left = p.xy(&pt(0.0, 0.0));
         assert!((top_left.y.as_mm() - 10.0).abs() < 1e-6, "the board's top edge is machine Y max");
@@ -228,9 +282,71 @@ mod tests {
         assert!(cross < 0.0, "board-frame CCW becomes machine-frame CW, as a mirror must");
     }
 
+    /// The fixture's registered corner is what lands on zero. It moves the **origin**,
+    /// not the axes: a board zeroed on its right edge runs into negative X, because X
+    /// still grows to the right — that is the machine's business, not the fixture's.
+    ///
+    /// Until this worked, the origin was editable in the UI, hardcoded to front-left in
+    /// the crosswalk, and ignored here — a control that looked like it did something.
+    #[test]
+    fn the_work_origin_lands_on_the_corner_the_fixture_registers_against() {
+        // A 20 x 10 board. Its four corners in machine space are (0,0) and (20,10) at
+        // the extremes, whichever one is chosen as zero.
+        let placed = |origin: BoardOrigin| {
+            let p = Placement::new(Some(&bounds(0.0, 0.0, 20.0, 10.0)), 0.0, origin, 1.0, 1.0,
+                Length::from_mm(2.0), Length::from_mm(5.0));
+            // Board (0,0) is the top-left corner, which the Y flip puts at the back.
+            let back_left = p.xy(&pt(0.0, 0.0));
+            let front_right = p.xy(&pt(20.0, 10.0));
+            (
+                (back_left.x.as_mm(), back_left.y.as_mm()),
+                (front_right.x.as_mm(), front_right.y.as_mm()),
+            )
+        };
+
+        // Front-left: the default, and what every program emitted before this worked.
+        assert_eq!(
+            placed(BoardOrigin::default()),
+            ((0.0, 10.0), (20.0, 0.0)),
+            "the board sits wholly in the positive quadrant"
+        );
+
+        // Right-hand stop: X is measured back from the right edge, so the board is at
+        // negative X. Y is untouched.
+        assert_eq!(
+            placed(BoardOrigin { x_at_right: true, y_at_back: false }),
+            ((-20.0, 10.0), (0.0, 0.0))
+        );
+
+        // Back stop: likewise for Y.
+        assert_eq!(
+            placed(BoardOrigin { x_at_right: false, y_at_back: true }),
+            ((0.0, 0.0), (20.0, -10.0))
+        );
+
+        // Both, i.e. registered into the back-right corner.
+        assert_eq!(
+            placed(BoardOrigin { x_at_right: true, y_at_back: true }),
+            ((-20.0, 0.0), (0.0, -10.0))
+        );
+    }
+
+    /// The edge names come straight from the schema, and anything unrecognised falls
+    /// back to front-left rather than silently picking the far corner.
+    #[test]
+    fn origin_edges_parse_from_the_schema_words() {
+        assert_eq!(BoardOrigin::from_edges("left", "front"), BoardOrigin::default());
+        assert_eq!(
+            BoardOrigin::from_edges("RIGHT", "Back"),
+            BoardOrigin { x_at_right: true, y_at_back: true },
+            "case is not the operator's problem"
+        );
+        assert_eq!(BoardOrigin::from_edges("nonsense", ""), BoardOrigin::default());
+    }
+
     #[test]
     fn scaling_multiplies_each_axis() {
-        let p = Placement::new(Some(&bounds(0.0, 0.0, 10.0, 10.0)), 0.0, 1.01, 0.99, Length::from_mm(2.0), Length::from_mm(5.0));
+        let p = Placement::new(Some(&bounds(0.0, 0.0, 10.0, 10.0)), 0.0, BoardOrigin::default(), 1.01, 0.99, Length::from_mm(2.0), Length::from_mm(5.0));
         let out = p.xy(&pt(5.0, 5.0));
         assert!((out.x.as_mm() - 5.05).abs() < 1e-6);
         assert!((out.y.as_mm() - 4.95).abs() < 1e-6);
@@ -240,7 +356,7 @@ mod tests {
     fn quarter_turn_keeps_the_board_in_the_positive_quadrant() {
         // A 20×10 board rotated 90° becomes 10×20; every mapped point stays within
         // [0,10]×[0,20] and the rotated min corner sits at the origin.
-        let p = Placement::new(Some(&bounds(0.0, 0.0, 20.0, 10.0)), 90.0, 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
+        let p = Placement::new(Some(&bounds(0.0, 0.0, 20.0, 10.0)), 90.0, BoardOrigin::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
         for (bx, by) in [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)] {
             let out = p.xy(&pt(bx, by));
             assert!(out.x.as_mm() >= -1e-6 && out.x.as_mm() <= 10.0 + 1e-6, "x in [0,10]: {}", out.x.as_mm());
@@ -253,7 +369,7 @@ mod tests {
     #[test]
     fn placing_and_unplacing_is_the_identity() {
         for (angle, sx, sy) in [(0.0, 1.0, 1.0), (90.0, 1.0, 1.0), (37.0, 1.01, 0.99)] {
-            let p = Placement::new(Some(&bounds(3.0, 7.0, 12.0, 9.0)), angle, sx, sy,
+            let p = Placement::new(Some(&bounds(3.0, 7.0, 12.0, 9.0)), angle, BoardOrigin::default(), sx, sy,
                 Length::from_mm(2.0), Length::from_mm(5.0));
             for board in [pt(3.0, 7.0), pt(9.0, 11.5), pt(15.0, 16.0)] {
                 let back = p.unplace(&p.xy(&board));
@@ -270,7 +386,7 @@ mod tests {
 
     #[test]
     fn is_deterministic() {
-        let p = Placement::new(Some(&bounds(3.0, 7.0, 12.0, 9.0)), 37.0, 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
+        let p = Placement::new(Some(&bounds(3.0, 7.0, 12.0, 9.0)), 37.0, BoardOrigin::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0));
         assert_eq!(p.xy(&pt(6.0, 9.0)), p.xy(&pt(6.0, 9.0)));
     }
 }

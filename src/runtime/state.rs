@@ -1328,8 +1328,8 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
         "name": fixture.name,
         "board_holding_method": fixture.backing_board,
         "origin": {
-            "x0": "left",
-            "y0": "front",
+            "x0": fixture.origin_x0,
+            "y0": fixture.origin_y0,
         },
         "backboard_thickness": fixture.backboard_thickness.to_string(),
         "bed_clearance": fixture.bed_clearance.to_string(),
@@ -1377,6 +1377,19 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
         breakthrough: size_at(value, "/breakthrough", 0.5),
         z_retract: size_at(value, "/z_retract", 5.0),
         z_safe: size_at(value, "/z_safe", 20.0),
+        // The registered corner. Schema-defaulted, so the fallbacks here only guard a
+        // hand-edited file; `normalize_fixture_value` has already corrected any value
+        // that names an edge the axis cannot be zeroed on.
+        origin_x0: value
+            .pointer("/origin/x0")
+            .and_then(Value::as_str)
+            .unwrap_or("left")
+            .to_string(),
+        origin_y0: value
+            .pointer("/origin/y0")
+            .and_then(Value::as_str)
+            .unwrap_or("front")
+            .to_string(),
         // Ordinal, not a length. 1 is the schema default and the only value a
         // single-WCS machine can honour.
         work_coordinate_system: value

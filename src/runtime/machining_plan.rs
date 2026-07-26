@@ -27,7 +27,7 @@ use units::Length;
 use crate::data::model::TabContour;
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
-use crate::gcode::placement::Placement;
+use crate::gcode::placement::{BoardOrigin, Placement};
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
 use crate::gcode::planner::{
     plan_drilling, plan_outline, plan_routing, DrillTarget, OutlineSpan, RouteShape, RouteTarget,
@@ -103,12 +103,19 @@ pub fn board_solid(ctx: &AppCtx) -> Option<scene::BoardSolid> {
         .as_ref()
         .and_then(|raw| raw.cnc_id)
         .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
+    let first_fixture = first
+        .as_ref()
+        .and_then(|raw| raw.fixture_id)
+        .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
 
     // Z here is irrelevant — a solid is placed in XY only — so the retract/safe heights
     // are nominal rather than resolved from a fixture.
     let placement = Placement::new(
         board.bounding_box.as_ref(),
         orientation,
+        first_fixture
+            .map(|f| BoardOrigin::from_edges(&f.origin_x0, &f.origin_y0))
+            .unwrap_or_default(),
         cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
         cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
         Length::from_mm(0.0),
@@ -350,6 +357,7 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     let placement = Placement::new(
         ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
         orientation,
+        BoardOrigin::from_edges(&fixture.origin_x0, &fixture.origin_y0),
         cnc.scaling_x as f64,
         cnc.scaling_y as f64,
         fixture.z_retract,
