@@ -285,6 +285,17 @@ fn point_length_mm(diameter_mm: f64, point_angle_deg: f64) -> f64 {
     (diameter_mm / 2.0) / tangent
 }
 
+/// The plunge a **router** must reach to cut through: `T + m`.
+///
+/// A router is flat-ended, so unlike a twist drill there is no point length to clear —
+/// its own face defines the breakthrough. Exposed because the operation planner sizes
+/// routers the assigner never scored: a slot cutter is chosen by *width* (it has to fit
+/// between the slot walls), not by hole demand, so it never passes through
+/// [`z_feasibility`]. Callers should still check the tool's flute length against this.
+pub fn router_plunge(setup: &Setup) -> Length {
+    Length::from_mm(setup.board_thickness.as_mm() + setup.breakthrough_margin.as_mm())
+}
+
 /// The Z-feasibility verdict for one (tool, hole) pair (§2½).
 struct ZFit {
     feasible: bool,

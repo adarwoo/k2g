@@ -105,6 +105,28 @@ properties:
   # which is a CNC-profile capability (`has_repeatable_home`), not a fixture toggle.
 
   # ---------------------------------------------------------------------------
+  # board_flip_axis
+  # ---------------------------------------------------------------------------
+  # How the board turns over for a bottom-side step. This is a property of the
+  # FIXTURE, not of the job or the machining profile: it is decided entirely by
+  # where the registration is — two pins on a left-to-right line let the board be
+  # turned like a page (about Y), pins on a front-to-back line tumble it (about X).
+  #
+  # Getting it wrong produces a mirrored board, so there is no default that is
+  # safe for every fixture; `y` is the common case (page turn) and is what the
+  # schema assumes when a profile predates this field.
+  #
+  board_flip_axis:
+    description: >-
+      Which axis the board is turned about when a machining step works the
+      bottom side. 'y' turns it left-to-right like a page (mirroring X, front
+      edge stays at the front); 'x' tumbles it front-to-back (mirroring Y, left
+      edge stays on the left). Ignored by top-side steps.
+    type: string
+    default: y
+    enum: [x, y]
+
+  # ---------------------------------------------------------------------------
   # locating_pins
   # ---------------------------------------------------------------------------
   # Locating pin strategy and geometry.

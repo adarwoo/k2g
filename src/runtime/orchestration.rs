@@ -271,7 +271,7 @@ impl AppCtx {
         // Body-phase inputs: the resolved drill plan, the per-step CNC render context
         // (`step_render[i]` matches `plan.steps[i]`), and the tool→feed/speed lookup.
         // Built here on the main thread; the worker only renders.
-        let plan = machining_plan::plan_machining(&self.app);
+        let plan = machining_plan::plan_machining(self);
         let step_render = process
             .and_then(|profile| Uuid::parse_str(&profile.id).ok())
             .map(|profile_id| {

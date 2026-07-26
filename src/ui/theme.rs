@@ -2719,8 +2719,13 @@ th {
     color: color-mix(in srgb, var(--warn) 85%, var(--text));
 }
 
+/*
+ * Drill-size swatches encode diameter, not hole type, so they are deliberately not
+ * one of the kind colours above — they take the panel's own foreground. It must be a
+ * theme token: a hardcoded near-black vanished against the dark theme's panel.
+ */
 .board-hole-legend {
-    color: #111111;
+    color: var(--text);
 }
 
 .board-hole-other {

@@ -133,6 +133,47 @@ pub fn render_step_body(
                         out.push_str(&render_route_move(coder, render, mv, fs)?);
                     }
                 }
+                OpKind::RouteContour { ref path } => {
+                    // The span carries its own geometry: drop in at its start, feed
+                    // through it, lift off at its end. The gap to the next span is the
+                    // retaining tab, so the retract between them is not optional.
+                    let mut moves = Vec::with_capacity(path.len() + 2);
+                    moves.push(RouteMove::Rapid {
+                        x: path[0].x,
+                        y: path[0].y,
+                        z: op.z.z_retract,
+                    });
+                    moves.push(RouteMove::Plunge {
+                        x: path[0].x,
+                        y: path[0].y,
+                        z: op.z.z_bottom,
+                    });
+                    moves.extend(path[1..].iter().map(|p| RouteMove::Cut {
+                        x: p.x,
+                        y: p.y,
+                        z: op.z.z_bottom,
+                    }));
+                    let last = path[path.len() - 1];
+                    moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
+                    for mv in &moves {
+                        out.push_str(&render_route_move(coder, render, mv, fs)?);
+                    }
+                }
+                OpKind::RouteSlot { width, from_solid } => {
+                    // entry/exit are the slot's medial-axis end centres (see `OpKind`).
+                    let moves = routing::slot_route(
+                        op.entry,
+                        op.exit,
+                        op.z.z_retract,
+                        op.z.z_bottom,
+                        width,
+                        block.diameter,
+                        from_solid,
+                    );
+                    for mv in &moves {
+                        out.push_str(&render_route_move(coder, render, mv, fs)?);
+                    }
+                }
             }
         }
     }
@@ -147,16 +188,38 @@ pub fn render_step_body(
     Ok(out)
 }
 
-/// Renders one move of a routed-hole spiral through the matching motion primitive:
-/// `Rapid`→`rapid_move`, `Cut`→`linear_cut` (carrying the spindle rpm), `Arc`→`cut_arc`
-/// (carrying the XY feed). Geometry is already in machine coordinates — the Coder only
-/// formats it (op-planner §6).
+/// Renders one move of a routing toolpath through the matching motion primitive:
+/// `Rapid`→`rapid_move`, `Plunge`/`Cut`→`linear_cut`, `Arc`→`cut_arc`. Geometry is
+/// already in machine coordinates — the Coder only formats it (op-planner §6).
+///
+/// **Each feed move carries its own `F`.** A `G1` with no feed word runs at whatever is
+/// modal — after a drill block that is the *drill's* plunge feed, which is not a feed a
+/// router should see. `Plunge` is derated by [`routing::PLUNGE_FEED_FRACTION`], since a
+/// tool's one rated feed is its lateral feed.
 fn render_route_move(
     coder: &Coder,
     render: &StepRender,
     mv: &RouteMove,
     fs: FeedsSpeeds,
 ) -> Result<String, BodyError> {
+    /// `linear_cut` for a feed move, at the given feed.
+    fn linear(
+        coder: &Coder,
+        render: &StepRender,
+        (x, y, z): (units::Length, units::Length, units::Length),
+        feed: FeedRate,
+        fs: FeedsSpeeds,
+    ) -> Result<String, BodyError> {
+        let mut s = Scope::new();
+        s.push("x", x);
+        s.push("y", y);
+        s.push("z", z);
+        s.push("feedrate", feed);
+        // Legacy: templates that restate the spindle speed on the cut line.
+        s.push("s", fs.rpm);
+        render_one(coder, "linear_cut", &render.linear_cut_tpl, &mut s)
+    }
+
     match *mv {
         RouteMove::Rapid { x, y, z } => {
             let mut s = Scope::new();
@@ -165,14 +228,13 @@ fn render_route_move(
             s.push("z", z);
             render_one(coder, "rapid_move", &render.rapid_move_tpl, &mut s)
         }
-        RouteMove::Cut { x, y, z } => {
-            let mut s = Scope::new();
-            s.push("x", x);
-            s.push("y", y);
-            s.push("z", z);
-            s.push("s", fs.rpm);
-            render_one(coder, "linear_cut", &render.linear_cut_tpl, &mut s)
+        RouteMove::Plunge { x, y, z } => {
+            let plunge = FeedRate::from_mm_per_min(
+                fs.feed.as_mm_per_min() * routing::PLUNGE_FEED_FRACTION,
+            );
+            linear(coder, render, (x, y, z), plunge, fs)
         }
+        RouteMove::Cut { x, y, z } => linear(coder, render, (x, y, z), fs.feed, fs),
         RouteMove::Arc { x, y, i, j, ccw } => {
             let mut s = Scope::new();
             s.push("arc_cmd", if ccw { "G3".to_string() } else { "G2".to_string() });
@@ -239,7 +301,7 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
         start_spindle_tpl: "`S{rpm}\n`M03".to_string(),
         stop_spindle_tpl: "`M05".to_string(),
         rapid_move_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
-        linear_cut_tpl: "`G1 X{x} Y{y} Z{z} S{s}".to_string(),
+        linear_cut_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
         cut_arc_tpl: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}".to_string(),
         spindle: SpindleRange::new(
             RotationalSpeed::from_rpm(5_000.0),
@@ -396,21 +458,115 @@ mod tests {
             }],
             notes: vec![],
         };
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+
+        assert!(body.contains("G0 X5 Y5 Z5"), "rapid to centre above the work:\n{body}");
+        assert!(
+            body.contains("G1 X5 Y5 Z-2.1 F200"),
+            "plunge at the centre (no island), at a third of the 600 lateral feed:\n{body}"
+        );
+        // Spiral: a G3 full circle ending on the wall (reach = (3.2-1.0)/2 = 1.1 → X6.1).
+        assert!(body.contains("G3 X6.1 Y5 I-1.1 J0 F600"), "finishing lap on the wall:\n{body}");
+    }
+
+    /// A 1 mm router in a 2 mm-wide slot lying along +X from (0,0) to (4,0): the axis
+    /// pass clears the core, then one stadium lap finishes both walls and both ends.
+    #[test]
+    fn a_routed_slot_expands_into_an_axis_pass_and_a_stadium_lap() {
+        let coder = Coder::new();
+        let step = StepPlan {
+            index: 0,
+            name: "Route".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(2),
+                diameter: Length::from_mm(1.0),
+                ops: vec![AtomicOp {
+                    phase: Phase::Route,
+                    kind: OpKind::RouteSlot { width: Length::from_mm(2.0), from_solid: true },
+                    tool_id: "r1".to_string(),
+                    entry: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                    exit: Point::new(Length::from_mm(4.0), Length::from_mm(0.0)),
+                    z: ZProfile {
+                        z_bottom: Length::from_mm(-2.1),
+                        z_retract: Length::from_mm(5.0),
+                        z_feed: None,
+                    },
+                    primitive: "route_slot",
+                    source: "slot1".to_string(),
+                }],
+                travel_mm: 0.0,
+            }],
+            notes: vec![],
+        };
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+
+        assert!(body.contains("G1 X0 Y0 Z-2.1 F200"), "plunge on the axis:\n{body}");
+        assert!(body.contains("G1 X4 Y0 Z-2.1 F600"), "the axis pass clears the core:\n{body}");
+        // Wall at (2.0 − 1.0)/2 = 0.5 either side; the caps are half circles about the
+        // axis ends, so their I/J is ±0.5 in Y.
+        assert!(body.contains("G3 X0 Y-0.5 I0 J-0.5 F600"), "cap about the (0,0) end:\n{body}");
+        assert!(body.contains("G3 X4 Y0.5 I0 J0.5 F600"), "cap about the (4,0) end:\n{body}");
+        assert!(body.contains("G0 X4 Y0.5 Z5"), "retracts from where the lap finished:\n{body}");
+    }
+
+    /// An outline span drops in at its start, feeds through every vertex, and lifts off
+    /// at its end. The lift is what leaves the retaining tab uncut, so it is not optional.
+    #[test]
+    fn an_outline_span_is_cut_between_a_plunge_and_a_retract() {
+        let coder = Coder::new();
+        let path: Vec<Point> = [(1.0, 0.0), (10.0, 0.0), (10.0, 5.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let step = StepPlan {
+            index: 0,
+            name: "Outline".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(4),
+                diameter: Length::from_mm(2.0),
+                ops: vec![AtomicOp {
+                    phase: Phase::Route,
+                    kind: OpKind::RouteContour { path: path.clone() },
+                    tool_id: "r1".to_string(),
+                    entry: path[0],
+                    exit: path[2],
+                    z: ZProfile {
+                        z_bottom: Length::from_mm(-2.1),
+                        z_retract: Length::from_mm(5.0),
+                        z_feed: None,
+                    },
+                    primitive: "route_contour",
+                    source: "outer#0.span0".to_string(),
+                }],
+                travel_mm: 0.0,
+            }],
+            notes: vec![],
+        };
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let cut = lines.iter().position(|l| l.starts_with("G0 X1 Y0 Z5")).expect("rapid to the span start");
+        assert_eq!(lines[cut + 1], "G1 X1 Y0 Z-2.1 F200", "plunge at the start");
+        assert_eq!(lines[cut + 2], "G1 X10 Y0 Z-2.1 F600");
+        assert_eq!(lines[cut + 3], "G1 X10 Y5 Z-2.1 F600", "every vertex is cut through");
+        assert_eq!(lines[cut + 4], "G0 X10 Y5 Z5", "lifts off, leaving the tab uncut");
+    }
+
+    /// The router used by the routing tests: 600 mm/min rated at a reachable speed, so
+    /// the lateral feed renders as 600 and the derated plunge as 200.
+    fn router_feed() -> BTreeMap<String, ToolFeed> {
         let mut tf = BTreeMap::new();
         tf.insert(
             "r1".to_string(),
             ToolFeed {
                 name: "1mm router".to_string(),
-                feed: Some(FeedRate::from_mm_per_min(400.0)),
+                feed: Some(FeedRate::from_mm_per_min(600.0)),
                 speed: Some(RotationalSpeed::from_rpm(18_000.0)),
             },
         );
-        let body = render_step_body(&coder, &step, &render_ctx(true), &tf).expect("routes");
-
-        assert!(body.contains("G0 X5 Y5 Z5"), "rapid to centre above the work:\n{body}");
-        assert!(body.contains("G1 X5 Y5 Z-2.1 S18000"), "plunge at the centre (no island):\n{body}");
-        // Spiral: a G3 full circle ending on the wall (reach = (3.2-1.0)/2 = 1.1 → X6.1).
-        assert!(body.contains("G3 X6.1 Y5 I-1.1 J0 F400"), "finishing lap on the wall:\n{body}");
+        tf
     }
 
     #[test]

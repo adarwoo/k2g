@@ -9,6 +9,7 @@ pub mod assigner;
 pub mod coder;
 pub mod feeds;
 pub mod oblong;
+pub mod outline;
 pub mod placement;
 pub mod plan;
 pub mod planner;

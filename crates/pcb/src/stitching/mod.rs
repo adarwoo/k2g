@@ -556,53 +556,58 @@ fn signed_area_nm2(pts: &[(i64, i64)]) -> i128 {
 }
 
 
-/// Offset each contour by `tool_radius_nm`, returning the compensated paths
-/// that a CNC router should follow.
+/// Offsets each contour by `tool_radius_nm` into the cutter-centre path that frees the
+/// board at its **nominal** size, one entry per input contour and in the same order.
 ///
-/// - Outer boundaries are offset **inward** (negative delta).
-/// - Inner holes are offset **outward** (positive delta).
+/// The sign follows from what survives the cut. A PCB keeps the material inside its outer
+/// boundary and loses the material inside each cutout, so the kerf must fall on the waste
+/// side of both:
 ///
-/// Returns `(outer_paths, hole_paths)` both in nm coordinates.
-pub fn routing_offset(
-    contours: &[Contour],
-    tool_radius_nm: i64,
-) -> (Vec<Vec<(i64, i64)>>, Vec<Vec<(i64, i64)>>) {
+/// - **Outer boundary** — the cutter runs *outside* the line (positive delta). Offsetting
+///   inward instead would return a board one router diameter undersized.
+/// - **Interior cutout** — the cutter runs *inside* the opening (negative delta), leaving
+///   the cutout at its drawn size rather than a diameter oversized.
+///
+/// A contour smaller than the cutter can vanish under the offset, which is why an entry
+/// can be `None`: the caller must report that feature as unmillable rather than skip it
+/// silently. Where an offset splits a contour in two, the largest part is taken — the
+/// others are slivers of a feature the tool cannot resolve.
+///
+/// Operates on the tessellated [`Contour::points`], so the result is a polyline: joins,
+/// concave-corner trimming and self-intersection removal all come from the polygon
+/// offset, which is what makes it correct without a special case per corner type. The
+/// typed [`Contour::segments`] are preserved for a later arc-fitting pass
+/// (operation-planner.md §3) but are not consulted here.
+pub fn routing_offset(contours: &[Contour], tool_radius_nm: i64) -> Vec<Option<Vec<(i64, i64)>>> {
     use clipper2_rust::{
         core::Paths64,
         inflate_paths_64,
         offset::{EndType, JoinType},
     };
 
-    let to_paths64 = |pts: &[(i64, i64)]| -> Path64 {
-        pts.iter().map(|&(x, y)| Point64 { x, y }).collect()
-    };
-
-    let mut outer_paths: Vec<Vec<(i64, i64)>> = Vec::new();
-    let mut hole_paths: Vec<Vec<(i64, i64)>> = Vec::new();
-
-    for contour in contours {
-        if contour.points.is_empty() {
-            continue;
-        }
-        let input: Paths64 = vec![to_paths64(&contour.points)];
-        // delta sign: negative = shrink (route inside), positive = grow (route outside)
-        let delta = if contour.is_hole {
-            tool_radius_nm as f64
-        } else {
-            -(tool_radius_nm as f64)
-        };
-        let offset = inflate_paths_64(&input, delta, JoinType::Round, EndType::Polygon, 2.0, 0.0);
-        let converted: Vec<Vec<(i64, i64)>> =
-            offset.iter().map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect()).collect();
-
-        if contour.is_hole {
-            hole_paths.extend(converted);
-        } else {
-            outer_paths.extend(converted);
-        }
-    }
-
-    (outer_paths, hole_paths)
+    contours
+        .iter()
+        .map(|contour| {
+            if contour.points.len() < 3 {
+                return None;
+            }
+            let input: Paths64 =
+                vec![contour.points.iter().map(|&(x, y)| Point64 { x, y }).collect::<Path64>()];
+            // Grow the boundary, shrink the cutouts — the kerf lands on the waste side
+            // of each. `Round` joins are the tool's own radius sweeping a convex corner.
+            let delta = if contour.is_hole {
+                -(tool_radius_nm as f64)
+            } else {
+                tool_radius_nm as f64
+            };
+            let offset = inflate_paths_64(&input, delta, JoinType::Round, EndType::Polygon, 2.0, 0.0);
+            offset
+                .iter()
+                .map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect::<Vec<(i64, i64)>>())
+                .max_by_key(|path| signed_area_nm2(path).unsigned_abs())
+                .filter(|path| path.len() >= 3)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

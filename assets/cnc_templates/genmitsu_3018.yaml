@@ -26,7 +26,7 @@ primitives:
     metric();
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"
-  linear_cut: "`G1 X{x} Y{y} Z{z} S{s}"
+  linear_cut: "`G1 X{x} Y{y} Z{z} F{feedrate}"
   start_spindle: |
     `S{rpm}
     `M03

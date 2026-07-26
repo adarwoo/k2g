@@ -323,17 +323,23 @@ properties:
       #   {x}
       #   {y}
       #   {z}
+      #   {feedrate}
       #   {s}
       #
+      # The template MUST emit a feed word. A G1 with no F runs at whatever feed is
+      # modal — after a drill cycle that is the drill's plunge feed, which is not a
+      # feed a router should ever see.
+      #
       linear_cut:
-        description: Linear cutting primitive. Takes x, y, z, and s.
+        description: Linear cutting primitive. Takes x, y, z, and feedrate.
         type: string
         x-variables:
           - { name: x, type: length, description: "Target X coordinate." }
           - { name: y, type: length, description: "Target Y coordinate." }
           - { name: z, type: length, description: "Target Z coordinate." }
-          - { name: s, type: rpm, description: "Spindle speed for the cut." }
-        default: "`G1 X{x} Y{y} Z{z} S{s}"
+          - { name: feedrate, type: feed, description: "Feed for this move: the derated plunge feed when it enters the material, the lateral cutting feed otherwise. The application chooses which." }
+          - { name: s, type: rpm, description: "Spindle speed, for controllers that want it restated on the cut line. Normally already set by start_spindle." }
+        default: "`G1 X{x} Y{y} Z{z} F{feedrate}"
 
       # Start spindle primitive.
       #

@@ -34,6 +34,7 @@ use log::warn;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::data::model::EdgeTab;
 use crate::paths::AppDirs;
 
 /// Every schema the application persists, embedded at build time. The order is
@@ -200,10 +201,16 @@ impl AppData {
         // empty-string refs); they are normalized before parsing.
         for profile in Profile::ALL {
             let dir = data_dir.join(profile.dir_name());
-            if profile == Profile::Machining {
-                errors.extend(load_machining_normalized(&mut store, &dir));
-            } else {
-                errors.extend(store.parse_directory(profile.schema_id(), &dir));
+            let normalize = match profile {
+                Profile::Machining => Some(normalize_machining_file as fn(&mut Value, &Path)),
+                Profile::Cnc => Some(normalize_cnc_value as fn(&mut Value, &Path)),
+                Profile::Fixture | Profile::Toolset => None,
+            };
+            match normalize {
+                Some(normalize) => {
+                    errors.extend(load_normalized(&mut store, profile.schema_id(), &dir, normalize))
+                }
+                None => errors.extend(store.parse_directory(profile.schema_id(), &dir)),
             }
         }
 
@@ -641,6 +648,38 @@ impl AppData {
         self.store.replace_document_from_value_at(&path, &value).is_some()
     }
 
+    /// The live job's retaining-tab placements, in file order. Empty — the schema
+    /// default, and what a legacy job file yields — means "place them automatically
+    /// from the profile's tab count" (see `job.yaml`).
+    pub fn job_edge_tabs(&self) -> Vec<EdgeTab> {
+        self.job()
+            .map(|doc| doc.to_value())
+            .and_then(|value| value.get("edge_tabs").and_then(Value::as_array).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(EdgeTab::from_value)
+            .collect()
+    }
+
+    /// Replaces the live job's tab placements wholesale.
+    ///
+    /// Wholesale rather than add/remove because the board view edits the set as a
+    /// whole and the list is short; it also keeps the persisted order equal to the
+    /// order shown. Re-parses, so the datastore re-validates each entry.
+    pub fn set_job_edge_tabs(&mut self, tabs: &[EdgeTab]) -> bool {
+        let path = self.job_path.clone();
+        let Some(mut value) = self.job().map(|doc| doc.to_value()) else {
+            return false;
+        };
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "edge_tabs".into(),
+                Value::Array(tabs.iter().map(EdgeTab::to_value).collect()),
+            );
+        }
+        self.store.replace_document_from_value_at(&path, &value).is_some()
+    }
+
     // ---- toolset rack edits ----------------------------------------------
     //
     // A toolset's `slots` are a `T1..Tn` rack: each slot has a `mode`
@@ -840,10 +879,20 @@ fn is_yaml(path: &Path) -> bool {
     )
 }
 
-/// Loads machining profiles from `dir`, normalizing each on-disk file into
-/// `machining.yaml` form (see [`normalize_machining_value`]) before parsing, and
-/// registers `dir` as the machining collection so new/edited files land there.
-fn load_machining_normalized(store: &mut ResolvedStore, dir: &Path) -> Vec<DataError> {
+/// Loads a profile collection from `dir`, running each on-disk file through
+/// `normalize` before parsing, and registers `dir` as that collection so new/edited
+/// files land there.
+///
+/// The normalisers exist because on-disk profiles outlive their schema: a file written
+/// by an older build carries a shape the current schema would reject (or, worse, quietly
+/// accept as wrong). Fixing it here — once, on the way in — is what keeps the rest of the
+/// app from having to know about historical shapes.
+fn load_normalized(
+    store: &mut ResolvedStore,
+    schema_id: &str,
+    dir: &Path,
+    normalize: fn(&mut Value, &Path),
+) -> Vec<DataError> {
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
@@ -857,13 +906,62 @@ fn load_machining_normalized(store: &mut ResolvedStore, dir: &Path) -> Vec<DataE
             let Some(mut value) = parse_yaml_value(&text) else {
                 continue;
             };
-            normalize_machining_value(&mut value);
+            normalize(&mut value, &path);
             if let Ok(normalized) = serde_json::to_string(&value) {
                 items.push((path, normalized));
             }
         }
     }
-    store.parse_texts("machining.yaml", dir, &items)
+    store.parse_texts(schema_id, dir, &items)
+}
+
+/// The `linear_cut` template shipped as the schema default — the repair target below.
+const LINEAR_CUT_DEFAULT: &str = "`G1 X{x} Y{y} Z{z} F{feedrate}";
+
+/// Whether a motion template emits a feed word at all: either through the `{feedrate}`
+/// variable or as a hardcoded `F<number>`.
+///
+/// The hardcoded case matters — a profile that pins its own feed is unusual but valid,
+/// and rewriting it would silently change how that machine cuts.
+fn emits_a_feed(template: &str) -> bool {
+    template.contains("{feedrate}")
+        || template
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'F' && (w[1].is_ascii_digit() || w[1] == b'.'))
+}
+
+/// Repairs a CNC profile written before `linear_cut` carried a feed.
+///
+/// The old shipped default was `` `G1 X{x} Y{y} Z{z} S{s} `` — a G1 with **no F**, which
+/// runs at whatever feed happens to be modal. After a drill block that is the drill's
+/// plunge feed, and a router driven at a drill's plunge feed breaks. A saved profile that
+/// cannot emit a feed is therefore repaired rather than merely flagged; one that already
+/// emits a feed (variable or hardcoded) is left exactly as the operator wrote it.
+fn normalize_cnc_value(value: &mut Value, path: &Path) {
+    let Some(template) = value
+        .pointer("/primitives/linear_cut")
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    if emits_a_feed(template) {
+        return;
+    }
+    warn!(
+        "[{}] primitives.linear_cut emitted no feed rate ('{template}'); \
+         repaired to the current default so routing moves carry F",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("cnc.yaml")
+    );
+    if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut) {
+        primitives.insert("linear_cut".into(), Value::from(LINEAR_CUT_DEFAULT));
+    }
+}
+
+/// Adapts [`normalize_machining_value`] to the [`load_normalized`] signature; machining
+/// normalisation needs no file name.
+fn normalize_machining_file(value: &mut Value, _path: &Path) {
+    normalize_machining_value(value);
 }
 
 /// The per-step keys moved out of the pre-v3 flat top level into a step object.
@@ -1735,6 +1833,34 @@ mod tests {
             matches!(node, Some(NodeValue::Str(ref s)) if *s == saved),
             "the save directory should round-trip, got {node:?}"
         );
+    }
+
+    /// A `linear_cut` that cannot emit a feed is repaired; one that can — by variable or
+    /// hardcoded — is left exactly as the operator wrote it.
+    #[test]
+    fn a_feedless_linear_cut_is_repaired_and_a_feeding_one_is_left_alone() {
+        let repaired = |template: &str| {
+            let mut value = serde_json::json!({ "primitives": { "linear_cut": template } });
+            normalize_cnc_value(&mut value, Path::new("machine.yaml"));
+            value
+                .pointer("/primitives/linear_cut")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string()
+        };
+
+        // The old shipped default: spindle speed but no F at all.
+        assert_eq!(repaired("`G1 X{x} Y{y} Z{z} S{s}"), LINEAR_CUT_DEFAULT);
+        // Already carries the variable.
+        assert_eq!(repaired(LINEAR_CUT_DEFAULT), LINEAR_CUT_DEFAULT);
+        // A profile that pins its own feed is a deliberate choice, not a defect.
+        let pinned = "`G1 X{x} Y{y} Z{z} F250";
+        assert_eq!(repaired(pinned), pinned);
+
+        // A profile with no primitives block at all must not panic.
+        let mut bare = serde_json::json!({ "name": "no primitives" });
+        normalize_cnc_value(&mut bare, Path::new("machine.yaml"));
+        assert_eq!(bare, serde_json::json!({ "name": "no primitives" }));
     }
 
     /// A machining profile written before the `routing` block was retired must still

@@ -57,7 +57,7 @@ pub enum Phase {
 /// read. For a [`OpKind::Drill`] the single [`AtomicOp::primitive`] renders it; a
 /// [`OpKind::RouteHole`] expands into a sequence of moves (rapid/plunge/arc), so its
 /// `primitive` is only a display label.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OpKind {
     /// A point drill (`drill` primitive, G81). `entry == exit`.
     Drill,
@@ -66,6 +66,24 @@ pub enum OpKind {
     /// reach the bed). Carries the finished hole diameter; the router diameter comes
     /// from the enclosing block. Expanded by the body renderer via `super::routing`.
     RouteHole { hole_diameter: Length },
+    /// An oblong slot milled by a router (the `route`, `drill_ends_then_route` and
+    /// `drill_chain_then_route` oblong strategies).
+    ///
+    /// The op's [`AtomicOp::entry`] and [`AtomicOp::exit`] are the slot's **medial-axis
+    /// end centres**, so those two placed points carry the slot's orientation and no
+    /// board-space angle survives into machine space. `width` is the slot across its
+    /// short axis; `from_solid` is `false` when a drill chain has already opened the
+    /// channel and only the wall lap remains. Expanded by `super::routing::slot_route`.
+    RouteSlot { width: Length, from_solid: bool },
+    /// One span of the board outline: a cutter-centre polyline, already offset onto the
+    /// waste side of the edge and already in machine coordinates.
+    ///
+    /// This is the one op kind that **carries** its geometry rather than deriving it,
+    /// because a contour's shape cannot be reconstructed from two points. It is still one
+    /// atomic op — the whole span is a single uninterrupted cut, which is exactly the unit
+    /// the ordering and phase rules want (op-planner §1). Retaining tabs are the *gaps*
+    /// between spans, so they need no representation of their own.
+    RouteContour { path: Vec<Point> },
 }
 
 /// The Z parameters an op cuts at, in machine Z. `z_bottom` is the deepest cutting

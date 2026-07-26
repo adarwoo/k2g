@@ -34,6 +34,63 @@ properties:
     maximum: 180
     default: 0
 
+  # ---------------------------------------------------------------------------
+  # Retaining tabs
+  #
+  # The machining profile owns the *policy* — how many tabs, how wide, tab or
+  # mouse bites (`route_board.edge`). It is reusable across boards, so it cannot
+  # own *placement*: where a tab sits only means anything for one specific
+  # outline. That is live per-job data, and it lives here beside the board
+  # orientation for the same reason.
+  # ---------------------------------------------------------------------------
+  edge_tabs:
+    description: >-
+      Where the retaining tabs sit on the board outline, for this board.
+
+      A tab is stored as a position **along a contour**, not as an XY point:
+      `at` is the fraction of the contour's total length, measured from the
+      contour's first segment start in the stitcher's traversal order. That way
+      moving the board in the KiCad layout — which happens constantly — leaves
+      every tab where the operator put it, whereas an absolute coordinate would
+      be invalidated by any translation.
+
+      Each tab is centred on its position and spans the profile's `tab_width`
+      along the contour, whatever retention mode the profile asks for (a solid
+      tab, a row of mouse-bite drills, or both).
+
+      An empty list means place them automatically: the profile's tab count,
+      spread evenly by arc length around each contour that is cut. Any entry at
+      all takes over completely, so what is generated is what is shown.
+    type: array
+    default: []
+    items:
+      type: object
+      properties:
+        contour:
+          description: >-
+            Which outline this tab holds: the board's own boundary, or the edge
+            of an interior cutout (which needs tabs too when the slug is big
+            enough to move).
+          type: string
+          default: outer
+          enum: [outer, cutout]
+        index:
+          description: >-
+            Which contour of that kind, in the stitcher's order. Always 0 for a
+            board with a single outline and no cutouts.
+          type: integer
+          minimum: 0
+          default: 0
+        at:
+          description: >-
+            Position along the contour as a fraction of its length, from its
+            start point. 0 and 1 are the same place.
+          type: number
+          minimum: 0
+          exclusiveMaximum: 1
+      required: [at]
+      additionalProperties: false
+
 required: [schema_version]
 
 additionalProperties: false

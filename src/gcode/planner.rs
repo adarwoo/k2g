@@ -149,22 +149,35 @@ pub fn plan_drilling(
         .collect()
 }
 
-/// One round hole to mill by spiralling a router (the assigner's route-fallback: too
-/// big to drill, or a drill point that would reach the bed). Not a drill target.
+/// What a [`RouteTarget`] mills — the two feature shapes a router makes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RouteShape {
+    /// A round hole, spiralled from its centre out to `hole_diameter`.
+    Hole { hole_diameter: Length },
+    /// An oblong slot whose medial axis runs from the target's `at` to `far` (both board
+    /// coordinates) and which is `width` across. `from_solid` is `false` when a drill
+    /// chain has already opened the channel, leaving only the wall lap.
+    Slot { far: pcb::BoardPoint, width: Length, from_solid: bool },
+}
+
+/// One feature to mill with a router: a round hole no drill can make (the assigner's
+/// route-fallback — too big to drill, or a drill point that would reach the bed), or an
+/// oblong slot whose strategy calls for a router. Not a drill target.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouteTarget {
     /// Feature id (board hole id or a synthesised index), carried onto the op.
     pub source: String,
-    /// Hole centre in board coordinates.
+    /// Board coordinates of where the cut begins: a hole's centre, or a slot's near
+    /// medial-axis end centre.
     pub at: pcb::BoardPoint,
     /// The router performing the cut (the block's tool).
     pub tool_id: String,
-    /// Router diameter — the block diameter and the spiral's cutter width.
+    /// Router diameter — the block diameter and the toolpath's cutter width.
     pub tool_diameter: Length,
-    /// Finished hole diameter — the spiral sweeps out to `(hole − tool)/2`.
-    pub hole_diameter: Length,
-    /// Plunge past the top surface (`T + m`) from the assignment — a positive distance;
-    /// the op stores it as a negative machine-Z depth.
+    /// The feature's geometry.
+    pub shape: RouteShape,
+    /// Plunge past the top surface (`T + m`) — a positive distance; the op stores it as
+    /// a negative machine-Z depth.
     pub z_bottom: Length,
 }
 
@@ -180,20 +193,33 @@ pub fn plan_routing(
 ) -> Vec<ToolBlock> {
     struct Placed {
         entry: Point,
+        /// Where the tool leaves: the same point for a hole, the far medial end for a
+        /// slot. Placed here so the slot's orientation is transformed exactly once.
+        exit: Point,
         z_bottom: Length,
-        hole_diameter: Length,
+        kind: OpKind,
         source: String,
     }
     let mut by_tool: BTreeMap<String, (Length, Vec<Placed>)> = BTreeMap::new();
     for target in targets {
         let entry = placement.xy(&target.at);
+        let (exit, kind) = match &target.shape {
+            RouteShape::Hole { hole_diameter } => {
+                (entry, OpKind::RouteHole { hole_diameter: *hole_diameter })
+            }
+            RouteShape::Slot { far, width, from_solid } => (
+                placement.xy(far),
+                OpKind::RouteSlot { width: *width, from_solid: *from_solid },
+            ),
+        };
         let slot_entry = by_tool
             .entry(target.tool_id.clone())
             .or_insert_with(|| (target.tool_diameter, Vec::new()));
         slot_entry.1.push(Placed {
             entry,
+            exit,
             z_bottom: target.z_bottom,
-            hole_diameter: target.hole_diameter,
+            kind,
             source: target.source.clone(),
         });
     }
@@ -217,17 +243,20 @@ pub fn plan_routing(
                     let p = &placed[i];
                     AtomicOp {
                         phase: Phase::Route,
-                        kind: OpKind::RouteHole { hole_diameter: p.hole_diameter },
+                        primitive: match p.kind {
+                            OpKind::RouteSlot { .. } => "route_slot",
+                            _ => "route_hole",
+                        },
+                        kind: p.kind.clone(),
                         tool_id: tool_id.clone(),
                         entry: p.entry,
-                        exit: p.entry,
+                        exit: p.exit,
                         z: ZProfile {
                             // Negative machine-Z depth (board top is Z0; op-planner §6).
                             z_bottom: Length::from_mm(-p.z_bottom.as_mm()),
                             z_retract: placement.z_retract(),
                             z_feed: None,
                         },
-                        primitive: "route_hole",
                         source: p.source.clone(),
                     }
                 })
@@ -242,6 +271,75 @@ pub fn plan_routing(
             }
         })
         .collect()
+}
+
+/// One uninterrupted span of the board outline to cut.
+///
+/// Unlike a drill or a hole target, a span arrives **already placed**: the contour has to
+/// be offset in board space (before the CNC's per-axis scaling, which would otherwise turn
+/// a constant kerf into a varying one), and each offset point is then mapped through the
+/// placement. So the caller does the placing and the planner only orders.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlineSpan {
+    /// Feature id — the contour and span it came from, for the view + diagnostics.
+    pub source: String,
+    /// Cutter-centre polyline in **machine** coordinates.
+    pub path: Vec<Point>,
+}
+
+/// Plans the board-outline phase: one block for the outline router, its spans ordered by
+/// travel between their start points.
+///
+/// One block, not one per contour, because the outline is cut by a single router — the
+/// step should pay one tool change for the whole outline whatever it is made of. Returns
+/// `None` when there is nothing to cut, so the caller adds no empty block (and so no
+/// pointless tool change) to the step.
+///
+/// Span order is a pure travel optimisation. It does not affect how well the board is held:
+/// the tabs between spans are what hold it, and they survive until the operator breaks
+/// them, so no span order can release the board early.
+pub fn plan_outline(
+    spans: &[OutlineSpan],
+    tool_id: &str,
+    tool_diameter: Length,
+    z_bottom: Length,
+    z_retract: Length,
+    start: Point,
+    slots: &BTreeMap<String, u8>,
+) -> Option<ToolBlock> {
+    let usable: Vec<&OutlineSpan> = spans.iter().filter(|s| s.path.len() >= 2).collect();
+    if usable.is_empty() {
+        return None;
+    }
+
+    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
+    let order = tsp_order(start, &entries);
+    let travel_mm = route_length(start, &entries, &order);
+
+    let ops: Vec<AtomicOp> = order
+        .iter()
+        .map(|&i| {
+            let span = usable[i];
+            AtomicOp {
+                phase: Phase::Route,
+                kind: OpKind::RouteContour { path: span.path.clone() },
+                tool_id: tool_id.to_string(),
+                entry: span.path[0],
+                exit: span.path[span.path.len() - 1],
+                z: ZProfile { z_bottom, z_retract, z_feed: None },
+                primitive: "route_contour",
+                source: span.source.clone(),
+            }
+        })
+        .collect();
+
+    Some(ToolBlock {
+        slot: slots.get(tool_id).copied(),
+        tool_id: tool_id.to_string(),
+        diameter: tool_diameter,
+        ops,
+        travel_mm,
+    })
 }
 
 /// A length quantised to whole micrometres (matches the assigner's precision), for
@@ -499,16 +597,24 @@ mod tests {
         assert_eq!(blocks[0].slot, Some(3));
     }
 
-    #[test]
-    fn route_holes_land_in_the_route_phase_carrying_the_hole_diameter() {
-        let targets = vec![RouteTarget {
-            source: "h1".to_string(),
-            at: pcb::BoardPoint { x: Length::from_mm(3.0), y: Length::from_mm(4.0) },
+    fn route_target(source: &str, at: (f64, f64), shape: RouteShape) -> RouteTarget {
+        RouteTarget {
+            source: source.to_string(),
+            at: pcb::BoardPoint { x: Length::from_mm(at.0), y: Length::from_mm(at.1) },
             tool_id: "router".to_string(),
             tool_diameter: Length::from_mm(1.0),
-            hole_diameter: Length::from_mm(3.2),
+            shape,
             z_bottom: Length::from_mm(2.1),
-        }];
+        }
+    }
+
+    #[test]
+    fn route_holes_land_in_the_route_phase_carrying_the_hole_diameter() {
+        let targets = vec![route_target(
+            "h1",
+            (3.0, 4.0),
+            RouteShape::Hole { hole_diameter: Length::from_mm(3.2) },
+        )];
         let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].diameter.as_mm(), 1.0, "block diameter is the router");
@@ -516,6 +622,105 @@ mod tests {
         assert_eq!(op.phase, Phase::Route);
         assert_eq!(op.kind, OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) });
         assert_eq!(op.primitive, "route_hole");
+        assert_eq!(op.entry, op.exit, "a spiralled hole ends where it began");
         assert!(op.z.z_bottom.as_mm() < 0.0, "cut depth is below the surface");
+    }
+
+    /// A slot's two medial-axis ends both go through the placement, so the op carries the
+    /// orientation as placed points — there is no board-space angle left to misread.
+    #[test]
+    fn a_routed_slot_carries_its_axis_as_placed_entry_and_exit() {
+        let targets = vec![route_target(
+            "slot1",
+            (2.0, 5.0),
+            RouteShape::Slot {
+                far: pcb::BoardPoint { x: Length::from_mm(6.0), y: Length::from_mm(5.0) },
+                width: Length::from_mm(1.6),
+                from_solid: true,
+            },
+        )];
+        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        let op = &blocks[0].ops[0];
+        assert_eq!(
+            op.kind,
+            OpKind::RouteSlot { width: Length::from_mm(1.6), from_solid: true }
+        );
+        assert_eq!(op.primitive, "route_slot");
+        assert_eq!(op.entry, Point::new(Length::from_mm(2.0), Length::from_mm(5.0)));
+        assert_eq!(op.exit, Point::new(Length::from_mm(6.0), Length::from_mm(5.0)));
+    }
+
+    /// Every outline span lands in one block on the outline router — one tool change for
+    /// the whole outline — and each op carries the span it cuts, entry to exit.
+    #[test]
+    fn outline_spans_share_one_block_and_carry_their_own_path() {
+        let span = |source: &str, from: (f64, f64), to: (f64, f64)| OutlineSpan {
+            source: source.to_string(),
+            path: vec![
+                Point::new(Length::from_mm(from.0), Length::from_mm(from.1)),
+                Point::new(Length::from_mm(to.0), Length::from_mm(to.1)),
+            ],
+        };
+        let spans = vec![
+            span("outer#0.span0", (50.0, 0.0), (60.0, 0.0)),
+            span("outer#0.span1", (1.0, 0.0), (10.0, 0.0)),
+            // A degenerate span is dropped rather than emitted as a zero-length cut.
+            OutlineSpan { source: "outer#0.span2".into(), path: vec![] },
+        ];
+        let block = plan_outline(
+            &spans,
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .expect("there is an outline to cut");
+
+        assert_eq!(block.op_count(), 2, "the empty span is dropped");
+        assert_eq!(block.ops[0].source, "outer#0.span1", "the nearer span is cut first");
+        assert_eq!(block.ops[0].phase, Phase::Route);
+        assert_eq!(block.ops[0].primitive, "route_contour");
+        assert_eq!(block.ops[0].entry, spans[1].path[0]);
+        assert_eq!(block.ops[0].exit, spans[1].path[1], "the op ends where its span does");
+        assert!(matches!(&block.ops[0].kind, OpKind::RouteContour { path } if *path == spans[1].path));
+    }
+
+    /// Nothing to cut means no block at all — an empty block would still cost a tool
+    /// change, which is the one thing block grouping exists to avoid.
+    #[test]
+    fn an_outline_with_no_cuttable_spans_makes_no_block() {
+        assert!(plan_outline(
+            &[],
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .is_none());
+    }
+
+    /// Holes and slots milled by the same router share one block, so the step pays for a
+    /// single tool change rather than one per shape.
+    #[test]
+    fn holes_and_slots_on_one_router_share_a_single_block() {
+        let targets = vec![
+            route_target("h1", (0.0, 0.0), RouteShape::Hole { hole_diameter: Length::from_mm(3.2) }),
+            route_target(
+                "slot1",
+                (10.0, 0.0),
+                RouteShape::Slot {
+                    far: pcb::BoardPoint { x: Length::from_mm(12.0), y: Length::from_mm(0.0) },
+                    width: Length::from_mm(1.6),
+                    from_solid: false,
+                },
+            ),
+        ];
+        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        assert_eq!(blocks.len(), 1, "one router, one block");
+        assert_eq!(blocks[0].op_count(), 2);
     }
 }

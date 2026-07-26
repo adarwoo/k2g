@@ -5,27 +5,39 @@
 //! drill targets to the pure [`planner`](crate::gcode::planner) for decomposition and
 //! ordering.
 //!
-//! **Scope:** the drill phase. Round PTH/NPTH holes (and vias) that resolve to a drill
-//! become ordered point-drill ops; oblong slots, routed holes and board-outline
-//! routing are recorded as pending notes and planned once the stitcher preserves typed
-//! segments (op-planner §3, §9.6). Heights (`z_retract`/`z_safe`) use provisional
-//! defaults until the fixture model carries them.
+//! **Scope.** Both phases are planned. Round PTH/NPTH holes (and vias) become ordered
+//! point-drill ops or spiral-routed pockets; oblong slots become drill chains, router
+//! passes or both, per the step's strategy; and the board outline becomes offset cut
+//! spans with retaining tabs left between them.
+//!
+//! Three things are deliberately still notes rather than ops: **locating pins** (the
+//! board carries no metadata for them), **scoring / V-grooving** (partial-depth cuts need
+//! a depth model and a V-bit the tool stock does not describe), and **arc-preserving
+//! outline offsets** — the outline is offset as a polyline today, so a curved edge is cut
+//! as chords rather than as `G2`/`G3` (op-planner §3, §9.6). None of these produces a
+//! wrong program; each produces a less complete or less elegant one, and says so.
+//!
+//! Heights (`z_retract`/`z_safe`) use provisional defaults until the fixture model
+//! carries them.
 
 use uuid::Uuid;
 
 use units::Length;
 
+use crate::data::model::TabContour;
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
 use crate::gcode::placement::Placement;
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
-use crate::gcode::oblong;
-use crate::gcode::planner::{plan_drilling, plan_routing, DrillTarget, RouteTarget};
+use crate::gcode::planner::{
+    plan_drilling, plan_outline, plan_routing, DrillTarget, OutlineSpan, RouteShape, RouteTarget,
+};
+use crate::gcode::{oblong, outline};
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, plan_routers, read_steps, HoleGroup,
-    OblongStrategy, StepRaw,
+    OblongStrategy, RouterPlan, StepRaw,
 };
-use crate::runtime::AppState;
+use crate::runtime::AppCtx;
 
 /// R-plane retract used only when a step has no resolvable fixture (the fixture now
 /// carries `z_retract`); keeps the Machining view planning mid-configuration (mm).
@@ -36,7 +48,7 @@ const DEFAULT_Z_SAFE_MM: f64 = 5.0;
 
 /// Builds the machining plan for the current context: one [`StepPlan`] per machining
 /// step of the selected profile, each with its ordered drill-phase tool blocks.
-pub fn plan_machining(ctx: &AppState) -> MachiningPlan {
+pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
     let Some(profile_id) = ctx
         .selected_process_profile_id
         .as_deref()
@@ -74,7 +86,7 @@ fn note(message: &str) -> MachiningPlan {
 }
 
 /// Plans one step's drill phase.
-fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> StepPlan {
+fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> StepPlan {
     let name = raw.name.clone();
     let mut notes: Vec<String> = Vec::new();
 
@@ -143,7 +155,10 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     // point that would reach the bed). Oblong slots are still deferred.
     let mut drill_targets: Vec<DrillTarget> = Vec::new();
     let mut route_targets: Vec<RouteTarget> = Vec::new();
-    let mut pending_slot_routes = 0usize;
+    // Slots whose strategy calls for a router but for which no cutter fits, and slot
+    // routers whose flute is too short to reach through — both leave the slot unfinished.
+    let mut unmilled_slots = 0usize;
+    let mut short_flute_routers: std::collections::BTreeSet<String> = Default::default();
     for (i, hole) in holes.iter().enumerate() {
         let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
         let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else { continue };
@@ -172,8 +187,37 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
                     });
                 }
             }
+            // The slot's route half. The cutter is chosen by *width* (it must fit
+            // between the walls), so it is the router plan's, not the assigner's — and
+            // its plunge has no drill point to clear.
             if oblong.routes() {
-                pending_slot_routes += 1;
+                let router = routers
+                    .for_group(&group)
+                    .and_then(|id| ctx.tools.iter().find(|t| t.id == id));
+                match router {
+                    Some(router) => {
+                        let z_bottom = assigner::router_plunge(&setup);
+                        if router.flute_length.is_some_and(|f| f.as_mm() < z_bottom.as_mm()) {
+                            short_flute_routers.insert(router.name.clone());
+                        }
+                        // The medial axis: the two end centres, which is exactly where a
+                        // drill making the ends would sit.
+                        let half = Length::from_mm(slot.travel().as_mm() / 2.0);
+                        route_targets.push(RouteTarget {
+                            source: format!("{source}.route"),
+                            at: slot.point_at(Length::from_mm(-half.as_mm())),
+                            tool_id: router.id.clone(),
+                            tool_diameter: router.diameter,
+                            shape: RouteShape::Slot {
+                                far: slot.point_at(half),
+                                width: slot.width,
+                                from_solid: oblong.routes_from_solid(),
+                            },
+                            z_bottom,
+                        });
+                    }
+                    None => unmilled_slots += 1,
+                }
             }
             continue;
         }
@@ -193,7 +237,7 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
                 at: hole.position.clone(),
                 tool_id: assigned.tool_id.clone(),
                 tool_diameter,
-                hole_diameter: group.target,
+                shape: RouteShape::Hole { hole_diameter: group.target },
                 z_bottom: assigned.z_bottom,
             });
         }
@@ -210,26 +254,79 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
         fixture.map(|f| f.z_safe).unwrap_or(Length::from_mm(DEFAULT_Z_SAFE_MM)),
     );
     let start = Point::new(Length::from_mm(0.0), Length::from_mm(0.0));
+
+    // The board outline. Planned before the blocks are built because its mouse bites are
+    // *drilled*, and they have to join the drill phase — the board must still be whole
+    // when they are made, or the perforation is cut into a board that is already loose.
+    let mut outline_spans: Vec<OutlineSpan> = Vec::new();
+    if has_route {
+        if raw.route_board.cuts_through() {
+            match plan_outline_spans(ctx, raw, &routers, &placement, &mut drill_targets, &slots) {
+                Ok(spans) if spans.is_empty() => notes.push(
+                    "The retaining tabs are wider than the outline they sit on, so nothing \
+                     would be cut. Reduce the tab width or the tab count."
+                        .into(),
+                ),
+                Ok(spans) => outline_spans = spans,
+                Err(reason) => notes.push(reason),
+            }
+        } else {
+            notes.push(format!(
+                "Edge cut '{}' is not yet planned — only 'route' and 'mill' cut right \
+                 through. Scoring and V-grooving need a partial-depth model and a V-bit \
+                 the tool stock does not carry yet.",
+                raw.route_board.cut
+            ));
+        }
+    }
+
     let mut blocks = plan_drilling(&drill_targets, &placement, start, &slots);
     blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
+    if let Some(outline_router) = routers.outline.as_deref() {
+        let tool = ctx.tools.iter().find(|t| t.id == outline_router);
+        if let Some(tool) = tool {
+            let z_bottom = assigner::router_plunge(&setup);
+            if tool.flute_length.is_some_and(|f| f.as_mm() < z_bottom.as_mm()) {
+                notes.push(format!(
+                    "Outline router '{}' cannot reach through the board — the outline will \
+                     not be cut free. Stock a longer cutter.",
+                    tool.name
+                ));
+            }
+            blocks.extend(plan_outline(
+                &outline_spans,
+                outline_router,
+                tool.diameter,
+                // Negative machine-Z depth (board top is Z0; op-planner §6).
+                Length::from_mm(-z_bottom.as_mm()),
+                placement.z_retract(),
+                start,
+                &slots,
+            ));
+        }
+    }
 
     // Record what this step's plan does not yet cover.
-    if pending_slot_routes > 0 {
+    if unmilled_slots > 0 {
         notes.push(format!(
-            "{pending_slot_routes} oblong slot(s) still need their route pass — awaits the route phase. \
-             Any drilling their strategy calls for is planned."
+            "{unmilled_slots} oblong slot(s) have no router narrow enough to mill, so their \
+             route pass is missing — see the Tooling tab. Any drilling their strategy calls \
+             for is planned."
         ));
     }
-    // Surface unmillable slots here too: when the oblong phase lands these are the
-    // features that will have no tool, and the Tooling tab carries the full detail.
+    if !short_flute_routers.is_empty() {
+        notes.push(format!(
+            "Slot router(s) {} cannot reach through the board — the slot walls will be cut \
+             short. Stock a longer cutter.",
+            short_flute_routers.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    // Surface unmillable slots here too: the Tooling tab carries the full detail.
     if !routers.unroutable_widths.is_empty() {
         notes.push(format!(
             "{} slot width(s) are narrower than any available router — see the Tooling tab.",
             routers.unroutable_widths.len()
         ));
-    }
-    if has_route {
-        notes.push("Board-outline routing not yet planned — awaits the outline route phase.".into());
     }
     if has_locating {
         notes.push("Locating pins are not yet planned.".into());
@@ -239,6 +336,153 @@ fn plan_step(ctx: &AppState, index: usize, raw: &StepRaw, orientation: f64) -> S
     }
 
     StepPlan { index, name, blocks, notes }
+}
+
+/// Builds the board-outline cut spans, and pushes any mouse-bite holes onto
+/// `drill_targets` so they are made while the board is still whole.
+///
+/// The pipeline, in the order the geometry demands:
+///
+/// 1. **Offset in board space** ([`pcb::routing_offset`]) — the kerf goes on the waste
+///    side of each contour, so the board comes out at its drawn size. Board space, not
+///    machine space, because the CNC's per-axis scaling would otherwise stretch a
+///    constant kerf into a varying one.
+/// 2. **Place** every offset point through the [`Placement`].
+/// 3. **Split for tabs** — the job's own placements when it has any, otherwise the
+///    profile's count spread evenly ([`outline::tab_positions`]). Measured on the offset
+///    path, so a tab is the width asked for where the cutter actually passes.
+/// 4. **Perforate**, when the retention mode asks for mouse bites.
+///
+/// Returns `Err` with an operator-facing reason when the outline cannot be cut at all;
+/// per-contour problems come back as spans that are simply absent, which the step's own
+/// notes cover.
+fn plan_outline_spans(
+    ctx: &AppCtx,
+    raw: &StepRaw,
+    routers: &RouterPlan,
+    placement: &Placement,
+    drill_targets: &mut Vec<DrillTarget>,
+    slots: &std::collections::BTreeMap<String, u8>,
+) -> Result<Vec<OutlineSpan>, String> {
+    let Some(stitched) = ctx.stitched_board_data.as_ref() else {
+        return Err("The board outline has not been stitched yet — refresh the board snapshot.".into());
+    };
+    if !stitched.errors.is_empty() {
+        return Err(format!(
+            "The board outline could not be stitched into closed contours ({}), so it \
+             cannot be routed.",
+            stitched.errors.join("; ")
+        ));
+    }
+    let Some(router_id) = routers.outline.as_deref() else {
+        return Err("No router in stock for the board outline — the outline is not planned.".into());
+    };
+    let Some(router) = ctx.tools.iter().find(|t| t.id == router_id) else {
+        return Err("The outline router is no longer in stock.".into());
+    };
+
+    let radius_nm = (router.diameter.as_mm() * 1e6 / 2.0).round() as i64;
+    let offsets = pcb::routing_offset(&stitched.contours, radius_nm);
+
+    // The job's placements, grouped the way they are stored: by contour kind and index.
+    let placed_tabs = with_appdata(|data| data.job_edge_tabs());
+    let edge = &raw.route_board;
+
+    let mut spans: Vec<OutlineSpan> = Vec::new();
+    let mut vanished = 0usize;
+    // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
+    let (mut outer_n, mut cutout_n) = (0usize, 0usize);
+
+    for (contour, offset) in stitched.contours.iter().zip(offsets) {
+        let kind = if contour.is_hole { TabContour::Cutout } else { TabContour::Outer };
+        let index = if contour.is_hole { &mut cutout_n } else { &mut outer_n };
+        let (kind_index, label) = (*index, kind.as_str());
+        *index += 1;
+
+        let Some(offset) = offset else {
+            vanished += 1;
+            continue;
+        };
+        let points: Vec<Point> = offset
+            .iter()
+            .map(|&(x, y)| {
+                placement.xy(&pcb::BoardPoint {
+                    x: Length::from_mm(x as f64 / 1e6),
+                    y: Length::from_mm(y as f64 / 1e6),
+                })
+            })
+            .collect();
+        let Some(path) = outline::Loop::new(&points) else { continue };
+
+        let mine: Vec<f64> = placed_tabs
+            .iter()
+            .filter(|t| t.contour == kind && t.index == kind_index)
+            .map(|t| t.at)
+            .collect();
+        let tabs = outline::tab_positions(&mine, if edge.retains() { edge.tabs } else { 0 });
+
+        for (n, span) in outline::cut_spans(&path, &tabs, edge.tab_width.as_mm())
+            .into_iter()
+            .enumerate()
+        {
+            spans.push(OutlineSpan { source: format!("{label}#{kind_index}.span{n}"), path: span });
+        }
+
+        // Mouse bites are drills, so they join the drill phase rather than the route one.
+        if edge.perforates() {
+            if let Some(bite_tool) = mouse_bite_drill(ctx, slots) {
+                for (n, tab) in tabs.iter().enumerate() {
+                    let centres = outline::mouse_bite_centres(
+                        &path,
+                        *tab,
+                        edge.tab_width.as_mm(),
+                        edge.bite_holes,
+                    );
+                    for (h, centre) in centres.into_iter().enumerate() {
+                        drill_targets.push(DrillTarget {
+                            source: format!("{label}#{kind_index}.bite{n}.{h}"),
+                            // The span geometry is already placed, so unplace it: the
+                            // drill planner places its own targets.
+                            at: placement.unplace(&centre),
+                            tool_id: bite_tool.0.clone(),
+                            diameter: bite_tool.1,
+                            z_bottom: bite_tool.2,
+                            // One run, so the perforation is drilled in order along the
+                            // tab rather than being scattered through the tour.
+                            chain: Some(format!("{label}#{kind_index}.bite{n}")),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if vanished > 0 {
+        return Err(format!(
+            "{vanished} outline contour(s) are smaller than the {} router and vanish under \
+             its kerf, so they cannot be cut. Stock a smaller cutter.",
+            router.name
+        ));
+    }
+    Ok(spans)
+}
+
+/// The drill that perforates a mouse bite: `(tool id, diameter, plunge)`.
+///
+/// The smallest drill already in the rack, because a mouse bite wants the smallest hole
+/// that will still break cleanly and — more to the point — must not add a tool change of
+/// its own to a step that has already been assigned. `None` when the rack holds no drill,
+/// which leaves the tab solid rather than inventing a tool.
+fn mouse_bite_drill(
+    ctx: &AppCtx,
+    slots: &std::collections::BTreeMap<String, u8>,
+) -> Option<(String, Length, Length)> {
+    let setup = build_setup(ctx, None);
+    ctx.tools
+        .iter()
+        .filter(|t| slots.contains_key(&t.id) && !t.kind.eq_ignore_ascii_case("router"))
+        .min_by_key(|t| t.diameter.as_um().round() as i64)
+        .map(|t| (t.id.clone(), t.diameter, assigner::router_plunge(&setup)))
 }
 
 /// A step that could not be planned — no blocks, the reasons surfaced as notes.

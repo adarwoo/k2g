@@ -149,6 +149,60 @@ pub(crate) struct StepRaw {
     pub(crate) fixture_id: Option<Uuid>,
     pub(crate) toolset_id: Option<Uuid>,
     pub(crate) drill: DrillConfigRaw,
+    pub(crate) route_board: EdgeConfigRaw,
+}
+
+/// The step's `route_board.edge` config — the board-outline **policy**, defaulted when
+/// absent.
+///
+/// Only the policy: how the edge is cut, how many tabs hold the board and how wide they
+/// are. Where those tabs sit is not here, and cannot be — a machining profile is reused
+/// across boards, and a tab position means nothing without one specific outline. That
+/// lives on the job (`job.yaml#/edge_tabs`).
+pub(crate) struct EdgeConfigRaw {
+    /// How the edge is made: `route | mill | score | vgroove`.
+    pub(crate) cut: String,
+    /// Retention mode: `none | tabs | mouse_bites | tabs_with_mouse_bites`.
+    pub(crate) retention: String,
+    /// How many tabs to spread evenly when the job places none itself.
+    pub(crate) tabs: usize,
+    /// The length of loop each tab leaves uncut.
+    pub(crate) tab_width: Length,
+    /// Holes per tab, when the retention mode perforates.
+    pub(crate) bite_holes: usize,
+}
+
+impl EdgeConfigRaw {
+    /// Whether anything holds the board in during the cut. `none` means it is held some
+    /// other way (tape, a vacuum bed), so the outline is cut in one closed pass.
+    pub(crate) fn retains(&self) -> bool {
+        self.retention != "none"
+    }
+
+    /// Whether each tab is perforated with a row of drills so it snaps cleanly.
+    pub(crate) fn perforates(&self) -> bool {
+        matches!(self.retention.as_str(), "mouse_bites" | "tabs_with_mouse_bites")
+    }
+
+    /// Whether the edge is cut right through by a router — the only mode the outline
+    /// phase plans today. Scoring and V-grooving cut partway and need a depth model and
+    /// a V-bit, which the tool stock does not carry yet.
+    pub(crate) fn cuts_through(&self) -> bool {
+        matches!(self.cut.as_str(), "route" | "mill")
+    }
+}
+
+impl Default for EdgeConfigRaw {
+    fn default() -> Self {
+        // The schema's own defaults for `route_board.edge`.
+        Self {
+            cut: "route".to_string(),
+            retention: "tabs".to_string(),
+            tabs: 4,
+            tab_width: Length::from_mm(2.0),
+            bite_holes: 3,
+        }
+    }
 }
 
 /// The step's drill `holes` config, defaulted when absent.
@@ -196,6 +250,13 @@ impl OblongStrategy {
     /// Whether the strategy needs a router — and so a cutter that fits the slot width.
     pub(crate) fn routes(self) -> bool {
         !matches!(self, Self::DrillChain)
+    }
+
+    /// Whether the router meets full material. False only for `drill_chain_then_route`,
+    /// where the chain has already opened the channel and all that is left is the
+    /// finishing lap on the wall.
+    pub(crate) fn routes_from_solid(self) -> bool {
+        !matches!(self, Self::DrillChainThenRoute)
     }
 
     /// The chain's pitch ceiling as a fraction of the drill diameter, or `None` when the
@@ -418,6 +479,14 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                 let drill = drill_base
                     .map(|base| read_drill_config(root, &base))
                     .unwrap_or_default();
+                // `mill_board` shares the `route_board` shape; whichever the step
+                // enables, its edge config is read from the same place.
+                let edge_op = if operations.iter().any(|op| op == "mill_board") {
+                    "mill_board"
+                } else {
+                    "route_board"
+                };
+                let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}/edge"));
 
                 StepRaw {
                     name: node_str(root, &format!("/steps/{i}/name"))
@@ -428,10 +497,27 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     fixture_id: node_ref(root, &format!("/steps/{i}/fixture/default")),
                     toolset_id: node_ref(root, &format!("/steps/{i}/toolset/default")),
                     drill,
+                    route_board,
                 }
             })
             .collect()
     })
+}
+
+/// Reads the `edge` outline config at `base`, falling back to defaults per field.
+fn read_edge_config(root: &Node, base: &str) -> EdgeConfigRaw {
+    let default = EdgeConfigRaw::default();
+    EdgeConfigRaw {
+        cut: node_str(root, &format!("{base}/cut")).unwrap_or(default.cut),
+        retention: node_str(root, &format!("{base}/retention")).unwrap_or(default.retention),
+        tabs: node_count(root, &format!("{base}/tabs")).unwrap_or(default.tabs),
+        tab_width: node_length(root, &format!("{base}/tab_width")).unwrap_or(default.tab_width),
+        // The schema floors this at 1, so a zero here would be a corrupt file, not a
+        // request for an unperforated tab — that is what `retention` is for.
+        bite_holes: node_count(root, &format!("{base}/bite_holes"))
+            .filter(|n| *n > 0)
+            .unwrap_or(default.bite_holes),
+    }
 }
 
 /// Reads the `holes` drill config at `base`, falling back to defaults per field.
@@ -1137,6 +1223,15 @@ fn node_ref(root: &Node, ptr: &str) -> Option<Uuid> {
         NodeValue::Ref(reference) => Some(reference.raw),
         NodeValue::Id(id) => Some(*id),
         NodeValue::Str(s) => Uuid::parse_str(s).ok(),
+        _ => None,
+    }
+}
+
+/// A non-negative integer node, as a count. Negative values are rejected rather than
+/// wrapped — a count is what the schema's `minimum: 0` fields all are.
+fn node_count(root: &Node, ptr: &str) -> Option<usize> {
+    match &root.get_pointer(ptr)?.value {
+        NodeValue::Int(value) => usize::try_from(*value).ok(),
         _ => None,
     }
 }
