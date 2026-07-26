@@ -152,39 +152,59 @@ pub(crate) struct StepRaw {
     pub(crate) route_board: EdgeConfigRaw,
 }
 
-/// The step's `route_board.edge` config — the board-outline **policy**, defaulted when
-/// absent.
+/// How a through-cut contour is held until the operator breaks it out
+/// (`route_board.*.retention`).
+#[derive(Clone, Copy)]
+pub(crate) struct RetentionRaw {
+    /// `none` or `tabs`.
+    pub(crate) tabs: bool,
+    /// How many to place when the job positions none itself.
+    pub(crate) count: usize,
+    /// Length of contour each tab leaves uncut.
+    pub(crate) width: Length,
+    /// Perforate each tab so it snaps cleanly. A property *of* a tab, not an
+    /// alternative to one.
+    pub(crate) mouse_bites: bool,
+}
+
+impl RetentionRaw {
+    /// The schema's defaults, with `count` varying by what is being held: an outline
+    /// wants four tabs, a cutout's slug one or two.
+    fn defaults(count: usize) -> Self {
+        Self { tabs: true, count, width: Length::from_mm(2.0), mouse_bites: false }
+    }
+}
+
+/// The step's `route_board` config — the board-routing **policy**, defaulted when absent.
 ///
-/// Only the policy: how the edge is cut, how many tabs hold the board and how wide they
-/// are. Where those tabs sit is not here, and cannot be — a machining profile is reused
-/// across boards, and a tab position means nothing without one specific outline. That
-/// lives on the job (`job.yaml#/edge_tabs`).
+/// Only the policy: how the boundary is cut, whether interior cutouts are routed too, and
+/// how each is retained. Where the tabs actually sit is not here and cannot be — a
+/// machining profile is reused across boards, and a tab position means nothing without one
+/// specific outline. That lives on the job (`job.yaml#/edge_tabs`).
 pub(crate) struct EdgeConfigRaw {
-    /// How the edge is made: `route | mill | score | vgroove`.
+    /// How the boundary is made: `route | mill | score | vgroove`.
     pub(crate) cut: String,
-    /// Retention mode: `none | tabs | mouse_bites | tabs_with_mouse_bites`.
-    pub(crate) retention: String,
-    /// How many tabs to spread evenly when the job places none itself.
-    pub(crate) tabs: usize,
-    /// The length of loop each tab leaves uncut.
-    pub(crate) tab_width: Length,
-    /// Holes per tab, when the retention mode perforates.
-    pub(crate) bite_holes: usize,
+    /// Retention for the board's own boundary.
+    pub(crate) outline: RetentionRaw,
+    /// Whether interior openings are routed as well as the boundary.
+    pub(crate) cutouts: bool,
+    /// Retention for those interior openings.
+    pub(crate) cutout_retention: RetentionRaw,
+    /// Material left on the wall for a finishing pass; zero means none.
+    pub(crate) finishing: Length,
 }
 
 impl EdgeConfigRaw {
-    /// Whether anything holds the board in during the cut. `none` means it is held some
-    /// other way (tape, a vacuum bed), so the outline is cut in one closed pass.
-    pub(crate) fn retains(&self) -> bool {
-        self.retention != "none"
+    /// The retention policy for one contour kind.
+    pub(crate) fn retention(&self, is_cutout: bool) -> RetentionRaw {
+        if is_cutout {
+            self.cutout_retention
+        } else {
+            self.outline
+        }
     }
 
-    /// Whether each tab is perforated with a row of drills so it snaps cleanly.
-    pub(crate) fn perforates(&self) -> bool {
-        matches!(self.retention.as_str(), "mouse_bites" | "tabs_with_mouse_bites")
-    }
-
-    /// Whether the edge is cut right through by a router — the only mode the outline
+    /// Whether the boundary is cut right through by a router — the only mode the outline
     /// phase plans today. Scoring and V-grooving cut partway and need a depth model and
     /// a V-bit, which the tool stock does not carry yet.
     pub(crate) fn cuts_through(&self) -> bool {
@@ -194,13 +214,13 @@ impl EdgeConfigRaw {
 
 impl Default for EdgeConfigRaw {
     fn default() -> Self {
-        // The schema's own defaults for `route_board.edge`.
+        // The schema's own defaults for `route_board`.
         Self {
             cut: "route".to_string(),
-            retention: "tabs".to_string(),
-            tabs: 4,
-            tab_width: Length::from_mm(2.0),
-            bite_holes: 3,
+            outline: RetentionRaw::defaults(4),
+            cutouts: true,
+            cutout_retention: RetentionRaw::defaults(2),
+            finishing: Length::from_mm(0.1),
         }
     }
 }
@@ -486,16 +506,16 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                 } else {
                     "route_board"
                 };
-                let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}/edge"));
+                let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}"));
 
                 StepRaw {
                     name: node_str(root, &format!("/steps/{i}/name"))
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or_else(|| format!("Step {}", i + 1)),
                     operations,
-                    cnc_id: node_ref(root, &format!("/steps/{i}/cnc/default")),
-                    fixture_id: node_ref(root, &format!("/steps/{i}/fixture/default")),
-                    toolset_id: node_ref(root, &format!("/steps/{i}/toolset/default")),
+                    cnc_id: node_ref(root, &format!("/steps/{i}/cnc")),
+                    fixture_id: node_ref(root, &format!("/steps/{i}/fixture")),
+                    toolset_id: node_ref(root, &format!("/steps/{i}/toolset")),
                     drill,
                     route_board,
                 }
@@ -504,19 +524,32 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
     })
 }
 
-/// Reads the `edge` outline config at `base`, falling back to defaults per field.
+/// Reads a `retention` block at `base`, falling back to `default` per field.
+fn read_retention(root: &Node, base: &str, default: RetentionRaw) -> RetentionRaw {
+    RetentionRaw {
+        tabs: node_str(root, &format!("{base}/mode"))
+            .map(|mode| mode != "none")
+            .unwrap_or(default.tabs),
+        count: node_count(root, &format!("{base}/count")).unwrap_or(default.count),
+        width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
+        mouse_bites: node_bool(root, &format!("{base}/mouse_bites"))
+            .unwrap_or(default.mouse_bites),
+    }
+}
+
+/// Reads the `route_board` config at `base`, falling back to defaults per field.
 fn read_edge_config(root: &Node, base: &str) -> EdgeConfigRaw {
     let default = EdgeConfigRaw::default();
     EdgeConfigRaw {
-        cut: node_str(root, &format!("{base}/cut")).unwrap_or(default.cut),
-        retention: node_str(root, &format!("{base}/retention")).unwrap_or(default.retention),
-        tabs: node_count(root, &format!("{base}/tabs")).unwrap_or(default.tabs),
-        tab_width: node_length(root, &format!("{base}/tab_width")).unwrap_or(default.tab_width),
-        // The schema floors this at 1, so a zero here would be a corrupt file, not a
-        // request for an unperforated tab — that is what `retention` is for.
-        bite_holes: node_count(root, &format!("{base}/bite_holes"))
-            .filter(|n| *n > 0)
-            .unwrap_or(default.bite_holes),
+        cut: node_str(root, &format!("{base}/outline/cut")).unwrap_or(default.cut),
+        outline: read_retention(root, &format!("{base}/outline/retention"), default.outline),
+        cutouts: node_bool(root, &format!("{base}/cutouts/enabled")).unwrap_or(default.cutouts),
+        cutout_retention: read_retention(
+            root,
+            &format!("{base}/cutouts/retention"),
+            default.cutout_retention,
+        ),
+        finishing: node_length(root, &format!("{base}/finishing")).unwrap_or(default.finishing),
     }
 }
 
@@ -568,6 +601,27 @@ pub(crate) fn build_setup(ctx: &AppState, fixture_id: Option<Uuid>) -> Setup {
     }
 }
 
+/// The operator-facing reason a step cannot be planned for want of a profile, or `None`
+/// when all three bindings are set.
+///
+/// A step references exactly one CNC, fixture and toolset, and any of them may be unset —
+/// which is a deliberate state (it is how a half-configured step reads), not something to
+/// default away. Shared by the Tooling tab and the Machining plan so both refuse the same
+/// steps with the same words.
+pub(crate) fn missing_bindings(raw: &StepRaw) -> Option<String> {
+    let missing: Vec<&str> = [
+        ("CNC", raw.cnc_id.is_none()),
+        ("fixture", raw.fixture_id.is_none()),
+        ("toolset", raw.toolset_id.is_none()),
+    ]
+    .into_iter()
+    .filter_map(|(label, absent)| absent.then_some(label))
+    .collect();
+
+    (!missing.is_empty())
+        .then(|| format!("This step has no {} profile selected.", missing.join(", no ")))
+}
+
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
 fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let has_pth = raw.operations.iter().any(|op| op == "drill_pth");
@@ -575,18 +629,26 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let has_route = raw.operations.iter().any(|op| op == "route_board" || op == "mill_board");
     let has_locating = raw.operations.iter().any(|op| op == "drill_locating_pins");
 
-    // Resolve the toolset (rack) and CNC (ATC capacity).
-    let Some(toolset_id) = raw.toolset_id else {
-        return StepOutcome::Failed(vec!["This step has no toolset selected.".into()]);
-    };
-    let Some(toolset) = ctx.toolsets.iter().find(|t| t.id == toolset_id.to_string()) else {
+    // Every binding is required, and for the same reason the Machining plan requires
+    // them: a defaulted fixture or CNC yields a plausible answer about hardware the
+    // operator does not have. Both views must agree on which steps are plannable at all,
+    // so this check is the same one, worded the same way.
+    if let Some(reason) = missing_bindings(raw) {
+        return StepOutcome::Failed(vec![reason]);
+    }
+    let Some(toolset) = raw
+        .toolset_id
+        .and_then(|id| ctx.toolsets.iter().find(|t| t.id == id.to_string()))
+    else {
         return StepOutcome::Failed(vec!["The step's toolset profile could not be found.".into()]);
     };
-    let atc_slots = raw
+    let Some(atc_slots) = raw
         .cnc_id
         .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()))
         .map(|m| m.atc_slot_count as usize)
-        .unwrap_or(0);
+    else {
+        return StepOutcome::Failed(vec!["The step's CNC profile could not be found.".into()]);
+    };
 
     // Build the hole demand set from the board, grouped by (kind, size) for counts.
     let holes = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
@@ -1422,6 +1484,36 @@ mod tests {
 
     /// A round hole has no slot router, and slots are only resolved when the step's
     /// oblong strategy actually mills them.
+    /// A step with no profile chosen is refused by name, not defaulted. This is the whole
+    /// point of allowing "none": it makes the step unrunnable rather than silently
+    /// planning against a machine and fixture the operator never picked.
+    #[test]
+    fn a_step_missing_a_profile_is_refused_and_says_which() {
+        let step = |cnc: bool, fixture: bool, toolset: bool| StepRaw {
+            name: "Step".into(),
+            operations: vec!["drill_pth".into()],
+            cnc_id: cnc.then(uuid::Uuid::now_v7),
+            fixture_id: fixture.then(uuid::Uuid::now_v7),
+            toolset_id: toolset.then(uuid::Uuid::now_v7),
+            drill: Default::default(),
+            route_board: Default::default(),
+        };
+        assert_eq!(missing_bindings(&step(true, true, true)), None, "all three set");
+        assert_eq!(
+            missing_bindings(&step(false, true, true)).as_deref(),
+            Some("This step has no CNC profile selected.")
+        );
+        assert_eq!(
+            missing_bindings(&step(true, false, true)).as_deref(),
+            Some("This step has no fixture profile selected.")
+        );
+        assert_eq!(
+            missing_bindings(&step(false, false, false)).as_deref(),
+            Some("This step has no CNC, no fixture, no toolset profile selected."),
+            "a fresh step names all three at once rather than one per attempt"
+        );
+    }
+
     #[test]
     fn slot_routers_are_only_resolved_when_the_strategy_routes() {
         let tools = vec![router("fits", 0.4)];

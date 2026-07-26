@@ -34,17 +34,10 @@ use crate::gcode::planner::{
 };
 use crate::gcode::{oblong, outline};
 use crate::runtime::tooling::{
-    build_rack_spec, build_setup, collect_hole_groups, plan_routers, read_steps, HoleGroup,
-    OblongStrategy, RouterPlan, StepRaw,
+    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, plan_routers, read_steps,
+    HoleGroup, OblongStrategy, RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
-
-/// R-plane retract used only when a step has no resolvable fixture (the fixture now
-/// carries `z_retract`); keeps the Machining view planning mid-configuration (mm).
-const DEFAULT_Z_RETRACT_MM: f64 = 2.0;
-/// Safe height used only when a step has no resolvable fixture (the fixture now
-/// carries `z_safe`); keeps the Machining view planning mid-configuration (mm).
-const DEFAULT_Z_SAFE_MM: f64 = 5.0;
 
 /// Builds the machining plan for the current context: one [`StepPlan`] per machining
 /// step of the selected profile, each with its ordered drill-phase tool blocks.
@@ -95,18 +88,28 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     let has_route = raw.operations.iter().any(|op| op == "route_board" || op == "mill_board");
     let has_locating = raw.operations.iter().any(|op| op == "drill_locating_pins");
 
-    // Resolve the toolset (rack) and CNC (ATC + scaling).
-    let Some(toolset_id) = raw.toolset_id else {
-        return failed(index, name, vec!["This step has no toolset selected.".into()]);
+    // Every binding is required to plan. Defaulting a missing CNC to "no ATC, unity
+    // scaling" or a missing fixture to nominal heights would produce a plausible-looking
+    // program for hardware the operator does not have, so an unset binding stops the
+    // step. Shared with the Tooling tab so both views refuse the same steps.
+    if let Some(reason) = missing_bindings(raw) {
+        return failed(index, name, vec![reason]);
+    }
+    let (Some(cnc_id), Some(fixture_id), Some(toolset_id)) =
+        (raw.cnc_id, raw.fixture_id, raw.toolset_id)
+    else {
+        unreachable!("missing_bindings just established all three are present")
     };
     let Some(toolset) = ctx.toolsets.iter().find(|t| t.id == toolset_id.to_string()) else {
         return failed(index, name, vec!["The step's toolset profile could not be found.".into()]);
     };
-    let cnc = raw.cnc_id.and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
-    let atc_slots = cnc.map(|m| m.atc_slot_count as usize).unwrap_or(0);
-    let fixture = raw
-        .fixture_id
-        .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
+    let Some(cnc) = ctx.machines.iter().find(|m| m.id == cnc_id.to_string()) else {
+        return failed(index, name, vec!["The step's CNC profile could not be found.".into()]);
+    };
+    let Some(fixture) = ctx.fixtures.iter().find(|f| f.id == fixture_id.to_string()) else {
+        return failed(index, name, vec!["The step's fixture profile could not be found.".into()]);
+    };
+    let atc_slots = cnc.atc_slot_count as usize;
 
     let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
@@ -248,10 +251,10 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     let placement = Placement::new(
         ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
         orientation,
-        cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
-        cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
-        fixture.map(|f| f.z_retract).unwrap_or(Length::from_mm(DEFAULT_Z_RETRACT_MM)),
-        fixture.map(|f| f.z_safe).unwrap_or(Length::from_mm(DEFAULT_Z_SAFE_MM)),
+        cnc.scaling_x as f64,
+        cnc.scaling_y as f64,
+        fixture.z_retract,
+        fixture.z_safe,
     );
     let start = Point::new(Length::from_mm(0.0), Length::from_mm(0.0));
 
@@ -262,12 +265,17 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     if has_route {
         if raw.route_board.cuts_through() {
             match plan_outline_spans(ctx, raw, &routers, &placement, &mut drill_targets, &slots) {
-                Ok(spans) if spans.is_empty() => notes.push(
-                    "The retaining tabs are wider than the outline they sit on, so nothing \
-                     would be cut. Reduce the tab width or the tab count."
-                        .into(),
-                ),
-                Ok(spans) => outline_spans = spans,
+                Ok((spans, warnings)) => {
+                    notes.extend(warnings);
+                    if spans.is_empty() {
+                        notes.push(
+                            "The retaining tabs are wider than the outline they sit on, so \
+                             nothing would be cut. Reduce the tab width or the tab count."
+                                .into(),
+                        );
+                    }
+                    outline_spans = spans;
+                }
                 Err(reason) => notes.push(reason),
             }
         } else {
@@ -353,9 +361,10 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
 ///    path, so a tab is the width asked for where the cutter actually passes.
 /// 4. **Perforate**, when the retention mode asks for mouse bites.
 ///
-/// Returns `Err` with an operator-facing reason when the outline cannot be cut at all;
-/// per-contour problems come back as spans that are simply absent, which the step's own
-/// notes cover.
+/// Returns `Err` with an operator-facing reason when the outline cannot be cut at all.
+/// Per-contour shortfalls — a contour that vanishes under the kerf, tabs the sides have
+/// no room for — come back as warnings alongside the spans, because the rest of the
+/// outline is still worth cutting.
 fn plan_outline_spans(
     ctx: &AppCtx,
     raw: &StepRaw,
@@ -363,7 +372,7 @@ fn plan_outline_spans(
     placement: &Placement,
     drill_targets: &mut Vec<DrillTarget>,
     slots: &std::collections::BTreeMap<String, u8>,
-) -> Result<Vec<OutlineSpan>, String> {
+) -> Result<(Vec<OutlineSpan>, Vec<String>), String> {
     let Some(stitched) = ctx.stitched_board_data.as_ref() else {
         return Err("The board outline has not been stitched yet — refresh the board snapshot.".into());
     };
@@ -390,6 +399,8 @@ fn plan_outline_spans(
 
     let mut spans: Vec<OutlineSpan> = Vec::new();
     let mut vanished = 0usize;
+    // Tabs the outline had no room for, at the clearance the distribution keeps.
+    let mut crowded = 0usize;
     // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
     let (mut outer_n, mut cutout_n) = (0usize, 0usize);
 
@@ -398,6 +409,12 @@ fn plan_outline_spans(
         let index = if contour.is_hole { &mut cutout_n } else { &mut outer_n };
         let (kind_index, label) = (*index, kind.as_str());
         *index += 1;
+
+        // An interior opening the step chooses not to route: it stays as drawn copper,
+        // and the board keeps the material.
+        if contour.is_hole && !edge.cutouts {
+            continue;
+        }
 
         let Some(offset) = offset else {
             vanished += 1;
@@ -414,30 +431,54 @@ fn plan_outline_spans(
             .collect();
         let Some(path) = outline::Loop::new(&points) else { continue };
 
-        let mine: Vec<f64> = placed_tabs
-            .iter()
-            .filter(|t| t.contour == kind && t.index == kind_index)
-            .map(|t| t.at)
-            .collect();
-        let tabs = outline::tab_positions(&mine, if edge.retains() { edge.tabs } else { 0 });
+        let retention = edge.retention(contour.is_hole);
+        let width_mm = retention.width.as_mm();
 
-        for (n, span) in outline::cut_spans(&path, &tabs, edge.tab_width.as_mm())
-            .into_iter()
-            .enumerate()
-        {
+        // Where the tabs go. Distribution runs on the contour's own **straight
+        // segments**, not on the offset polyline — the offset flattens every rounded
+        // corner into dozens of chords, so "segments" there would be meaningless. Each
+        // computed anchor is then placed and projected onto the offset path, which for
+        // an outward offset of a straight run is exactly the perpendicular foot.
+        let tabs: Vec<f64> = if retention.tabs {
+            let anchors = outline::distribute_tabs(
+                &straight_segments_mm(contour),
+                retention.count,
+                width_mm,
+            );
+            if anchors.len() < retention.count {
+                crowded += retention.count - anchors.len();
+            }
+            anchors
+                .iter()
+                .enumerate()
+                .map(|(n, anchor)| {
+                    let at = path.nearest_fraction(placement.xy(&pcb::BoardPoint {
+                        x: Length::from_mm(anchor.point.0),
+                        y: Length::from_mm(anchor.point.1),
+                    }));
+                    // The operator's own nudge, as a fraction of the loop.
+                    let nudge = placed_tabs
+                        .iter()
+                        .find(|t| t.contour == kind && t.index == kind_index && t.tab == n)
+                        .map(|t| t.offset.as_mm())
+                        .unwrap_or(0.0);
+                    (at + nudge / path.length_mm()).rem_euclid(1.0)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        for (n, span) in outline::cut_spans(&path, &tabs, width_mm).into_iter().enumerate() {
             spans.push(OutlineSpan { source: format!("{label}#{kind_index}.span{n}"), path: span });
         }
 
         // Mouse bites are drills, so they join the drill phase rather than the route one.
-        if edge.perforates() {
+        if retention.mouse_bites {
             if let Some(bite_tool) = mouse_bite_drill(ctx, slots) {
                 for (n, tab) in tabs.iter().enumerate() {
-                    let centres = outline::mouse_bite_centres(
-                        &path,
-                        *tab,
-                        edge.tab_width.as_mm(),
-                        edge.bite_holes,
-                    );
+                    let centres =
+                        outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
                     for (h, centre) in centres.into_iter().enumerate() {
                         drill_targets.push(DrillTarget {
                             source: format!("{label}#{kind_index}.bite{n}.{h}"),
@@ -457,6 +498,14 @@ fn plan_outline_spans(
         }
     }
 
+    let mut warnings: Vec<String> = Vec::new();
+    if crowded > 0 {
+        warnings.push(format!(
+            "{crowded} retaining tab(s) could not be placed: the outline's straight sides \
+             have no room left at the required clearance. Widen the board's sides, narrow \
+             the tabs, or ask for fewer."
+        ));
+    }
     if vanished > 0 {
         return Err(format!(
             "{vanished} outline contour(s) are smaller than the {} router and vanish under \
@@ -464,7 +513,30 @@ fn plan_outline_spans(
             router.name
         ));
     }
-    Ok(spans)
+    Ok((spans, warnings))
+}
+
+/// A contour's straight sides as `(x0, y0, x1, y1)` in board millimetres — the only
+/// segments a tab may sit on.
+///
+/// Arcs and beziers are skipped. A tab on a curve is one the operator has to snap on a
+/// radius, and the distribution's even-spacing and clearance arithmetic is stated in
+/// straight-line lengths. A rounded-corner board therefore takes its tabs on the flats,
+/// which is where they belong anyway.
+fn straight_segments_mm(contour: &pcb::Contour) -> Vec<(f64, f64, f64, f64)> {
+    contour
+        .segments
+        .iter()
+        .filter_map(|segment| match *segment {
+            pcb::Segment::Line { start, end } => Some((
+                start.0 as f64 / 1e6,
+                start.1 as f64 / 1e6,
+                end.0 as f64 / 1e6,
+                end.1 as f64 / 1e6,
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The drill that perforates a mouse bite: `(tool id, diameter, plunge)`.

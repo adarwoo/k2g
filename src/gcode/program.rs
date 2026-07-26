@@ -237,7 +237,9 @@ fn render_route_move(
         RouteMove::Cut { x, y, z } => linear(coder, render, (x, y, z), fs.feed, fs),
         RouteMove::Arc { x, y, i, j, ccw } => {
             let mut s = Scope::new();
-            s.push("arc_cmd", if ccw { "G3".to_string() } else { "G2".to_string() });
+            // The direction, not the word for it: which G-code names a clockwise arc is
+            // the profile's business, so the template branches on this boolean.
+            s.push("clockwise", !ccw);
             s.push("x", x);
             s.push("y", y);
             s.push("i", i);
@@ -264,26 +266,34 @@ fn feeds_error_text(error: FeedsError) -> String {
     }
 }
 
-/// Prefixes every non-blank line of the assembled program with a sequential `N` number,
-/// stepping by the CNC's `line_numbering_increment`. Line numbering is a whole-program
-/// concern — no primitive can number its own line — so it runs once here, over the
-/// finished program, rather than inside any template. An increment of `0` disables it
-/// (the program is returned unchanged); otherwise blank lines are dropped so the
-/// numbered program is contiguous.
-pub fn number_lines(program: &str, increment: u16) -> String {
-    if increment == 0 {
-        return program.to_string();
+/// Prefixes every non-blank line of the assembled program with the CNC's `line_number`
+/// primitive, rendered with `line` = 1, 2, 3 … .
+///
+/// Line numbering is a whole-program concern — no primitive can know its own position —
+/// so it runs once here, over the finished program, rather than inside the templates that
+/// built it. The **format** is still entirely the profile's: the template decides the
+/// word, the increment (`{line * 10}`) and the separator, and ends with a backtick so no
+/// newline is emitted between the prefix and the line it numbers.
+///
+/// An empty template disables numbering and the program is returned unchanged — what
+/// `line_numbering_increment: 0` used to mean. Blank lines are dropped when numbering, so
+/// the numbered program is contiguous.
+///
+/// A template that fails to render is a [`BodyError::Render`]: silently shipping an
+/// unnumbered program to a controller that requires line numbers would be worse than
+/// stopping.
+pub fn number_lines(coder: &Coder, program: &str, template: &str) -> Result<String, BodyError> {
+    if template.trim().is_empty() {
+        return Ok(program.to_string());
     }
-    let mut n: u32 = 0;
-    program
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            n += u32::from(increment);
-            format!("N{n} {line}")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut out: Vec<String> = Vec::new();
+    for (index, line) in program.lines().filter(|l| !l.trim().is_empty()).enumerate() {
+        let mut scope = Scope::new();
+        scope.push("line", index as i64 + 1);
+        let prefix = render_one(coder, "line_number", template, &mut scope)?;
+        out.push(format!("{prefix}{line}"));
+    }
+    Ok(out.join("\n"))
 }
 
 /// Representative CNC operation primitives, as **test input** for the renderer.
@@ -302,7 +312,8 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
         stop_spindle_tpl: "`M05".to_string(),
         rapid_move_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
         linear_cut_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
-        cut_arc_tpl: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}".to_string(),
+        cut_arc_tpl: r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#
+            .to_string(),
         spindle: SpindleRange::new(
             RotationalSpeed::from_rpm(5_000.0),
             RotationalSpeed::from_rpm(24_000.0),
@@ -569,12 +580,50 @@ mod tests {
         tf
     }
 
+    /// The number, its step and its separator all come from the profile's template —
+    /// the application only supplies `line`. The template's closing backtick is what
+    /// keeps the prefix on the same output line.
     #[test]
-    fn number_lines_prefixes_non_blank_lines_and_honours_the_increment() {
-        // Blank lines are dropped; the rest step by the increment.
-        assert_eq!(number_lines("G21\n\nG0 Z5", 10), "N10 G21\nN20 G0 Z5");
-        // Increment 0 disables numbering entirely.
-        assert_eq!(number_lines("G21\nG0 Z5", 0), "G21\nG0 Z5");
+    fn line_numbering_is_entirely_the_profiles_template() {
+        let coder = Coder::new();
+        // Blank lines are dropped; the rest step by whatever arithmetic the profile
+        // writes, here the conventional ten.
+        assert_eq!(
+            number_lines(&coder, "G21\n\nG0 Z5", "`N{line * 10} `").unwrap(),
+            "N10 G21\nN20 G0 Z5"
+        );
+        // A different dialect is a template edit, not a code change.
+        assert_eq!(
+            number_lines(&coder, "G21\nG0 Z5", "`/{line}:`").unwrap(),
+            "/1:G21\n/2:G0 Z5"
+        );
+        // An empty template disables numbering — what `line_numbering_increment: 0` was.
+        assert_eq!(number_lines(&coder, "G21\nG0 Z5", "").unwrap(), "G21\nG0 Z5");
+    }
+
+    /// Without the closing backtick the prefix would take the whole line to itself and
+    /// push the GCode onto the next one — so the parser rule is load-bearing here, and
+    /// this pins it.
+    #[test]
+    fn a_line_number_template_without_the_closing_backtick_breaks_the_line() {
+        let coder = Coder::new();
+        assert_eq!(
+            number_lines(&coder, "G21", "`N{line * 10} ").unwrap(),
+            "N10 \nG21",
+            "the emitted newline separates the number from its line"
+        );
+    }
+
+    /// A template that cannot render stops generation: quietly shipping an unnumbered
+    /// program to a controller that requires numbers is the worse failure.
+    #[test]
+    fn a_broken_line_number_template_is_a_named_error() {
+        let coder = Coder::new();
+        let err = number_lines(&coder, "G21", "`N{nope}`").unwrap_err();
+        match err {
+            BodyError::Render { primitive, .. } => assert_eq!(primitive, "line_number"),
+            other => panic!("expected a Render error, got {other:?}"),
+        }
     }
 
     #[test]

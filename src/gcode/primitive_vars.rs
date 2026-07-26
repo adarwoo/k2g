@@ -23,6 +23,7 @@ const CNC_SCHEMA: &str = include_str!("../../schemas/cnc.yaml");
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VarType {
     String,
+    Boolean,
     Length,
     Feed,
     Rpm,
@@ -34,6 +35,7 @@ pub enum VarType {
 impl VarType {
     fn parse(raw: &str) -> Self {
         match raw {
+            "boolean" => Self::Boolean,
             "length" => Self::Length,
             "feed" => Self::Feed,
             "rpm" => Self::Rpm,
@@ -47,6 +49,7 @@ impl VarType {
     pub fn label(self) -> &'static str {
         match self {
             Self::String => "string",
+            Self::Boolean => "boolean",
             Self::Length => "length",
             Self::Feed => "feed",
             Self::Rpm => "rpm",

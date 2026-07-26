@@ -450,9 +450,8 @@ impl AppData {
     //
     // A machining profile is an ordered `steps` array; each step has structural
     // fields the fine-grained setters can't express: the cnc/fixture/toolset
-    // bindings (a `default` reference plus a `choices` array) and the
-    // `operations` array, plus add/remove/reorder of steps themselves. These
-    // edit the plain document value and re-parse it (see
+    // references and the `operations` array, plus add/remove/reorder of steps
+    // themselves. These edit the plain document value and re-parse it (see
     // [`ResolvedStore::replace_document_from_value`]).
 
     /// Edits a document at the plain-value level and re-parses it (structural
@@ -466,17 +465,18 @@ impl AppData {
         self.store.replace_document_from_value(id, &value).is_some()
     }
 
-    /// Sets a **step's** binding for `field` (`"cnc"`, `"fixture"`, or
-    /// `"toolset"`): the active `default` reference (absent when `None`) and the
-    /// allowed `choices`. Creates the binding object if the step lacks it (a
-    /// freshly-added step has no cnc/fixture/toolset until picked).
-    pub fn set_step_binding(
+    /// Sets a **step's** profile reference for `field` (`"cnc"`, `"fixture"`, or
+    /// `"toolset"`).
+    ///
+    /// `None` **removes** the key rather than writing an empty string: absent is how the
+    /// schema spells "no profile chosen", and an empty string would fail the `uuid_v7`
+    /// pattern on the next load.
+    pub fn set_step_reference(
         &mut self,
         id: Uuid,
         step: usize,
         field: &str,
-        default: Option<Uuid>,
-        choices: &[Uuid],
+        target: Option<Uuid>,
     ) -> bool {
         let field = field.to_string();
         self.edit_document_value(id, |value| {
@@ -486,24 +486,14 @@ impl AppData {
             else {
                 return;
             };
-            let entry = step_obj
-                .entry(field.clone())
-                .or_insert_with(|| serde_json::json!({ "choices": [] }));
-            let Some(binding) = entry.as_object_mut() else {
-                return;
-            };
-            match default {
+            match target {
                 Some(uuid) => {
-                    binding.insert("default".into(), Value::String(uuid.to_string()));
+                    step_obj.insert(field, Value::String(uuid.to_string()));
                 }
                 None => {
-                    binding.remove("default");
+                    step_obj.remove(&field);
                 }
             }
-            binding.insert(
-                "choices".into(),
-                Value::Array(choices.iter().map(|u| Value::String(u.to_string())).collect()),
-            );
         })
     }
 
@@ -564,20 +554,8 @@ impl AppData {
         })
     }
 
-    /// Back-compat shim for the still-single-step machining UI: edits the binding
-    /// on the first step. Removed once the UI drives steps by index (Stage 3).
-    pub fn set_machining_binding(
-        &mut self,
-        id: Uuid,
-        field: &str,
-        default: Option<Uuid>,
-        choices: &[Uuid],
-    ) -> bool {
-        self.set_step_binding(id, 0, field, default, choices)
-    }
-
-    /// Back-compat shim: edits the first step's operations. See
-    /// [`Self::set_machining_binding`].
+    /// Back-compat shim for the still-single-step machining UI: edits the first step's
+    /// operations. Removed once the UI drives steps by index (Stage 3).
     pub fn set_machining_operations(&mut self, id: Uuid, operations: &[String]) -> bool {
         self.set_step_operations(id, 0, operations)
     }
@@ -674,7 +652,7 @@ impl AppData {
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
                 "edge_tabs".into(),
-                Value::Array(tabs.iter().map(EdgeTab::to_value).collect()),
+                Value::Array(tabs.iter().copied().map(EdgeTab::to_value).collect()),
             );
         }
         self.store.replace_document_from_value_at(&path, &value).is_some()
@@ -918,6 +896,13 @@ fn load_normalized(
 /// The `linear_cut` template shipped as the schema default — the repair target below.
 const LINEAR_CUT_DEFAULT: &str = "`G1 X{x} Y{y} Z{z} F{feedrate}";
 
+/// The retired `cut_arc` variable that used to arrive as a ready-made "G2"/"G3".
+const ARC_CMD_PLACEHOLDER: &str = "{arc_cmd}";
+
+/// What it becomes: the profile naming the direction itself. GTL has no ternary, so
+/// this is a Rhai if-expression.
+const ARC_DIRECTION_EXPR: &str = r#"{if clockwise { "G2" } else { "G3" }}"#;
+
 /// Whether a motion template emits a feed word at all: either through the `{feedrate}`
 /// variable or as a hardcoded `F<number>`.
 ///
@@ -939,22 +924,72 @@ fn emits_a_feed(template: &str) -> bool {
 /// cannot emit a feed is therefore repaired rather than merely flagged; one that already
 /// emits a feed (variable or hardcoded) is left exactly as the operator wrote it.
 fn normalize_cnc_value(value: &mut Value, path: &Path) {
-    let Some(template) = value
-        .pointer("/primitives/linear_cut")
-        .and_then(Value::as_str)
-    else {
-        return;
-    };
-    if emits_a_feed(template) {
-        return;
+    let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("cnc.yaml").to_string();
+
+    // `linear_cut` with no feed at all.
+    if let Some(template) = value.pointer("/primitives/linear_cut").and_then(Value::as_str) {
+        if !emits_a_feed(template) {
+            warn!(
+                "[{file}] primitives.linear_cut emitted no feed rate ('{template}'); \
+                 repaired to the current default so routing moves carry F"
+            );
+            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
+            {
+                primitives.insert("linear_cut".into(), Value::from(LINEAR_CUT_DEFAULT));
+            }
+        }
     }
-    warn!(
-        "[{}] primitives.linear_cut emitted no feed rate ('{template}'); \
-         repaired to the current default so routing moves carry F",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("cnc.yaml")
-    );
-    if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut) {
-        primitives.insert("linear_cut".into(), Value::from(LINEAR_CUT_DEFAULT));
+
+    // `cut_arc` was handed a ready-made `{arc_cmd}` word. It is now handed the
+    // direction as a boolean and the profile names it, so a template still asking for
+    // `arc_cmd` would fail to render with "variable not found" — a hard generation
+    // failure. The substitution is safe because `arc_cmd` was only ever G2 or G3.
+    if let Some(template) = value.pointer("/primitives/cut_arc").and_then(Value::as_str) {
+        if template.contains(ARC_CMD_PLACEHOLDER) {
+            warn!(
+                "[{file}] primitives.cut_arc used the retired {{arc_cmd}} variable; \
+                 rewritten to branch on the new `clockwise` boolean"
+            );
+            let repaired = template.replace(ARC_CMD_PLACEHOLDER, ARC_DIRECTION_EXPR);
+            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
+            {
+                primitives.insert("cut_arc".into(), Value::from(repaired));
+            }
+        }
+    }
+
+    // `machine.line_numbering_increment` was a bare integer the application turned into
+    // "N<n> " itself. Numbering is now a template, so the field is retired — and it must
+    // be *removed*, or `additionalProperties: false` rejects the whole profile. Its value
+    // is folded into a seeded `line_number` template so the program keeps numbering
+    // exactly as before rather than silently losing it.
+    let increment = value
+        .pointer_mut("/machine")
+        .and_then(Value::as_object_mut)
+        .and_then(|machine| machine.remove("line_numbering_increment"))
+        .and_then(|v| v.as_u64());
+    if let Some(increment) = increment {
+        let already_set = value
+            .pointer("/primitives/line_number")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty());
+        if !already_set {
+            // The trailing space sits inside the closing backtick, which both suppresses
+            // the newline and keeps the space from being trimmed.
+            let seeded = if increment == 0 {
+                String::new()
+            } else {
+                format!("`N{{line * {increment}}} `")
+            };
+            warn!(
+                "[{file}] machine.line_numbering_increment ({increment}) is retired; \
+                 carried over into primitives.line_number"
+            );
+            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
+            {
+                primitives.insert("line_number".into(), Value::from(seeded));
+            }
+        }
     }
 }
 
@@ -1029,6 +1064,63 @@ fn normalize_machining_value(value: &mut Value) {
 ///   as *absent* (hence incomplete, prompting the user) rather than an invalid
 ///   UUID.
 ///
+/// Rewrites a step's `route_board` from the edge-only shape into the current one.
+///
+/// The old block described the board's boundary and nothing else:
+///
+/// ```yaml
+/// route_board:
+///   edge: { cut, retention, tabs, tab_width, bite_holes, vgroove_depth }
+///   finishing: { clearance, direction }
+/// ```
+///
+/// Four things changed, and all four would be rejected by `additionalProperties: false`
+/// if left alone:
+///
+/// - `edge` became `outline`, with interior `cutouts` beside it — the boundary is not
+///   the only thing routed out of a board.
+/// - `retention` grew from a bare enum into an object, and its two mouse-bite values
+///   folded into a `mouse_bites` flag on a tab. A mouse bite is a perforated *tab*, not
+///   an alternative to one.
+/// - `bite_holes` is gone: how many holes perforate a tab follows from the tab width and
+///   the drill.
+/// - `finishing` collapsed from `{clearance, direction}` to the clearance alone. Climb is
+///   the only sensible direction for cutting a part out, and the toolpaths take it from
+///   the geometry.
+fn normalize_route_board_value(step: &mut serde_json::Map<String, Value>) {
+    let Some(route_board) = step.get_mut("route_board").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    if let Some(Value::Object(mut edge)) = route_board.remove("edge") {
+        // `retention: mouse_bites | tabs_with_mouse_bites` both meant "tabs, perforated".
+        let old_mode = edge.remove("retention");
+        let old_mode = old_mode.as_ref().and_then(Value::as_str).unwrap_or("tabs");
+        let mouse_bites = matches!(old_mode, "mouse_bites" | "tabs_with_mouse_bites");
+        let mode = if old_mode == "none" { "none" } else { "tabs" };
+
+        let mut retention = serde_json::Map::new();
+        retention.insert("mode".into(), Value::from(mode));
+        if let Some(count) = edge.remove("tabs") {
+            retention.insert("count".into(), count);
+        }
+        if let Some(width) = edge.remove("tab_width") {
+            retention.insert("width".into(), width);
+        }
+        retention.insert("mouse_bites".into(), Value::from(mouse_bites));
+        edge.remove("bite_holes");
+        edge.insert("retention".into(), Value::Object(retention));
+
+        route_board.insert("outline".into(), Value::Object(edge));
+    }
+
+    // `{clearance, direction}` → the clearance alone.
+    if let Some(Value::Object(finishing)) = route_board.get("finishing").cloned() {
+        let clearance = finishing.get("clearance").cloned().unwrap_or(Value::from("0.1mm"));
+        route_board.insert("finishing".into(), clearance);
+    }
+}
+
 /// Operation config objects are left in place (always materialized by the
 /// loader); only their `enabled` flag is stripped.
 fn normalize_step_value(step: &mut Value) {
@@ -1050,15 +1142,31 @@ fn normalize_step_value(step: &mut Value) {
     // load, so it is dropped here.
     obj.remove("routing");
 
+    normalize_route_board_value(obj);
+
+    // A step's cnc/fixture/toolset was once `{ default: <uuid>, choices: [<uuid>…] }`,
+    // for a job-level override that was never built and has since been dropped: a step
+    // is one physical setup, so an alternative machine is a second step. Collapse the
+    // old shape onto its `default`, which is the only part that ever selected anything.
+    //
+    // An empty or missing default becomes an absent key — "no profile chosen" — rather
+    // than the empty string the old editor wrote, which the `uuid_v7` pattern rejects.
     for key in ["cnc", "fixture", "toolset"] {
-        let Some(binding) = obj.get_mut(key).and_then(Value::as_object_mut) else {
-            continue;
-        };
-        if binding.get("default").and_then(Value::as_str) == Some("") {
-            binding.remove("default");
+        let collapsed = match obj.get(key) {
+            Some(Value::Object(binding)) => binding.get("default").and_then(Value::as_str),
+            Some(Value::String(id)) => Some(id.as_str()),
+            _ => continue,
         }
-        if let Some(choices) = binding.get_mut("choices").and_then(Value::as_array_mut) {
-            choices.retain(|choice| choice.as_str().map(|s| !s.is_empty()).unwrap_or(true));
+        .filter(|id| !id.is_empty())
+        .map(|id| Value::String(id.to_string()));
+
+        match collapsed {
+            Some(reference) => {
+                obj.insert(key.to_string(), reference);
+            }
+            None => {
+                obj.remove(key);
+            }
         }
     }
 }
@@ -1333,28 +1441,38 @@ mod tests {
 
         let (mut data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
 
-        // The legacy flat file migrated into a single-step machining doc:
-        // `enabled` gone, empty fixture ref dropped (absent, not invalid), real cnc
-        // ref preserved — all now under steps[0].
+        // The legacy flat file migrated into a single-step machining doc: `enabled`
+        // gone, both `{default, choices}` bindings collapsed onto their default, the
+        // empty fixture ref dropped (absent, not invalid) — all now under steps[0].
         let doc = data.get(id).expect("legacy machining loaded");
         assert!(
             matches!(&doc.root.get_pointer("/steps").unwrap().value, NodeValue::Array(a) if a.len() == 1),
             "flat legacy profile becomes one step"
         );
         assert!(doc.root.get_pointer("/steps/0/drill_pth/enabled").is_none(), "enabled should be stripped");
-        assert!(doc.root.get_pointer("/steps/0/fixture/default").is_none(), "empty ref should be dropped");
-        assert!(doc.root.get_pointer("/steps/0/cnc/default").is_some(), "real ref preserved");
+        assert!(doc.root.get_pointer("/steps/0/fixture").is_none(), "empty ref should be dropped");
+        let cnc_ref = doc.root.get_pointer("/steps/0/cnc").expect("real ref preserved");
+        assert!(
+            matches!(&cnc_ref.value, NodeValue::Ref(r) if r.raw == cnc),
+            "the binding collapses onto its default, not onto the choices array"
+        );
 
-        // Structural edits round-trip: set step 0's fixture binding and operations.
+        // Structural edits round-trip: set step 0's fixture reference and operations,
+        // then clear the reference again.
         let fixture = uuid::Uuid::now_v7();
-        assert!(data.set_step_binding(id, 0, "fixture", Some(fixture), &[fixture]));
+        assert!(data.set_step_reference(id, 0, "fixture", Some(fixture)));
         assert!(data.set_step_operations(id, 0, &["drill_pth".to_string(), "route_board".to_string()]));
 
         let doc = data.get(id).unwrap();
-        let fixture_default = doc.root.get_pointer("/steps/0/fixture/default").expect("fixture set");
-        assert!(matches!(&fixture_default.value, NodeValue::Ref(r) if r.raw == fixture));
+        let stored = doc.root.get_pointer("/steps/0/fixture").expect("fixture set");
+        assert!(matches!(&stored.value, NodeValue::Ref(r) if r.raw == fixture));
         let ops = doc.root.get_pointer("/steps/0/operations").unwrap();
         assert!(matches!(&ops.value, NodeValue::Array(a) if a.len() == 2));
+
+        // "No profile" removes the key: an empty string would fail the uuid pattern
+        // on the next load, which is how the old editor used to corrupt a file.
+        assert!(data.set_step_reference(id, 0, "fixture", None));
+        assert!(data.get(id).unwrap().root.get_pointer("/steps/0/fixture").is_none());
     }
 
     #[test]
@@ -1376,7 +1494,7 @@ mod tests {
             doc.root.get_pointer("/steps/0/drill_pth/holes").is_some(),
             "per-op config materialized within the step"
         );
-        assert!(doc.root.get_pointer("/steps/0/cnc/default").is_none(), "binding absent until picked");
+        assert!(doc.root.get_pointer("/steps/0/cnc").is_none(), "binding absent until picked");
     }
 
     #[test]
@@ -1861,6 +1979,112 @@ mod tests {
         let mut bare = serde_json::json!({ "name": "no primitives" });
         normalize_cnc_value(&mut bare, Path::new("machine.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "no primitives" }));
+    }
+
+    /// `cut_arc` is now handed the direction as a boolean, so a saved template still
+    /// asking for `{arc_cmd}` would fail at render with "variable not found" — a hard
+    /// generation failure. It is rewritten rather than merely flagged.
+    #[test]
+    fn a_cut_arc_using_the_retired_arc_cmd_is_rewritten_to_branch_on_clockwise() {
+        let mut value = serde_json::json!({
+            "primitives": { "cut_arc": "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}" }
+        });
+        normalize_cnc_value(&mut value, Path::new("machine.yaml"));
+        assert_eq!(
+            value.pointer("/primitives/cut_arc").and_then(Value::as_str),
+            Some(r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#)
+        );
+
+        // A profile that already branches is left exactly as its author wrote it —
+        // including one that names the directions the other way round.
+        let custom = r#"`{if clockwise { "G02" } else { "G03" }} X{x} Y{y}"#;
+        let mut untouched = serde_json::json!({ "primitives": { "cut_arc": custom } });
+        normalize_cnc_value(&mut untouched, Path::new("machine.yaml"));
+        assert_eq!(untouched.pointer("/primitives/cut_arc").and_then(Value::as_str), Some(custom));
+    }
+
+    /// The retired `line_numbering_increment` must be removed — `additionalProperties:
+    /// false` would reject the whole profile — and its value carried into the new
+    /// template, so a program that was numbered stays numbered.
+    #[test]
+    fn the_retired_line_numbering_increment_becomes_a_line_number_template() {
+        let profile = |increment: u64| {
+            serde_json::json!({
+                "machine": { "atc_slot_count": 0, "line_numbering_increment": increment },
+                "primitives": {}
+            })
+        };
+
+        let mut numbered = profile(10);
+        normalize_cnc_value(&mut numbered, Path::new("machine.yaml"));
+        assert!(
+            numbered.pointer("/machine/line_numbering_increment").is_none(),
+            "the retired field must not survive into validation"
+        );
+        assert_eq!(
+            numbered.pointer("/primitives/line_number").and_then(Value::as_str),
+            Some("`N{line * 10} `"),
+            "the increment moves into the template's own arithmetic"
+        );
+
+        // Zero meant "no numbering", which is now an empty template.
+        let mut off = profile(0);
+        normalize_cnc_value(&mut off, Path::new("machine.yaml"));
+        assert_eq!(off.pointer("/primitives/line_number").and_then(Value::as_str), Some(""));
+
+        // A profile that already has a template keeps it; the stale field is still
+        // dropped so the profile validates.
+        let mut both = serde_json::json!({
+            "machine": { "line_numbering_increment": 10 },
+            "primitives": { "line_number": "`/{line}:`" }
+        });
+        normalize_cnc_value(&mut both, Path::new("machine.yaml"));
+        assert!(both.pointer("/machine/line_numbering_increment").is_none());
+        assert_eq!(
+            both.pointer("/primitives/line_number").and_then(Value::as_str),
+            Some("`/{line}:`")
+        );
+    }
+
+    /// Every profile on disk was written with `{ default, choices }` bindings. They must
+    /// collapse onto the chosen profile, not be rejected by `additionalProperties: false`
+    /// and not lose the selection.
+    #[test]
+    fn a_stepped_profile_with_the_old_choices_bindings_collapses_onto_its_default() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let machining_dir = data_dir.join(Profile::Machining.dir_name());
+        fs::create_dir_all(&machining_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let cnc = uuid::Uuid::now_v7();
+        let other = uuid::Uuid::now_v7();
+        let previous = format!(
+            "schema_version: 3\n\
+             id: \"{id}\"\n\
+             name: Old bindings\n\
+             steps:\n\
+             \x20 - name: Step 1\n\
+             \x20   operations: [drill_pth]\n\
+             \x20   cnc: {{ default: \"{cnc}\", choices: [\"{cnc}\", \"{other}\"] }}\n\
+             \x20   fixture: {{ default: '', choices: [] }}\n"
+        );
+        fs::write(machining_dir.join("old.yaml"), previous).unwrap();
+
+        let (data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(
+            errors.iter().all(|e| !format!("{e:?}").contains("choices")),
+            "the retired choices array must not surface as a load error: {errors:#?}"
+        );
+        let doc = data.get(id).expect("the profile should still load");
+        let stored = doc.root.get_pointer("/steps/0/cnc").expect("cnc kept");
+        assert!(
+            matches!(&stored.value, NodeValue::Ref(r) if r.raw == cnc),
+            "the chosen profile survives; the rejected alternative does not"
+        );
+        assert!(
+            doc.root.get_pointer("/steps/0/fixture").is_none(),
+            "a binding with no default becomes absent — 'no profile chosen'"
+        );
     }
 
     /// A machining profile written before the `routing` block was retired must still

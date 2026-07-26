@@ -306,11 +306,15 @@ pub fn refresh_legacy_machining() {
 
 /// The machining operation keys and labels — the `operation_key` enum from
 /// `machining.yaml`, in schema order.
+/// Ordered by how often a step uses them, not alphabetically or by phase: almost every
+/// job drills PTH, most also drill NPTH, many route the edge — and locating pins and
+/// milling are the exceptions. The list is both the display order and the order the
+/// enabled set is persisted in, so it matches `operation_key` in `machining.yaml`.
 const MACHINING_OPERATIONS: &[(&str, &str)] = &[
-    ("drill_locating_pins", "Drill locating pins"),
     ("drill_pth", "Drill plated holes (PTH)"),
     ("drill_npth", "Drill non-plated holes (NPTH)"),
     ("route_board", "Route board edge"),
+    ("drill_locating_pins", "Drill locating pins"),
     ("mill_board", "Mill board"),
 ];
 
@@ -318,6 +322,35 @@ const MACHINING_OPERATIONS: &[(&str, &str)] = &[
 /// per-operation configuration.
 pub fn machining_operations() -> &'static [(&'static str, &'static str)] {
     MACHINING_OPERATIONS
+}
+
+/// Whether the field at `ptr` is relevant given its siblings, per the schema's
+/// `x-show-when` (see [`crate::ui::show_when`]). Fields with no declaration are always
+/// relevant, which is nearly all of them.
+fn is_relevant(id: Uuid, ptr: &str) -> bool {
+    let Some(condition) = crate::ui::show_when::show_when(ptr) else {
+        return true;
+    };
+    let Some((parent, _)) = ptr.rsplit_once('/') else {
+        return true;
+    };
+    let sibling = with_appdata(|data| {
+        data.get(id)
+            .and_then(|doc| doc.root.get_pointer(&format!("{parent}/{}", condition.sibling)))
+            .map(|node| node_to_json(&node.value))
+    });
+    condition.matches(sibling.as_ref())
+}
+
+/// A node value as plain JSON, for comparing against a schema-declared condition.
+fn node_to_json(value: &NodeValue) -> serde_json::Value {
+    match value {
+        NodeValue::Str(s) => serde_json::Value::from(s.clone()),
+        NodeValue::Bool(b) => serde_json::Value::from(*b),
+        NodeValue::Int(i) => serde_json::Value::from(*i),
+        NodeValue::Float(f) => serde_json::Value::from(*f),
+        other => serde_json::Value::from(node_display(other)),
+    }
 }
 
 /// The child property names of the object node at `ptr`, in schema order (empty
@@ -348,6 +381,12 @@ fn SchemaFormNode(id: Uuid, ptr: String) -> Element {
     let Some(field) = use_field(id, &ptr) else {
         return rsx! {};
     };
+    // A field the schema says is irrelevant right now (`x-show-when`) is not rendered —
+    // a scored board offers no tab count, a routed one no V-groove depth. Display only:
+    // the value stays in the document, so nothing is lost by toggling back.
+    if !is_relevant(id, &ptr) {
+        return rsx! {};
+    }
     if matches!(field.kind, FieldKind::Object) {
         rsx! {
             div { class: "schema-subsection",
@@ -398,13 +437,6 @@ fn StockFormNode(ptr: String) -> Element {
     }
 }
 
-/// A machining reference binding (`default` + `choices`), read from the document.
-#[derive(Clone, Default, PartialEq)]
-pub struct BindingView {
-    pub default: Option<Uuid>,
-    pub choices: Vec<Uuid>,
-}
-
 /// Extracts a UUID from a reference/id/string node value.
 fn ref_uuid(value: &NodeValue) -> Option<Uuid> {
     match value {
@@ -415,45 +447,29 @@ fn ref_uuid(value: &NodeValue) -> Option<Uuid> {
     }
 }
 
-/// Reads the `default`/`choices` binding for `field` on `step` of document `id`.
-fn read_binding_inner(id: Uuid, step: usize, field: &str) -> BindingView {
+/// Reads the profile `field` (`"cnc"`/`"fixture"`/`"toolset"`) on `step` of document
+/// `id`. `None` is a real answer, not a failure: a step with no profile chosen.
+fn read_binding_inner(id: Uuid, step: usize, field: &str) -> Option<Uuid> {
     if !appdata_ready() {
-        return BindingView::default();
+        return None;
     }
     with_appdata(|data| {
-        let Some(doc) = data.get(id) else {
-            return BindingView::default();
-        };
-        let default = doc
+        data.get(id)?
             .root
-            .get_pointer(&format!("/steps/{step}/{field}/default"))
-            .and_then(|node| ref_uuid(&node.value));
-        let choices = doc
-            .root
-            .get_pointer(&format!("/steps/{step}/{field}/choices"))
-            .map(|node| match &node.value {
-                NodeValue::Array(items) => items.iter().filter_map(|it| ref_uuid(&it.value)).collect(),
-                _ => Vec::new(),
-            })
-            .unwrap_or_default();
-        BindingView { default, choices }
+            .get_pointer(&format!("/steps/{step}/{field}"))
+            .and_then(|node| ref_uuid(&node.value))
     })
 }
 
-/// Reads a step binding, subscribing the caller to store mutations.
-pub fn use_binding(id: Uuid, step: usize, field: &str) -> BindingView {
+/// Reads a step's profile reference, subscribing the caller to store mutations.
+pub fn use_binding(id: Uuid, step: usize, field: &str) -> Option<Uuid> {
     subscribe();
     read_binding_inner(id, step, field)
 }
 
-/// Reads a step binding without subscribing — for use inside event handlers.
-pub fn read_binding(id: Uuid, step: usize, field: &str) -> BindingView {
-    read_binding_inner(id, step, field)
-}
-
-/// Writes a step binding (`default` + `choices`) and triggers re-render.
-pub fn set_binding(id: Uuid, step: usize, field: &str, default: Option<Uuid>, choices: &[Uuid]) {
-    with_appdata_mut(|data| data.set_step_binding(id, step, field, default, choices));
+/// Writes a step's profile reference (`None` clears it) and triggers re-render.
+pub fn set_binding(id: Uuid, step: usize, field: &str, target: Option<Uuid>) {
+    with_appdata_mut(|data| data.set_step_reference(id, step, field, target));
     bump_render();
 }
 
@@ -569,76 +585,53 @@ pub fn use_duplicate_primitives(id: Uuid) -> Vec<String> {
     })
 }
 
-/// A reference-binding editor for a machining `field` (`"cnc"`/`"fixture"`/
-/// `"toolset"`): tick the allowed `choices`, pick the active `default` (a radio
-/// among the ticked). Options are the available profiles of `kind`.
+/// The `<option>` value standing for "no profile chosen".
+///
+/// A sentinel rather than an empty string so it cannot be confused with a profile whose
+/// id failed to render; the handler maps it straight back to `None`.
+const NO_PROFILE: &str = "__none__";
+
+/// The profile picker for a machining step's `field` (`"cnc"`/`"fixture"`/`"toolset"`):
+/// a single dropdown over the available profiles of `kind`, plus a "None" entry.
+///
+/// One reference, not a set. A step is one physical setup, so a second machine or fixture
+/// for it is a second step — see the note in `schemas/machining.yaml`. Choosing None is
+/// deliberately allowed and deliberately blocking: it leaves the step unrunnable and the
+/// planner says which binding is missing, which is better than generating a program for a
+/// machine the operator does not have.
 #[component]
 pub fn BindingPicker(id: Uuid, step: usize, field: String, kind: crate::data::Profile, label: String) -> Element {
-    let binding = use_binding(id, step, &field);
+    let selected = use_binding(id, step, &field);
     let options = use_profiles(kind);
+    let on_field = field.clone();
 
     rsx! {
         div { class: "field binding-picker",
             label { "{label}" }
             if options.is_empty() {
-                p { class: "field-hint", "No profiles available yet." }
-            }
-            for (pid, name) in options {
-                BindingRow {
-                    id,
-                    step,
-                    field: field.clone(),
-                    pid,
-                    name,
-                    checked: binding.choices.contains(&pid),
-                    is_default: binding.default == Some(pid),
+                p { class: "field-hint", "No profiles available yet — create one first." }
+            } else {
+                select {
+                    onchange: move |evt| {
+                        let value = evt.value();
+                        let target = if value == NO_PROFILE { None } else { Uuid::parse_str(&value).ok() };
+                        set_binding(id, step, &on_field, target);
+                    },
+                    // Dioxus does not reflect a <select>'s `value:` on first render, so
+                    // each option carries an explicit `selected:`. Without it a saved
+                    // profile reads back as "None" until something else forces a
+                    // re-render — and then appears to set itself.
+                    option { value: NO_PROFILE, selected: selected.is_none(), "— None —" }
+                    for (pid , name) in options {
+                        option { value: "{pid}", selected: selected == Some(pid), "{name}" }
+                    }
+                }
+                if selected.is_none() {
+                    p { class: "field-hint field-hint-warn",
+                        "No profile selected — this step cannot be machined."
+                    }
                 }
             }
-        }
-    }
-}
-
-/// One selectable profile within a [`BindingPicker`].
-#[component]
-fn BindingRow(id: Uuid, step: usize, field: String, pid: Uuid, name: String, checked: bool, is_default: bool) -> Element {
-    let field_toggle = field.clone();
-    let field_default = field;
-    rsx! {
-        div { class: "binding-row",
-            input {
-                r#type: "checkbox",
-                checked,
-                onchange: move |evt| {
-                    let current = read_binding(id, step, &field_toggle);
-                    let mut next = current.choices;
-                    let mut next_default = current.default;
-                    if evt.checked() {
-                        if !next.contains(&pid) {
-                            next.push(pid);
-                        }
-                        if next_default.is_none() {
-                            next_default = Some(pid);
-                        }
-                    } else {
-                        next.retain(|c| *c != pid);
-                        if next_default == Some(pid) {
-                            next_default = next.first().copied();
-                        }
-                    }
-                    set_binding(id, step, &field_toggle, next_default, &next);
-                },
-            }
-            input {
-                r#type: "radio",
-                name: "binding-{field_default}-{step}-{id}",
-                checked: is_default,
-                disabled: !checked,
-                onchange: move |_| {
-                    let current = read_binding(id, step, &field_default);
-                    set_binding(id, step, &field_default, Some(pid), &current.choices);
-                },
-            }
-            span { class: "binding-name", "{name}" }
         }
     }
 }

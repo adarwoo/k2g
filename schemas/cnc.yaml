@@ -155,22 +155,11 @@ properties:
         required: [x, y]
         additionalProperties: false
 
-      # -----------------------------------------------------------------------
-      # line_numbering_increment
-      # -----------------------------------------------------------------------
-      # Program line numbering increment.
-      #
-      # 0 disables line numbering.
-      #
-      # Valid examples:
-      #   line_numbering_increment: 0
-      #   line_numbering_increment: 10
-      #
-      line_numbering_increment:
-        description: Program line numbering increment. 0 means none.
-        type: integer
-        minimum: 0
-        default: 10
+      # Line numbering was once `line_numbering_increment` here — a bare integer the
+      # application turned into "N<n> " itself. That put GCode in the application, and
+      # split the format across two places. It is now entirely the
+      # `primitives.line_number` template, whose arithmetic carries the increment.
+      # Profiles are migrated on load (`normalize_cnc_value` in src/data/mod.rs).
 
       # -----------------------------------------------------------------------
       # has_repeatable_home
@@ -224,7 +213,6 @@ properties:
       - spindle_rpm_max
       - atc_slot_count
       - scaling
-      - line_numbering_increment
 
     additionalProperties: false
 
@@ -386,24 +374,30 @@ properties:
       # Arc cutting primitive.
       #
       # Expected placeholders include:
-      #   {arc_cmd}
+      #   {clockwise}
       #   {x}
       #   {y}
       #   {i}
       #   {j}
       #   {xy_feedrate}
       #
+      # Direction arrives as a BOOLEAN, not as a ready-made word: the application
+      # decides which way the cutter goes round, the profile decides what that is
+      # called. GTL has no ternary, so the idiom is a Rhai if-expression:
+      #
+      #   {if clockwise { "G2" } else { "G3" }}
+      #
       cut_arc:
         description: Arc cutting primitive template.
         type: string
         x-variables:
-          - { name: arc_cmd, type: string, description: "Arc direction command (G2 clockwise / G3 counter-clockwise)." }
+          - { name: clockwise, type: boolean, description: "True when the arc turns clockwise (conventionally G2), false counter-clockwise (G3). Use: {if clockwise { \"G2\" } else { \"G3\" }}." }
           - { name: x, type: length, description: "Arc end-point X coordinate." }
           - { name: y, type: length, description: "Arc end-point Y coordinate." }
           - { name: i, type: length, description: "Arc centre X offset from the start point." }
           - { name: j, type: length, description: "Arc centre Y offset from the start point." }
           - { name: xy_feedrate, type: feed, description: "Cutting feed rate in the XY plane." }
-        default: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+        default: "`{if clockwise { \"G2\" } else { \"G3\" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
 
       # Bezier cutting primitive.
       #
@@ -480,6 +474,32 @@ properties:
         x-variables:
           - { name: text, type: string, description: "Banner/comment text to insert." }
         default: "`( {text} )"
+
+      # Optional line-number primitive.
+      #
+      # Expected placeholders include:
+      #   {line}
+      #
+      # Emitted as a PREFIX to each program line, so it must not end the line:
+      # close the template with a backtick, which suppresses the newline and keeps
+      # the separating space inside the delimiters where an editor cannot trim it.
+      #
+      #   line_number: "`N{line * 10} `"
+      #
+      # `line` counts from 1 over the program's non-blank lines. Absent or empty
+      # means no numbering at all — which is what replaced the former
+      # `machine.line_numbering_increment`, whose value now lives in the template's
+      # own arithmetic. Numbering is a whole-program pass, so this is applied after
+      # the program is assembled, not by the primitives that build it.
+      #
+      line_number:
+        description: >-
+          Optional per-line number prefix. Absent or empty means the program is not
+          numbered. End the template with a backtick so no newline is emitted.
+        type: string
+        x-variables:
+          - { name: line, type: integer, description: "1-based index of the program line being numbered, counting non-blank lines only." }
+        default: ""
 
     required:
       - initialise

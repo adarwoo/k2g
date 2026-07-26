@@ -45,22 +45,22 @@ properties:
   # ---------------------------------------------------------------------------
   edge_tabs:
     description: >-
-      Where the retaining tabs sit on the board outline, for this board.
+      Per-tab **nudges** away from where the application put them.
 
-      A tab is stored as a position **along a contour**, not as an XY point:
-      `at` is the fraction of the contour's total length, measured from the
-      contour's first segment start in the stitcher's traversal order. That way
-      moving the board in the KiCad layout — which happens constantly — leaves
-      every tab where the operator put it, whereas an absolute coordinate would
-      be invalidated by any translation.
+      Tab positions are computed, not stored: the profile says how many, and they
+      are shared out over the outline's straight sides, longest first, evenly
+      spaced within each side (see `distribute_tabs` in src/gcode/outline.rs). So
+      what the job records is only the operator's disagreement with that — a
+      signed distance along the contour from a tab's computed home.
 
-      Each tab is centred on its position and spans the profile's `tab_width`
-      along the contour, whatever retention mode the profile asks for (a solid
-      tab, a row of mouse-bite drills, or both).
+      Storing the difference rather than the position is what makes a tab survive
+      the board changing. Move the board in the KiCad layout, or lengthen a side,
+      and the computed positions follow the new geometry while "the second tab on
+      the long edge, nudged 3 mm along" still means the same thing. An absolute
+      position would silently end up somewhere else.
 
-      An empty list means place them automatically: the profile's tab count,
-      spread evenly by arc length around each contour that is cut. Any entry at
-      all takes over completely, so what is generated is what is shown.
+      Only non-zero nudges are stored, so an empty list means "as computed" — the
+      normal case.
     type: array
     default: []
     items:
@@ -81,15 +81,29 @@ properties:
           type: integer
           minimum: 0
           default: 0
-        at:
+        tab:
           description: >-
-            Position along the contour as a fraction of its length, from its
-            start point. 0 and 1 are the same place.
-          type: number
+            Which computed tab on that contour, counting from 0 in contour order.
+          type: integer
           minimum: 0
-          exclusiveMaximum: 1
-      required: [at]
+        offset:
+          description: >-
+            How far along the contour to move it from its computed home. Signed:
+            positive runs the way the contour is traversed. The clearance rule
+            still applies, so a nudge that would push a tab into a corner or into
+            its neighbour is clamped rather than obeyed.
+          $ref: "units.yaml#/$defs/offset"
+      required: [tab, offset]
       additionalProperties: false
+
+  edge_tabs_locked:
+    description: >-
+      Move every tab together. With this set, nudging one tab applies the same
+      offset to all of them — the usual intent when the whole pattern wants
+      shifting round, rather than one tab clearing one obstruction. A UI
+      behaviour: it changes how offsets are written, never how they are read.
+    type: boolean
+    default: false
 
 required: [schema_version]
 

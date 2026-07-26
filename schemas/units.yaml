@@ -41,6 +41,23 @@ $defs:
     pattern: '^\s*(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
 
   # ---------------------------------------------------------------------------
+  # offset
+  # ---------------------------------------------------------------------------
+  # A signed linear displacement: `size` with a direction. Use this — never
+  # `size` — wherever a value means "this far from somewhere", because half of
+  # those are negative. A `size` is a magnitude (a diameter, a thickness) and its
+  # pattern deliberately rejects a leading minus.
+  #
+  # Valid examples:
+  #   "3 mm"
+  #   "-1.5mm"
+  #   "-0.125 in"
+  #
+  offset:
+    type: string
+    pattern: '^\s*-?(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
+
+  # ---------------------------------------------------------------------------
   # feed
   # ---------------------------------------------------------------------------
   # Feed rate expressed as distance per minute.

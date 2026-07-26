@@ -225,12 +225,23 @@ Primitive set:
 ```
 CNC / Fixture / Toolset profiles       (leaf profiles)
 Machining profile  (Profile::Machining, schemas/machining.yaml, x-schema-version 3)
-    = an ordered `steps` array; each step is ONE physical setup with its own
-      cnc/fixture/toolset bindings ({default, choices}) + operations + config
+    = an ordered `steps` array; each step is ONE physical setup referencing
+      EXACTLY ONE cnc + fixture + toolset (or none) + operations + config
 Job                (schemas/job.yaml, a SINGLETON — one per install, no id/name)
     = the single live thing being processed; references ONE machining profile
-      (its ordered steps). Future: also carries the session's last-minute data.
+      (its ordered steps), plus the per-board live data: board orientation and
+      the retaining-tab placements (`edge_tabs`).
 ```
+
+- A step's cnc/fixture/toolset were once `{default, choices}` — a chosen profile
+  plus the alternatives a job could later switch between. That job-level override
+  was never built and the idea was dropped (2026-07-26): a step *is* one physical
+  setup, so a different machine or fixture is a different step. Old files are
+  collapsed onto their `default` on load.
+- A binding may be **absent**, meaning no profile is chosen. Both the Tooling tab
+  and the Machining plan refuse such a step by name rather than defaulting it —
+  a guessed machine or fixture yields a plausible program for hardware the
+  operator does not have.
 
 Notes:
 - A machining profile grew from one flat setup to an ordered list of steps

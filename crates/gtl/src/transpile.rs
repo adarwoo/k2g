@@ -7,6 +7,11 @@
 //! - A line whose first non-whitespace character is a backtick is an *emit line*;
 //!   everything after the backtick is its payload, compiled to a single
 //!   `emit(...)` statement with each `{ expr }` spliced in as `fmt(expr)`.
+//! - A payload that **also ends** with a backtick emits without a trailing newline
+//!   (`emit_raw`), so the next emit continues the same output line. The closing
+//!   backtick is a delimiter as well as a flag: it makes trailing whitespace part
+//!   of the payload — visible, and safe from an editor that trims line ends —
+//!   which is what lets `` `N{line * 10} ` `` produce a line-number prefix.
 //! - Every other line is passed through to Rhai unchanged.
 
 /// A segment of an emit-line payload.
@@ -26,11 +31,18 @@ pub(crate) fn transpile(source: &str) -> Result<String, (usize, usize, String)> 
         let trimmed = raw.trim_start();
         let leading = raw.len() - trimmed.len();
         if let Some(payload) = trimmed.strip_prefix('`') {
+            // A closing backtick suppresses the newline. Checked *before* scanning so
+            // the delimiter never reaches the payload; a lone backtick leaves an empty
+            // remainder, which has no closing backtick and so still emits a blank line.
+            let (payload, newline) = match payload.strip_suffix('`') {
+                Some(inner) => (inner, false),
+                None => (payload, true),
+            };
             // `off` is the char offset of the open brace within the payload; the
             // author column is that plus the dropped indentation and the backtick.
             let segments = scan_payload(payload)
                 .map_err(|(off, message)| (line_no, leading + 1 + off + 1, message))?;
-            out.push_str(&assemble(&segments));
+            out.push_str(&assemble(&segments, newline));
         } else {
             out.push_str(raw);
         }
@@ -128,11 +140,15 @@ fn scan_expr(chars: &[char], start: usize) -> Result<(String, usize), String> {
     Err("unterminated `{` interpolation".to_string())
 }
 
-/// Assemble parsed segments into one `emit(...)` Rhai statement. An empty payload
-/// (a bare backtick) becomes `emit("")`, i.e. one blank output line.
-fn assemble(segments: &[Segment]) -> String {
+/// Assemble parsed segments into one emit statement — `emit` when the line ends with a
+/// newline, `emit_raw` when a closing backtick suppressed it.
+///
+/// An empty payload from a bare backtick becomes `emit("")`, i.e. one blank output line;
+/// an empty payload from `` `` `` becomes `emit_raw("")`, which writes nothing at all.
+fn assemble(segments: &[Segment], newline: bool) -> String {
+    let call = if newline { "emit" } else { "emit_raw" };
     if segments.is_empty() {
-        return "emit(\"\");".to_string();
+        return format!("{call}(\"\");");
     }
     let parts: Vec<String> = segments
         .iter()
@@ -141,7 +157,7 @@ fn assemble(segments: &[Segment]) -> String {
             Segment::Expr(e) => format!("fmt({e})"),
         })
         .collect();
-    format!("emit({});", parts.join(" + "))
+    format!("{call}({});", parts.join(" + "))
 }
 
 /// Render `s` as a double-quoted Rhai string literal, escaping `\` and `"`.
@@ -176,6 +192,29 @@ mod tests {
     #[test]
     fn bare_backtick_emits_an_empty_line() {
         assert_eq!(transpile("`").unwrap(), "emit(\"\");\n");
+    }
+
+    /// A closing backtick suppresses the newline, so the next emit continues the line.
+    #[test]
+    fn closing_backtick_suppresses_the_newline() {
+        assert_eq!(transpile("`N{n}`").unwrap(), "emit_raw(\"N\" + fmt(n));\n");
+        assert_eq!(transpile("`G21`").unwrap(), "emit_raw(\"G21\");\n");
+    }
+
+    /// The closing backtick is a delimiter, so trailing whitespace is part of the
+    /// payload — which is how a line-number prefix gets its separating space without
+    /// depending on an editor not trimming the line.
+    #[test]
+    fn trailing_space_before_the_closing_backtick_is_kept() {
+        assert_eq!(transpile("`N{n} `").unwrap(), "emit_raw(\"N\" + fmt(n) + \" \");\n");
+    }
+
+    /// A lone backtick is the opener with an empty payload, not an opener plus a
+    /// closer — so it keeps emitting a blank line. Two backticks emit nothing.
+    #[test]
+    fn one_backtick_is_a_blank_line_and_two_emit_nothing() {
+        assert_eq!(transpile("`").unwrap(), "emit(\"\");\n");
+        assert_eq!(transpile("``").unwrap(), "emit_raw(\"\");\n");
     }
 
     #[test]

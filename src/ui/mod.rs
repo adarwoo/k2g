@@ -2,6 +2,7 @@ pub mod bindings;
 pub mod help;
 pub mod navigation;
 pub mod screens;
+pub mod show_when;
 pub mod theme;
 
 use std::sync::OnceLock;

@@ -314,7 +314,7 @@ impl AppCtx {
             plan,
             step_render,
             tool_feeds,
-            line_numbering_increment: machine.map(|m| m.line_numbering_increment).unwrap_or(0),
+            line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
         }
     }
 

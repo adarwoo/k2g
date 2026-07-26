@@ -333,7 +333,7 @@ primitives:
   stop_spindle: "M05"
   drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
   peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
-  cut_arc: "{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+  cut_arc: '{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
   cut_bezier: |
     ; cut_bezier fallback
     ; implementation may expand into one or more arc segments
@@ -376,6 +376,7 @@ Optional primitive attributes:
 
 - `primitives.pause` -> optional pause/message insertion point
 - `primitives.banner` -> optional comment/banner insertion point
+- `primitives.line_number` -> optional per-line `N` prefix; absent/empty means the program is not numbered
 
 Compatibility and fallback requirements:
 

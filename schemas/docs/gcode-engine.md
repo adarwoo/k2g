@@ -71,7 +71,7 @@ into a single scope per primitive call:
 |---------------|------------------------------|---------------------|----------|
 | **Program** (job context + run metadata) | once, at `Coder::new` | whole generation | `toolset.size`, `fixture.backing_board_thickness`, `machine.max_feed_rate`, `machine.spindle_rpm_min`, `cnc.z_safe`, `pcb_filename`, `timestamp`, `scaling_x`, `scaling_y` |
 | **Operation** | per tool / operation         | one operation's steps | `tool_diameter`, `rpm`, `z_feed`, `xy_feed`, `z_bottom`, `z_retract`, `peck` |
-| **Call**      | per `expand()`               | one primitive call  | `x`, `y`, `z`, `s`, `i`, `j`, `arc_cmd`, `slot`, `message`, `text` |
+| **Call**      | per `expand()`               | one primitive call  | `x`, `y`, `z`, `s`, `i`, `j`, `clockwise`, `line`, `slot`, `message`, `text` |
 
 Precedence on a name clash is **call > operation > program**.
 
@@ -146,8 +146,11 @@ scope:
 - **Active unit mode** — set by `metric()` / `imperial()` (GTL §5). It mirrors
   the machine's modal `G21`/`G20` state, so it must survive from `initialise`
   through every later primitive.
-- **Line-number counter** — the monotonic `N` word, advanced by the machine's
-  `line_numbering_increment`.
+- **Line-number counter** — the position of each program line, passed to the
+  `line_number` primitive as `line` (1-based, non-blank lines only). The word
+  itself, the increment and the separator are all the profile's template; the
+  engine only counts. Numbering is a whole-program pass, applied after the
+  sections are assembled.
 
 Everything a *script* declares is call-local; only these engine facts carry over.
 
@@ -258,7 +261,7 @@ primitive name and (for Parse/Runtime) the author-source location.
 // `FixtureProfile`, `ToolsetProfile`, or AppData.
 let job = job_context! {
     machine:   ns!{ max_feed_rate, spindle_rpm_min, spindle_rpm_max },
-    cnc:       ns!{ z_safe, line_numbering_increment },
+    cnc:       ns!{ z_safe },
     fixture:   ns!{ backing_board_thickness },
     toolset:   ns!{ size },
     machining: ns!{ peck },

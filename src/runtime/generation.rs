@@ -29,9 +29,9 @@ pub struct GenerationInput {
     pub plan: crate::gcode::plan::MachiningPlan,
     pub step_render: Vec<crate::gcode::program::StepRender>,
     pub tool_feeds: std::collections::BTreeMap<String, crate::gcode::program::ToolFeed>,
-    /// The CNC's `N`-number step (0 disables line numbering). Applied once to the
-    /// assembled program.
-    pub line_numbering_increment: u16,
+    /// The CNC's `line_number` primitive, applied once to the assembled program.
+    /// Empty disables numbering.
+    pub line_number_tpl: String,
 }
 
 /// A successful run's output, published atomically into `AppState`.
@@ -218,7 +218,8 @@ fn run_generation(
 
     // Line numbering is a whole-program pass over the assembled sections (the CNC's
     // `N`-number step), applied last so header, body and footer share one sequence.
-    let gcode = crate::gcode::program::number_lines(&gcode, input.line_numbering_increment);
+    let gcode = crate::gcode::program::number_lines(&coder, &gcode, &input.line_number_tpl)
+        .map_err(|e| GenerationAbort::Failed(e.message()))?;
 
     // Summarise what the body actually machined, plus what the plan deferred (oblong
     // slots, routing, locating pins — the notes the Machining view carries).
@@ -308,7 +309,7 @@ mod tests {
             plan: crate::gcode::plan::MachiningPlan::default(),
             step_render: Vec::new(),
             tool_feeds: std::collections::BTreeMap::new(),
-            line_numbering_increment: 0,
+            line_number_tpl: String::new(),
         }
     }
 
@@ -402,8 +403,9 @@ mod tests {
     }
 
     #[test]
-    fn line_numbers_are_applied_to_the_assembled_program_by_the_cnc_increment() {
-        let input = GenerationInput { line_numbering_increment: 10, ..sample_input() };
+    fn line_numbers_are_applied_to_the_assembled_program_by_the_cnc_template() {
+        let input =
+            GenerationInput { line_number_tpl: "`N{line * 10} `".to_string(), ..sample_input() };
         let cancel = Arc::new(AtomicBool::new(false));
         let out = run_generation(&input, &cancel).ok().unwrap();
         let lines: Vec<&str> = out.gcode.lines().collect();

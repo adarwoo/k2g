@@ -16,13 +16,16 @@ type: object
 # ---------------------------------------------------------------------------
 
 $defs:
+  # Ordered by how often a step uses them — almost every job drills PTH, most also
+  # drill NPTH, many route the edge; locating pins and milling are the exceptions.
+  # The UI shows them in this order and persists the enabled set in it.
   operation_key:
     type: string
     enum:
-      - drill_locating_pins
       - drill_pth
       - drill_npth
       - route_board
+      - drill_locating_pins
       - mill_board
 
   allowance:
@@ -106,78 +109,161 @@ $defs:
     required: [holes]
     additionalProperties: false
 
+  # ---------------------------------------------------------------------------
+  # retention — how a through-cut contour holds on until the operator breaks it
+  # out. Shared by the board outline and by interior cutouts, because the problem
+  # is the same one; only the sensible number of tabs differs.
+  #
+  # `mouse_bites` is a property OF a tab, not an alternative to one: a mouse bite
+  # is a tab perforated so it snaps cleanly and files down to nothing. (It was
+  # once two more `mode` values, which read as though a board could be held by
+  # mouse bites alone, all the way round — which is not a thing.)
+  #
+  # How many holes perforate a tab is deliberately NOT a setting: it follows from
+  # the tab width and the drill, at a pitch of twice the drill diameter.
+  # ---------------------------------------------------------------------------
+  retention:
+    type: object
+    default:
+      mode: tabs
+      count: 4
+      width: 2.0mm
+      mouse_bites: false
+    properties:
+      mode:
+        description: >-
+          `tabs` leaves short bridges of material so the part cannot move under
+          the cutter. `none` cuts it free in one pass — correct only when
+          something else holds it down (tape, a vacuum bed).
+        type: string
+        default: tabs
+        enum: [none, tabs]
+      count:
+        description: >-
+          How many tabs to place when the job does not position them itself.
+          They are shared out over the outline's straight sides, longest first.
+        type: integer
+        minimum: 0
+        default: 4
+        x-show-when: { mode: [tabs] }
+      width:
+        description: Length of contour each tab leaves uncut.
+        $ref: "units.yaml#/$defs/size"
+        default: 2.0mm
+        x-show-when: { mode: [tabs] }
+      mouse_bites:
+        description: >-
+          Perforate each tab with a row of small drills so it snaps cleanly and
+          leaves a much smaller nib than a solid tab. The holes are drilled while
+          the board is still whole.
+        type: boolean
+        default: false
+        x-show-when: { mode: [tabs] }
+    required: [mode]
+    additionalProperties: false
+
   route_board:
     type: object
     default:
-      edge:
+      outline:
         cut: route
-        retention: tabs
-        tabs: 4
-        tab_width: 2.0mm
-        bite_holes: 3
-      finishing:
-        clearance: 0.1mm
-        direction: climb
+        retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
+      cutouts:
+        enabled: true
+        retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+      finishing: 0.1mm
     properties:
-      edge:
+      # The board's own boundary.
+      outline:
         type: object
         default:
           cut: route
-          retention: tabs
-          tabs: 4
-          tab_width: 2.0mm
-          bite_holes: 3
+          retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
         properties:
           cut:
+            description: >-
+              How the boundary is made. `route`/`mill` cut right through, so the
+              board needs retaining; `score`/`vgroove` cut partway and it does not.
             type: string
             default: route
             enum: [route, mill, score, vgroove]
-          retention:
-            type: string
-            default: tabs
-            enum: [none, tabs, mouse_bites, tabs_with_mouse_bites]
-          tabs: { type: integer, minimum: 0, default: 4 }
-          tab_width:
-            $ref: "units.yaml#/$defs/size"
-            default: 2.0mm
-          bite_holes: { type: integer, minimum: 1, default: 3 }
           # Only meaningful when `cut: vgroove`; ignored otherwise. It carries a
           # default and — like every per-operation field — is always materialised
           # by the loader (see the note at the foot of this file), so it must NOT
           # be gated behind a conditional-presence rule: an `if cut != vgroove then
           # vgroove_depth absent` constraint would fail against the materialised
-          # default on every non-vgroove edge.
+          # default on every non-vgroove outline. `x-show-when` hides it in the UI
+          # instead, which is a display rule and costs validation nothing.
           vgroove_depth:
             $ref: "units.yaml#/$defs/percent_50_100"
             default: 80%
+            x-show-when: { cut: [vgroove] }
+          retention:
+            $ref: "#/$defs/retention"
+            default: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
+            x-show-when: { cut: [route, mill] }
         required: [cut]
         additionalProperties: false
-      finishing:
+
+      # Interior openings — anything the board loses from the middle. These are
+      # always cut right through (there is no scoring a hole), and the slug wants
+      # holding for the same reason the board does: a loose one gets thrown by the
+      # cutter. Its own tab count, because a small slug needs one or two, not four.
+      cutouts:
         type: object
         default:
-          clearance: 0.1mm
-          direction: climb
+          enabled: true
+          retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
         properties:
-          clearance:
-            $ref: "units.yaml#/$defs/size"
-            default: 0.1mm
-          direction:
-            type: string
-            default: climb
-            enum: [conventional, climb]
+          enabled:
+            description: Route the interior openings as well as the boundary.
+            type: boolean
+            default: true
+          retention:
+            $ref: "#/$defs/retention"
+            default: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+            x-show-when: { enabled: [true] }
+        required: [enabled]
         additionalProperties: false
-    required: [edge]
+
+      # Material left for a final full-depth pass, cleaning up the roughing cut.
+      # A length rather than a flag plus a length: 0 means no finishing pass, so
+      # one field carries both the decision and the amount.
+      #
+      # There was also a `direction: conventional | climb` here. It is gone: for an
+      # internal pocket or a part being cut out, climb is the only sensible
+      # direction (it is what keeps FR4's top copper from lifting), and the
+      # toolpaths pick it from the geometry — see `src/gcode/routing.rs`.
+      finishing:
+        description: >-
+          Material left on the wall for a final finishing pass. 0 means the
+          roughing pass is the finished cut.
+        $ref: "units.yaml#/$defs/size"
+        default: 0.1mm
+    required: [outline]
     additionalProperties: false
 
   # -------------------------------------------------------------------------
   # step — one machining setup within the profile's ordered sequence.
   #
-  # Bindings (cnc/fixture/toolset) are each a `default` (the active reference)
-  # plus the `choices` allowed for it. `$ref` keeps UUIDv7 validation; `x-ref`
-  # makes the datastore resolve the value against the target profile
-  # collection. They are left absent on a freshly-added step (the step reads
-  # as incomplete until the user picks them), mirroring the old top-level
-  # bindings.
+  # Each step references **exactly one** CNC, fixture and toolset profile.
+  # `$ref` keeps UUIDv7 validation; `x-ref` makes the datastore resolve the
+  # value against the target profile collection.
+  #
+  # These were once a `default` reference plus an array of allowed `choices`,
+  # on the assumption that a job would later be able to override a profile's
+  # bindings from among the allowed set. That idea was dropped (2026-07-26):
+  # a step *is* one physical setup, so a second CNC or fixture for it is a
+  # second step, not an alternative. The choices array bought a much heavier
+  # editor (tick the allowed, then pick one with a radio) for a flexibility
+  # nothing consumed. Profiles written in the old shape are collapsed onto
+  # their `default` on load — see `normalize_step_value` in src/data/mod.rs.
+  #
+  # A binding may be **absent**, which means no profile is chosen. That is a
+  # real state — a freshly added step starts there — and it makes the step
+  # unrunnable rather than defaulted: generating against a guessed machine or
+  # fixture would produce a program for hardware the operator does not have.
+  # The planner reports the missing binding instead.
   # -------------------------------------------------------------------------
   step:
     type: object
@@ -192,52 +278,19 @@ $defs:
         default: Machining step
 
       cnc:
-        description: Selected CNC profile (default) plus allowed choices.
-        type: object
-        properties:
-          default:
-            description: Active CNC profile reference.
-            $ref: "id.yaml#/$defs/uuid_v7"
-            x-ref: "cnc.yaml"
-          choices:
-            type: array
-            items:
-              $ref: "id.yaml#/$defs/uuid_v7"
-              x-ref: "cnc.yaml"
-        required: [default, choices]
-        additionalProperties: false
+        description: The CNC profile this step runs on. Absent means none is chosen.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "cnc.yaml"
 
       fixture:
-        description: Selected fixture profile (default) plus allowed choices.
-        type: object
-        properties:
-          default:
-            description: Active fixture profile reference.
-            $ref: "id.yaml#/$defs/uuid_v7"
-            x-ref: "fixture.yaml"
-          choices:
-            type: array
-            items:
-              $ref: "id.yaml#/$defs/uuid_v7"
-              x-ref: "fixture.yaml"
-        required: [default, choices]
-        additionalProperties: false
+        description: The fixture profile holding the board. Absent means none is chosen.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "fixture.yaml"
 
       toolset:
-        description: Selected toolset profile (default) plus allowed choices.
-        type: object
-        properties:
-          default:
-            description: Active toolset profile reference.
-            $ref: "id.yaml#/$defs/uuid_v7"
-            x-ref: "toolset.yaml"
-          choices:
-            type: array
-            items:
-              $ref: "id.yaml#/$defs/uuid_v7"
-              x-ref: "toolset.yaml"
-        required: [default, choices]
-        additionalProperties: false
+        description: The toolset (rack) this step loads. Absent means none is chosen.
+        $ref: "id.yaml#/$defs/uuid_v7"
+        x-ref: "toolset.yaml"
 
       side_to_machine:
         description: Which side of the board this step machines.
@@ -279,15 +332,13 @@ $defs:
       route_board:
         $ref: "#/$defs/route_board"
         default:
-          edge:
+          outline:
             cut: route
-            retention: tabs
-            tabs: 4
-            tab_width: 2.0mm
-            bite_holes: 3
-          finishing:
-            clearance: 0.1mm
-            direction: climb
+            retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
+          cutouts:
+            enabled: true
+            retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+          finishing: 0.1mm
 
       mill_board:
         type: object
@@ -309,7 +360,11 @@ $defs:
             additionalProperties: false
         additionalProperties: false
 
-    required: [name, cnc, fixture, toolset, operations]
+    # The bindings are deliberately NOT required: absent means "no profile chosen",
+    # which is where a freshly added step starts and a state the operator may leave it
+    # in. Requiring them would reject a half-configured profile on load instead of
+    # letting the planner report which binding is missing.
+    required: [name, operations]
     additionalProperties: false
 
 properties:

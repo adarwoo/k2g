@@ -692,9 +692,6 @@ impl AppState {
             profile.cnc_profile_id == uuid
                 || profile.fixture_profile_id == uuid
                 || profile.toolset_profile_id == uuid
-                || profile.cnc_profile_choices.iter().any(|id| id == uuid)
-                || profile.fixture_profile_choices.iter().any(|id| id == uuid)
-                || profile.toolset_profile_choices.iter().any(|id| id == uuid)
         }) || self
             .toolsets
             .iter()
@@ -1063,9 +1060,9 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
             },
-            "line_numbering_increment": machine.line_numbering_increment,
         },
         "primitives": {
+            "line_number": machine.line_number_tpl,
             "initialise": machine.gcode_header,
             "rapid_move": machine.drill_first_move,
             "linear_cut": machine.drill_cycle_mode_series,
@@ -1098,7 +1095,6 @@ fn machine_required_paths() -> &'static [&'static str] {
         "machine.atc_slot_count",
         "machine.scaling.x",
         "machine.scaling.y",
-        "machine.line_numbering_increment",
         "primitives.initialise",
         "primitives.rapid_move",
         "primitives.linear_cut",
@@ -1122,17 +1118,7 @@ fn fixture_required_paths() -> &'static [&'static str] {
 }
 
 fn process_required_paths() -> &'static [&'static str] {
-    &[
-        "id",
-        "name",
-        "cnc.default",
-        "cnc.choices",
-        "fixture.default",
-        "fixture.choices",
-        "toolset.default",
-        "toolset.choices",
-        "operations",
-    ]
+    &["id", "name", "cnc", "fixture", "toolset", "operations"]
 }
 
 fn toolset_required_paths() -> &'static [&'static str] {
@@ -1220,12 +1206,11 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         atc_slot_count,
         scaling_x,
         scaling_y,
-        line_numbering_increment: value
-            .pointer("/machine/line_numbering_increment")
-            .and_then(Value::as_u64)
-            .map(|v| v as u16)
-            .or_else(|| value.get("line_numbering_increment").and_then(Value::as_u64).map(|v| v as u16))
-            .unwrap_or(10),
+        line_number_tpl: value
+            .pointer("/primitives/line_number")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         gcode_header: value
             .pointer("/primitives/initialise")
             .and_then(Value::as_str)
@@ -1402,39 +1387,14 @@ fn size_at(value: &Value, pointer: &str, default_mm: f64) -> Length {
 }
 
 fn process_profile_to_value(profile: &JobProfile) -> Value {
-    let cnc_choices = if profile.cnc_profile_choices.is_empty() {
-        vec![profile.cnc_profile_id.clone()]
-    } else {
-        profile.cnc_profile_choices.clone()
-    };
-    let fixture_choices = if profile.fixture_profile_choices.is_empty() {
-        vec![profile.fixture_profile_id.clone()]
-    } else {
-        profile.fixture_profile_choices.clone()
-    };
-    let toolset_choices = if profile.toolset_profile_choices.is_empty() {
-        vec![profile.toolset_profile_id.clone()]
-    } else {
-        profile.toolset_profile_choices.clone()
-    };
-
     let mut value = json!({
         "schema_version": 2,
         "id": profile.id,
         "name": profile.name,
         "side_to_machine": profile.side.as_str(),
-        "cnc": {
-            "default": profile.cnc_profile_id,
-            "choices": cnc_choices,
-        },
-        "fixture": {
-            "default": profile.fixture_profile_id,
-            "choices": fixture_choices,
-        },
-        "toolset": {
-            "default": profile.toolset_profile_id,
-            "choices": toolset_choices,
-        },
+        "cnc": profile.cnc_profile_id,
+        "fixture": profile.fixture_profile_id,
+        "toolset": profile.toolset_profile_id,
         "operations": profile
             .default_operations
             .iter()
@@ -1513,29 +1473,25 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
     };
 
     let cnc_profile_id = value
-        .pointer("/cnc/default")
+        .get("cnc")
         .and_then(Value::as_str)
         .or_else(|| value.get("cnc_profile_id").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
 
     let fixture_profile_id = value
-        .pointer("/fixture/default")
+        .get("fixture")
         .and_then(Value::as_str)
         .or_else(|| value.get("fixture_profile_id").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
 
     let toolset_profile_id = value
-        .pointer("/toolset/default")
+        .get("toolset")
         .and_then(Value::as_str)
         .or_else(|| value.get("toolset_profile_id").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
-
-    let mut cnc_profile_choices = extract_binding_choices(value, "cnc", &cnc_profile_id);
-    let mut fixture_profile_choices = extract_binding_choices(value, "fixture", &fixture_profile_id);
-    let mut toolset_profile_choices = extract_binding_choices(value, "toolset", &toolset_profile_id);
 
     let mut default_operations = value
         .get("operations")
@@ -1587,73 +1543,20 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         }
     }
 
-    if cnc_profile_id.trim().is_empty() {
-        pending_required_fields.insert("cnc.default".to_string());
-        pending_required_fields.insert("cnc.choices".to_string());
-    } else if !is_uuid(&cnc_profile_id) {
-        warn!(
-            "Skipping machining profile '{}': cnc.default is not a UUID ({})",
-            id,
-            cnc_profile_id
-        );
-        return None;
-    } else {
-        if !cnc_profile_choices.iter().any(|existing| existing == &cnc_profile_id) {
-            cnc_profile_choices.push(cnc_profile_id.clone());
-        }
-        sort_uuid_v7_ids(&mut cnc_profile_choices);
-        if cnc_profile_choices.is_empty() {
-            pending_required_fields.insert("cnc.choices".to_string());
-        } else {
-            pending_required_fields.remove("cnc.choices");
-        }
-    }
-    if fixture_profile_id.trim().is_empty() {
-        pending_required_fields.insert("fixture.default".to_string());
-        pending_required_fields.insert("fixture.choices".to_string());
-    } else if !is_uuid(&fixture_profile_id) {
-        warn!(
-            "Skipping machining profile '{}': fixture.default is not a UUID ({})",
-            id,
-            fixture_profile_id
-        );
-        return None;
-    } else {
-        if !fixture_profile_choices
-            .iter()
-            .any(|existing| existing == &fixture_profile_id)
-        {
-            fixture_profile_choices.push(fixture_profile_id.clone());
-        }
-        sort_uuid_v7_ids(&mut fixture_profile_choices);
-        if fixture_profile_choices.is_empty() {
-            pending_required_fields.insert("fixture.choices".to_string());
-        } else {
-            pending_required_fields.remove("fixture.choices");
-        }
-    }
-    if toolset_profile_id.trim().is_empty() {
-        pending_required_fields.insert("toolset.default".to_string());
-        pending_required_fields.insert("toolset.choices".to_string());
-    } else if !is_uuid(&toolset_profile_id) {
-        warn!(
-            "Skipping machining profile '{}': toolset.default is not a UUID ({})",
-            id,
-            toolset_profile_id
-        );
-        return None;
-    } else {
-        if !toolset_profile_choices
-            .iter()
-            .any(|existing| existing == &toolset_profile_id)
-        {
-            toolset_profile_choices.push(toolset_profile_id.clone());
-        }
-        sort_uuid_v7_ids(&mut toolset_profile_choices);
-        if toolset_profile_choices.is_empty() {
-            pending_required_fields.insert("toolset.choices".to_string());
-        } else {
-            pending_required_fields.remove("toolset.choices");
+    // Each binding is one optional reference. Absent means the operator has not chosen
+    // one yet — a pending field, so the step reads as incomplete rather than being
+    // silently defaulted onto some other machine. A present-but-malformed reference is
+    // a corrupt file, and skipping the profile is the honest response to that.
+    for (field, value) in [
+        ("cnc", &cnc_profile_id),
+        ("fixture", &fixture_profile_id),
+        ("toolset", &toolset_profile_id),
+    ] {
+        if value.trim().is_empty() {
+            pending_required_fields.insert(field.to_string());
+        } else if !is_uuid(value) {
+            warn!("Skipping machining profile '{id}': {field} is not a UUID ({value})");
+            return None;
         }
     }
     if default_operations.is_empty() {
@@ -1664,11 +1567,8 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         id,
         name,
         cnc_profile_id,
-        cnc_profile_choices,
         fixture_profile_id,
-        fixture_profile_choices,
         toolset_profile_id,
-        toolset_profile_choices,
         side,
         default_operations,
         operation_setups,
@@ -1757,38 +1657,6 @@ fn merge_object_defaults(target: &mut Value, defaults: &Value) {
             target_obj.insert(key.clone(), default_value.clone());
         }
     }
-}
-
-fn extract_binding_choices(value: &Value, domain: &str, default_id: &str) -> Vec<String> {
-    let mut choices = value
-        .pointer(&format!("/{domain}/choices"))
-        .and_then(|v| {
-            if let Some(arr) = v.as_array() {
-                Some(
-                    arr.iter()
-                        .filter_map(Value::as_str)
-                        .filter(|candidate| is_uuid(candidate))
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>(),
-                )
-            } else if v.as_str() == Some("any") {
-                Some(Vec::new())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default();
-
-    if !default_id.trim().is_empty() && !choices.iter().any(|existing| existing == default_id) {
-        choices.push(default_id.to_string());
-    }
-    sort_uuid_v7_ids(&mut choices);
-    choices
-}
-
-fn sort_uuid_v7_ids(ids: &mut Vec<String>) {
-    ids.sort();
-    ids.dedup();
 }
 
 // toolset.yaml -> ToolsetProfile conversion boundary.
@@ -2051,9 +1919,9 @@ mod step_projection_tests {
             "steps": [
                 {
                     "name": "Drill PTH",
-                    "cnc": { "default": cnc, "choices": [cnc] },
-                    "fixture": { "default": cnc, "choices": [cnc] },
-                    "toolset": { "default": cnc, "choices": [cnc] },
+                    "cnc": cnc,
+                    "fixture": cnc,
+                    "toolset": cnc,
                     "side_to_machine": "top",
                     "operations": ["drill_pth", "route_board"],
                 }
@@ -2066,7 +1934,7 @@ mod step_projection_tests {
         let cnc = "018f0000-0000-7000-8000-0000000000aa";
         let flat = flatten_first_step(&stepped_machining(cnc));
         assert_eq!(flat.get("name").and_then(Value::as_str), Some("PTH board"));
-        assert_eq!(flat.pointer("/cnc/default").and_then(Value::as_str), Some(cnc));
+        assert_eq!(flat.get("cnc").and_then(Value::as_str), Some(cnc));
         assert!(flat.get("operations").and_then(Value::as_array).is_some());
     }
 
@@ -2164,7 +2032,8 @@ mod job_dock_tests {
     /// A hand-edited or stale settings file cannot produce an unusable column.
     #[test]
     fn the_persisted_dock_width_is_clamped_to_the_handle_bounds() {
-        assert!(MIN_JOB_PIN_WIDTH < DEFAULT_JOB_PIN_WIDTH && DEFAULT_JOB_PIN_WIDTH < MAX_JOB_PIN_WIDTH);
+        const { assert!(MIN_JOB_PIN_WIDTH < DEFAULT_JOB_PIN_WIDTH) };
+        const { assert!(DEFAULT_JOB_PIN_WIDTH < MAX_JOB_PIN_WIDTH) };
         assert_eq!((-500i64).clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
         assert_eq!(99_999i64.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MAX_JOB_PIN_WIDTH);
     }

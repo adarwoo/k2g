@@ -53,6 +53,9 @@ GCode output.
 - Indentation *before* the backtick is Rhai source layout and is discarded.
 - Everything *after* the backtick (including spaces) is the emit payload, taken
   verbatim except for interpolation and escapes.
+- A payload that **also ends** with a backtick is emitted **without a trailing
+  newline**, so the next emit continues the same output line. The closing
+  backtick is not part of the payload.
 - Every other line is passed through to Rhai unchanged.
 
 ```
@@ -66,6 +69,25 @@ A bare backtick emits a blank line:
 ```
 `                           // => one empty output line
 ```
+
+### 3.1.1 Continuing a line
+
+A closing backtick suppresses the newline, which lets one line be composed from
+several emits — a conditional prefix, a fragment built in a loop, or the
+`line_number` primitive, whose whole job is to prefix a line it does not own:
+
+```
+`N{line * 10} `             // => "N10 " with no newline; the line follows
+``                          // => nothing at all
+```
+
+The closing backtick is a **delimiter** as much as a flag, and that is the point:
+trailing whitespace sits *inside* it, so the separating space above is visible in
+the source and survives an editor that trims line ends. Without a terminator that
+space would be both invisible and fragile.
+
+A lone backtick is an opener with an empty payload, not an opener plus a closer,
+so it still emits a blank line.
 
 ### 3.2 Interpolation
 

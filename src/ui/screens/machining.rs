@@ -302,11 +302,6 @@ fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
 
             SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
 
-            div { class: "schema-section",
-                h4 { class: "section-title", "Routing" }
-                SchemaForm { id, ptr: format!("/steps/{index}/routing") }
-            }
-
             // Configuration sections for the currently enabled operations.
             for (key , op_label) in machining_operations().iter().copied() {
                 if enabled_ops.iter().any(|op| op == key) {

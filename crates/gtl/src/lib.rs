@@ -14,6 +14,21 @@
 //! }
 //! ```
 //!
+//! ## Continuing a line
+//!
+//! An emit line that **also ends** with a backtick writes its text without a trailing
+//! newline, so the next emit continues the same output line:
+//!
+//! ```text
+//! `N{line * 10} `    // -> emit_raw("N" + fmt(line * 10) + " ");
+//! ```
+//!
+//! The closing backtick is a delimiter as much as a flag: trailing whitespace sits
+//! *inside* it, so it is visible in the source and survives an editor that trims line
+//! ends — which is what makes a prefix like the line number above workable. A lone
+//! backtick is still an opener with an empty payload, so it emits a blank line as
+//! before; `` `` `` emits nothing at all.
+//!
 //! ## Deliberately domain-agnostic
 //!
 //! The crate emits *strings*, not GCode. It registers only the language surface —
@@ -84,6 +99,12 @@ impl Writer {
         buf.push_str(line);
         buf.push('\n');
     }
+
+    /// Append `text` with **no** trailing newline, so whatever is emitted next
+    /// continues the same output line. What a closing-backtick emit line compiles to.
+    pub fn emit_raw(&self, text: &str) {
+        self.0.borrow_mut().push_str(text);
+    }
 }
 
 /// The GTL engine: transpiles + compiles templates and runs them against a Rhai
@@ -112,6 +133,12 @@ impl Gtl {
             let mut buf = sink.borrow_mut();
             buf.push_str(&text);
             buf.push('\n');
+        });
+
+        // The closing-backtick form: no newline, so the next emit continues the line.
+        let sink = output.clone();
+        engine.register_fn("emit_raw", move |text: ImmutableString| {
+            sink.borrow_mut().push_str(&text);
         });
 
         // Default formatter for plain values. A host overrides `fmt` for its own
@@ -219,6 +246,37 @@ mod tests {
         assert_eq!(render(&gtl, "`G0 X{x} Y{y}", &mut scope).unwrap(), "G0 X3.2 Y7\n");
     }
 
+    /// A closing backtick suppresses the newline, so several emits compose one output
+    /// line. This is the end-to-end behaviour the module docs (and the app's GTL help)
+    /// teach — the transpiler tests cover the parse, this covers what comes out.
+    ///
+    /// The **optional prefix** is the shape worth pinning: the conditional piece carries
+    /// the closing backtick and an ordinary emit finishes the line, so the result is one
+    /// well-formed line whether or not the condition fires.
+    #[test]
+    fn a_closing_backtick_lets_several_emits_compose_one_line() {
+        let gtl = Gtl::new();
+        let src = "if dry_run {\n    `(SIMULATED) `\n}\n`G1 X{x} F{feed}";
+        let render_with = |dry: bool| {
+            let mut scope = Scope::new();
+            scope.push("dry_run", dry);
+            scope.push("x", 3.2_f64);
+            scope.push("feed", 300_i64);
+            render(&gtl, src, &mut scope).unwrap()
+        };
+        assert_eq!(render_with(true), "(SIMULATED) G1 X3.2 F300\n");
+        assert_eq!(render_with(false), "G1 X3.2 F300\n", "the line is well-formed either way");
+    }
+
+    /// A prefix-only template emits no newline of its own — what makes it a prefix.
+    #[test]
+    fn a_prefix_template_leaves_the_line_open() {
+        let gtl = Gtl::new();
+        let mut scope = Scope::new();
+        scope.push("line", 1_i64);
+        assert_eq!(render(&gtl, "`N{line * 10} `", &mut scope).unwrap(), "N10 ");
+    }
+
     #[test]
     fn control_flow_emits_lines_in_order() {
         let gtl = Gtl::new();
@@ -306,3 +364,5 @@ while z > z_bottom {
         assert_eq!(render(&gtl, "preamble();\n`G0", &mut scope).unwrap(), "G21\nG90\nG0\n");
     }
 }
+
+

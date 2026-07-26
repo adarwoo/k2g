@@ -71,7 +71,6 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
             &["/machine/spindle_rpm_min", "/machine/spindle_rpm_max"],
         ),
         group("Axis scaling", &["/machine/scaling/x", "/machine/scaling/y"]),
-        group("Line numbering", &["/machine/line_numbering_increment"]),
         group(
             "Zeroing & tool length",
             &["/machine/has_repeatable_home", "/machine/tool_length_measurement"],
@@ -97,6 +96,7 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
                 "/primitives/cut_bezier",
                 "/primitives/pause",
                 "/primitives/banner",
+                "/primitives/line_number",
             ],
         ),
         group("Tool change", &["/primitives/change_tool"]),

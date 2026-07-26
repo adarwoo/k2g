@@ -15,7 +15,6 @@ machine:
   scaling:
     x: 1.0
     y: 1.0
-  line_numbering_increment: 10
 
 primitives:
   initialise: |
@@ -30,7 +29,7 @@ primitives:
     `M3
   stop_spindle: "`M5"
   drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
-  cut_arc: "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+  cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
   cut_bezier: |
     `; cut_bezier fallback
   change_tool: |
@@ -46,3 +45,4 @@ primitives:
     `MSG {message}
     `M1
   banner: "`( {text} )"
+  line_number: '`N{line * 10} `'

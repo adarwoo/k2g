@@ -1990,14 +1990,14 @@ p {
     gap: 4px;
 }
 
-.binding-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.binding-row .binding-name {
-    font-size: 13px;
+/*
+ * A step binds exactly one CNC / fixture / toolset, so the picker is a plain
+ * dropdown. It used to be a checkbox-plus-radio row per profile — tick the allowed
+ * set, then pick one — which is why `.binding-row` and `.binding-name` are gone.
+ */
+.field-hint-warn {
+    color: var(--warn);
+    opacity: 0.9;
 }
 
 /* Toolset "rack" editor: T1..Tn rows stacked in a single vertical column.

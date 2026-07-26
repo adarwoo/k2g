@@ -30,26 +30,36 @@ impl TabContour {
     }
 }
 
-/// One retaining tab's placement on the board outline (`job.yaml#/edge_tabs`).
+/// One retaining tab's **nudge** away from where the application put it
+/// (`job.yaml#/edge_tabs`).
 ///
-/// Stored as a position **along** a contour rather than as an XY point: `at` is the
-/// fraction of that contour's length from its start, so moving the board in the KiCad
-/// layout leaves every tab where the operator put it. Width and retention style are not
-/// here — those are profile policy, reusable across boards.
+/// Positions are computed, not stored — the profile says how many tabs, and
+/// `crate::gcode::outline::distribute_tabs` shares them over the outline's straight
+/// sides. What the job records is the operator's disagreement with that: a signed
+/// distance along the contour. Storing the difference is what lets a tab survive the
+/// board changing shape, since the computed home moves with the geometry and the nudge
+/// still means the same thing.
+///
+/// Width and retention style are not here — those are profile policy, reusable across
+/// boards.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTab {
     pub contour: TabContour,
     /// Which contour of that kind, in the stitcher's order.
     pub index: usize,
-    /// Fraction along the contour, in `[0, 1)`.
-    pub at: f64,
+    /// Which computed tab on that contour, in contour order.
+    pub tab: usize,
+    /// How far along the contour to move it, signed; positive runs with the traversal.
+    pub offset: Length,
 }
 
 impl EdgeTab {
-    /// Reads one `edge_tabs` entry. `at` is required (a tab with no position is not a
-    /// tab); the rest fall back to the schema defaults.
+    /// Reads one `edge_tabs` entry. `tab` and `offset` are required — an entry naming
+    /// neither a tab nor a displacement records nothing. The rest fall back to the
+    /// schema defaults.
     pub fn from_value(value: &Value) -> Option<Self> {
-        let at = value.get("at").and_then(Value::as_f64)?;
+        let tab = value.get("tab").and_then(Value::as_u64)? as usize;
+        let offset = value.get("offset").and_then(Value::as_str)?;
         Some(Self {
             contour: value
                 .get("contour")
@@ -57,16 +67,19 @@ impl EdgeTab {
                 .map(TabContour::from_key)
                 .unwrap_or_default(),
             index: value.get("index").and_then(Value::as_u64).unwrap_or(0) as usize,
-            // The contour is a loop, so a position is only ever meaningful modulo 1.
-            at: at.rem_euclid(1.0),
+            tab,
+            offset: Length::from_string(offset, Some(units::LengthUnit::Mm)).ok()?,
         })
     }
 
-    pub fn to_value(&self) -> Value {
+    pub fn to_value(self) -> Value {
         let mut obj = Map::new();
         obj.insert("contour".into(), Value::from(self.contour.as_str()));
         obj.insert("index".into(), Value::from(self.index as u64));
-        obj.insert("at".into(), Value::from(self.at.rem_euclid(1.0)));
+        obj.insert("tab".into(), Value::from(self.tab as u64));
+        // Authored in millimetres: the stored form is canonical, and the UI converts
+        // for display like every other length.
+        obj.insert("offset".into(), Value::from(format!("{}mm", self.offset.as_mm())));
         Value::Object(obj)
     }
 }
@@ -98,12 +111,13 @@ pub enum ProductionOperation {
 }
 
 impl ProductionOperation {
+    /// In the same "most likely first" order the UI and `operation_key` use.
     pub fn all() -> [Self; 5] {
         [
-            Self::DrillLocatingPins,
             Self::DrillPth,
             Self::DrillNpth,
             Self::RouteBoard,
+            Self::DrillLocatingPins,
             Self::MillBoard,
         ]
     }

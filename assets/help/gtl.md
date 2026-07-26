@@ -18,6 +18,46 @@ line is script (loops, conditions, variables).
 emits `G0 X3.2 Y7` — the backtick is dropped, and `{x}` / `{y}` are replaced
 with the real values.
 
+## Continuing a line — the closing backtick
+
+A backtick at the **end** of the line too means "don't break the line here", so
+whatever comes next carries on where this left off. The `line_number` field is
+the clearest case — its whole job is to put something in front of a line it does
+not otherwise touch:
+
+```
+`N{line * 10} `
+```
+
+emits `N10 ` and stops. No line break, so the line being numbered follows it and
+you get `N10 G0 X3.2 Y7`.
+
+Notice the space before the closing backtick. That is the whole reason the mark
+goes at the *end*: the space sits between two backticks, so you can see it and
+your editor cannot quietly trim it off the end of the line. Whatever you want
+between the pieces — a space, a colon, nothing at all — goes inside.
+
+You can use it anywhere you want to build a line from more than one piece. An
+optional prefix is the safe shape, because the line is still finished by an
+ordinary emit:
+
+```
+if dry_run {
+    `(SIMULATED) `
+}
+`G1 X{x} Y{y} F{feed}
+```
+
+**Take care to finish the line.** A line left open runs straight into whatever is
+emitted next, wherever that comes from — so put the closing backtick on the
+*optional* pieces, and let an ordinary emit line end the result.
+
+Two details worth knowing:
+
+- A backtick **on its own** is still an empty emitted line, as before — one
+  backtick is a start mark with nothing after it, not a start *and* an end.
+- Two backticks `` `` `` emit nothing at all.
+
 ## Substituting values — `{ ... }`
 
 Put any variable or expression in braces. Because braces mark the boundary, you
@@ -87,6 +127,9 @@ if has_positioning_pins {
 | You write            | You get                                             |
 |----------------------|-----------------------------------------------------|
 | `` `G0 X{x} Y{y} ``  | a GCode line with values substituted                |
+| `` `N{line} ` ``     | the same, with **no line break** — the next emit continues it |
+| `` ` ``              | one empty line                                      |
+| `` `` ``             | nothing                                             |
 | `{ expr }`           | evaluate `expr`, convert to the active unit, insert |
 | `{{` / `}}`          | a literal `{` / `}`                                 |
 | `metric()`           | switch to mm, emit `G21`                             |

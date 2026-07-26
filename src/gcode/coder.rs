@@ -109,6 +109,11 @@ fn push_sample(scope: &mut Scope, var: &PrimitiveVar) {
         VarType::String => {
             scope.push(var.name.clone(), sample_string(&var.name));
         }
+        VarType::Boolean => {
+            // `true` so the preview of a two-branch template (`cut_arc`'s direction)
+            // shows the first branch rather than an empty or negative case.
+            scope.push(var.name.clone(), true);
+        }
         VarType::Length => {
             scope.push(var.name.clone(), Length::from_mm(10.0));
         }
