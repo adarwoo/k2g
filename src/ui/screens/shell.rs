@@ -264,9 +264,36 @@ pub fn DiagnosticsBanner(
     }
 }
 
+/// The rail's class list for one nav entry.
+///
+/// `active` is "this screen is on screen now"; `is-pinned` is "the Job view is docked
+/// beside whatever screen you go to". They are independent — the Job entry can carry
+/// either, both, or neither — so the styles must not be the same one, or a pinned Job
+/// would read as the current screen (see the rail CSS in `theme.rs`).
+fn rail_button_class(screen: Screen, selected: Screen, job_pinned: bool) -> String {
+    let mut classes = String::from("rail-button");
+    if screen == selected {
+        classes.push_str(" active");
+    }
+    if screen == Screen::Job && job_pinned {
+        classes.push_str(" is-pinned");
+    }
+    classes
+}
+
 #[component]
 pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
     let snapshot = state.read().clone();
+    let selected = snapshot.selected_screen;
+    // The pin lives here rather than inside the Job view because turning it *on* is
+    // the common act, and it was previously only reachable by first navigating to the
+    // Job screen — i.e. away from the screen the dock was wanted on.
+    let pinned = snapshot.job_view_pinned;
+    let pin_title = if pinned {
+        "Unpin — stop showing the Job view beside the profile and inventory screens"
+    } else {
+        "Pin — keep the Job view visible beside the profile and inventory screens"
+    };
     let nav_items = [
         Some(Screen::Job),
         None,
@@ -286,13 +313,28 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
         aside { class: "shell-rail",
             for (idx , item) in nav_items.iter().enumerate() {
                 if let Some(screen) = *item {
-                    button {
-                        key: "{screen.key()}",
-                        class: if screen == snapshot.selected_screen { "rail-button active" } else { "rail-button" },
-                        onclick: move |_| super::mutate_ctx(state, |s| s.select_screen(screen)),
-                        span { class: "rail-button-content",
-                            span { class: "rail-button-icon", {rail_icon(screen)} }
-                            span { class: "rail-button-text", "{screen.label()}" }
+                    // A row, not a bare button: the pin has to be a *sibling* of the
+                    // nav button (a button inside a button is invalid HTML and the
+                    // inner click would not be reachable).
+                    div { key: "{screen.key()}", class: "rail-item",
+                        button {
+                            class: rail_button_class(screen, selected, pinned),
+                            onclick: move |_| super::mutate_ctx(state, |s| s.select_screen(screen)),
+                            span { class: "rail-button-content",
+                                span { class: "rail-button-icon", {rail_icon(screen)} }
+                                span { class: "rail-button-text", "{screen.label()}" }
+                            }
+                        }
+                        if screen == Screen::Job {
+                            button {
+                                class: if pinned { "rail-pin-toggle active" } else { "rail-pin-toggle" },
+                                r#type: "button",
+                                title: "{pin_title}",
+                                "aria-label": "{pin_title}",
+                                "aria-pressed": if pinned { "true" } else { "false" },
+                                onclick: move |_| super::mutate_ctx(state, |s| s.toggle_job_view_pinned()),
+                                "📌"
+                            }
                         }
                     }
                 } else {

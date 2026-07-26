@@ -24,7 +24,7 @@ use rack::RackView;
 use sidebar::JobSidebar;
 use tooling::ToolingView;
 
-/// The tabbed Job view — the tab bar, the pin toggle, and the active tab's content.
+/// The tabbed Job view — the tab bar and the active tab's content.
 ///
 /// Rendered in two places from this one definition: as the Job screen's main column,
 /// and as the column docked beside a profile screen when the view is pinned. `docked`
@@ -32,6 +32,10 @@ use tooling::ToolingView;
 /// stay live either way, because switching Code ↔ Tooling while editing stock is most
 /// of what the dock is for. Tab selection is the same `selected_job_view` state, so
 /// returning to the Job screen lands on the tab left open in the dock.
+///
+/// The pin that controls the dock is NOT here: it lives beside Job in the navigation
+/// rail, so it can be reached from whichever screen the user wants the dock on rather
+/// than only after navigating to the thing being pinned.
 #[component]
 pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Element {
     let snapshot = state.read().clone();
@@ -47,42 +51,27 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
     } else {
         snapshot.selected_job_view
     };
-    let pinned = snapshot.job_view_pinned;
-    let pin_class = if pinned { "job-pin-toggle active" } else { "job-pin-toggle" };
-    let pin_title = if pinned {
-        "Unpin — stop showing this view on the profile screens"
-    } else {
-        "Pin — keep this view visible on the profile screens"
-    };
-
     rsx! {
         section {
             class: if docked { "panel grow project-main job-panel-docked" } else { "panel grow project-main" },
 
+            // The caption comes first and the tabs trail it: rsx drops a trailing
+            // element that follows a `for` loop, so nothing may be added after the
+            // loop here without wrapping it.
             div { class: "project-view-tabs",
-                // The tabs live in their own group so the pin is not a bare sibling of
-                // the `for` loop — rsx drops a trailing element in that position.
-                div { class: "project-view-tab-group",
-                    if docked {
-                        span { class: "job-dock-caption", "Job" }
-                    }
-                    for view in views.iter() {
-                        button {
-                            key: "{view.key()}",
-                            class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
-                            onclick: {
-                                let target = *view;
-                                move |_| super::mutate_ctx(state, |s| s.selected_job_view = target)
-                            },
-                            "{view.label()}"
-                        }
-                    }
+                if docked {
+                    span { class: "job-dock-caption", "Job" }
                 }
-                button {
-                    class: "{pin_class}",
-                    title: "{pin_title}",
-                    onclick: move |_| super::mutate_ctx(state, |s| s.toggle_job_view_pinned()),
-                    "📌"
+                for view in views.iter() {
+                    button {
+                        key: "{view.key()}",
+                        class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
+                        onclick: {
+                            let target = *view;
+                            move |_| super::mutate_ctx(state, |s| s.selected_job_view = target)
+                        },
+                        "{view.label()}"
+                    }
                 }
             }
 

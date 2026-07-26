@@ -303,6 +303,26 @@ body {
     gap: 8px;
 }
 
+/*
+ * One rail row. It exists so the Job row can carry the pin toggle beside its nav
+ * button; every other row holds a button alone and looks no different for it.
+ *
+ * `relative` because the pin is positioned into the row's top-right corner rather
+ * than laid out beside the button: taking width from the Job button alone would make
+ * it narrower than every other rail entry, and the corner is empty anyway (the icon
+ * and label sit left).
+ */
+.rail-item {
+    position: relative;
+    display: flex;
+    min-width: 0;
+}
+
+.rail-item > .rail-button {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .rail-button {
     border: 1px solid transparent;
     border-radius: 12px;
@@ -356,6 +376,56 @@ body {
 .rail-button.active .rail-button-icon {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+/*
+ * Job is pinned: the view is docked beside whatever screen you visit.
+ *
+ * Deliberately NOT the `.active` treatment — that means "you are looking at this
+ * screen", and the two states are independent (Job can be pinned while you sit on
+ * Stock, or pinned while you sit on Job). So pinned is an outline, selected is a
+ * fill: both can show at once and still be told apart.
+ */
+.rail-button.is-pinned {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/*
+ * The pin itself, in the row's top-right corner. Dimmed and desaturated when off so
+ * it reads as an affordance rather than a badge; lit and ringed when on, which is the
+ * same on/off language it had in the Job tab row before it moved here.
+ */
+.rail-pin-toggle {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 1;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    padding: 2px 4px;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    filter: grayscale(1);
+    opacity: 0.55;
+    transition: opacity 140ms ease, filter 140ms ease, border-color 140ms ease,
+        background 140ms ease;
+}
+
+.rail-pin-toggle:hover {
+    opacity: 1;
+    filter: none;
+    border-color: var(--border);
+    background: var(--bg-elev);
+}
+
+.rail-pin-toggle.active {
+    filter: none;
+    opacity: 1;
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 16%, var(--bg-elev));
 }
 
 .rail-button-text {
@@ -440,33 +510,6 @@ body {
     width: 2px;
 }
 
-/* The pin toggle sits at the far end of the view-tab row. */
-.job-pin-toggle {
-    flex: 0 0 auto;
-    border: 1px solid transparent;
-    border-radius: 999px;
-    background: transparent;
-    padding: 5px 9px;
-    font-size: 13px;
-    line-height: 1;
-    cursor: pointer;
-    filter: grayscale(1);
-    opacity: 0.55;
-    transition: opacity 140ms ease, filter 140ms ease, border-color 140ms ease;
-}
-
-.job-pin-toggle:hover {
-    opacity: 0.9;
-    border-color: var(--border);
-}
-
-.job-pin-toggle.active {
-    filter: none;
-    opacity: 1;
-    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
 /*
  * Below this the two columns cannot both stay usable: 132px rail + the 380px minimum
  * dock + ~700px for the screen beside it, plus padding. Note this is CSS pixels — on
@@ -487,8 +530,21 @@ body {
         display: none;
     }
 
-    .job-pin-toggle {
+    /* The toggle can do nothing here, so it goes. The pinned *outline* is only
+     * neutralised, never `display: none` — that selector is on the Job nav button
+     * itself, and hiding it would take the whole entry out of the rail. `:not(.active)`
+     * both scopes the reset to the case that needs it and out-specifies the selected
+     * state, which must keep its own border. */
+    .rail-pin-toggle {
         display: none;
+    }
+
+    .rail-button.is-pinned {
+        border-style: solid;
+    }
+
+    .rail-button.is-pinned:not(.active) {
+        border-color: transparent;
     }
 }
 
@@ -1364,15 +1420,13 @@ body {
     min-height: 0;
 }
 
+/*
+ * The view-tab row: an optional dock caption, then the tabs. It was once a
+ * space-between pair — tab group at one end, pin toggle at the other — but the pin
+ * moved to the navigation rail, so the group wrapper went with it and the tabs sit
+ * here directly.
+ */
 .project-view-tabs {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-}
-
-/* The tabs themselves; the pin toggle is the row's other child. */
-.project-view-tab-group {
     display: flex;
     align-items: center;
     gap: 8px;
