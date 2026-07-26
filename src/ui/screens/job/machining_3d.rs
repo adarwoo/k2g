@@ -23,7 +23,7 @@
 use dioxus::prelude::*;
 
 use crate::gcode::scene;
-use crate::runtime::machining_plan::plan_machining;
+use crate::runtime::machining_plan::{self, plan_machining};
 use crate::runtime::AppCtx;
 
 /// The DOM id the canvas is mounted under. The script finds it rather than being handed
@@ -69,6 +69,40 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     key.position.set(80, -120, 200);
     scene.add(key);
     scene.add(new T.AxesHelper(20));
+
+    // The workpiece: the outline extruded downward from Z0, with every cutout and
+    // drilled hole as a hole in the shape. Real holes rather than cylinders sitting in
+    // them, so you can see through the board and see the drill go somewhere.
+    const board = BOARD_PLACEHOLDER;
+    if (board && board.outline && board.outline.length > 2) {
+      const shape = new T.Shape(board.outline.map(function (p) { return new T.Vector2(p[0], p[1]); }));
+      (board.openings || []).forEach(function (loop) {
+        if (loop.length > 2) {
+          shape.holes.push(new T.Path(loop.map(function (p) { return new T.Vector2(p[0], p[1]); })));
+        }
+      });
+      const slab = new T.Mesh(
+        new T.ExtrudeGeometry(shape, { depth: board.thickness_mm, bevelEnabled: false }),
+        // Lambert, not Standard: no metalness or roughness to tune, and a matt surface
+        // is easier to read orientation from than a shiny one.
+        //
+        // Slightly transparent on purpose. Cutting happens *below* Z0 — the whole
+        // breakthrough is inside the material — so an opaque slab hides the part of
+        // the job the view exists to show. `depthWrite: false` stops the board from
+        // occluding the paths behind it while still shading as a solid.
+        new T.MeshLambertMaterial({
+          color: 0x1f6f43,
+          side: T.DoubleSide,
+          transparent: true,
+          opacity: 0.72,
+          depthWrite: false,
+        })
+      );
+      // Z0 is the board's top surface (op-planner §6), so the slab hangs below it —
+      // which is what puts the toolpaths' plunges *into* the material.
+      slab.position.z = -board.thickness_mm;
+      scene.add(slab);
+    }
 
     // The toolpaths, from the payload Rust built. One Line2 per (tool, run) — the
     // extraction merges consecutive moves of the same kind, so this is a handful of
@@ -171,19 +205,24 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     // Built here, in Rust, and handed over whole. The renderer never sees a
     // `MachiningPlan` — it gets points and colours, which is the entire reason the
     // untested half of this feature stays small.
-    let traces = {
+    let (traces, board) = {
         let snapshot = state.read().clone();
-        scene::trace_plan(&plan_machining(&snapshot))
+        (
+            scene::trace_plan(&plan_machining(&snapshot)),
+            machining_plan::board_solid(&snapshot),
+        )
     };
     let point_count: usize = traces.iter().map(|t| t.point_count()).sum();
     let tool_count = traces.len();
     let payload = serde_json::to_string(&traces).unwrap_or_else(|_| "[]".to_string());
     let palette = serde_json::to_string(&scene::TOOL_PALETTE).unwrap_or_else(|_| "[]".to_string());
+    let board_json = serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string());
     // `use_effect` runs after the node exists, which is the whole point — the script
     // looks the canvas up by id and would find nothing if this ran during render.
     use_effect(move || {
         let payload = payload.clone();
         let palette = palette.clone();
+        let board_json = board_json.clone();
         spawn(async move {
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
@@ -196,7 +235,8 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
             let script = BOOTSTRAP_SCRIPT
                 .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
                 .replace("TRACES_PLACEHOLDER", &payload)
-                .replace("PALETTE_PLACEHOLDER", &palette);
+                .replace("PALETTE_PLACEHOLDER", &palette)
+                .replace("BOARD_PLACEHOLDER", &board_json);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
                     log::info!("3D machining view: WebGL bootstrap ok");

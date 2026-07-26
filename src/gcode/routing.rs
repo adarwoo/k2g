@@ -10,6 +10,14 @@
 //! user option here: no strategy choice, no island toggle, and the radial stepover is
 //! fixed at [`STEPOVER_FRACTION`] of the tool diameter (a standard roughing pitch).
 //!
+//! **Round holes clear on a true spiral** (revised 2026-07-26, after watching the 3D
+//! view). The first implementation cut concentric circles, stepping out radially between
+//! them. That works, but each step-out drives the cutter sideways into uncut material and
+//! then reverses it into a tangential arc — an engagement spike and a direction change,
+//! once per turn, which is exactly what breaks the sub-millimetre cutters PCB work uses.
+//! An Archimedean spiral advances the radius continuously instead, so engagement is
+//! constant and the tool never changes direction until the finishing lap.
+//!
 //! The two shapes are the same construction about different medial sets:
 //!
 //! | feature | medial set | offset pass at radius `r` |
@@ -37,6 +45,15 @@ use crate::gcode::plan::Point;
 
 /// Radial stepover as a fraction of the router diameter. Not user-exposed (KISS).
 pub const STEPOVER_FRACTION: f64 = 0.5;
+
+/// Chord tolerance for the spiral's `G1` approximation, in millimetres.
+///
+/// A true Archimedean spiral has no exact GCode form — an arc must keep a constant
+/// radius from its centre, and a spiral by definition does not — so it is emitted as
+/// short linear moves. The tolerance sets how short: 10 µm is an order of magnitude
+/// below what a PCB router repeats, and keeps a typical hole to a few dozen moves rather
+/// than the few hundred a fixed angular step would give on a large one.
+pub const SPIRAL_CHORD_MM: f64 = 0.01;
 
 /// Plunge feed as a fraction of the tool's rated (lateral) feed.
 ///
@@ -110,32 +127,45 @@ pub fn spiral_hole(
         RouteMove::Plunge { x: mm(cx), y: mm(cy), z: z_bottom },
     ];
 
-    // Concentric circles stepped out by the pitch, the last exactly on the wall. When
-    // the tool nearly fills the hole (`reach ≈ 0`) the plunge alone finishes it.
+    // An Archimedean spiral out to the wall, then one full circle to finish it. When the
+    // tool nearly fills the hole (`reach ≈ 0`) the plunge alone finishes it.
     if reach > MIN_REACH_MM {
-        let mut radii: Vec<f64> = Vec::new();
-        let mut rad = pitch;
-        while rad < reach - MIN_REACH_MM {
-            radii.push(rad);
-            rad += pitch;
-        }
-        radii.push(reach); // finishing lap on the wall
+        // Whole turns, so the spiral ends back on the +X axis at exactly `reach` — which
+        // is where the finishing lap then starts and closes. Rounding up also makes the
+        // real radial advance per turn no coarser than the stepover.
+        let turns = (reach / pitch).ceil().max(1.0);
+        let total_angle = turns * std::f64::consts::TAU;
 
-        for rad in &radii {
-            // Step out to (cx+rad, cy) at depth, then a full CCW circle back to it.
+        // Angular step from the chord tolerance at the widest radius, which is the worst
+        // case: the sagitta of a chord subtending θ on radius r is r(1 − cos(θ/2)).
+        let step = if SPIRAL_CHORD_MM < reach {
+            2.0 * (1.0 - SPIRAL_CHORD_MM / reach).acos()
+        } else {
+            total_angle
+        };
+        let segments = (total_angle / step.max(f64::EPSILON)).ceil().max(1.0) as usize;
+
+        for n in 1..=segments {
+            let angle = total_angle * (n as f64) / (segments as f64);
+            // Radius linear in angle — that is what makes it Archimedean, and what keeps
+            // the radial advance (and so the cutting engagement) constant.
+            let radius = reach * (n as f64) / (segments as f64);
             moves.push(RouteMove::Cut {
-                x: mm(cx + rad),
-                y: mm(cy),
+                x: mm(cx + radius * angle.cos()),
+                y: mm(cy + radius * angle.sin()),
                 z: z_bottom,
             });
-            moves.push(RouteMove::Arc {
-                x: mm(cx + rad),
-                y: mm(cy),
-                i: mm(-rad),
-                j: mm(0.0),
-                ccw: true,
-            });
         }
+
+        // The finishing lap: one true circle on the wall, so the finished surface is cut
+        // at a constant radius rather than by the last, still-growing turn of the spiral.
+        moves.push(RouteMove::Arc {
+            x: mm(cx + reach),
+            y: mm(cy),
+            i: mm(-reach),
+            j: mm(0.0),
+            ccw: true,
+        });
 
         // Retract straight up from the wall.
         moves.push(RouteMove::Rapid {
@@ -319,43 +349,86 @@ mod tests {
             "the centre is plunged before any spiral");
     }
 
-    /// Passes step out by the stepover and the final circle sits exactly on the wall
-    /// radius `(hole − tool)/2`, with none exceeding it.
+    /// The radius grows monotonically to the wall and never past it, and the turn-on-turn
+    /// advance never exceeds the stepover — which together are what "clears all the
+    /// material without gouging" means.
     #[test]
-    fn circles_step_out_to_the_wall_without_overshooting() {
-        // 3.2 mm hole, 1.0 mm tool → reach 1.1 mm, pitch 0.5 mm → radii 0.5, 1.0, 1.1.
+    fn the_spiral_grows_to_the_wall_without_overshooting_or_gapping() {
+        // 3.2 mm hole, 1.0 mm tool → reach 1.1 mm, stepover 0.5 mm.
         let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
             Length::from_mm(3.2), Length::from_mm(1.0));
+
         let radii: Vec<f64> = moves
             .iter()
             .filter_map(|m| match m {
-                RouteMove::Arc { i, .. } => Some(-i.as_mm()),
+                RouteMove::Cut { x, y, .. } => Some((x.as_mm().powi(2) + y.as_mm().powi(2)).sqrt()),
                 _ => None,
             })
             .collect();
-        assert_eq!(radii.len(), 3, "two rough passes + a wall lap: {radii:?}");
-        assert!((radii[0] - 0.5).abs() < 1e-6 && (radii[1] - 1.0).abs() < 1e-6);
-        assert!((radii[2] - 1.1).abs() < 1e-6, "final lap is on the wall");
-        // Consecutive passes never gap by more than the pitch → full coverage.
-        assert!(radii[0] <= 0.5 + 1e-9);
-        assert!(radii[1] - radii[0] <= 0.5 + 1e-9);
-        assert!(radii[2] - radii[1] <= 0.5 + 1e-9);
+        assert!(radii.len() > 20, "a spiral, not a handful of circles: {}", radii.len());
+        for pair in radii.windows(2) {
+            assert!(pair[1] >= pair[0] - 1e-9, "the radius only ever grows");
+        }
+        let last = radii[radii.len() - 1];
+        assert!((last - 1.1).abs() < 1e-6, "it finishes exactly on the wall, got {last}");
+        assert!(radii.iter().all(|r| *r <= 1.1 + 1e-9), "and never past it");
+
+        // Turn-on-turn advance: the radius after one full revolution, versus now.
+        let turns = (1.1_f64 / 0.5).ceil();
+        let per_turn = 1.1 / turns;
+        assert!(per_turn <= 0.5 + 1e-9, "advance per turn {per_turn} exceeds the stepover");
     }
 
-    /// Every arc is a full circle centred on the hole (end point == its own start, and
-    /// the centre offset points back to the hole centre).
+    /// The spiral ends on the +X axis at the wall, so the finishing lap is one true
+    /// circle that closes on itself — a constant-radius pass over the finished surface,
+    /// rather than leaving the last still-growing turn as the wall.
     #[test]
-    fn arcs_are_full_circles_about_the_hole_centre() {
+    fn a_single_finishing_lap_closes_the_wall() {
         let moves = spiral_hole(at((10.0, 20.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
             Length::from_mm(3.2), Length::from_mm(1.0));
-        for m in &moves {
-            if let RouteMove::Arc { x, y, i, j, ccw } = m {
-                let start_x = x.as_mm();
-                let center_x = start_x + i.as_mm();
-                assert!((center_x - 10.0).abs() < 1e-6, "circle centred on the hole X");
-                assert!((y.as_mm() - 20.0).abs() < 1e-6 && j.as_mm().abs() < 1e-9, "start/centre on the hole Y line");
-                assert!(*ccw);
-            }
+        let arcs: Vec<&RouteMove> = moves.iter().filter(|m| matches!(m, RouteMove::Arc { .. })).collect();
+        assert_eq!(arcs.len(), 1, "exactly one lap, at the end");
+
+        let RouteMove::Arc { x, y, i, j, ccw } = arcs[0] else { unreachable!() };
+        assert!((x.as_mm() - 11.1).abs() < 1e-6 && (y.as_mm() - 20.0).abs() < 1e-6,
+            "starts and ends on the +X axis at the wall");
+        assert!((x.as_mm() + i.as_mm() - 10.0).abs() < 1e-6, "centred on the hole X");
+        assert!((y.as_mm() + j.as_mm() - 20.0).abs() < 1e-6, "centred on the hole Y");
+        assert!(*ccw, "counter-clockwise: climb milling inside a pocket");
+
+        // The spiral has to hand over to it exactly, or the lap starts with a jump.
+        let before = moves.iter().rev().find_map(|m| match m {
+            RouteMove::Cut { x, y, .. } => Some((x.as_mm(), y.as_mm())),
+            _ => None,
+        }).expect("the spiral precedes the lap");
+        assert!((before.0 - 11.1).abs() < 1e-6 && (before.1 - 20.0).abs() < 1e-6,
+            "the lap begins where the spiral left off, got {before:?}");
+    }
+
+    /// The whole point of the change: no radial step-outs. Every move after the plunge
+    /// advances around the hole, so the cutter never drives sideways into uncut material
+    /// and never reverses into a tangent.
+    #[test]
+    fn the_spiral_never_steps_out_radially() {
+        let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
+            Length::from_mm(3.2), Length::from_mm(1.0));
+        let cuts: Vec<(f64, f64)> = moves
+            .iter()
+            .filter_map(|m| match m {
+                RouteMove::Cut { x, y, .. } => Some((x.as_mm(), y.as_mm())),
+                _ => None,
+            })
+            .collect();
+        // Consecutive points always subtend a positive angle at the centre: the path is
+        // always going round. A radial step-out would subtend zero.
+        for pair in cuts.windows(2) {
+            let a0 = pair[0].1.atan2(pair[0].0);
+            let a1 = pair[1].1.atan2(pair[1].0);
+            let swept = (a1 - a0).rem_euclid(std::f64::consts::TAU);
+            assert!(
+                swept > 1e-9 && swept < std::f64::consts::PI,
+                "consecutive cuts must advance around the hole, swept {swept} rad"
+            );
         }
     }
 

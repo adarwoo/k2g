@@ -32,7 +32,7 @@ use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
 use crate::gcode::planner::{
     plan_drilling, plan_outline, plan_routing, DrillTarget, OutlineSpan, RouteShape, RouteTarget,
 };
-use crate::gcode::{oblong, outline};
+use crate::gcode::{oblong, outline, scene};
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, missing_bindings, plan_routers, read_steps,
     HoleGroup, OblongStrategy, RouterPlan, StepRaw,
@@ -72,6 +72,89 @@ pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
 
     MachiningPlan { steps, note: None }
 }
+
+/// The workpiece as the 3D view draws it: the stitched outline, its interior cutouts and
+/// every drilled hole, all placed into machine space so the board and the toolpaths share
+/// one frame.
+///
+/// Uses the **first step's** placement. Steps could in principle resolve different CNC
+/// scaling calibrations, but they describe setups of the same physical board, and drawing
+/// one workpiece per step would say something untrue about the job. If that ever stops
+/// being an approximation it will be because a profile mixes machines, which is worth
+/// noticing rather than papering over.
+///
+/// `None` when there is no board or the outline could not be stitched — the toolpaths
+/// still render, just without a workpiece under them.
+pub fn board_solid(ctx: &AppCtx) -> Option<scene::BoardSolid> {
+    let board = ctx.board.as_ref()?;
+    let stitched = ctx.stitched_board_data.as_ref()?;
+    if !stitched.errors.is_empty() {
+        return None;
+    }
+
+    let orientation = with_appdata(|data| data.job_board_orientation()) as f64;
+    let first = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .map(read_steps)
+        .and_then(|steps| steps.into_iter().next());
+    let cnc = first
+        .as_ref()
+        .and_then(|raw| raw.cnc_id)
+        .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
+
+    // Z here is irrelevant — a solid is placed in XY only — so the retract/safe heights
+    // are nominal rather than resolved from a fixture.
+    let placement = Placement::new(
+        board.bounding_box.as_ref(),
+        orientation,
+        cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
+        cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
+        Length::from_mm(0.0),
+        Length::from_mm(0.0),
+    );
+    let place = |&(x, y): &(i64, i64)| {
+        let point = placement.xy(&pcb::BoardPoint {
+            x: Length::from_mm(x as f64 / 1e6),
+            y: Length::from_mm(y as f64 / 1e6),
+        });
+        [point.x.as_mm(), point.y.as_mm()]
+    };
+
+    let mut solid = scene::BoardSolid {
+        // A board with no stitched outer boundary has nothing to extrude.
+        outline: stitched
+            .contours
+            .iter()
+            .find(|c| !c.is_hole)
+            .map(|c| c.points.iter().map(place).collect())?,
+        openings: stitched
+            .contours
+            .iter()
+            .filter(|c| c.is_hole)
+            .map(|c| c.points.iter().map(place).collect())
+            .collect(),
+        thickness_mm: board.thickness.map(|t| t.as_mm()).unwrap_or(DEFAULT_THICKNESS_MM),
+    };
+
+    // Drilled holes, at their finished size — the board as it will come off the machine,
+    // not the tool list that got it there.
+    for hole in &board.holes {
+        let placed = placement.xy(&hole.position);
+        let diameter = hole
+            .drill_axes()
+            .map(|(major, _)| major.as_mm())
+            .unwrap_or_default();
+        solid.add_hole(placed.x.as_mm(), placed.y.as_mm(), diameter);
+    }
+
+    Some(solid)
+}
+
+/// Board thickness assumed when the KiCad stackup does not report one. 1.6 mm is the
+/// overwhelmingly common PCB, and this only affects how the workpiece is *drawn*.
+const DEFAULT_THICKNESS_MM: f64 = 1.6;
 
 /// A whole-plan note (nothing to plan).
 fn note(message: &str) -> MachiningPlan {

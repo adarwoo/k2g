@@ -133,6 +133,51 @@ impl ToolTrace {
     }
 }
 
+/// Segments used to draw a drilled hole's circle in the board solid.
+///
+/// Twelve is enough that a 0.8 mm hole reads as round at any zoom the board is legible
+/// at, and it keeps a 300-hole board to a few thousand extra vertices — which the
+/// triangulator does once, at build time.
+const HOLE_SEGMENTS: usize = 12;
+
+/// The workpiece: an outline with everything that is removed from it.
+///
+/// Rendered as an extruded polygon-with-holes, which is a built-in on the renderer's
+/// side, so this carries no triangles — just loops. All coordinates are machine
+/// millimetres, so the board and the toolpaths share one frame and any misalignment
+/// between them is a real misalignment rather than a rendering artefact.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BoardSolid {
+    /// The outer boundary, implicitly closed.
+    pub outline: Vec<[f64; 2]>,
+    /// Everything the board loses: routed cutouts and drilled holes alike.
+    ///
+    /// One list rather than two because the renderer treats them identically — they are
+    /// all just holes in the extruded shape. Drilled holes go in as circles rather than
+    /// as separate cylinders precisely so they are *holes* you can see through, instead
+    /// of pegs sitting in the board.
+    pub openings: Vec<Vec<[f64; 2]>>,
+    pub thickness_mm: f64,
+}
+
+impl BoardSolid {
+    /// Appends a drilled hole as a circle of [`HOLE_SEGMENTS`] points.
+    pub fn add_hole(&mut self, x: f64, y: f64, diameter: f64) {
+        if diameter <= 0.0 {
+            return;
+        }
+        let radius = diameter / 2.0;
+        self.openings.push(
+            (0..HOLE_SEGMENTS)
+                .map(|n| {
+                    let angle = std::f64::consts::TAU * (n as f64) / (HOLE_SEGMENTS as f64);
+                    [x + radius * angle.cos(), y + radius * angle.sin()]
+                })
+                .collect(),
+        );
+    }
+}
+
 /// Builds one [`ToolTrace`] per tool block, in plan order.
 ///
 /// Blocks arrive already phase-ordered and TSP-ordered, so this only has to walk them.
