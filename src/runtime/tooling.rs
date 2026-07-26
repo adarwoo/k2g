@@ -150,6 +150,11 @@ pub(crate) struct StepRaw {
     pub(crate) toolset_id: Option<Uuid>,
     pub(crate) drill: DrillConfigRaw,
     pub(crate) route_board: EdgeConfigRaw,
+    /// `side_to_machine == "bottom"`. Read per step rather than taken from the
+    /// profile projection (which only carries `steps[0]`), because a later step may
+    /// be the bottom-side one. Today this exists to *refuse* such a step — see the
+    /// readiness gate in `orchestration`.
+    pub(crate) machines_bottom: bool,
 }
 
 /// How a through-cut contour is held until the operator breaks it out
@@ -518,6 +523,8 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     toolset_id: node_ref(root, &format!("/steps/{i}/toolset")),
                     drill,
                     route_board,
+                    machines_bottom: node_str(root, &format!("/steps/{i}/side_to_machine"))
+                        .is_some_and(|side| side.eq_ignore_ascii_case("bottom")),
                 }
             })
             .collect()
@@ -620,6 +627,31 @@ pub(crate) fn missing_bindings(raw: &StepRaw) -> Option<String> {
 
     (!missing.is_empty())
         .then(|| format!("This step has no {} profile selected.", missing.join(", no ")))
+}
+
+/// Names the steps set to machine the bottom side, or `None` when they all machine the
+/// top. The readiness gate turns this into a no-go reason.
+///
+/// Takes the steps rather than a profile id so the decision is separable from reading
+/// the document — and so it can be tested, which the global-store path cannot be.
+///
+/// Every step is checked, not the profile's projected `side`: that projection carries
+/// `steps[0]` only, and a bottom-side *second* step is exactly what it would miss.
+pub(crate) fn bottom_side_steps_reason(steps: &[StepRaw]) -> Option<String> {
+    let names: Vec<String> = steps
+        .iter()
+        .filter(|step| step.machines_bottom)
+        .map(|step| format!("'{}'", step.name))
+        .collect();
+
+    (!names.is_empty()).then(|| {
+        format!(
+            "Bottom-side machining is not implemented yet — {} {} set to machine the \
+             bottom side, which would emit a top-side (mirrored) program",
+            if names.len() == 1 { "step" } else { "steps" },
+            names.join(", "),
+        )
+    })
 }
 
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
@@ -1484,6 +1516,59 @@ mod tests {
 
     /// A round hole has no slot router, and slots are only resolved when the step's
     /// oblong strategy actually mills them.
+    /// Builds a step that machines `side`, with everything else irrelevant to the test.
+    fn step_on(name: &str, machines_bottom: bool) -> StepRaw {
+        StepRaw {
+            name: name.into(),
+            operations: vec!["drill_pth".into()],
+            cnc_id: Some(uuid::Uuid::now_v7()),
+            fixture_id: Some(uuid::Uuid::now_v7()),
+            toolset_id: Some(uuid::Uuid::now_v7()),
+            drill: Default::default(),
+            route_board: Default::default(),
+            machines_bottom,
+        }
+    }
+
+    /// A bottom-side step must stop generation.
+    ///
+    /// Nothing mirrors geometry, so such a step emits the *top-side* program — a
+    /// mirrored board, produced silently while the UI confirms "Bottom". There is no
+    /// degraded-but-usable output to warn about, so the gate has to refuse.
+    #[test]
+    fn a_bottom_side_step_is_refused_because_nothing_mirrors_the_geometry() {
+        assert_eq!(bottom_side_steps_reason(&[]), None, "no steps, nothing to refuse");
+        assert_eq!(
+            bottom_side_steps_reason(&[step_on("Drill", false), step_on("Cut out", false)]),
+            None,
+            "an all-top profile generates"
+        );
+
+        let reason = bottom_side_steps_reason(&[step_on("Solder side", true)])
+            .expect("a bottom-side step must be refused");
+        assert!(reason.contains("'Solder side'"), "names the step: {reason}");
+        assert!(reason.contains("step "), "singular for one step: {reason}");
+    }
+
+    /// The check reads every step, not the profile's `steps[0]` projection — a
+    /// bottom-side *later* step is precisely what that projection cannot see.
+    #[test]
+    fn a_bottom_side_step_is_caught_wherever_it_sits_in_the_profile() {
+        let reason = bottom_side_steps_reason(&[
+            step_on("Top drill", false),
+            step_on("Flip and drill", true),
+            step_on("Cut out", false),
+        ])
+        .expect("a bottom-side second step must be refused");
+        assert!(reason.contains("'Flip and drill'"), "names the offending step: {reason}");
+        assert!(!reason.contains("'Top drill'"), "does not name innocent steps: {reason}");
+
+        let both = bottom_side_steps_reason(&[step_on("A", true), step_on("B", true)])
+            .expect("two bottom-side steps must be refused");
+        assert!(both.contains("steps "), "plural for two: {both}");
+        assert!(both.contains("'A', 'B'"), "names both: {both}");
+    }
+
     /// A step with no profile chosen is refused by name, not defaulted. This is the whole
     /// point of allowing "none": it makes the step unrunnable rather than silently
     /// planning against a machine and fixture the operator never picked.
@@ -1497,6 +1582,7 @@ mod tests {
             toolset_id: toolset.then(uuid::Uuid::now_v7),
             drill: Default::default(),
             route_board: Default::default(),
+            machines_bottom: false,
         };
         assert_eq!(missing_bindings(&step(true, true, true)), None, "all three set");
         assert_eq!(

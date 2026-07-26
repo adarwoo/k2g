@@ -588,6 +588,26 @@ fn evaluate_generation_readiness(
         _ => {}
     }
 
+    // A bottom-side step is refused outright.
+    //
+    // `side_to_machine` is settable per step and is reported back in the job sidebar,
+    // but nothing in the generator reads it: no geometry is mirrored, so a bottom-side
+    // step emits *the top-side program*. That is not a missing feature the operator can
+    // work around — it is a confidently wrong answer that scraps the board, and the UI
+    // confirms the wrong thing while producing it.
+    //
+    // So this blocks rather than warns. There is no correct output to fall back to, and
+    // a warning on a program that looks entirely plausible is not a safeguard. Lift it
+    // when the mirror (and the fixture's `board_flip_axis`) are actually applied.
+    if crate::data::appdata_ready() {
+        if let Ok(profile_id) = Uuid::parse_str(&profile.id) {
+            let steps = crate::runtime::tooling::read_steps(profile_id);
+            if let Some(reason) = crate::runtime::tooling::bottom_side_steps_reason(&steps) {
+                nogo_reasons.push(reason);
+            }
+        }
+    }
+
     if app.errors.iter().any(|error| error.is_error) {
         nogo_reasons.push("Blocking runtime errors present".to_string());
     }

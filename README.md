@@ -19,9 +19,7 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 
 > [!WARNING]
 > **Pre-release.** k2g generates code that drives a spindle. Read every program before
-> you run it, and air-cut anything new. See [Status](#status) for what is unfinished — in
-> particular, **bottom-side machining is selectable in the UI but is not yet applied**,
-> and a bottom-side step currently produces a top-side (mirrored) program.
+> you run it, and air-cut anything new. See [Status](#status) for what is unfinished.
 
 ---
 
@@ -70,7 +68,7 @@ hardware. What is **not** done:
 
 | Area | State |
 | --- | --- |
-| **Bottom-side machining** | Selectable per step and reported in the job sidebar, but **not applied**: a bottom-side step emits the same program as a top-side one. Do not use it. |
+| **Bottom-side machining** | Selectable per step, but **refused**: no geometry is mirrored yet, so k2g blocks generation for a bottom-side step rather than emit a top-side program for it. |
 | Copper isolation milling | Not started |
 | Engraving | Not started; planned for from the outset |
 | Tab nudging | Tabs land where the distribution algorithm puts them. The job stores per-tab offsets, but nothing sets them yet. |

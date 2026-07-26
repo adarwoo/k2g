@@ -185,6 +185,23 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     if let Some(reason) = missing_bindings(raw) {
         return failed(index, name, vec![reason]);
     }
+
+    // Refused, not annotated. Nothing mirrors geometry for a bottom-side step, so every
+    // block this would plan — and the drill map drawn from it — describes the top side.
+    // Showing a plausible plan under a step labelled "Bottom" is the failure mode the
+    // readiness gate exists to prevent, so the view must not draw one either.
+    if raw.machines_bottom {
+        return failed(
+            index,
+            name,
+            vec![
+                "This step is set to machine the bottom side, which is not implemented \
+                 yet: no geometry is mirrored, so the program would be the top-side one. \
+                 Set the step to the top side to plan it."
+                    .into(),
+            ],
+        );
+    }
     let (Some(cnc_id), Some(fixture_id), Some(toolset_id)) =
         (raw.cnc_id, raw.fixture_id, raw.toolset_id)
     else {
