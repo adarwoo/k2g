@@ -36,7 +36,6 @@ primitives:
     `M5
     `{manual_message}
     `T{slot} M6
-    `S{rpm}
   conclude: |
     `(end of file)
     `G0 Z{z_safe}

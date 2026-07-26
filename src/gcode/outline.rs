@@ -260,9 +260,17 @@ impl Loop {
         let length = (end - start).rem_euclid(total);
         let mut out = vec![self.point_at(start)];
         // Walk the vertices from `start`, wrapping, until the accumulated run is spent.
+        //
+        // `points` repeats the first vertex at the end to close the loop, so there are
+        // `len() - 1` *distinct* vertices — and the walk must take exactly that many
+        // steps. Taking `len()` steps revisits the starting vertex, which appends it a
+        // second time after the rest of the span: the cutter reaches the far end of a
+        // corner and then drives straight back across it. On a real board that shows up
+        // as a chamfered corner and an edge that is visibly not straight.
+        let vertices = self.points.len() - 1;
         let first = self.cumulative.partition_point(|&d| d <= start);
-        for step in 0..self.points.len() {
-            let idx = (first + step) % (self.points.len() - 1);
+        for step in 0..vertices {
+            let idx = (first + step) % vertices;
             let along = (self.cumulative[idx] - start).rem_euclid(total);
             if along >= length || along <= 0.0 {
                 continue;
@@ -467,6 +475,52 @@ mod tests {
                 spans[0].iter().map(|p| at(*p)).collect::<Vec<_>>()
             );
         }
+    }
+
+    /// A span walks the loop **once**, forwards, and stops — so its length is exactly the
+    /// arc it covers.
+    ///
+    /// This is the invariant that presence-of-corners misses. The walk once took one step
+    /// too many and re-emitted its starting vertex at the end, so after rounding a corner
+    /// the cutter drove straight back across it: on the machine, a chamfered corner and a
+    /// visibly bent edge. Found on a real board, not in the tests — hence this one.
+    #[test]
+    fn a_span_is_exactly_as_long_as_the_arc_it_covers() {
+        let r = rectangle();
+        let length = |span: &Vec<Point>| -> f64 {
+            span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum()
+        };
+
+        // One 2 mm tab at the start: the span runs 1 → 119 mm, across three corners.
+        let spans = cut_spans(&r, &[0.0], 2.0);
+        assert_eq!(spans.len(), 1);
+        assert!(
+            (length(&spans[0]) - 118.0).abs() < 1e-6,
+            "expected 118 mm of cut, got {} — {:?}",
+            length(&spans[0]),
+            spans[0].iter().map(|p| at(*p)).collect::<Vec<_>>()
+        );
+
+        // And each point is further along the loop than the last, never doubling back.
+        let mut previous = 0.0_f64;
+        for point in &spans[0] {
+            let along = r.nearest_fraction(*point) * 120.0;
+            assert!(
+                along + 1e-6 >= previous,
+                "the span goes backwards at {:?}: {along} after {previous}",
+                at(*point)
+            );
+            previous = along;
+        }
+
+        // A span that wraps past the loop's own start point is the same story.
+        let wrapped = cut_spans(&r, &[0.5], 2.0);
+        assert_eq!(wrapped.len(), 1);
+        assert!(
+            (length(&wrapped[0]) - 118.0).abs() < 1e-6,
+            "a wrapping span is the same length, got {}",
+            length(&wrapped[0])
+        );
     }
 
     /// Tabs wider than the loop would leave nothing to cut. Better an empty result the

@@ -916,6 +916,41 @@ fn emits_a_feed(template: &str) -> bool {
             .any(|w| w[0] == b'F' && (w[1].is_ascii_digit() || w[1] == b'.'))
 }
 
+/// Whether a template emits a spindle-speed word — an `S` followed by the `{rpm}`
+/// variable or by a literal number.
+fn sets_spindle_speed(template: &str) -> bool {
+    template.contains("S{rpm}")
+        || template
+            .as_bytes()
+            .windows(2)
+            .any(|w| w[0] == b'S' && w[1].is_ascii_digit())
+}
+
+/// Removes a trailing emit line that does nothing but set the spindle speed.
+///
+/// Only the *last* emit line, and only when it is nothing else: a line like
+/// `` `T{slot} M06 S{rpm} `` still does the tool change, so it is left alone and the
+/// duplicate accepted rather than risk mangling a hand-written template.
+fn drop_trailing_speed_line(template: &str) -> String {
+    let mut lines: Vec<&str> = template.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let is_speed_only = lines.last().is_some_and(|line| {
+        let body = line.trim().trim_start_matches('`').trim();
+        body.starts_with('S') && !body[1..].contains(char::is_whitespace) && sets_spindle_speed(body)
+    });
+    if is_speed_only {
+        lines.pop();
+    }
+    let mut out = lines.join("\n");
+    // Preserve the trailing newline of a YAML block scalar, so the round trip is clean.
+    if template.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// Repairs a CNC profile written before `linear_cut` carried a feed.
 ///
 /// The old shipped default was `` `G1 X{x} Y{y} Z{z} S{s} `` — a G1 with **no F**, which
@@ -954,6 +989,32 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
             if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
             {
                 primitives.insert("cut_arc".into(), Value::from(repaired));
+            }
+        }
+    }
+
+    // `change_tool` used to end with `S{rpm}`, and `start_spindle` opens with the same
+    // word — and the Coder always emits the two adjacent, so the program carried two
+    // identical S words in a row. Drop the trailing one, but *only* when `start_spindle`
+    // really does set the speed: a profile that programs S before M06 on purpose (some
+    // controllers want it) must keep working.
+    let spindle_sets_speed = value
+        .pointer("/primitives/start_spindle")
+        .and_then(Value::as_str)
+        .is_some_and(sets_spindle_speed);
+    if spindle_sets_speed {
+        if let Some(template) = value.pointer("/primitives/change_tool").and_then(Value::as_str) {
+            let trimmed = drop_trailing_speed_line(template);
+            if trimmed != template {
+                warn!(
+                    "[{file}] primitives.change_tool set the spindle speed that \
+                     start_spindle sets immediately after; dropped the duplicate S"
+                );
+                if let Some(primitives) =
+                    value.pointer_mut("/primitives").and_then(Value::as_object_mut)
+                {
+                    primitives.insert("change_tool".into(), Value::from(trimmed));
+                }
             }
         }
     }
@@ -1979,6 +2040,41 @@ mod tests {
         let mut bare = serde_json::json!({ "name": "no primitives" });
         normalize_cnc_value(&mut bare, Path::new("machine.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "no primitives" }));
+    }
+
+    /// `change_tool` used to end with the same `S{rpm}` that `start_spindle` opens with,
+    /// and the two are always emitted adjacent — so every program carried a duplicated S.
+    #[test]
+    fn a_change_tool_that_duplicates_the_spindle_speed_loses_it() {
+        let repaired = |change_tool: &str, start_spindle: &str| {
+            let mut value = serde_json::json!({
+                "primitives": { "change_tool": change_tool, "start_spindle": start_spindle }
+            });
+            normalize_cnc_value(&mut value, Path::new("machine.yaml"));
+            value.pointer("/primitives/change_tool").and_then(Value::as_str).unwrap().to_string()
+        };
+        let starts = "`S{rpm}\n`M03";
+
+        assert_eq!(repaired("`M05\n`T{slot} M06\n`S{rpm}", starts), "`M05\n`T{slot} M06");
+        assert_eq!(
+            repaired("`M05\n`T{slot} M06\n`S{rpm}\n", starts),
+            "`M05\n`T{slot} M06\n",
+            "a block scalar keeps its trailing newline"
+        );
+
+        // Left alone when start_spindle does not set the speed — then change_tool is the
+        // only thing that does, and dropping it would leave the spindle unprogrammed.
+        let manual = "`M05\n`T{slot} M06\n`S{rpm}";
+        assert_eq!(repaired(manual, "`M03"), manual);
+
+        // Left alone when the S shares its line with the tool change: removing that line
+        // would remove the M06 with it.
+        let combined = "`M05\n`T{slot} M06 S{rpm}";
+        assert_eq!(repaired(combined, starts), combined);
+
+        // Already clean.
+        let clean = "`M05\n`T{slot} M06";
+        assert_eq!(repaired(clean, starts), clean);
     }
 
     /// `cut_arc` is now handed the direction as a boolean, so a saved template still

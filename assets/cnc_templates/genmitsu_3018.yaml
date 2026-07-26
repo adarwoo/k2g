@@ -38,7 +38,6 @@ primitives:
     `M05
     `{manual_message}
     `T{slot} M06
-    `S{rpm}
   conclude: |
     `(end of file)
   pause: |

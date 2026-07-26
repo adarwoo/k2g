@@ -419,18 +419,22 @@ properties:
       #   {slot}
       #   {rpm}
       #
+      # This primitive stops the spindle, prompts if the change is manual, and swaps
+      # the tool. It should NOT set the speed: `start_spindle` is always emitted
+      # immediately after it and opens with `S{rpm}`, so an `S` here is unconditionally
+      # redundant and shows up as two identical S words in a row. `rpm` stays available
+      # for a controller that genuinely wants the speed programmed before `M06`.
       change_tool:
         description: Tool change primitive template.
         type: string
         x-variables:
           - { name: manual_message, type: string, description: "Operator prompt shown for a manual tool change." }
           - { name: slot, type: integer, description: "Target tool/rack slot number." }
-          - { name: rpm, type: rpm, description: "Spindle speed to resume after the change." }
+          - { name: rpm, type: rpm, description: "Spindle speed for the block. Normally left to start_spindle, which follows immediately; use it only if the controller needs S before M06." }
         default: |
           `M05
           `{manual_message}
           `T{slot} M06
-          `S{rpm}
 
       # Program finalization block.
       #
