@@ -12,6 +12,7 @@ mod board;
 mod code;
 mod gcode_highlight;
 mod machining;
+mod machining_3d;
 mod rack;
 mod sidebar;
 mod tooling;

@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use units::{Length, UserUnitDisplay, UserUnitSystem};
 
 use crate::gcode::plan::{StepPlan, ToolBlock};
+use crate::ui::screens::job::machining_3d::Machining3dView;
 use crate::runtime::machining_plan::plan_machining;
 use crate::runtime::AppCtx;
 
@@ -29,6 +30,11 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
 
     rsx! {
         div { class: "screen single tooling-view",
+            // The toolpath render. Above the text for now rather than replacing it —
+            // the list is still the only way to read exact coordinates, and the 3D view
+            // has not earned sole custody of the plan yet.
+            Machining3dView {}
+
             div { class: "machining-summary",
                 div { class: "impact-item",
                     div { class: "impact-name", "Machining steps" }

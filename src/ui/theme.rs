@@ -2607,6 +2607,55 @@ th {
     font-size: 12px;
 }
 
+/*
+ * The 3D machining view.
+ *
+ * The canvas carries NO width/height attributes — three.js sizes the drawing buffer
+ * from `clientWidth`/`clientHeight` through a ResizeObserver, and setting them in the
+ * markup as well would fight this box and give a stretched, blurry picture on a HiDPI
+ * display. So the element must have a definite height here, which is why this is not
+ * simply `height: 100%`.
+ */
+.machining-3d {
+    position: relative;
+    width: 100%;
+    height: clamp(280px, 52vh, 720px);
+    /* The panel is a flex column, so without this the box is free to collapse to its
+       content — and a canvas has no intrinsic height. */
+    flex: 0 0 auto;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
+    overflow: hidden;
+}
+
+/* Behind the canvas, so it only shows while (or if) nothing has been painted. */
+.machining-3d-placeholder {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--text-subtle);
+    font-size: 13px;
+    pointer-events: none;
+}
+
+.machining-3d-canvas {
+    position: relative;
+    display: block;
+    width: 100%;
+    height: 100%;
+    /* Orbiting is a drag, so the WebView must not try to select or pan instead. */
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+}
+
+.machining-3d-canvas:active {
+    cursor: grabbing;
+}
+
 .board-canvas {
     display: flex;
     width: 100%;
