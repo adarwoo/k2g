@@ -3776,6 +3776,30 @@ summary {
     text-decoration: underline;
 }
 
+/*
+ * The warranty disclaimer. Given a little weight — a tinted panel rather than the
+ * small-print treatment `.about-note` gets — because it is the one line on this screen
+ * an operator has a reason to read.
+ */
+.about-warranty {
+    width: 100%;
+    margin: 0;
+    padding: 10px 12px;
+    /* `--bg-elev`, not `--bg-subtle`: the card underneath is already `--bg-subtle`,
+     * so that would be an invisible panel. */
+    border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+    border-radius: 10px;
+    background: var(--bg-elev);
+    color: var(--text-subtle);
+    font-size: 13px;
+    line-height: 1.5;
+    text-align: left;
+}
+
+.about-warranty strong {
+    color: var(--text);
+}
+
 .about-note {
     margin: 0;
     color: var(--text-subtle);

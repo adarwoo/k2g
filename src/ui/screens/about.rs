@@ -38,6 +38,7 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let version = env!("CARGO_PKG_VERSION");
     let description = env!("CARGO_PKG_DESCRIPTION");
     let repository = env!("CARGO_PKG_REPOSITORY");
+    let license = env!("CARGO_PKG_LICENSE");
     let (author_name, author_email) = primary_author();
 
     rsx! {
@@ -73,6 +74,27 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                         dt { "Source" }
                         dd { a { class: "about-link", href: "{repository}", "{repository}" } }
                     }
+                    div { class: "about-fact",
+                        dt { "Licence" }
+                        dd {
+                            "{license} — free software"
+                            a {
+                                class: "about-link",
+                                href: "https://www.gnu.org/licenses/gpl-3.0.html",
+                                " · read the licence",
+                            }
+                        }
+                    }
+                }
+
+                // The GPL's warranty disclaimer (§§15–16) is the one part a user of a
+                // machine-control program should not have to open a text file to find:
+                // k2g drives a spindle from geometry it inferred, and the operator owns
+                // the outcome. Kept short and in plain words; the LICENSE file governs.
+                p { class: "about-warranty",
+                    strong { "No warranty." }
+                    " k2g is provided as-is. Verify every program before you run it — "
+                    "check the toolpath, the depths and the work origin against the job."
                 }
 
                 p { class: "about-note",

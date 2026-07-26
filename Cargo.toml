@@ -6,7 +6,14 @@ description = "GCode generator"
 authors = ["Bill Arreckx <software@arreckx.com>"]
 homepage = "https://github.com/adarwoo/k2g"
 repository = "https://github.com/adarwoo/k2g"
-license = "MIT"
+# GPL-3.0-**only**, not `-or-later`: the copyleft is the point, and "or later" would
+# let a future FSF licence govern this work sight-unseen. Bumping it later is a
+# one-word change; narrowing it after the fact is not.
+#
+# The vendored `third_party/kicad-ipc-rs` and `assets/vendor/three.bundle.js` are MIT
+# and stay MIT — MIT is GPL-compatible, so they may be combined into this GPL work
+# while keeping their own notices (both carry them in-tree).
+license = "GPL-3.0-only"
 
 [workspace]
 members = [

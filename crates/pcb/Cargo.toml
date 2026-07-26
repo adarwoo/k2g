@@ -1,6 +1,7 @@
 [package]
 name = "pcb"
 version = "0.1.0"
+license = "GPL-3.0-only"
 edition = "2021"
 description = "PCB acquisition from KiCad — multi-instance discovery, document enumeration, snapshot collection, and edge-cut stitching."
 
