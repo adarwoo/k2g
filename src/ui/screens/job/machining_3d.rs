@@ -1,11 +1,8 @@
-//! The 3D machining view's WebView bootstrap.
+//! The 3D machining view — a WebGL toolpath render inside the WebView.
 //!
-//! **This is the plumbing, not the picture.** It proves the one part of the 3D view that
-//! Rust cannot type-check: that the vendored three.js in the document head actually
-//! reaches a `<canvas>` we mounted, that a WebGL context comes up inside WebView2, and
-//! that a failure anywhere in that chain is *visible* rather than a blank rectangle.
-//! What it draws is a placeholder; the toolpath renderer replaces
-//! [`BOOTSTRAP_SCRIPT`] once the scene extraction exists.
+//! Draws what [`scene::trace_plan`](crate::gcode::scene::trace_plan) extracts from the
+//! machining plan: one coloured polyline set per tool block, rapids muted and thin
+//! against solid cutting moves, orbitable so the Z motion is actually legible.
 //!
 //! ## Why the split looks like this
 //!
@@ -25,19 +22,27 @@
 
 use dioxus::prelude::*;
 
+use crate::gcode::scene;
+use crate::runtime::machining_plan::plan_machining;
+use crate::runtime::AppCtx;
+
 /// The DOM id the canvas is mounted under. The script finds it rather than being handed
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
 const CANVAS_ID: &str = "k2g-machining-3d";
 
-/// Placeholder scene: a wireframe box the size of a small board, orbit controls, and a
-/// resize observer.
+/// The scene script. Three placeholders are substituted before it is evaluated:
+/// `CANVAS_ID_PLACEHOLDER`, `TRACES_PLACEHOLDER` (the serialised
+/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list) and `PALETTE_PLACEHOLDER`.
 ///
-/// Every line here is load-bearing for the bootstrap check even though the *content* is
-/// throwaway — between them they exercise the global, the renderer, the camera, the
-/// controls module, fat lines, and the animation loop. If this renders, the real scene
-/// is a matter of swapping the geometry.
+/// Substitution rather than `dioxus.send` from the Rust side because the payload is
+/// needed *before* the first frame, and a script that has its data inlined cannot race
+/// with the channel.
+///
+/// `scratchpad/harness/render.sh` extracts this literal verbatim and renders it under
+/// headless Edge, so it can be checked without launching the app.
 const BOOTSTRAP_SCRIPT: &str = r#"
 (function () {
+  const PALETTE = PALETTE_PLACEHOLDER;
   const T = window.K2G_THREE;
   if (!T) { dioxus.send("three.js global K2G_THREE is missing — the head script did not run"); return; }
   const canvas = document.getElementById("CANVAS_ID_PLACEHOLDER");
@@ -59,35 +64,44 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     const controls = new T.OrbitControls(camera, canvas);
     controls.enableDamping = true;
 
-    // Stand-in for the board: a 100 x 80 x 1.6 slab at the origin, lit well enough to
-    // read its orientation while orbiting.
-    const slab = new T.Mesh(
-      new T.ExtrudeGeometry(
-        new T.Shape([
-          new T.Vector2(0, 0), new T.Vector2(100, 0),
-          new T.Vector2(100, 80), new T.Vector2(0, 80),
-        ]),
-        { depth: 1.6, bevelEnabled: false }
-      ),
-      new T.MeshLambertMaterial({ color: 0x1f6f43 })
-    );
-    slab.position.z = -1.6;
-    scene.add(slab);
     scene.add(new T.HemisphereLight(0xffffff, 0x334455, 2.0));
     const key = new T.DirectionalLight(0xffffff, 1.2);
     key.position.set(80, -120, 200);
     scene.add(key);
-    scene.add(new T.AxesHelper(30));
+    scene.add(new T.AxesHelper(20));
 
-    // A fat polyline, because gl.lineWidth() is capped at 1 on WebView2's ANGLE path —
-    // if Line2 did not bundle correctly this is where it shows.
-    const geometry = new T.LineGeometry();
-    geometry.setPositions([10, 10, 2, 90, 10, 2, 90, 70, 2, 10, 70, 2, 10, 10, 2]);
-    const line = new T.Line2(
-      geometry,
-      new T.LineMaterial({ color: 0xffcc33, linewidth: 3, worldUnits: false })
-    );
-    scene.add(line);
+    // The toolpaths, from the payload Rust built. One Line2 per (tool, run) — the
+    // extraction merges consecutive moves of the same kind, so this is a handful of
+    // objects per tool rather than one per move.
+    //
+    // Fat lines are sized in *screen* space, so every material's `resolution` has to
+    // follow the canvas; they are collected here for `resize` to update.
+    const materials = [];
+    const traces = TRACES_PLACEHOLDER;
+
+    traces.forEach(function (trace, index) {
+      const colour = PALETTE[index % PALETTE.length];
+      trace.moves.forEach(function (run) {
+        const flat = [];
+        run.points.forEach(function (p) { flat.push(p.x, p.y, p.z); });
+        if (flat.length < 6) return;
+
+        const geometry = new T.LineGeometry();
+        geometry.setPositions(flat);
+        // Rapids read as scaffolding, cuts as the work — thin and dim against thick
+        // and saturated. The convention every backplot worth using shares.
+        const rapid = run.kind === "rapid";
+        const material = new T.LineMaterial({
+          color: rapid ? 0x55606f : colour,
+          linewidth: rapid ? 1 : 2.5,
+          transparent: rapid,
+          opacity: rapid ? 0.4 : 1.0,
+          worldUnits: false,
+        });
+        materials.push(material);
+        scene.add(new T.Line2(geometry, material));
+      });
+    });
 
     // Frame whatever is in the scene. The work sits in the positive quadrant with the
     // board's min corner on the machine origin (see gcode::placement), so the centre is
@@ -121,7 +135,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      line.material.resolution.set(w, h);   // fat lines are sized in screen space
+      materials.forEach(function (m) { m.resolution.set(w, h); });
     }
     new ResizeObserver(resize).observe(canvas);
     resize();
@@ -153,17 +167,36 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 /// `ResizeObserver` follows the element. Setting them in the markup would fight the
 /// layout and give a blurry, stretched drawing on a HiDPI display.
 #[component]
-pub fn Machining3dView() -> Element {
+pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
+    // Built here, in Rust, and handed over whole. The renderer never sees a
+    // `MachiningPlan` — it gets points and colours, which is the entire reason the
+    // untested half of this feature stays small.
+    let traces = {
+        let snapshot = state.read().clone();
+        scene::trace_plan(&plan_machining(&snapshot))
+    };
+    let point_count: usize = traces.iter().map(|t| t.point_count()).sum();
+    let tool_count = traces.len();
+    let payload = serde_json::to_string(&traces).unwrap_or_else(|_| "[]".to_string());
+    let palette = serde_json::to_string(&scene::TOOL_PALETTE).unwrap_or_else(|_| "[]".to_string());
     // `use_effect` runs after the node exists, which is the whole point — the script
     // looks the canvas up by id and would find nothing if this ran during render.
     use_effect(move || {
+        let payload = payload.clone();
+        let palette = palette.clone();
         spawn(async move {
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
             // prevent. Both ends are logged so a hang in between is distinguishable
             // from a script that never ran.
-            log::info!("3D machining view: starting WebGL bootstrap");
-            let script = BOOTSTRAP_SCRIPT.replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID);
+            log::info!(
+                "3D machining view: starting WebGL bootstrap ({tool_count} tool(s), \
+                 {point_count} point(s))"
+            );
+            let script = BOOTSTRAP_SCRIPT
+                .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
+                .replace("TRACES_PLACEHOLDER", &payload)
+                .replace("PALETTE_PLACEHOLDER", &palette);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
                     log::info!("3D machining view: WebGL bootstrap ok");

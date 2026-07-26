@@ -16,4 +16,5 @@ pub mod planner;
 pub mod primitive_vars;
 pub mod program;
 pub mod routing;
+pub mod scene;
 pub mod template;

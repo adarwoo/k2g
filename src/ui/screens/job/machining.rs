@@ -33,7 +33,7 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
             // The toolpath render. Above the text for now rather than replacing it —
             // the list is still the only way to read exact coordinates, and the 3D view
             // has not earned sole custody of the plan yet.
-            Machining3dView {}
+            Machining3dView { state }
 
             div { class: "machining-summary",
                 div { class: "impact-item",
