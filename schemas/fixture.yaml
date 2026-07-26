@@ -105,6 +105,48 @@ properties:
   # which is a CNC-profile capability (`has_repeatable_home`), not a fixture toggle.
 
   # ---------------------------------------------------------------------------
+  # work_coordinate_system
+  # ---------------------------------------------------------------------------
+  # WHICH of the machine's stored zero points this fixture is set up in.
+  #
+  # A fixture is clamped somewhere on the bed and its origin taught to the
+  # controller once; a machine holds several such origins and the program selects
+  # one. This says which — as an ORDINAL, not as a command. `1` is the machine's
+  # first work coordinate system, `2` the second, and so on.
+  #
+  # It is deliberately NOT `G54`/`G55`. Only the CNC profile speaks a dialect, and
+  # it maps the ordinal in its `initialise` template:
+  #
+  #   `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
+  #
+  # Keeping it an ordinal is also what lets a controller run past the easy six —
+  # Fanuc continues G59.1, G59.2 — which a fixed G54..G59 list never could:
+  #
+  #   `{if work_coordinate_system <= 6 { "G" + (53 + work_coordinate_system) }
+  #      else { "G59." + (work_coordinate_system - 6) }}
+  #
+  # NOT the same thing as `origin` below. `origin` is which corner of the BOARD is
+  # X0/Y0; this is which of the MACHINE's zeros the board is measured from.
+  #
+  # Only meaningful on a machine that homes repeatably (the CNC profile's
+  # `has_repeatable_home`): without that the operator re-establishes the work zero
+  # every job, so there is only ever the current one. The planner warns when the
+  # step's CNC cannot honour the value.
+  #
+  # Valid examples:
+  #   work_coordinate_system: 1
+  #   work_coordinate_system: 3
+  #
+  work_coordinate_system:
+    description: >-
+      Which of the machine's stored work coordinate systems this fixture occupies,
+      counting from 1. An ordinal, not a GCode word — the CNC profile's initialise
+      template turns it into whatever its dialect uses.
+    type: integer
+    minimum: 1
+    default: 1
+
+  # ---------------------------------------------------------------------------
   # board_flip_axis
   # ---------------------------------------------------------------------------
   # How the board turns over for a bottom-side step. This is a property of the

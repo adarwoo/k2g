@@ -44,6 +44,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                 "/board_holding_method",
                 "/origin/x0",
                 "/origin/y0",
+                // Beside `origin` because both answer "where is zero" — that one for
+                // the board's corner, this one for which of the machine's stored zeros
+                // the fixture sits in.
+                "/work_coordinate_system",
                 "/backboard_thickness",
                 "/bed_clearance",
                 "/breakthrough",

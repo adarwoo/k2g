@@ -258,15 +258,17 @@ impl AppCtx {
         // hardware) per the Z-model — the header/footer retract to it. Falls back to a
         // conservative 5 mm only when no fixture resolves (an incomplete job, which the
         // reference check already flags).
-        let z_safe = process
-            .and_then(|profile| {
-                self.app
-                    .fixtures
-                    .iter()
-                    .find(|fixture| fixture.id == profile.fixture_profile_id)
-            })
-            .map(|fixture| fixture.z_safe)
-            .unwrap_or(Length::from_mm(5.0));
+        let fixture = process.and_then(|profile| {
+            self.app
+                .fixtures
+                .iter()
+                .find(|fixture| fixture.id == profile.fixture_profile_id)
+        });
+        let z_safe = fixture.map(|fixture| fixture.z_safe).unwrap_or(Length::from_mm(5.0));
+        // Which of the machine's stored zeros the fixture sits in. An ordinal — the
+        // `initialise` template turns it into the controller's own word for it.
+        let work_coordinate_system =
+            fixture.map(|fixture| fixture.work_coordinate_system).unwrap_or(1);
 
         // Body-phase inputs: the resolved drill plan, the per-step CNC render context
         // (`step_render[i]` matches `plan.steps[i]`), and the tool→feed/speed lookup.
@@ -311,6 +313,7 @@ impl AppCtx {
             pcb_filename,
             timestamp,
             z_safe,
+            work_coordinate_system,
             plan,
             step_render,
             tool_feeds,

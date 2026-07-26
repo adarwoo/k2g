@@ -185,6 +185,33 @@ properties:
         default: false
 
       # -----------------------------------------------------------------------
+      # work_coordinate_systems
+      # -----------------------------------------------------------------------
+      # How many zero points this controller can store — the count a fixture's
+      # `work_coordinate_system` indexes into.
+      #
+      # A bare GRBL box has one; a Fanuc-style controller has six before it needs
+      # the G59.x extensions. The planner refuses a step whose fixture asks for
+      # more than the machine has, which is the only way to catch a fixture and a
+      # machine that disagree: neither profile knows about the other, and it is
+      # the step that binds them.
+      #
+      # Only meaningful alongside `has_repeatable_home` — stored zeros are worth
+      # nothing on a machine that cannot return to them.
+      #
+      # Valid examples:
+      #   work_coordinate_systems: 1
+      #   work_coordinate_systems: 6
+      #
+      work_coordinate_systems:
+        description: >
+          Number of work coordinate systems (stored zero points) the controller
+          holds. A fixture selects one of these by ordinal.
+        type: integer
+        minimum: 1
+        default: 6
+
+      # -----------------------------------------------------------------------
       # tool_length_measurement
       # -----------------------------------------------------------------------
       # How the controller establishes each tool's length (its Z offset).
@@ -280,10 +307,11 @@ properties:
           - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
+          - { name: work_coordinate_system, type: integer, description: "Which of the machine's stored zero points the step's fixture occupies, counting from 1. An ordinal — this template decides what to call it. Conventionally G53 + n, i.e. 1 is G54." }
         default: |
           `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
           `(Reset all back to safe defaults)
-          `G17 G54 G40 G49 G80 G90
+          `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
           metric();
           `G10 P0
           `(Establish the Z-Safe)
@@ -448,6 +476,7 @@ properties:
           - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
+          - { name: work_coordinate_system, type: integer, description: "The step fixture's stored zero point, counting from 1 — for a footer that reselects it before parking." }
         default: |
           `(end of file)
           `G0 Z{z_safe}

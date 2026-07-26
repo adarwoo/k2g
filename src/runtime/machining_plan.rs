@@ -194,6 +194,22 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     };
     let atc_slots = cnc.atc_slot_count as usize;
 
+    // Neither profile knows about the other, so this is the only place a fixture set up
+    // in the machine's fourth zero point can be caught against a controller that stores
+    // one. Left unchecked it renders as a `G57` the machine does not have, which is a
+    // program that runs somewhere unintended rather than one that fails.
+    if fixture.work_coordinate_system > cnc.work_coordinate_systems {
+        notes.push(format!(
+            "Fixture '{}' is set up in work coordinate system {}, but '{}' stores only \
+             {}. Re-teach the fixture into one the machine has, or correct the machine's \
+             count.",
+            fixture.name,
+            fixture.work_coordinate_system,
+            cnc.name,
+            cnc.work_coordinate_systems,
+        ));
+    }
+
     let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
 

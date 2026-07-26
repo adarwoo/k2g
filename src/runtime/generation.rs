@@ -23,6 +23,9 @@ pub struct GenerationInput {
     pub pcb_filename: String,
     pub timestamp: String,
     pub z_safe: Length,
+    /// The step fixture's work coordinate system, as an ordinal. The `initialise`
+    /// template maps it to whatever the controller calls that zero point.
+    pub work_coordinate_system: u8,
     // Body phase: the resolved drill plan (one entry per machining step) plus the
     // per-step render context and the tool→feed/speed lookup, built on the main thread
     // (the worker has no ctx access). `step_render[i]` matches `plan.steps[i]`.
@@ -162,6 +165,7 @@ fn run_generation(
     header_scope.push("pcb_filename", input.pcb_filename.clone());
     header_scope.push("timestamp", input.timestamp.clone());
     header_scope.push("z_safe", input.z_safe);
+    header_scope.push("work_coordinate_system", input.work_coordinate_system as i64);
     let header = coder
         .render("initialise", &input.initialise_template, &mut header_scope)
         .map_err(|err| GenerationAbort::Failed(format!("initialise: {err}")))?;
@@ -199,6 +203,7 @@ fn run_generation(
     footer_scope.push("pcb_filename", input.pcb_filename.clone());
     footer_scope.push("timestamp", input.timestamp.clone());
     footer_scope.push("z_safe", input.z_safe);
+    footer_scope.push("work_coordinate_system", input.work_coordinate_system as i64);
     let footer = coder
         .render("conclude", &input.conclude_template, &mut footer_scope)
         .map_err(|err| GenerationAbort::Failed(format!("conclude: {err}")))?;
@@ -306,6 +311,7 @@ mod tests {
             pcb_filename: "demo.kicad_pcb".to_string(),
             timestamp: "2026-01-01 00:00:00".to_string(),
             z_safe: units::Length::from_mm(5.0),
+            work_coordinate_system: 1,
             plan: crate::gcode::plan::MachiningPlan::default(),
             step_render: Vec::new(),
             tool_feeds: std::collections::BTreeMap::new(),

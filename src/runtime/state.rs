@@ -1060,6 +1060,7 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
             },
+            "work_coordinate_systems": machine.work_coordinate_systems,
         },
         "primitives": {
             "line_number": machine.line_number_tpl,
@@ -1206,6 +1207,11 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         atc_slot_count,
         scaling_x,
         scaling_y,
+        work_coordinate_systems: value
+            .pointer("/machine/work_coordinate_systems")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, u8::MAX as u64) as u8,
         line_number_tpl: value
             .pointer("/primitives/line_number")
             .and_then(Value::as_str)
@@ -1330,6 +1336,7 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
         "breakthrough": fixture.breakthrough.to_string(),
         "z_retract": fixture.z_retract.to_string(),
         "z_safe": fixture.z_safe.to_string(),
+        "work_coordinate_system": fixture.work_coordinate_system,
     })
 }
 
@@ -1370,6 +1377,13 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
         breakthrough: size_at(value, "/breakthrough", 0.5),
         z_retract: size_at(value, "/z_retract", 5.0),
         z_safe: size_at(value, "/z_safe", 20.0),
+        // Ordinal, not a length. 1 is the schema default and the only value a
+        // single-WCS machine can honour.
+        work_coordinate_system: value
+            .get("work_coordinate_system")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, u8::MAX as u64) as u8,
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
     })

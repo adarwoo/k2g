@@ -18,6 +18,9 @@ pub struct MachineProfile {
     pub scaling_y: f32,
     /// The `line_number` primitive; empty means the program is not numbered.
     pub line_number_tpl: String,
+    /// How many stored zero points the controller holds — the count a fixture's
+    /// `work_coordinate_system` indexes into.
+    pub work_coordinate_systems: u8,
     pub gcode_header: String,
     pub gcode_footer: String,
     pub drill_first_move: String,
@@ -45,6 +48,7 @@ impl Default for MachineProfile {
             scaling_x: 1.0,
             scaling_y: 1.0,
             line_number_tpl: String::new(),
+            work_coordinate_systems: 1,
             gcode_header: "".to_string(),
             gcode_footer: "".to_string(),
             drill_first_move: "".to_string(),
@@ -81,6 +85,10 @@ pub struct FixtureProfile {
     pub z_retract: Length,
     /// Safe travel height for rapids, clear of clamps and fixture hardware (`z_safe`).
     pub z_safe: Length,
+    /// Which of the machine's stored zero points this fixture occupies, from 1. An
+    /// ordinal: the CNC profile's `initialise` template names it (`G53 + n` on most
+    /// controllers, `G54 + n` on a Bantam, whose G54 is reserved).
+    pub work_coordinate_system: u8,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,
 }

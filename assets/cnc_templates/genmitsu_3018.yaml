@@ -21,7 +21,7 @@ machine:
 primitives:
   initialise: |
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    `G17 G54 G40 G49 G80 G90
+    `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
     metric();
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"

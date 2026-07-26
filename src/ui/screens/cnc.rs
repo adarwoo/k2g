@@ -73,7 +73,11 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
         group("Axis scaling", &["/machine/scaling/x", "/machine/scaling/y"]),
         group(
             "Zeroing & tool length",
-            &["/machine/has_repeatable_home", "/machine/tool_length_measurement"],
+            &[
+                "/machine/has_repeatable_home",
+                "/machine/work_coordinate_systems",
+                "/machine/tool_length_measurement",
+            ],
         ),
         group(
             "Program lifecycle",

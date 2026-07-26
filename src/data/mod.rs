@@ -916,6 +916,39 @@ fn emits_a_feed(template: &str) -> bool {
             .any(|w| w[0] == b'F' && (w[1].is_ascii_digit() || w[1] == b'.'))
 }
 
+/// What a hardcoded `G54` becomes: the ordinal the fixture supplies, mapped the
+/// conventional way. `work_coordinate_system` of 1 yields `G54`, so a default fixture
+/// gets byte-identical output.
+const WCS_EXPRESSION: &str = "G{53 + work_coordinate_system}";
+
+/// Replaces every whole-word occurrence of `word` in `text`, or `None` if there are
+/// none.
+///
+/// Whole-word so `G54` inside `G540` or `XG54` is left alone. GCode words are delimited
+/// by whitespace or line ends in every dialect this touches, which is what makes the
+/// rule safe to apply to a template we did not write.
+fn replace_word(text: &str, word: &str, replacement: &str) -> Option<String> {
+    let is_boundary = |c: Option<char>| c.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '.');
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut replaced = false;
+
+    while let Some(hit) = rest.find(word) {
+        let before = rest[..hit].chars().next_back();
+        let after = rest[hit + word.len()..].chars().next();
+        out.push_str(&rest[..hit]);
+        if is_boundary(before) && is_boundary(after) {
+            out.push_str(replacement);
+            replaced = true;
+        } else {
+            out.push_str(word);
+        }
+        rest = &rest[hit + word.len()..];
+    }
+    out.push_str(rest);
+    replaced.then_some(out)
+}
+
 /// Whether a template emits a spindle-speed word — an `S` followed by the `{rpm}`
 /// variable or by a literal number.
 fn sets_spindle_speed(template: &str) -> bool {
@@ -989,6 +1022,29 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
             if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
             {
                 primitives.insert("cut_arc".into(), Value::from(repaired));
+            }
+        }
+    }
+
+    // `initialise` used to name a work coordinate system outright — the shipped default
+    // was `G17 G54 G40 …`. That silently overrode whatever the step's fixture said it
+    // was set up in, which is the one thing a fixture most needs to be able to say. The
+    // ordinal now comes in as a variable and the template maps it, so a literal `G54`
+    // becomes the expression that yields G54 for the first system: identical output for
+    // a default fixture, and correct for every other one.
+    //
+    // Only `G54` is rewritten, and only as a whole word. A profile naming a different
+    // system (a Bantam's `G55`, say) is doing so because its machine reserves the lower
+    // ones, and guessing that machine's offset is not something to do behind its back.
+    if let Some(template) = value.pointer("/primitives/initialise").and_then(Value::as_str) {
+        if let Some(repaired) = replace_word(template, "G54", WCS_EXPRESSION) {
+            warn!(
+                "[{file}] primitives.initialise selected G54 outright, ignoring the \
+                 fixture's work coordinate system; rewritten to follow it"
+            );
+            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
+            {
+                primitives.insert("initialise".into(), Value::from(repaired));
             }
         }
     }
@@ -2040,6 +2096,46 @@ mod tests {
         let mut bare = serde_json::json!({ "name": "no primitives" });
         normalize_cnc_value(&mut bare, Path::new("machine.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "no primitives" }));
+    }
+
+    /// `initialise` naming `G54` outright silently overrode the step fixture's own work
+    /// coordinate system — the one thing a fixture most needs to be able to say. It is
+    /// rewritten to follow the fixture, which for the default ordinal emits `G54` still.
+    #[test]
+    fn an_initialise_that_hardcodes_g54_is_rewritten_to_follow_the_fixture() {
+        let repaired = |template: &str| {
+            let mut value = serde_json::json!({ "primitives": { "initialise": template } });
+            normalize_cnc_value(&mut value, Path::new("machine.yaml"));
+            value.pointer("/primitives/initialise").and_then(Value::as_str).unwrap().to_string()
+        };
+
+        assert_eq!(
+            repaired("`G17 G54 G40 G49 G80 G90"),
+            "`G17 G{53 + work_coordinate_system} G40 G49 G80 G90"
+        );
+
+        // A profile naming a *different* system does so because its machine reserves
+        // the lower ones (a Bantam's G54 is its own reference). Guessing that offset
+        // behind its back would move the job somewhere unintended.
+        let bantam = "`G17 G90\n`G55";
+        assert_eq!(repaired(bantam), bantam);
+
+        // Already following the fixture, or no preamble at all.
+        let following = "`G17 G{53 + work_coordinate_system} G40";
+        assert_eq!(repaired(following), following);
+    }
+
+    /// The rewrite is whole-word, so a `G54` that is part of something else survives —
+    /// this is editing a template we did not write.
+    #[test]
+    fn the_word_replacement_respects_boundaries() {
+        assert_eq!(replace_word("G17 G54 G40", "G54", "X").as_deref(), Some("G17 X G40"));
+        assert_eq!(replace_word("G54", "G54", "X").as_deref(), Some("X"), "alone on the line");
+        assert_eq!(replace_word("a\nG54\nb", "G54", "X").as_deref(), Some("a\nX\nb"));
+        assert_eq!(replace_word("G540 G54", "G54", "X").as_deref(), Some("G540 X"), "not a prefix");
+        assert_eq!(replace_word("G54.1", "G54", "X"), None, "not part of a decimal word");
+        assert_eq!(replace_word("XG54", "G54", "X"), None, "not a suffix");
+        assert_eq!(replace_word("nothing here", "G54", "X"), None);
     }
 
     /// `change_tool` used to end with the same `S{rpm}` that `start_spindle` opens with,

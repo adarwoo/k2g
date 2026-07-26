@@ -5,7 +5,9 @@
 # Important notes for Bantam Tools:
 #  - The TinyG controller does not support canned cycles like G81. The drill
 #    primitive still emits G81 and must be expanded by the application when used.
-#  - The machine defaults to the G55 coordinate system, unlike machines that use G54.
+#  - G54 is reserved for the machine's own reference, so the first usable work
+#    coordinate system is G55. The fixture's `work_coordinate_system` ordinal is
+#    therefore mapped as G54 + n here, where most machines use G53 + n.
 #
 # Primitives use the GCode Template Language (see docs/gcode-template-language.md):
 # a backtick line emits GCode, other lines are Rhai script, and {expr} in an emit
@@ -26,7 +28,7 @@ primitives:
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     `G17 G90 G40 G49 G80 G94
     metric();
-    `G55
+    `G{54 + work_coordinate_system}
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"
   linear_cut: "`G1 X{x} Y{y} Z{z} F{feedrate}"
