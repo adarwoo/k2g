@@ -12,7 +12,8 @@ Written in Rust. Runs as a desktop application beside KiCad and talks to it live
 KiCad's IPC API, so there are no Gerber or Excellon files to export and re-import: edit
 the board, hit refresh, get a new program.
 
-![k2g in use — the board in KiCad, then the generated program, tooling, rack schedule, drill map and 3D toolpath](assets/media/k2g-tour.gif)
+![k2g in use — the board in KiCad, then the generated program, tooling, rack schedule, drill map and 3D toolpath]
+(https://raw.githubusercontent.com/adarwoo/k2g/main/assets/media/k2g-tour.gif)
 
 <sub>A board in KiCad, then k2g: the generated program, the tooling and rack schedule,
 the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
