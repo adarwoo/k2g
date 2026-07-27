@@ -8,6 +8,7 @@ use crate::data::model::*;
 use crate::ui::navigation::*;
 use crate::runtime::AppError;
 use crate::runtime::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
+use super::save_program::SaveProgramButton;
 
 #[component]
 pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
@@ -146,6 +147,10 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
                     },
                     "{status_label}"
                 }
+
+                // Immediately right of the pill: the pill says the program is ready, and
+                // this is what you do about it.
+                SaveProgramButton { state }
 
                 button {
                     class: "icon-button",

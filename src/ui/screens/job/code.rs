@@ -7,12 +7,10 @@
 //! variables so light/dark both work.
 
 use dioxus::prelude::*;
-use rfd::FileDialog;
-use std::fs;
 use units::Length;
 
 use super::gcode_highlight::highlight_program;
-use crate::runtime::{with_ctx_mut, AppCtx, GCODE_FILE_EXTENSION, STATUS_KEY_GENERATION_NOGO_REASONS};
+use crate::runtime::{AppCtx, STATUS_KEY_GENERATION_NOGO_REASONS};
 use crate::ui::navigation::GenerationState;
 use units::user_format as unit_format;
 
@@ -20,7 +18,6 @@ use units::user_format as unit_format;
 #[component]
 pub fn CodeView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let mut save_status = use_signal(String::new);
     let board_thickness_pcb_label = snapshot
         .board
         .as_ref()
@@ -51,48 +48,11 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
         })
         .unwrap_or_default();
 
-    // The dialog's starting point and suggested name come from the runtime: the
-    // remembered directory (or the host default), and the board's own name.
-    let save_directory = snapshot.gcode_save_directory_or_default();
-    let save_file_name = snapshot.gcode_default_file_name();
-    let program = snapshot.gcode.clone();
-
     rsx! {
         div { class: "screen single",
-            div { class: "gcode-toolbar",
-                button {
-                    class: "btn btn-primary",
-                    disabled: is_empty,
-                    onclick: move |_| {
-                        let Some(path) = FileDialog::new()
-                            .set_title("Save G-code program")
-                            .set_directory(&save_directory)
-                            .set_file_name(&save_file_name)
-                            .add_filter("G-code", &[GCODE_FILE_EXTENSION, "ngc", "gcode", "tap"])
-                            .add_filter("All files", &["*"])
-                            .save_file()
-                        else {
-                            return; // cancelled
-                        };
-                        match fs::write(&path, program.as_bytes()) {
-                            Ok(()) => {
-                                // Remember where it went, so the next save opens here.
-                                if let Some(directory) = path.parent() {
-                                    with_ctx_mut(|ctx| ctx.app.remember_gcode_save_directory(directory));
-                                }
-                                let shown = path.file_name().unwrap_or(path.as_os_str());
-                                save_status.set(format!("Saved {}", shown.to_string_lossy()));
-                            }
-                            Err(err) => save_status.set(format!("Save failed: {err}")),
-                        }
-                    },
-                    "Save…"
-                }
-                if !save_status.read().is_empty() {
-                    span { class: "gcode-save-status", "{save_status}" }
-                }
-            }
-
+            // No Save button here: it lives in the top bar, beside the readiness pill, so
+            // the program can be saved from whichever screen the user is on rather than
+            // only from this tab.
             if is_empty {
                 div { class: "gcode-empty",
                     match snapshot.generation_state {

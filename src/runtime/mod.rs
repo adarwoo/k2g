@@ -120,6 +120,11 @@ pub struct AppState {
     /// Directory the last G-code save wrote to, mirrored to `global.setting.yaml`.
     /// `None` until the first save; see [`AppState::gcode_save_directory_or_default`].
     pub gcode_save_directory: Option<String>,
+    /// Directory on removable media the last "Save to USB" wrote to. Separate from
+    /// [`AppState::gcode_save_directory`] so the two histories cannot contaminate each
+    /// other — see [`removable::removable_save_directory`], which resolves it against
+    /// the media actually plugged in at the time.
+    pub last_removable_media_path: Option<String>,
     /// Keep the Job view docked beside the profile screens (see
     /// [`Screen::shows_pinned_job`]). The flag is kept even while the window is too
     /// narrow to honour it, so widening restores the layout without re-pinning.
@@ -170,6 +175,11 @@ pub mod machining_plan;
 /// In-memory capture of `tracing`/`log` output for the Logs screen.
 pub mod log_capture;
 pub use log_capture::CaptureLayer;
+
+/// Removable media (USB keys, SD cards): detection, save targeting, and eject.
+/// Windows-only in substance; the other platforms get a stub with the same API, so the
+/// UI needs no `cfg`.
+pub mod removable;
 
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
@@ -269,6 +279,7 @@ fn default_global_settings() -> Value {
         "selected_fixture_profile_id": Value::Null,
         "selected_toolset_profile_id": Value::Null,
         "gcode_save_directory": Value::Null,
+        "last_removable_media_path": Value::Null,
         "job_view_pinned": false,
         "job_pin_width": DEFAULT_JOB_PIN_WIDTH,
     })
@@ -290,6 +301,11 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     // Start the background generation worker now that the global ctx exists (the
     // worker publishes results into it). See `docs/gcode-generation.md` §6.
     start_generation_service();
+
+    // After the generation service, not before: that call is what creates the UI wake
+    // channel the watcher bumps. Started earlier, its first scan's wake would silently
+    // no-op and an already-inserted stick would stay invisible until the second tick.
+    removable::start_removable_media_watcher();
 
     // If the launched job is already ready, generate once now — the mutation-driven
     // regeneration trigger never fires at launch, so without this the Code view would

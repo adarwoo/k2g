@@ -268,6 +268,62 @@ body {
     gap: 10px;
 }
 
+/* The Save control: one button, or two joined into a split button when there is
+   removable media to save to. No gap — the pair reads as one control. */
+.topbar-save {
+    display: flex;
+    align-items: center;
+}
+
+/* Square off the facing corners and overlap the 1px border, so the seam is a single
+   line rather than a double one. Written as sibling selectors rather than a modifier
+   class because the second button is conditional: with only one child, the first
+   keeps its normal radius and no rule fires. */
+.topbar-save > .btn:not(:last-child) {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+.topbar-save > .btn + .btn {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    margin-left: -1px;
+    padding: 7px 8px;
+    display: flex;
+    align-items: center;
+}
+
+/* Separates the two halves of the split button, which are otherwise the same colour. */
+.topbar-save-media {
+    border-left-color: color-mix(in srgb, #000 22%, var(--accent-strong));
+}
+
+.topbar-save-media-svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* `.btn` had no disabled styling at all, so a disabled Save looked live and simply did
+   nothing when clicked. The hover rules are overridden too, or the button still lifts
+   under the cursor and denies the greying. */
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+    background: var(--bg-elev);
+}
+
+.btn-primary:disabled:hover {
+    background: var(--accent);
+}
+
 .icon-button,
 .text-button {
     border: 1px solid var(--border);
@@ -3116,19 +3172,6 @@ th {
 .program-stats {
     display: flex;
     gap: 18px;
-    font-size: 11px;
-    color: var(--text-subtle);
-}
-
-/* Save affordance above the program listing. */
-.gcode-toolbar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-}
-
-.gcode-save-status {
     font-size: 11px;
     color: var(--text-subtle);
 }

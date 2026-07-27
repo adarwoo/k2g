@@ -2114,6 +2114,48 @@ mod tests {
         );
     }
 
+    /// The removable-media path is a second, independent history: a "Save to USB" must
+    /// record where it went without disturbing where the ordinary Save opens. Same
+    /// optional-key rule as above — it was added later than every settings file in the
+    /// wild.
+    #[test]
+    fn the_removable_media_path_round_trips_without_touching_the_save_directory() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "a fresh store should load: {errors:#?}");
+
+        let ordinary = dir.path().join("downloads").to_string_lossy().into_owned();
+        let removable = "E:\\jobs".to_string();
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["gcode_save_directory"] = Value::String(ordinary.clone());
+        value["last_removable_media_path"] = Value::String(removable.clone());
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| p.is_empty()),
+            "recording both directories should not error"
+        );
+        data.flush();
+
+        let (reloaded, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "reload should be clean: {errors:#?}");
+        let read = |pointer: &str| {
+            reloaded
+                .settings()
+                .and_then(|doc| doc.root.get_pointer(pointer))
+                .map(|node| node.value.clone())
+        };
+        assert!(
+            matches!(read("/last_removable_media_path"), Some(NodeValue::Str(ref s)) if *s == removable),
+            "the removable-media path should round-trip"
+        );
+        assert!(
+            matches!(read("/gcode_save_directory"), Some(NodeValue::Str(ref s)) if *s == ordinary),
+            "the ordinary save directory must be untouched by it"
+        );
+    }
+
     /// A `linear_cut` that cannot emit a feed is repaired; one that can — by variable or
     /// hardcoded — is left exactly as the operator wrote it.
     #[test]

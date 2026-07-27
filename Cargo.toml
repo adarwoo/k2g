@@ -65,6 +65,36 @@ synoptic = "2"
 [dev-dependencies]
 tempfile = "3"
 
+# Windows-only: the removable-media (USB key / SD card) detect + eject facility in
+# `src/runtime/removable/win32.rs`, which is the only `unsafe` in this crate.
+# `windows-sys` rather than `windows`: 0.61 is already in the lockfile via
+# tokio/rfd/dirs-sys, so this compiles no additional crate, and the higher-level
+# wrappers would still be `unsafe` at every call site while pulling `windows-core` in
+# for a handful of kernel32 entry points.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    # HANDLE, INVALID_HANDLE_VALUE, CloseHandle, GENERIC_READ/GENERIC_WRITE
+    "Win32_Foundation",
+    # SECURITY_ATTRIBUTES — CreateFileW is gated on this feature because its
+    # signature names the type, even though we only ever pass null. Dropping this
+    # from the list fails as "cannot find function `CreateFileW`", which reads like
+    # a wrong module path rather than a missing feature.
+    "Win32_Security",
+    # GetLogicalDrives, GetDriveTypeW, GetVolumeInformationW, GetDiskFreeSpaceExW,
+    # CreateFileW, FlushFileBuffers, FILE_SHARE_*, OPEN_EXISTING
+    "Win32_Storage_FileSystem",
+    # DRIVE_REMOVABLE — which lives here, not beside GetDriveTypeW that returns it.
+    "Win32_System_WindowsProgramming",
+    # SetThreadErrorMode / SEM_FAILCRITICALERRORS — suppresses the modal "There is no
+    # disk in the drive" box when probing an empty card reader.
+    "Win32_System_Diagnostics_Debug",
+    # DeviceIoControl
+    "Win32_System_IO",
+    # FSCTL_LOCK_VOLUME / FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_MEDIA_REMOVAL /
+    # IOCTL_STORAGE_EJECT_MEDIA, PREVENT_MEDIA_REMOVAL
+    "Win32_System_Ioctl",
+] }
+
 # Windows-only: `build.rs` compiles the app icon into the `.exe` as a Windows
 # resource. Cargo matches `[target.*.build-dependencies]` against the **host**, so
 # these are fetched only when building on Windows; the build script additionally

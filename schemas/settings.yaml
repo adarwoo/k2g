@@ -83,6 +83,17 @@ properties:
     type: [string, "null"]
     default: null
 
+  last_removable_media_path:
+    description: |
+      Directory on removable media the last "Save to USB" wrote to, so the next one
+      opens where the previous left off. Null until the first such save. Kept apart
+      from `gcode_save_directory` deliberately: a USB save must not drag the ordinary
+      Save dialog onto a drive that will not be plugged in tomorrow. Only the drive
+      letter is matched against the media present at save time — a letter since reused
+      by a different stick falls back to that stick's root.
+    type: [string, "null"]
+    default: null
+
 required:
   [
     units,

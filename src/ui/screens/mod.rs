@@ -13,6 +13,7 @@ mod profile_manager;
 mod profiles_common;
 mod job;
 mod machining;
+mod save_program;
 mod shell;
 mod stock;
 mod toolset;

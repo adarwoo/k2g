@@ -54,7 +54,8 @@ impl AppState {
             rack_slots: BTreeMap::new(),
             board: boot.board_snapshot.clone(),
             kicad_status: boot.kicad_status.clone(),
-            gcode_save_directory: load_persisted_gcode_save_directory(),
+            gcode_save_directory: load_persisted_directory("gcode_save_directory"),
+            last_removable_media_path: load_persisted_directory("last_removable_media_path"),
             job_view_pinned: load_persisted_flag("job_view_pinned"),
             job_pin_width: load_persisted_job_pin_width(),
         };
@@ -265,6 +266,7 @@ impl AppState {
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
             "gcode_save_directory": self.gcode_save_directory,
+            "last_removable_media_path": self.last_removable_media_path,
             "job_view_pinned": self.job_view_pinned,
             "job_pin_width": self.job_pin_width,
         })
@@ -396,6 +398,21 @@ impl AppState {
             return;
         }
         self.gcode_save_directory = Some(directory);
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records the removable-media directory a "Save to USB" wrote to.
+    ///
+    /// Deliberately *not* folded into [`Self::remember_gcode_save_directory`]: the two
+    /// have independent histories, and letting a USB save move the ordinary dialog to a
+    /// drive letter that will be gone tomorrow is exactly the annoyance this feature
+    /// exists to remove. Same no-op-when-unchanged contract, for the same reason.
+    pub fn remember_removable_media_path(&mut self, directory: &std::path::Path) {
+        let directory = directory.to_string_lossy().into_owned();
+        if self.last_removable_media_path.as_deref() == Some(directory.as_str()) {
+            return;
+        }
+        self.last_removable_media_path = Some(directory);
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
@@ -1901,11 +1918,15 @@ fn load_persisted_job_pin_width() -> i64 {
         .clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH)
 }
 
-/// The remembered G-code save directory, if the settings file carries one.
-fn load_persisted_gcode_save_directory() -> Option<String> {
+/// A remembered directory from the settings file, if it carries one under `key`.
+///
+/// Blank is treated as absent: a settings file hand-edited to `""` would otherwise
+/// open a dialog at the process's current directory, which is wherever the app happened
+/// to be launched from.
+fn load_persisted_directory(key: &str) -> Option<String> {
     persistence_state()?
         .global_settings
-        .get("gcode_save_directory")
+        .get(key)
         .and_then(Value::as_str)
         .filter(|dir| !dir.trim().is_empty())
         .map(str::to_string)
