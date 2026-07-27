@@ -1463,17 +1463,36 @@ body {
 }
 
 /*
+ * The panel is the frame, not the scroller.
+ *
+ * It inherits `overflow: auto` from `.panel.grow`, which put the scrollbar around the
+ * panel's whole contents — the view-tab row included. Scrolling a long Tooling or Code
+ * listing therefore carried Board/Machining/Code/Tooling/Rack off the top of the panel,
+ * so switching view meant scrolling back up first. The scroll belongs on the view
+ * beneath the tabs; this pins the tabs in place.
+ */
+.panel.grow.project-main {
+    overflow: hidden;
+}
+
+/*
  * A job view is not a screen. Each renders *inside* this panel, beneath the view
  * tabs, but they all carry `.screen` for its flex/gap defaults — and `.screen` sets
  * `height: 100%`, which sizes the view to the whole panel with the tab row still
  * above it. The panel then overflows by exactly the tab height at every window size,
  * putting a second scrollbar beside the view's own. Inside the panel the view fills
  * what the tabs leave instead, so the only scrollbar is the content's.
+ *
+ * `.board-preview` is named alongside `.screen` because the Board view is the one that
+ * does not carry `.screen` — it sizes its own canvas — and without it the panel's
+ * `overflow: hidden` above would simply clip it.
  */
-.project-main > .screen {
+.project-main > .screen,
+.project-main > .board-preview {
     height: auto;
     flex: 1;
     min-height: 0;
+    overflow: auto;
 }
 
 /*
