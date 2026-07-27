@@ -18,7 +18,7 @@
 //! A script that throws in a WebView leaves no trace — no panic, no stderr, just a blank
 //! canvas — and WebView2's devtools have not been dependable on this project. So the
 //! page traps its own errors (`ERROR_TRAP` in `crate::ui`) and this module drains them
-//! into the Logs screen after every mount.
+//! into the Logs screen after every draw.
 
 use dioxus::prelude::*;
 
@@ -30,13 +30,22 @@ use crate::runtime::AppCtx;
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
 const CANVAS_ID: &str = "k2g-machining-3d";
 
-/// The scene script. Three placeholders are substituted before it is evaluated:
+/// The scene script. Four placeholders are substituted before it is evaluated:
 /// `CANVAS_ID_PLACEHOLDER`, `TRACES_PLACEHOLDER` (the serialised
-/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list) and `PALETTE_PLACEHOLDER`.
+/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list), `BOARD_PLACEHOLDER` (the
+/// serialised [`BoardSolid`](crate::gcode::scene::BoardSolid)) and `PALETTE_PLACEHOLDER`.
 ///
 /// Substitution rather than `dioxus.send` from the Rust side because the payload is
 /// needed *before* the first frame, and a script that has its data inlined cannot race
 /// with the channel.
+///
+/// The script is evaluated once per plan change, and splits in two on arrival: the first
+/// evaluation builds the renderer, the camera and the controls and leaves a `__k2g_draw`
+/// on the canvas; every later one calls that with the new geometry and returns. The split
+/// exists because the two halves have opposite lifetimes — a second `WebGLRenderer` on
+/// the same canvas would leak a WebGL context (browsers cap those at ~16), and a rebuilt
+/// camera would throw away wherever the user had orbited to, while the geometry has to be
+/// replaced wholesale or the view silently keeps showing the previous plan.
 ///
 /// `scratchpad/harness/render.sh` extracts this literal verbatim and renders it under
 /// headless Edge, so it can be checked without launching the app.
@@ -48,10 +57,16 @@ const BOOTSTRAP_SCRIPT: &str = r#"
   const canvas = document.getElementById("CANVAS_ID_PLACEHOLDER");
   if (!canvas) { dioxus.send("canvas #CANVAS_ID_PLACEHOLDER not found"); return; }
 
-  // Idempotent: the view re-renders on every plan change, and a second renderer on the
-  // same canvas would leak a WebGL context (browsers cap those at ~16).
-  if (canvas.__k2g_started) { dioxus.send(""); return; }
-  canvas.__k2g_started = true;
+  const board = BOARD_PLACEHOLDER;
+  const traces = TRACES_PLACEHOLDER;
+
+  // Already running on this canvas: hand the new plan to the renderer that is up and
+  // return. Everything below this line is one-per-canvas and must not run twice.
+  if (canvas.__k2g_draw) {
+    try { canvas.__k2g_draw(board, traces); dioxus.send(""); }
+    catch (err) { dioxus.send(String((err && err.stack) || err)); }
+    return;
+  }
 
   try {
     const renderer = new T.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
@@ -70,11 +85,41 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     scene.add(key);
     scene.add(new T.AxesHelper(20));
 
+    // Everything that comes from the plan hangs off one group, so a redraw is "empty the
+    // group and refill it" rather than working out which of the scene's children belonged
+    // to the previous plan.
+    const content = new T.Group();
+    scene.add(content);
+
+    // Fat lines are sized in *screen* space, so every material's `resolution` has to
+    // follow the canvas; the live set is collected here for `resize` and replaced
+    // wholesale on each redraw.
+    let materials = [];
+
+    // The bounds the camera was last framed on — see `frameScene`.
+    let framed = null;
+
+    // How far the work must move or resize, as a fraction of its own span, before a
+    // redraw is allowed to take the camera back.
+    const REFRAME_RATIO = 0.25;
+
+    // Drops the previous plan's geometry, GPU buffers included. Three.js does not free
+    // those on removal from the scene graph, so a redraw without this would grow the
+    // renderer's memory by a whole plan every time.
+    function clearContent() {
+      content.traverse(function (object) {
+        if (object.geometry) object.geometry.dispose();
+        if (object.material) object.material.dispose();
+      });
+      content.clear();
+      materials = [];
+    }
+
     // The workpiece: the outline extruded downward from Z0, with every cutout and
     // drilled hole as a hole in the shape. Real holes rather than cylinders sitting in
     // them, so you can see through the board and see the drill go somewhere.
-    const board = BOARD_PLACEHOLDER;
-    if (board && board.outline && board.outline.length > 2) {
+    function addBoard(board) {
+      if (!board || !board.outline || board.outline.length <= 2) return;
       const shape = new T.Shape(board.outline.map(function (p) { return new T.Vector2(p[0], p[1]); }));
       (board.openings || []).forEach(function (loop) {
         if (loop.length > 2) {
@@ -101,52 +146,59 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       // Z0 is the board's top surface (op-planner §6), so the slab hangs below it —
       // which is what puts the toolpaths' plunges *into* the material.
       slab.position.z = -board.thickness_mm;
-      scene.add(slab);
+      content.add(slab);
     }
 
     // The toolpaths, from the payload Rust built. One Line2 per (tool, run) — the
     // extraction merges consecutive moves of the same kind, so this is a handful of
     // objects per tool rather than one per move.
-    //
-    // Fat lines are sized in *screen* space, so every material's `resolution` has to
-    // follow the canvas; they are collected here for `resize` to update.
-    const materials = [];
-    const traces = TRACES_PLACEHOLDER;
+    function addTraces(traces) {
+      (traces || []).forEach(function (trace, index) {
+        const colour = PALETTE[index % PALETTE.length];
+        trace.moves.forEach(function (run) {
+          const flat = [];
+          run.points.forEach(function (p) { flat.push(p.x, p.y, p.z); });
+          if (flat.length < 6) return;
 
-    traces.forEach(function (trace, index) {
-      const colour = PALETTE[index % PALETTE.length];
-      trace.moves.forEach(function (run) {
-        const flat = [];
-        run.points.forEach(function (p) { flat.push(p.x, p.y, p.z); });
-        if (flat.length < 6) return;
-
-        const geometry = new T.LineGeometry();
-        geometry.setPositions(flat);
-        // Rapids read as scaffolding, cuts as the work — thin and dim against thick
-        // and saturated. The convention every backplot worth using shares.
-        const rapid = run.kind === "rapid";
-        const material = new T.LineMaterial({
-          color: rapid ? 0x55606f : colour,
-          linewidth: rapid ? 1 : 2.5,
-          transparent: rapid,
-          opacity: rapid ? 0.4 : 1.0,
-          worldUnits: false,
+          const geometry = new T.LineGeometry();
+          geometry.setPositions(flat);
+          // Rapids read as scaffolding, cuts as the work — thin and dim against thick
+          // and saturated. The convention every backplot worth using shares.
+          const rapid = run.kind === "rapid";
+          const material = new T.LineMaterial({
+            color: rapid ? 0x55606f : colour,
+            linewidth: rapid ? 1 : 2.5,
+            transparent: rapid,
+            opacity: rapid ? 0.4 : 1.0,
+            worldUnits: false,
+          });
+          materials.push(material);
+          content.add(new T.Line2(geometry, material));
         });
-        materials.push(material);
-        scene.add(new T.Line2(geometry, material));
       });
-    });
+    }
 
     // Frame whatever is in the scene. The work sits in the positive quadrant with the
     // board's min corner on the machine origin (see gcode::placement), so the centre is
     // never (0,0) and a fixed camera position would always look past the board. Fitting
     // the bounding box instead means the view is correct for any board size.
+    //
+    // A redraw only re-frames when the work has materially moved or resized. Switching
+    // an operation off barely shifts the bounds, and snapping the camera back to the
+    // default three-quarter view every time a checkbox is ticked would undo the orbit the
+    // user just made to look at the thing they are changing — whereas a different board
+    // would otherwise be left framed for the previous one.
     function frameScene() {
       const bounds = new T.Box3().setFromObject(scene);
       if (bounds.isEmpty()) return;
       const centre = bounds.getCenter(new T.Vector3());
       const size = bounds.getSize(new T.Vector3());
       const span = Math.max(size.x, size.y, size.z) || 1;
+      if (framed &&
+          centre.distanceTo(framed.centre) < framed.span * REFRAME_RATIO &&
+          Math.abs(span - framed.span) < framed.span * REFRAME_RATIO) {
+        return;
+      }
       // Back off far enough that the largest dimension fits the vertical field of view,
       // with a little air around it.
       const distance = (span / 2) / Math.tan((camera.fov * Math.PI) / 360) * 1.6;
@@ -161,8 +213,8 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       camera.far = distance * 10;
       camera.updateProjectionMatrix();
       controls.update();
+      framed = { centre: centre.clone(), span: span };
     }
-    frameScene();
 
     function resize() {
       const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
@@ -171,10 +223,43 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       camera.updateProjectionMatrix();
       materials.forEach(function (m) { m.resolution.set(w, h); });
     }
+
+    // The whole of what a plan change changes. Kept on the canvas because that is the
+    // only handle a later `eval` — which runs in page scope, with no reference to this
+    // closure — can find it by.
+    canvas.__k2g_draw = function (board, traces) {
+      clearContent();
+      addBoard(board);
+      addTraces(traces);
+      resize();          // the new fat-line materials have no resolution until this runs
+      frameScene();
+    };
+
     new ResizeObserver(resize).observe(canvas);
-    resize();
+    canvas.__k2g_draw(board, traces);
+
+    // Frames the canvas has been out of the document for. The canvas is destroyed when
+    // the Job view switches tab or the dock closes, and this loop would otherwise keep a
+    // dead renderer — and its WebGL context, of which browsers allow ~16 — alive for the
+    // life of the page, so a dozen tab switches would exhaust them. Given a grace period
+    // rather than acted on at once because the teardown is irreversible: a canvas the
+    // renderer has released cannot get its context back, so a detach that turns out to be
+    // momentary must not be fatal.
+    let orphaned = 0;
+    const ORPHAN_FRAMES = 60;
 
     (function frame() {
+      if (!canvas.isConnected) {
+        if (++orphaned > ORPHAN_FRAMES) {
+          canvas.__k2g_draw = null;
+          renderer.forceContextLoss();
+          renderer.dispose();
+          return;
+        }
+        requestAnimationFrame(frame);
+        return;                  // nothing to draw into, but keep counting
+      }
+      orphaned = 0;
       requestAnimationFrame(frame);
       controls.update();
       renderer.render(scene, camera);
@@ -189,11 +274,45 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 
     dioxus.send("");    // empty == the bootstrap got all the way through
   } catch (err) {
-    canvas.__k2g_started = false;
+    canvas.__k2g_draw = null;
     dioxus.send(String((err && err.stack) || err));
   }
 })();
 "#;
+
+/// Everything the scene script draws, already serialised.
+///
+/// One `PartialEq` value so a [`use_memo`] can tell whether there is anything new to
+/// draw. The plan is re-derived on every state change, but most changes leave the
+/// geometry byte-identical — a theme toggle, a rename, a log tick — and re-evaluating the
+/// script for those would rebuild the scene for nothing.
+#[derive(Clone, PartialEq)]
+struct ScenePayload {
+    /// The serialised [`ToolTrace`](crate::gcode::scene::ToolTrace) list.
+    traces: String,
+    /// The serialised [`BoardSolid`](crate::gcode::scene::BoardSolid), or `null`.
+    board: String,
+    tool_count: usize,
+    point_count: usize,
+}
+
+impl ScenePayload {
+    /// Plans the machining and flattens it into what the renderer is handed.
+    ///
+    /// All of it decided here, in Rust: the renderer never sees a `MachiningPlan`, it
+    /// gets points and colours, which is the entire reason the untested half of this
+    /// feature stays small.
+    fn build(ctx: &AppCtx) -> Self {
+        let traces = scene::trace_plan(&plan_machining(ctx));
+        let board = machining_plan::board_solid(ctx);
+        Self {
+            point_count: traces.iter().map(|t| t.point_count()).sum(),
+            tool_count: traces.len(),
+            traces: serde_json::to_string(&traces).unwrap_or_else(|_| "[]".to_string()),
+            board: serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string()),
+        }
+    }
+}
 
 /// The 3D toolpath canvas.
 ///
@@ -202,46 +321,46 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 /// layout and give a blurry, stretched drawing on a HiDPI display.
 #[component]
 pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
-    // Built here, in Rust, and handed over whole. The renderer never sees a
-    // `MachiningPlan` — it gets points and colours, which is the entire reason the
-    // untested half of this feature stays small.
-    let (traces, board) = {
+    // Two sources have to be watched, because a plan has two ways of changing. The
+    // fixture, stock and board come off `state`; the machining profile — the operation
+    // toggles, the per-operation settings — is a schema-driven AppData edit that only
+    // announces itself through the store revision.
+    let payload = use_memo(move || {
+        let _ = crate::ui::bindings::data_revision();
         let snapshot = state.read().clone();
-        (
-            scene::trace_plan(&plan_machining(&snapshot)),
-            machining_plan::board_solid(&snapshot),
-        )
-    };
-    let point_count: usize = traces.iter().map(|t| t.point_count()).sum();
-    let tool_count = traces.len();
-    let payload = serde_json::to_string(&traces).unwrap_or_else(|_| "[]".to_string());
-    let palette = serde_json::to_string(&scene::TOOL_PALETTE).unwrap_or_else(|_| "[]".to_string());
-    let board_json = serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string());
+        ScenePayload::build(&snapshot)
+    });
+
     // `use_effect` runs after the node exists, which is the whole point — the script
     // looks the canvas up by id and would find nothing if this ran during render.
+    //
+    // The payload is read *inside* the closure, and that read is what subscribes the
+    // effect: `use_effect` registers its closure once, so deriving the payload in the
+    // component body and capturing it here — which is what this did — pinned the view to
+    // the plan as it stood on first render, and no later edit ever reached the canvas.
     use_effect(move || {
-        let payload = payload.clone();
-        let palette = palette.clone();
-        let board_json = board_json.clone();
+        let payload = payload();
         spawn(async move {
+            let ScenePayload { traces, board, tool_count, point_count } = payload;
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
             // prevent. Both ends are logged so a hang in between is distinguishable
             // from a script that never ran.
             log::info!(
-                "3D machining view: starting WebGL bootstrap ({tool_count} tool(s), \
-                 {point_count} point(s))"
+                "3D machining view: drawing {tool_count} tool(s), {point_count} point(s)"
             );
+            let palette =
+                serde_json::to_string(&scene::TOOL_PALETTE).unwrap_or_else(|_| "[]".to_string());
             let script = BOOTSTRAP_SCRIPT
                 .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
-                .replace("TRACES_PLACEHOLDER", &payload)
+                .replace("TRACES_PLACEHOLDER", &traces)
                 .replace("PALETTE_PLACEHOLDER", &palette)
-                .replace("BOARD_PLACEHOLDER", &board_json);
+                .replace("BOARD_PLACEHOLDER", &board);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
-                    log::info!("3D machining view: WebGL bootstrap ok");
+                    log::info!("3D machining view: drawn");
                 }
-                Ok(message) => log::error!("3D machining view failed to start: {message}"),
+                Ok(message) => log::error!("3D machining view failed to draw: {message}"),
                 Err(err) => log::error!("3D machining view could not be evaluated: {err}"),
             }
             report_page_errors().await;
