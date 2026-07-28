@@ -15,6 +15,9 @@ machine:
   scaling:
     x: 1.0
     y: 1.0
+  work_coordinate_systems: 6
+  has_repeatable_home: true
+  tool_length_measurement: auto_setter
 
 primitives:
   initialise: |

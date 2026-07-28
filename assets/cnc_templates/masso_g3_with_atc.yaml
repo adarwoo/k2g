@@ -9,12 +9,15 @@
 name: "Masso G3 - With ATC"
 
 machine:
-  spindle_rpm_min: "5000rpm"
-  spindle_rpm_max: "24000rpm"
+  spindle_rpm_min: "10000rpm"
+  spindle_rpm_max: "60000rpm"
   atc_slot_count: 8
   scaling:
     x: 1.0
     y: 1.0
+  work_coordinate_systems: 6
+  has_repeatable_home: true
+  tool_length_measurement: auto_setter
 
 primitives:
   initialise: |

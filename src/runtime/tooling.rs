@@ -23,8 +23,8 @@
 use uuid::Uuid;
 
 use datastore::{Node, NodeValue, UnitValue};
-use units::Length;
-use units::UserUnitDisplay;
+use units::user_format as unit_format;
+use units::{FeedRate, Length, RotationalSpeed, UserUnitDisplay, UserUnitSystem};
 
 use crate::data::model::tool_core::ToolKind;
 use crate::data::model::{Tool, ToolsetGenerationPolicy};
@@ -33,6 +33,7 @@ use crate::gcode::assigner::{
     self, Allowance, AssignConfig, AssignError, DemandKind, DepthDetail, FaultReason, HoleDemand,
     OverflowPolicy, RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
+use crate::gcode::feeds::{self, SpindleRange};
 use crate::runtime::AppState;
 
 /// The full tooling plan: one entry per machining step (in order).
@@ -674,13 +675,15 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     else {
         return StepOutcome::Failed(vec!["The step's toolset profile could not be found.".into()]);
     };
-    let Some(atc_slots) = raw
+    // The whole profile, not just its ATC count: the spindle range is needed further down
+    // to say whether the step's tools can actually run at their rated speeds.
+    let Some(machine) = raw
         .cnc_id
         .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()))
-        .map(|m| m.atc_slot_count as usize)
     else {
         return StepOutcome::Failed(vec!["The step's CNC profile could not be found.".into()]);
     };
+    let atc_slots = machine.atc_slot_count as usize;
 
     // Build the hole demand set from the board, grouped by (kind, size) for counts.
     let holes = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
@@ -777,6 +780,24 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                 .map(|s| s.tool_id.clone())
                 .filter(|id| seen.insert(id.clone()))
                 .collect();
+
+            // Last, so a derate notice reads after the warnings about what the step cannot
+            // do at all — this one is about *how* it will run, not whether it can.
+            let loaded: Vec<LoadedTool> = tool_ids
+                .iter()
+                .filter_map(|id| ctx.tools.iter().find(|t| t.id == *id))
+                .map(|tool| LoadedTool {
+                    name: tool.display_name(),
+                    feed: tool.feed_rate,
+                    speed: tool.spindle_speed,
+                })
+                .collect();
+            warnings.extend(derate_notes(
+                &machine.name,
+                SpindleRange::new(machine.spindle_rpm_min, machine.spindle_rpm_max),
+                &loaded,
+                ctx.unit_system,
+            ));
 
             StepOutcome::Resolved(StepResolved {
                 summary: machine_summary(rack_rows.len(), atc_slots),
@@ -1142,6 +1163,108 @@ fn unroutable_slot_warning(ctx: &AppState, width: Length) -> String {
     }
 }
 
+/// One tool as the derate notice needs it: what to call it, and its rated pair.
+///
+/// Owned rather than a `&Tool` because the caller has already reduced the step's rack to
+/// distinct ids, and carrying the whole tool here would invite this to grow into a second
+/// tool model.
+pub(crate) struct LoadedTool {
+    pub name: String,
+    pub feed: Option<FeedRate>,
+    pub speed: Option<RotationalSpeed>,
+}
+
+/// Tells the operator that the step will not run at its tools' rated speeds.
+///
+/// A tool's rated feed is defined *at its rated spindle speed*, so when the machine
+/// cannot reach that speed [`feeds::resolve`] clamps the spindle and scales the feed by
+/// the same ratio, holding chip load constant. That is correct and deliberate — but it is
+/// also invisible: the program simply carries a smaller `F` than the datasheet, with
+/// nothing to distinguish a deliberate derate from a bug.
+///
+/// **Aggregated on purpose.** A catalog rating drills at 48–100 kRPM against a 24 kRPM
+/// spindle clamps *every* tool in the step, so one warning per tool would be nine lines of
+/// alarm for the entirely normal case, burying the step's real warnings (no router in
+/// stock, unroutable widths, assigner diagnostics). One line per direction, naming the
+/// worst offender, says the same thing.
+///
+/// The two directions are separate lines because they mean opposite things: capping is
+/// routine, while a tool rated *below* the spindle floor is run faster than it is rated
+/// for, which is the direction that breaks cutters.
+///
+/// Tools whose rated pair is incomplete are skipped rather than reported: generation
+/// already fails those with a message of its own ([`crate::gcode::program::BodyError`]),
+/// and repeating it here would be noise.
+pub(crate) fn derate_notes(
+    machine: &str,
+    range: SpindleRange,
+    tools: &[LoadedTool],
+    unit: UserUnitSystem,
+) -> Vec<String> {
+    // (tool name, scale, rated feed) for each tool whose speed the machine had to change.
+    let mut capped: Vec<(&str, f64, FeedRate)> = Vec::new();
+    let mut raised: Vec<(&str, f64, FeedRate)> = Vec::new();
+
+    for tool in tools {
+        let Ok(resolved) = feeds::resolve(tool.feed, tool.speed, range) else {
+            continue;
+        };
+        if !resolved.clamped {
+            continue;
+        }
+        // Both are `Some` — `resolve` would have errored otherwise.
+        let (Some(rated_feed), Some(rated_speed)) = (tool.feed, tool.speed) else {
+            continue;
+        };
+        let scale = resolved.rpm.as_rpm() / rated_speed.as_rpm();
+        if scale < 1.0 {
+            capped.push((tool.name.as_str(), scale, rated_feed));
+        } else {
+            raised.push((tool.name.as_str(), scale, rated_feed));
+        }
+    }
+
+    let total = tools.len();
+    let mut notes = Vec::new();
+
+    // The worst case is the one the operator needs to sanity-check: the deepest cut in
+    // feed when capping, the largest increase when raising.
+    if let Some(worst) = capped.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+        notes.push(format!(
+            "{} of {total} tool(s) exceed {machine}'s {} ceiling — the spindle is capped and \
+             feeds are derated in proportion to hold chip load. Deepest: {} at {} of its rated {}.",
+            capped.len(),
+            unit_format::format_rotational_speed_display(range.max),
+            worst.0,
+            percent(worst.1),
+            worst.2.unit_display(unit).user,
+        ));
+    }
+    if let Some(worst) = raised.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+        notes.push(format!(
+            "{} of {total} tool(s) are rated below {machine}'s {} floor — the spindle is raised \
+             and feeds scaled up in proportion. Largest: {} at {} of its rated {}.",
+            raised.len(),
+            unit_format::format_rotational_speed_display(range.min),
+            worst.0,
+            percent(worst.1),
+            worst.2.unit_display(unit).user,
+        ));
+    }
+    notes
+}
+
+/// A feed/speed ratio as a percentage, without a trailing `.0` on the whole numbers that
+/// round ratings usually produce.
+fn percent(scale: f64) -> String {
+    let value = scale * 100.0;
+    if (value - value.round()).abs() < 0.05 {
+        format!("{}%", value.round())
+    } else {
+        format!("{value:.1}%")
+    }
+}
+
 /// Maps a toolset + ATC count to the assigner's rack spec. Capacity = usable
 /// (non-disabled) slots, capped by the ATC size when the machine has one.
 pub(crate) fn build_rack_spec(
@@ -1377,6 +1500,106 @@ mod tests {
             plated: None,
             orientation_deg: None,
         }
+    }
+
+    // --- derate notices ----------------------------------------------------
+
+    fn loaded(name: &str, feed_mm_min: f64, rpm: f64) -> LoadedTool {
+        LoadedTool {
+            name: name.to_string(),
+            feed: Some(FeedRate::from_mm_per_min(feed_mm_min)),
+            speed: Some(RotationalSpeed::from_rpm(rpm)),
+        }
+    }
+
+    fn spindle(min: f64, max: f64) -> SpindleRange {
+        SpindleRange::new(RotationalSpeed::from_rpm(min), RotationalSpeed::from_rpm(max))
+    }
+
+    /// The case this feature exists for: the catalog rates drills far above the spindle,
+    /// so everything is capped. One line, not one per tool.
+    #[test]
+    fn every_capped_tool_collapses_into_a_single_note() {
+        let tools = vec![
+            loaded("1.0mm drill", 14_400.0, 48_000.0), // → 50%
+            loaded("0.8mm drill", 17_100.0, 57_000.0), // → 42.1%
+            loaded("0.3mm drill", 20_000.0, 100_000.0), // → 24%, the deepest
+        ];
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        assert_eq!(notes.len(), 1, "one aggregated line, not one per tool: {notes:#?}");
+        let note = &notes[0];
+        assert!(note.contains("3 of 3 tool(s)"), "counts them: {note}");
+        assert!(note.contains("24000 rpm"), "names the ceiling: {note}");
+        assert!(note.contains("0.3mm drill"), "names the worst offender: {note}");
+        assert!(note.contains("24%"), "reports the deepest derate: {note}");
+        // Unspaced, which is how `UserUnitDisplay` renders a feed everywhere else.
+        assert!(note.contains("20000mm/min"), "against the rated feed: {note}");
+    }
+
+    /// The two directions mean opposite things, so they never share a line.
+    #[test]
+    fn capping_and_raising_are_reported_separately() {
+        let tools = vec![
+            loaded("1.0mm drill", 14_400.0, 48_000.0), // above the ceiling
+            loaded("slow cutter", 200.0, 1_000.0),     // below the floor
+        ];
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        assert_eq!(notes.len(), 2, "one per direction: {notes:#?}");
+        assert!(notes[0].contains("capped"), "capping first: {}", notes[0]);
+        assert!(notes[1].contains("raised"), "then raising: {}", notes[1]);
+        assert!(notes[1].contains("slow cutter") && notes[1].contains("500%"), "{}", notes[1]);
+    }
+
+    /// The guard against alarm fatigue: a machine that can reach the ratings says nothing.
+    #[test]
+    fn nothing_clamped_produces_no_note_at_all() {
+        let tools = vec![loaded("1.0mm drill", 600.0, 12_000.0)];
+        let notes =
+            derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        assert!(notes.is_empty(), "rated speed is reachable — nothing to say: {notes:#?}");
+    }
+
+    /// A missing rating is generation's error to report, with its own message. Counting it
+    /// here would double-report it, and the total must stay honest either way.
+    #[test]
+    fn a_tool_missing_its_rating_is_skipped_not_counted() {
+        let tools = vec![
+            loaded("1.0mm drill", 14_400.0, 48_000.0),
+            LoadedTool { name: "no feed".into(), feed: None, speed: Some(RotationalSpeed::from_rpm(60_000.0)) },
+            LoadedTool { name: "no speed".into(), feed: Some(FeedRate::from_mm_per_min(400.0)), speed: None },
+        ];
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("1 of 3 tool(s)"), "only the rated one is counted: {}", notes[0]);
+        assert!(!notes[0].contains("no feed") && !notes[0].contains("no speed"), "{}", notes[0]);
+    }
+
+    /// "Worst" is the deepest cut when capping but the largest increase when raising —
+    /// opposite ends of the scale, and easy to get backwards.
+    #[test]
+    fn the_worst_offender_is_picked_from_the_right_end_of_each_range() {
+        let capped = vec![
+            loaded("mild", 1_000.0, 30_000.0),  // → 80%
+            loaded("severe", 1_000.0, 96_000.0), // → 25%
+        ];
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &capped, UserUnitSystem::Metric);
+        assert!(notes[0].contains("severe") && notes[0].contains("25%"), "{}", notes[0]);
+
+        let raised = vec![
+            loaded("mild", 1_000.0, 4_000.0), // → 125%
+            loaded("severe", 1_000.0, 500.0), // → 1000%
+        ];
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &raised, UserUnitSystem::Metric);
+        assert!(notes[0].contains("severe") && notes[0].contains("1000%"), "{}", notes[0]);
+    }
+
+    /// Figures follow the user's units like every other number on the screen.
+    #[test]
+    fn the_rated_feed_is_shown_in_the_users_units() {
+        let tools = vec![loaded("1.0mm drill", 25_400.0, 48_000.0)];
+        let notes =
+            derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Imperial);
+        assert!(notes[0].contains("1000ipm"), "25400 mm/min is 1000 ipm: {}", notes[0]);
     }
 
     #[test]
