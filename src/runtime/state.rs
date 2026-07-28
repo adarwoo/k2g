@@ -12,7 +12,7 @@ impl AppState {
 
         let mut state = Self {
             selected_screen: Screen::Job,
-            selected_job_view: JobCenterView::Board,
+            selected_job_view: JobCenterView::Code, // TEMP-CAPTURE
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -1072,6 +1072,8 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
         "machine": {
             "spindle_rpm_min": machine.spindle_rpm_min.to_string(),
             "spindle_rpm_max": machine.spindle_rpm_max.to_string(),
+            "max_feed_xy": machine.max_feed_xy.to_string(),
+            "max_feed_z": machine.max_feed_z.to_string(),
             "atc_slot_count": machine.atc_slot_count,
             "scaling": {
                 "x": machine.scaling_x,
@@ -1110,6 +1112,8 @@ fn machine_required_paths() -> &'static [&'static str] {
         "id",
         "machine.spindle_rpm_min",
         "machine.spindle_rpm_max",
+        "machine.max_feed_xy",
+        "machine.max_feed_z",
         "machine.atc_slot_count",
         "machine.scaling.x",
         "machine.scaling.y",
@@ -1195,6 +1199,19 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         .or_else(|| value.get("spindle_max_rpm").and_then(Value::as_u64).map(|v| units::RotationalSpeed::from_rpm(v as f64)))
         .unwrap_or_else(|| units::RotationalSpeed::from_rpm(24000.0));
 
+    // The schema defaults both to 5000mm/min and the parser fills that in for a profile
+    // written before they existed, so the fallback here is only reached by a value the
+    // unit parser rejects. It matches the schema rather than inventing a third number.
+    let feed_at = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .and_then(|raw| units::FeedRate::from_string(raw, Some(units::FeedRateUnit::MmPerMin)).ok())
+            .unwrap_or_else(|| units::FeedRate::from_mm_per_min(5000.0))
+    };
+    let max_feed_xy = feed_at("/machine/max_feed_xy");
+    let max_feed_z = feed_at("/machine/max_feed_z");
+
     let atc_slot_count = value
         .pointer("/machine/atc_slot_count")
         .and_then(Value::as_u64)
@@ -1221,6 +1238,8 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         name,
         spindle_rpm_min,
         spindle_rpm_max,
+        max_feed_xy,
+        max_feed_z,
         atc_slot_count,
         scaling_x,
         scaling_y,

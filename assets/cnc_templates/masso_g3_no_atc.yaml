@@ -11,6 +11,11 @@ name: "Masso G3 - Manual Tool Change"
 machine:
   spindle_rpm_min: "5000rpm"
   spindle_rpm_max: "24000rpm"
+  # Conservative starting values: the machine's real limits are on its
+  # specification, and a tool rated faster is run at a lower spindle speed so
+  # its chip load is still met.
+  max_feed_xy: "5000mm/min"
+  max_feed_z: "5000mm/min"
   atc_slot_count: 0
   scaling:
     x: 1.0

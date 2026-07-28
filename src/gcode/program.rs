@@ -18,13 +18,14 @@ use gtl::Scope;
 use units::{FeedRate, RotationalSpeed};
 
 use crate::gcode::coder::Coder;
-use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, SpindleRange};
+use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, MachineLimits, Motion};
 use crate::gcode::plan::{OpKind, StepPlan};
 use crate::gcode::routing::{self, RouteMove};
 
 /// The per-step rendering context the body needs beyond the plan: the CNC's operation
-/// primitive templates, its spindle range (for the feed/speed clamp), and whether tool
-/// changes are automatic (ATC) — a manual machine gets an operator prompt instead.
+/// primitive templates, its spindle and axis limits (for the feed/speed solve), and
+/// whether tool changes are automatic (ATC) — a manual machine gets an operator prompt
+/// instead.
 #[derive(Clone)]
 pub struct StepRender {
     pub drill_tpl: String,
@@ -36,7 +37,7 @@ pub struct StepRender {
     pub rapid_move_tpl: String,
     pub linear_cut_tpl: String,
     pub cut_arc_tpl: String,
-    pub spindle: SpindleRange,
+    pub limits: MachineLimits,
     pub is_atc: bool,
 }
 
@@ -87,7 +88,16 @@ pub fn render_step_body(
             Some(tf) => (tf.name.clone(), tf.feed, tf.speed),
             None => (block.tool_id.clone(), None, None),
         };
-        let fs = feeds::resolve(feed, speed, render.spindle)
+        // The block commands its spindle speed once, so the solve has to account for every
+        // move it will make: a block that drills is bound by Z alone, while anything that
+        // routes feeds laterally too. `any` rather than `all` because the binding
+        // constraint is the most restrictive one present.
+        let motion = if block.ops.iter().any(|op| !matches!(op.kind, OpKind::Drill)) {
+            Motion::Routing
+        } else {
+            Motion::Drilling
+        };
+        let fs = feeds::resolve(feed, speed, render.limits, motion)
             .map_err(|e| BodyError::Feeds { tool: name.clone(), message: feeds_error_text(e) })?;
         let slot = block.slot.unwrap_or(0) as i64;
 
@@ -314,10 +324,17 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
         linear_cut_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
         cut_arc_tpl: r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#
             .to_string(),
-        spindle: SpindleRange::new(
-            RotationalSpeed::from_rpm(5_000.0),
-            RotationalSpeed::from_rpm(24_000.0),
-        ),
+        limits: MachineLimits {
+            spindle: feeds::SpindleRange::new(
+                RotationalSpeed::from_rpm(5_000.0),
+                RotationalSpeed::from_rpm(24_000.0),
+            ),
+            // High enough not to bind, so a test that means to exercise the spindle clamp
+            // is not silently also exercising the axis ceiling. The tests that care about
+            // the ceiling set it themselves.
+            max_feed_xy: FeedRate::from_mm_per_min(1e9),
+            max_feed_z: FeedRate::from_mm_per_min(1e9),
+        },
         is_atc,
     }
 }

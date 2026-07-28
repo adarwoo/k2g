@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use serde_json::Value;
-use units::{Length, RotationalSpeed};
+use units::{FeedRate, Length, RotationalSpeed};
 
 use super::job::{ProductionOperation, Side};
 use super::state::RackSlot;
@@ -13,6 +13,13 @@ pub struct MachineProfile {
     pub name: String,
     pub spindle_rpm_min: RotationalSpeed,
     pub spindle_rpm_max: RotationalSpeed,
+    /// The fastest the machine can feed in the XY plane. A tool rated faster is run at a
+    /// lower spindle speed rather than merely fed slower, so its chip load still holds —
+    /// see [`crate::gcode::feeds`].
+    pub max_feed_xy: FeedRate,
+    /// The same for Z. Kept separate because Z is usually the slower axis and drilling is
+    /// entirely Z motion, so this is the limit that most often binds.
+    pub max_feed_z: FeedRate,
     pub atc_slot_count: u8,
     pub scaling_x: f32,
     pub scaling_y: f32,
@@ -44,6 +51,11 @@ impl Default for MachineProfile {
             name: String::new(),
             spindle_rpm_min: RotationalSpeed::from_rpm(0.0),
             spindle_rpm_max: RotationalSpeed::from_rpm(0.0),
+            // Zero, not the schema's 5000: a `Default` profile is a placeholder that has
+            // not been read from anywhere, and inventing a plausible machine limit here
+            // would let an unconfigured CNC silently produce a program.
+            max_feed_xy: FeedRate::from_mm_per_min(0.0),
+            max_feed_z: FeedRate::from_mm_per_min(0.0),
             atc_slot_count: 0,
             scaling_x: 1.0,
             scaling_y: 1.0,

@@ -99,6 +99,45 @@ properties:
         $ref: "units.yaml#/$defs/rpm"
 
       # -----------------------------------------------------------------------
+      # max_feed_xy
+      # -----------------------------------------------------------------------
+      # The fastest the machine can actually feed in the XY plane, from its
+      # specification — not a preference. A tool rated faster than this is run at a
+      # lower spindle speed so its chip load is still met (see max_feed_z).
+      #
+      # Valid examples:
+      #   max_feed_xy: "5000mm/min"
+      #   max_feed_xy: "5000 mm/min"
+      #   max_feed_xy: "200 ipm"
+      #
+      max_feed_xy:
+        description: >
+          Maximum feed rate the machine can sustain in the XY plane. Used to cap
+          routing feeds: a tool whose rated feed exceeds it is run at a proportionally
+          lower spindle speed rather than simply being fed slower, so feed per
+          revolution is preserved.
+        default: "5000mm/min"
+        $ref: "units.yaml#/$defs/feed"
+
+      # -----------------------------------------------------------------------
+      # max_feed_z
+      # -----------------------------------------------------------------------
+      # The Z axis is usually the slow one, and drilling is *entirely* Z motion, so
+      # this is the limit that most often binds. Kept separate from max_feed_xy
+      # precisely so a slow Z does not needlessly throttle lateral routing.
+      #
+      # Valid examples:
+      #   max_feed_z: "5000mm/min"
+      #   max_feed_z: "1500 mm/min"
+      #
+      max_feed_z:
+        description: >
+          Maximum feed rate the machine can sustain on Z. Binds every drilling plunge,
+          and the entry plunge of a routing pass. Usually lower than max_feed_xy.
+        default: "5000mm/min"
+        $ref: "units.yaml#/$defs/feed"
+
+      # -----------------------------------------------------------------------
       # atc_slot_count
       # -----------------------------------------------------------------------
       # Number of automatic tool changer slots.
@@ -238,6 +277,10 @@ properties:
     required:
       - spindle_rpm_min
       - spindle_rpm_max
+      # Required, but both carry a default, so a profile written before they existed
+      # loads with the conservative 5000mm/min filled in rather than being rejected.
+      - max_feed_xy
+      - max_feed_z
       - atc_slot_count
       - scaling
 

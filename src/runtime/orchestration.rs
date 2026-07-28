@@ -196,7 +196,7 @@ impl AppCtx {
     /// ATC flag (a manual machine gets an operator prompt). Empty templates when the
     /// step has no resolvable CNC — a case the readiness gate already blocks.
     fn build_step_render_ctx(machine: Option<&MachineProfile>) -> crate::gcode::program::StepRender {
-        use crate::gcode::feeds::SpindleRange;
+        use crate::gcode::feeds::{MachineLimits, SpindleRange};
         match machine {
             Some(m) => crate::gcode::program::StepRender {
                 drill_tpl: m.drill_next_hole.clone(),
@@ -206,7 +206,11 @@ impl AppCtx {
                 rapid_move_tpl: m.drill_first_move.clone(),
                 linear_cut_tpl: m.drill_cycle_mode_series.clone(),
                 cut_arc_tpl: m.route_plunge_and_offset.clone(),
-                spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
+                limits: MachineLimits {
+                    spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
+                    max_feed_xy: m.max_feed_xy,
+                    max_feed_z: m.max_feed_z,
+                },
                 is_atc: m.atc_slot_count > 0,
             },
             None => crate::gcode::program::StepRender {
@@ -217,10 +221,16 @@ impl AppCtx {
                 rapid_move_tpl: String::new(),
                 linear_cut_tpl: String::new(),
                 cut_arc_tpl: String::new(),
-                spindle: SpindleRange::new(
-                    units::RotationalSpeed::from_rpm(1_000.0),
-                    units::RotationalSpeed::from_rpm(24_000.0),
-                ),
+                limits: MachineLimits {
+                    spindle: SpindleRange::new(
+                        units::RotationalSpeed::from_rpm(1_000.0),
+                        units::RotationalSpeed::from_rpm(24_000.0),
+                    ),
+                    // The schema's own default, so a step with no resolvable CNC behaves
+                    // like a freshly created profile rather than like an unlimited machine.
+                    max_feed_xy: units::FeedRate::from_mm_per_min(5_000.0),
+                    max_feed_z: units::FeedRate::from_mm_per_min(5_000.0),
+                },
                 is_atc: false,
             },
         }

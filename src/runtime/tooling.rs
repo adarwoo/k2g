@@ -33,7 +33,7 @@ use crate::gcode::assigner::{
     self, Allowance, AssignConfig, AssignError, DemandKind, DepthDetail, FaultReason, HoleDemand,
     OverflowPolicy, RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
-use crate::gcode::feeds::{self, SpindleRange};
+use crate::gcode::feeds::{self, Limited, MachineLimits, Motion, SpindleRange};
 use crate::runtime::AppState;
 
 /// The full tooling plan: one entry per machining step (in order).
@@ -790,11 +790,18 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                     name: tool.display_name(),
                     feed: tool.feed_rate,
                     speed: tool.spindle_speed,
+                    // Same predicate the router selection uses, so "can it mill?" has one
+                    // answer in this module rather than two that could drift.
+                    motion: if is_router_tool(tool) { Motion::Routing } else { Motion::Drilling },
                 })
                 .collect();
             warnings.extend(derate_notes(
                 &machine.name,
-                SpindleRange::new(machine.spindle_rpm_min, machine.spindle_rpm_max),
+                MachineLimits {
+                    spindle: SpindleRange::new(machine.spindle_rpm_min, machine.spindle_rpm_max),
+                    max_feed_xy: machine.max_feed_xy,
+                    max_feed_z: machine.max_feed_z,
+                },
                 &loaded,
                 ctx.unit_system,
             ));
@@ -1172,72 +1179,81 @@ pub(crate) struct LoadedTool {
     pub name: String,
     pub feed: Option<FeedRate>,
     pub speed: Option<RotationalSpeed>,
+    /// Which axis limit binds it — a router feeds laterally, everything else plunges.
+    pub motion: Motion,
 }
 
-/// Tells the operator that the step will not run at its tools' rated speeds.
+/// Tells the operator that the step will not run at its tools' rated values.
 ///
-/// A tool's rated feed is defined *at its rated spindle speed*, so when the machine
-/// cannot reach that speed [`feeds::resolve`] clamps the spindle and scales the feed by
-/// the same ratio, holding chip load constant. That is correct and deliberate — but it is
-/// also invisible: the program simply carries a smaller `F` than the datasheet, with
-/// nothing to distinguish a deliberate derate from a bug.
+/// A tool's rated feed is defined *at its rated spindle speed*, so when the machine cannot
+/// deliver that pair [`feeds::resolve`] moves the spindle and scales the feed with it,
+/// holding chip load constant. That is correct and deliberate — but it is also invisible:
+/// the program simply carries a smaller `F` than the datasheet, with nothing to
+/// distinguish a deliberate derate from a bug.
 ///
-/// **Aggregated on purpose.** A catalog rating drills at 48–100 kRPM against a 24 kRPM
-/// spindle clamps *every* tool in the step, so one warning per tool would be nine lines of
+/// **Aggregated on purpose.** A catalog rating drills at 48–100 kRPM against a slower
+/// spindle clamps most of a step's tools, so one warning per tool would be nine lines of
 /// alarm for the entirely normal case, burying the step's real warnings (no router in
-/// stock, unroutable widths, assigner diagnostics). One line per direction, naming the
-/// worst offender, says the same thing.
+/// stock, unroutable widths, assigner diagnostics). One line per cause, naming the worst
+/// offender, says the same thing.
 ///
-/// The two directions are separate lines because they mean opposite things: capping is
-/// routine, while a tool rated *below* the spindle floor is run faster than it is rated
-/// for, which is the direction that breaks cutters.
+/// The causes are separate lines because they mean different things and have different
+/// fixes: capping is routine, a tool rated *below* the spindle floor is run faster than it
+/// is rated for, a feed ceiling means the job is slower than it needs to be (raise the
+/// axis limit if the machine really is faster), and a conflict means the chip load is not
+/// being met at all.
 ///
 /// Tools whose rated pair is incomplete are skipped rather than reported: generation
 /// already fails those with a message of its own ([`crate::gcode::program::BodyError`]),
 /// and repeating it here would be noise.
 pub(crate) fn derate_notes(
     machine: &str,
-    range: SpindleRange,
+    limits: MachineLimits,
     tools: &[LoadedTool],
     unit: UserUnitSystem,
 ) -> Vec<String> {
-    // (tool name, scale, rated feed) for each tool whose speed the machine had to change.
+    // (tool name, scale, rated feed) per cause, where scale is running rpm ÷ rated rpm.
     let mut capped: Vec<(&str, f64, FeedRate)> = Vec::new();
     let mut raised: Vec<(&str, f64, FeedRate)> = Vec::new();
+    let mut feed_bound: Vec<(&str, f64, FeedRate)> = Vec::new();
+    let mut conflicted: Vec<(&str, f64, FeedRate)> = Vec::new();
 
     for tool in tools {
-        let Ok(resolved) = feeds::resolve(tool.feed, tool.speed, range) else {
+        let Ok(resolved) = feeds::resolve(tool.feed, tool.speed, limits, tool.motion) else {
             continue;
         };
-        if !resolved.clamped {
-            continue;
-        }
         // Both are `Some` — `resolve` would have errored otherwise.
         let (Some(rated_feed), Some(rated_speed)) = (tool.feed, tool.speed) else {
             continue;
         };
         let scale = resolved.rpm.as_rpm() / rated_speed.as_rpm();
-        if scale < 1.0 {
-            capped.push((tool.name.as_str(), scale, rated_feed));
-        } else {
-            raised.push((tool.name.as_str(), scale, rated_feed));
+        let entry = (tool.name.as_str(), scale, rated_feed);
+        match resolved.limit {
+            Limited::No => {}
+            Limited::Spindle if scale < 1.0 => capped.push(entry),
+            Limited::Spindle => raised.push(entry),
+            Limited::Feed => feed_bound.push(entry),
+            Limited::Conflict => conflicted.push(entry),
         }
     }
 
     let total = tools.len();
     let mut notes = Vec::new();
+    // The worst case is the one to sanity-check: the deepest cut in speed, or the largest
+    // increase where the spindle floor pushed tools up.
+    let deepest = |group: &[(&str, f64, FeedRate)]| {
+        group.iter().min_by(|a, b| a.1.total_cmp(&b.1)).map(|w| (w.0.to_string(), w.1, w.2))
+    };
 
-    // The worst case is the one the operator needs to sanity-check: the deepest cut in
-    // feed when capping, the largest increase when raising.
-    if let Some(worst) = capped.iter().min_by(|a, b| a.1.total_cmp(&b.1)) {
+    if let Some((name, scale, rated)) = deepest(&capped) {
         notes.push(format!(
             "{} of {total} tool(s) exceed {machine}'s {} ceiling — the spindle is capped and \
-             feeds are derated in proportion to hold chip load. Deepest: {} at {} of its rated {}.",
+             feeds are derated in proportion to hold chip load. Deepest: {name} at {} of its \
+             rated {}.",
             capped.len(),
-            unit_format::format_rotational_speed_display(range.max),
-            worst.0,
-            percent(worst.1),
-            worst.2.unit_display(unit).user,
+            unit_format::format_rotational_speed_display(limits.spindle.max),
+            percent(scale),
+            rated.unit_display(unit).user,
         ));
     }
     if let Some(worst) = raised.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
@@ -1245,10 +1261,34 @@ pub(crate) fn derate_notes(
             "{} of {total} tool(s) are rated below {machine}'s {} floor — the spindle is raised \
              and feeds scaled up in proportion. Largest: {} at {} of its rated {}.",
             raised.len(),
-            unit_format::format_rotational_speed_display(range.min),
+            unit_format::format_rotational_speed_display(limits.spindle.min),
             worst.0,
             percent(worst.1),
             worst.2.unit_display(unit).user,
+        ));
+    }
+    if let Some((name, scale, rated)) = deepest(&feed_bound) {
+        notes.push(format!(
+            "{} of {total} tool(s) want a feed faster than {machine} can move ({} in XY, {} on Z) \
+             — the spindle is lowered to suit, which holds chip load but makes the job slower. \
+             Deepest: {name} at {} of its rated {}. Raise the machine's feed limits if it really \
+             is faster.",
+            feed_bound.len(),
+            limits.max_feed_xy.unit_display(unit).user,
+            limits.max_feed_z.unit_display(unit).user,
+            percent(scale),
+            rated.unit_display(unit).user,
+        ));
+    }
+    if let Some((name, _, rated)) = deepest(&conflicted) {
+        notes.push(format!(
+            "{} of {total} tool(s) cannot meet their rated chip load on {machine}: the feed they \
+             need is beyond the axis ({} on Z) at every speed the spindle will run ({} minimum), \
+             so the feed is capped and they will cut lighter than rated. Worst: {name}, rated {}.",
+            conflicted.len(),
+            limits.max_feed_z.unit_display(unit).user,
+            unit_format::format_rotational_speed_display(limits.spindle.min),
+            rated.unit_display(unit).user,
         ));
     }
     notes
@@ -1509,11 +1549,25 @@ mod tests {
             name: name.to_string(),
             feed: Some(FeedRate::from_mm_per_min(feed_mm_min)),
             speed: Some(RotationalSpeed::from_rpm(rpm)),
+            motion: Motion::Drilling,
         }
     }
 
-    fn spindle(min: f64, max: f64) -> SpindleRange {
-        SpindleRange::new(RotationalSpeed::from_rpm(min), RotationalSpeed::from_rpm(max))
+    /// Spindle limits only: the axes are set far beyond anything a test tool asks for, so
+    /// a test about the spindle range is not silently also a test about the feed ceiling.
+    fn spindle(min: f64, max: f64) -> MachineLimits {
+        machine(min, max, 1e9, 1e9)
+    }
+
+    fn machine(rpm_min: f64, rpm_max: f64, xy: f64, z: f64) -> MachineLimits {
+        MachineLimits {
+            spindle: SpindleRange::new(
+                RotationalSpeed::from_rpm(rpm_min),
+                RotationalSpeed::from_rpm(rpm_max),
+            ),
+            max_feed_xy: FeedRate::from_mm_per_min(xy),
+            max_feed_z: FeedRate::from_mm_per_min(z),
+        }
     }
 
     /// The case this feature exists for: the catalog rates drills far above the spindle,
@@ -1565,8 +1619,18 @@ mod tests {
     fn a_tool_missing_its_rating_is_skipped_not_counted() {
         let tools = vec![
             loaded("1.0mm drill", 14_400.0, 48_000.0),
-            LoadedTool { name: "no feed".into(), feed: None, speed: Some(RotationalSpeed::from_rpm(60_000.0)) },
-            LoadedTool { name: "no speed".into(), feed: Some(FeedRate::from_mm_per_min(400.0)), speed: None },
+            LoadedTool {
+                name: "no feed".into(),
+                feed: None,
+                speed: Some(RotationalSpeed::from_rpm(60_000.0)),
+                motion: Motion::Drilling,
+            },
+            LoadedTool {
+                name: "no speed".into(),
+                feed: Some(FeedRate::from_mm_per_min(400.0)),
+                speed: None,
+                motion: Motion::Drilling,
+            },
         ];
         let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
         assert_eq!(notes.len(), 1);
@@ -1591,6 +1655,68 @@ mod tests {
         ];
         let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &raised, UserUnitSystem::Metric);
         assert!(notes[0].contains("severe") && notes[0].contains("1000%"), "{}", notes[0]);
+    }
+
+    /// A machine that can reach the speed but not move that fast gets its own line, with
+    /// the fix named — the axis limits are configuration, and may simply be too low.
+    #[test]
+    fn an_axis_that_cannot_keep_up_is_reported_separately_from_the_spindle() {
+        // 20000 mm/min @ 100000 rpm is 0.2 mm/rev; a 1500 mm/min Z delivers that at
+        // 7500 rpm, well inside the spindle range, so the axis is what binds.
+        let tools = vec![loaded("0.3mm drill", 20_000.0, 100_000.0)];
+        let notes = derate_notes(
+            "CNC#1",
+            machine(1_000.0, 100_000.0, 5_000.0, 1_500.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
+        assert!(notes[0].contains("1500mm/min"), "names the Z limit: {}", notes[0]);
+        assert!(notes[0].contains("7.5%"), "7500 of 100000 rpm: {}", notes[0]);
+        assert!(notes[0].contains("Raise the machine's feed limits"), "names the fix: {}", notes[0]);
+    }
+
+    /// The unsolvable case says plainly that the chip load is *not* being met — it is the
+    /// one message here that is about damage rather than about speed.
+    #[test]
+    fn an_unreachable_chip_load_is_called_out_as_such() {
+        let tools = vec![loaded("0.3mm drill", 20_000.0, 100_000.0)];
+        let notes = derate_notes(
+            "CNC#1",
+            machine(10_000.0, 100_000.0, 5_000.0, 1_500.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
+        assert_eq!(notes.len(), 1, "{notes:#?}");
+        assert!(notes[0].contains("cannot meet their rated chip load"), "{}", notes[0]);
+        assert!(notes[0].contains("cut lighter than rated"), "{}", notes[0]);
+    }
+
+    /// A router's plunge is derated to a third, so the same Z allows three times the feed
+    /// — it must not be reported against the drilling ceiling.
+    #[test]
+    fn a_router_is_judged_against_the_routing_ceiling() {
+        let mut router = loaded("1.4mm router", 4_400.0, 34_000.0);
+        router.motion = Motion::Routing;
+        // Z 1500 permits 4500 laterally, which covers the router's 4400 — nothing to say.
+        let notes = derate_notes(
+            "CNC#1",
+            machine(1_000.0, 100_000.0, 5_000.0, 1_500.0),
+            &[router],
+            UserUnitSystem::Metric,
+        );
+        assert!(notes.is_empty(), "4400 fits under 3 × 1500: {notes:#?}");
+
+        // The same tool judged as a drill would be capped at 1500 instead.
+        let drill = loaded("1.4mm router", 4_400.0, 34_000.0);
+        let notes = derate_notes(
+            "CNC#1",
+            machine(1_000.0, 100_000.0, 5_000.0, 1_500.0),
+            &[drill],
+            UserUnitSystem::Metric,
+        );
+        assert_eq!(notes.len(), 1, "as a plunge it does not fit: {notes:#?}");
     }
 
     /// Figures follow the user's units like every other number on the screen.
