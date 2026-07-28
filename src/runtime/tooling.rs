@@ -841,6 +841,33 @@ pub(crate) fn bottom_side_steps_reason(steps: &[StepRaw]) -> Option<String> {
     })
 }
 
+/// Describes any operation two steps both claim on the same board side, or `None` when
+/// every step's work is its own. The readiness gate turns this into a no-go reason.
+///
+/// The machining editor disables the checkbox that would create such a profile, so this
+/// exists for the ones it never saw: hand-edited YAML, an imported profile, or one
+/// written before the rule existed. Blocking rather than warning, because the output is
+/// not degraded but wrong — two programs driving a tool through the same holes, the
+/// second one into a board that the first has already released from its tabs.
+///
+/// Takes the steps rather than a profile id for the same reason
+/// [`bottom_side_steps_reason`] does: so the decision is testable without the store.
+pub(crate) fn duplicate_operations_reason(steps: &[StepRaw]) -> Option<String> {
+    let conflicts = crate::data::model::conflicting_operations(
+        steps
+            .iter()
+            .map(|step| (step.name.as_str(), step.machines_bottom, step.operations.as_slice())),
+    );
+
+    (!conflicts.is_empty()).then(|| {
+        conflicts
+            .iter()
+            .map(|conflict| conflict.message())
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
 fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let has_pth = raw.drills_pth();
@@ -2049,8 +2076,6 @@ mod tests {
         assert_eq!(plan.mandatory_ids(), vec!["big".to_string(), "small".to_string()]);
     }
 
-    /// A round hole has no slot router, and slots are only resolved when the step's
-    /// oblong strategy actually mills them.
     /// Builds a step that machines `side`, with everything else irrelevant to the test.
     fn step_on(name: &str, machines_bottom: bool) -> StepRaw {
         StepRaw {
@@ -2102,6 +2127,56 @@ mod tests {
             .expect("two bottom-side steps must be refused");
         assert!(both.contains("steps "), "plural for two: {both}");
         assert!(both.contains("'A', 'B'"), "names both: {both}");
+    }
+
+    /// Two steps cutting the same feature on the same side must stop generation.
+    ///
+    /// The editor disables the checkbox that would do this, so a profile reaching the
+    /// gate with a clash was hand-edited or imported. It cannot be allowed through: the
+    /// second program drives a tool back through holes that are already there, into a
+    /// board the first program may have released from its tabs.
+    #[test]
+    fn an_operation_claimed_by_two_steps_on_one_side_is_refused() {
+        let step_doing = |name: &str, bottom: bool, ops: &[&str]| StepRaw {
+            operations: ops.iter().map(|op| op.to_string()).collect(),
+            ..step_on(name, bottom)
+        };
+
+        assert_eq!(duplicate_operations_reason(&[]), None, "no steps, nothing to clash");
+        assert_eq!(
+            duplicate_operations_reason(&[
+                step_doing("Drill", false, &["drill_pth", "drill_npth"]),
+                step_doing("Cut out", false, &["route_board"]),
+            ]),
+            None,
+            "a profile that splits its work generates"
+        );
+
+        let reason = duplicate_operations_reason(&[
+            step_doing("Drill", false, &["drill_pth"]),
+            step_doing("Drill again", false, &["drill_pth"]),
+        ])
+        .expect("the same holes drilled twice must be refused");
+        assert!(reason.contains("Drill plated holes"), "names the operation: {reason}");
+        assert!(reason.contains("'Drill'") && reason.contains("'Drill again'"), "names both steps: {reason}");
+    }
+
+    /// Milling the component side and then the solder side is the two-sided workflow,
+    /// not a mistake — the rule counts the sides apart.
+    #[test]
+    fn the_same_operation_on_opposite_sides_is_allowed_through() {
+        let step_doing = |name: &str, bottom: bool, ops: &[&str]| StepRaw {
+            operations: ops.iter().map(|op| op.to_string()).collect(),
+            ..step_on(name, bottom)
+        };
+
+        assert_eq!(
+            duplicate_operations_reason(&[
+                step_doing("Mill component side", false, &["mill_board"]),
+                step_doing("Mill solder side", true, &["mill_board"]),
+            ]),
+            None,
+        );
     }
 
     /// A step with no profile chosen is refused by name, not defaulted. This is the whole

@@ -1,5 +1,6 @@
 pub mod job;
 pub mod catalog;
+pub mod operations;
 pub mod profiles;
 pub mod state;
 pub mod stock;
@@ -15,6 +16,10 @@ pub mod tool_core;
 pub use units::UserUnitSystem;
 pub use catalog::{CatalogStockCatalog, CatalogStockSection, CatalogStockTool};
 pub use job::{EdgeTab, JobConfig, ProductionOperation, Side, TabContour};
+pub use operations::{
+    conflicting_operations, operation_once_per_side, step_reference, MachiningOperation,
+    OperationConflict, MACHINING_OPERATIONS,
+};
 pub use profiles::{
     CascadeDeleteImpact, FixtureProfile, JobProfile, MachineProfile, ToolsetGenerationPolicy,
     ToolsetProfile,

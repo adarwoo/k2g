@@ -870,34 +870,33 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     // Ghosted when the selected step does not cut the outline: the
                                                     // kerf is drawn so the board still reads as a board, but it is
                                                     // plainly another step's work.
-                                                    if let Some(outline) = stitched_outline.as_ref() {
-                                                        {
-                                                            let double_kerf = outline_band_width * 2.0;
-                                                            let band_class = if routes_outline {
-                                                                "board-outline-band"
-                                                            } else {
-                                                                "board-outline-band board-step-ghost"
-                                                            };
-                                                            rsx! {
-                                                                path {
-                                                                    d: "{outline}",
-                                                                    class: "{band_class}",
-                                                                    stroke_width: "{double_kerf}",
-                                                                    mask: "url(#board-outside-route-mask)",
+                                                    // The ghost class goes on a wrapping group, never beside
+                                                    // `board-outline-band` on the band itself: that class sets its
+                                                    // own `opacity`, and two single-class rules have equal
+                                                    // specificity, so whichever the sheet declares last wins and
+                                                    // the ghost is silently ignored. The slot and marker groups
+                                                    // below take this shape for the same reason.
+                                                    g { class: if routes_outline { "" } else { "board-step-ghost" },
+                                                        if let Some(outline) = stitched_outline.as_ref() {
+                                                            {
+                                                                let double_kerf = outline_band_width * 2.0;
+                                                                rsx! {
+                                                                    path {
+                                                                        d: "{outline}",
+                                                                        class: "board-outline-band",
+                                                                        stroke_width: "{double_kerf}",
+                                                                        mask: "url(#board-outside-route-mask)",
+                                                                    }
                                                                 }
                                                             }
-                                                        }
-                                                    } else {
-                                                        for shape in board_edge_shapes_svg.iter() {
-                                                            {edge_shape_element(
-                                                                shape,
-                                                                if routes_outline {
-                                                                    "board-outline-band"
-                                                                } else {
-                                                                    "board-outline-band board-step-ghost"
-                                                                },
-                                                                Some(outline_band_width),
-                                                            )}
+                                                        } else {
+                                                            for shape in board_edge_shapes_svg.iter() {
+                                                                {edge_shape_element(
+                                                                    shape,
+                                                                    "board-outline-band",
+                                                                    Some(outline_band_width),
+                                                                )}
+                                                            }
                                                         }
                                                     }
                                                     for shape in board_edge_shapes_svg.iter() {

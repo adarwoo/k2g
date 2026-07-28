@@ -144,6 +144,14 @@ impl AppCtx {
             if readiness.is_ready {
                 self.report_generation_started(trigger, &change_set);
             } else {
+                // Drop the previous run's programs. They were generated from a job that
+                // no longer exists — the trigger says so — and cannot be replaced while
+                // the gate is shut. Keeping them left the Save button happily writing
+                // last configuration's G-code to a USB stick while the pill beside it
+                // read "Not ready", and made the saved step count that of a profile the
+                // operator had already changed. `publish_failure` clears for exactly this
+                // reason: a live tool must never offer a stale program.
+                self.app.programs.clear();
                 log::warn!(
                     "Generation not started: cause={} nogo_reasons={} modified=[{}]",
                     trigger.cause_key(),
@@ -484,20 +492,17 @@ impl MutationChangeSet {
                 return true;
             }
         }
-        if let Some(cnc_id) = references.cnc_profile_id.as_ref() {
-            if self.changed_machine_profile_ids.contains(cnc_id) {
-                return true;
-            }
-        }
-        if let Some(fixture_id) = references.fixture_profile_id.as_ref() {
-            if self.changed_fixture_profile_ids.contains(fixture_id) {
-                return true;
-            }
-        }
-        if let Some(toolset_id) = references.toolset_profile_id.as_ref() {
-            if self.changed_toolset_profile_ids.contains(toolset_id) {
-                return true;
-            }
+        // Intersections rather than single-id comparisons: any step's machine, fixture
+        // or rack changing is a reason to regenerate, not only the first step's.
+        if !self.changed_machine_profile_ids.is_disjoint(&references.cnc_profile_ids)
+            || !self
+                .changed_fixture_profile_ids
+                .is_disjoint(&references.fixture_profile_ids)
+            || !self
+                .changed_toolset_profile_ids
+                .is_disjoint(&references.toolset_profile_ids)
+        {
+            return true;
         }
         self.changed_tool_ids
             .iter()
@@ -614,6 +619,11 @@ fn evaluate_generation_readiness(
             if let Some(reason) = crate::runtime::tooling::bottom_side_steps_reason(&steps) {
                 nogo_reasons.push(reason);
             }
+            // Two steps cutting the same feature on the same side. The editor cannot
+            // produce this, so reaching here means the profile arrived another way.
+            if let Some(reason) = crate::runtime::tooling::duplicate_operations_reason(&steps) {
+                nogo_reasons.push(reason);
+            }
         }
     }
 
@@ -679,37 +689,43 @@ fn referenced_dependency_fingerprint(app: &AppState, references: &JobReferences)
         }
     }
 
-    if let Some(machine_id) = references.cnc_profile_id.as_ref() {
-        if let Some(machine) = app.machines.iter().find(|m| &m.id == machine_id) {
-            parts.push(format!("machine:{}", machine_profile_to_value(machine)));
-        }
+    // Every step's machine, fixture and rack — not just the first step's. Editing the
+    // templates of a CNC that only step 2 runs on must regenerate step 2's program, and
+    // the sets are ordered, so the fingerprint is stable.
+    for machine in app
+        .machines
+        .iter()
+        .filter(|machine| references.cnc_profile_ids.contains(&machine.id))
+    {
+        parts.push(format!("machine:{}", machine_profile_to_value(machine)));
     }
 
-    if let Some(fixture_id) = references.fixture_profile_id.as_ref() {
-        if let Some(fixture) = app
-            .fixtures
-            .iter()
-            .find(|fixture| &fixture.id == fixture_id)
-        {
-            parts.push(format!("fixture:{}", fixture_profile_to_value(fixture)));
-        }
+    for fixture in app
+        .fixtures
+        .iter()
+        .filter(|fixture| references.fixture_profile_ids.contains(&fixture.id))
+    {
+        parts.push(format!("fixture:{}", fixture_profile_to_value(fixture)));
     }
 
-    if let Some(toolset_id) = references.toolset_profile_id.as_ref() {
-        if let Some(toolset) = app
-            .toolsets
+    for toolset in app
+        .toolsets
+        .iter()
+        .filter(|toolset| references.toolset_profile_ids.contains(&toolset.id))
+    {
+        parts.push(format!("toolset:{}", toolset_profile_to_value(toolset)));
+    }
+
+    // Once for the job, not once per rack: the id set is already the union across steps,
+    // and repeating the same tool per toolset would only make the string longer.
+    if !references.referenced_tool_ids.is_empty() {
+        let referenced_tools = app
+            .tools
             .iter()
-            .find(|toolset| &toolset.id == toolset_id)
-        {
-            parts.push(format!("toolset:{}", toolset_profile_to_value(toolset)));
-            let referenced_tools = app
-                .tools
-                .iter()
-                .filter(|tool| references.referenced_tool_ids.contains(&tool.id))
-                .cloned()
-                .collect::<Vec<_>>();
-            parts.push(format!("tools:{}", stock_value_from_tools(&referenced_tools)));
-        }
+            .filter(|tool| references.referenced_tool_ids.contains(&tool.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        parts.push(format!("tools:{}", stock_value_from_tools(&referenced_tools)));
     }
 
     parts.join("||")
@@ -733,20 +749,44 @@ fn collect_job_references(app: &AppState) -> JobReferences {
         return refs;
     };
 
-    refs.cnc_profile_id = Some(profile.cnc_profile_id.clone());
-    refs.fixture_profile_id = Some(profile.fixture_profile_id.clone());
-    refs.toolset_profile_id = Some(profile.toolset_profile_id.clone());
+    // Step 0's bindings, from the flat projection. Always present, and the only source
+    // before the datastore has loaded — the per-step pass below supersedes it.
+    refs.cnc_profile_ids.insert(profile.cnc_profile_id.clone());
+    refs.fixture_profile_ids.insert(profile.fixture_profile_id.clone());
+    refs.toolset_profile_ids.insert(profile.toolset_profile_id.clone());
 
-    if let Some(toolset) = app
+    // Every *other* step's bindings, and the document that decides them. Read from the
+    // datastore because the projection above carries `steps[0]` only.
+    if let Ok(profile_uuid) = Uuid::parse_str(process_id) {
+        if crate::data::appdata_ready() {
+            refs.machining_document = crate::data::with_appdata(|data| {
+                data.get(profile_uuid)
+                    .map(|doc| doc.to_value().to_string())
+                    .unwrap_or_default()
+            });
+        }
+        for step in crate::runtime::tooling::read_steps(profile_uuid) {
+            if let Some(cnc) = step.cnc_id {
+                refs.cnc_profile_ids.insert(cnc.to_string());
+            }
+            if let Some(fixture) = step.fixture_id {
+                refs.fixture_profile_ids.insert(fixture.to_string());
+            }
+            if let Some(toolset) = step.toolset_id {
+                refs.toolset_profile_ids.insert(toolset.to_string());
+            }
+        }
+    }
+
+    // The tools every referenced rack loads. A tool belonging only to step 2's toolset
+    // is as much a dependency as one in step 1's.
+    for toolset in app
         .toolsets
         .iter()
-        .find(|toolset| toolset.id == profile.toolset_profile_id)
+        .filter(|toolset| refs.toolset_profile_ids.contains(&toolset.id))
     {
-        refs.referenced_tool_ids = toolset
-            .slots
-            .values()
-            .filter_map(|slot| slot.tool_id.clone())
-            .collect::<BTreeSet<_>>();
+        refs.referenced_tool_ids
+            .extend(toolset.slots.values().filter_map(|slot| slot.tool_id.clone()));
     }
 
     refs
@@ -874,6 +914,113 @@ impl Deref for AppCtx {
 impl DerefMut for AppCtx {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.app
+    }
+}
+
+/// Named apart from the `tests` module in `generation.rs`, which is `include!`d into
+/// this same module and would otherwise collide.
+#[cfg(test)]
+mod orchestration_tests {
+    use super::*;
+
+    fn empty_app() -> AppState {
+        AppState::new(&UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+        })
+    }
+
+    /// Editing any step must schedule a regeneration.
+    ///
+    /// The trigger compares the in-memory `JobProfile`, which is the **step-0 flattened**
+    /// projection of the machining profile — it has no steps array at all. So adding a
+    /// second step, giving it its CNC and fixture, or deleting it changed nothing the
+    /// trigger could see: no program was ever generated for it, `programs` kept the step
+    /// count of a profile the operator had already changed, and the Save button offered
+    /// one file for a two-step job. The document string is what carries the steps.
+    #[test]
+    fn a_change_to_a_later_step_triggers_regeneration() {
+        let app = empty_app();
+        let references = |document: &str| JobReferences {
+            process_profile_id: Some("profile".to_string()),
+            machining_document: document.to_string(),
+            ..JobReferences::default()
+        };
+
+        let one_step = references(r#"{"steps":[{"name":"Drill"}]}"#);
+        assert!(
+            detect_generation_trigger(
+                &app,
+                &app,
+                &one_step,
+                &one_step,
+                &MutationChangeSet::default()
+            )
+            .is_none(),
+            "an unchanged profile must not regenerate — the trigger fires on every mutation"
+        );
+
+        let two_steps = references(r#"{"steps":[{"name":"Drill"},{"name":"Cut out"}]}"#);
+        assert!(
+            detect_generation_trigger(
+                &app,
+                &app,
+                &one_step,
+                &two_steps,
+                &MutationChangeSet::default()
+            )
+            .is_some(),
+            "adding a step must regenerate, or its program never exists"
+        );
+
+        // Configuring the added step, and deleting it again, are the same kind of change.
+        let configured = references(r#"{"steps":[{"name":"Drill"},{"name":"Cut out","cnc":"x"}]}"#);
+        assert!(detect_generation_trigger(
+            &app,
+            &app,
+            &two_steps,
+            &configured,
+            &MutationChangeSet::default()
+        )
+        .is_some());
+        assert!(detect_generation_trigger(
+            &app,
+            &app,
+            &configured,
+            &one_step,
+            &MutationChangeSet::default()
+        )
+        .is_some());
+    }
+
+    /// A profile referenced only by a later step is still a dependency.
+    ///
+    /// The reference sets used to be one id each, taken from the step-0 projection, so
+    /// editing the CNC that only step 2 runs on regenerated nothing — and the program the
+    /// operator then saved was rendered through the *old* templates.
+    #[test]
+    fn editing_a_profile_only_a_later_step_uses_is_noticed() {
+        let mut references = JobReferences {
+            process_profile_id: Some("profile".to_string()),
+            ..JobReferences::default()
+        };
+        references.cnc_profile_ids.insert("step-1-cnc".to_string());
+        references.cnc_profile_ids.insert("step-2-cnc".to_string());
+
+        let changed_step_2_machine = MutationChangeSet {
+            changed_machine_profile_ids: ["step-2-cnc".to_string()].into_iter().collect(),
+            ..MutationChangeSet::default()
+        };
+        assert!(changed_step_2_machine.touches_referenced_dependencies(&references));
+
+        let changed_someone_elses = MutationChangeSet {
+            changed_machine_profile_ids: ["unrelated".to_string()].into_iter().collect(),
+            ..MutationChangeSet::default()
+        };
+        assert!(
+            !changed_someone_elses.touches_referenced_dependencies(&references),
+            "a CNC no step binds is not a reason to regenerate"
+        );
     }
 }
 

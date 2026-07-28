@@ -19,6 +19,18 @@ $defs:
   # Ordered by how often a step uses them — almost every job drills PTH, most also
   # drill NPTH, many route the edge; locating pins and milling are the exceptions.
   # The UI shows them in this order and persists the enabled set in it.
+  #
+  # ONE CLAIM PER BOARD SIDE. Every key here except `drill_locating_pins` may appear
+  # in at most one step per side: each removes material the board has once, so a
+  # second step claiming it repeats the cut rather than adding work. The rule is per
+  # *side* — milling the component side then the solder side is two real jobs — and
+  # `drill_locating_pins` is exempt because pins register the board against a fixture,
+  # so re-fixturing legitimately drills another set.
+  #
+  # This is not expressible in JSON Schema (it constrains steps against each other),
+  # so it lives in `src/data/model/operations.rs`, which mirrors this list and is what
+  # both the editor and the readiness gate consult. Keep the two in step — a test
+  # asserts they match, in order.
   operation_key:
     type: string
     enum:

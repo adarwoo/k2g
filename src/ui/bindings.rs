@@ -13,7 +13,10 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
-use crate::data::model::UserUnitSystem;
+use crate::data::model::{
+    conflicting_operations, operation_once_per_side, step_reference, MachiningOperation,
+    OperationConflict, UserUnitSystem, MACHINING_OPERATIONS,
+};
 use units::user_format as unit_format;
 use datastore::{FieldKind, Node, NodeValue, RemoveError, UnitValue};
 use serde_json::Value;
@@ -304,23 +307,13 @@ pub fn refresh_legacy_machining() {
 // pickers, since they aren't expressible as plain fields.
 // ---------------------------------------------------------------------------
 
-/// The machining operation keys and labels — the `operation_key` enum from
-/// `machining.yaml`, in schema order.
-/// Ordered by how often a step uses them, not alphabetically or by phase: almost every
-/// job drills PTH, most also drill NPTH, many route the edge — and locating pins and
-/// milling are the exceptions. The list is both the display order and the order the
-/// enabled set is persisted in, so it matches `operation_key` in `machining.yaml`.
-const MACHINING_OPERATIONS: &[(&str, &str)] = &[
-    ("drill_pth", "Drill plated holes (PTH)"),
-    ("drill_npth", "Drill non-plated holes (NPTH)"),
-    ("route_board", "Route board edge"),
-    ("drill_locating_pins", "Drill locating pins"),
-    ("mill_board", "Mill board"),
-];
-
-/// The machining operations as `(key, label)` pairs, for screens that lay out
-/// per-operation configuration.
-pub fn machining_operations() -> &'static [(&'static str, &'static str)] {
+/// The machining operations, in schema order — display order, persisted order, and
+/// the order per-operation configuration sections are laid out in.
+///
+/// The table itself lives in [`crate::data::model::operations`] rather than here: the
+/// readiness gate needs the same list to refuse a profile that claims one operation
+/// twice, and a second copy under `ui` is how the two would come to disagree.
+pub fn machining_operations() -> &'static [MachiningOperation] {
     MACHINING_OPERATIONS
 }
 
@@ -547,11 +540,13 @@ pub fn move_step(id: Uuid, from: usize, to: usize) {
     bump_render();
 }
 
-/// Operation keys enabled in more than one step of `id` — a likely authoring
-/// error (e.g. PTH drilled twice; distinct keys across steps are fine).
-/// Subscribes to store mutations.
-pub fn use_duplicate_primitives(id: Uuid) -> Vec<String> {
-    subscribe();
+/// One step of `id` as the uniqueness rule sees it: what it is called, which side it
+/// machines, and what it claims to do.
+///
+/// Read straight from the document rather than from the `JobProfile` projection,
+/// which carries `steps[0]` only — a clash between steps 2 and 3 is exactly what that
+/// projection cannot see.
+fn step_operation_claims(id: Uuid) -> Vec<(String, bool, Vec<String>)> {
     if !appdata_ready() {
         return Vec::new();
     }
@@ -563,26 +558,77 @@ pub fn use_duplicate_primitives(id: Uuid) -> Vec<String> {
             Some(NodeValue::Array(items)) => items.len(),
             _ => 0,
         };
-        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-        for i in 0..count {
-            if let Some(NodeValue::Array(ops)) = doc
-                .root
-                .get_pointer(&format!("/steps/{i}/operations"))
-                .map(|node| &node.value)
-            {
-                for op in ops {
-                    if let NodeValue::Str(key) = &op.value {
-                        *counts.entry(key.clone()).or_default() += 1;
-                    }
-                }
-            }
-        }
-        counts
-            .into_iter()
-            .filter(|(_, c)| *c > 1)
-            .map(|(key, _)| key)
+        (0..count)
+            .map(|i| {
+                let name = match doc
+                    .root
+                    .get_pointer(&format!("/steps/{i}/name"))
+                    .map(|node| &node.value)
+                {
+                    Some(NodeValue::Str(name)) if !name.trim().is_empty() => name.clone(),
+                    // An unnamed step still has to be nameable in a message, and its
+                    // ordinal is what the editor shows beside it.
+                    _ => format!("Step {}", i + 1),
+                };
+                let bottom = matches!(
+                    doc.root
+                        .get_pointer(&format!("/steps/{i}/side_to_machine"))
+                        .map(|node| &node.value),
+                    Some(NodeValue::Str(side)) if side == "bottom"
+                );
+                let operations = match doc
+                    .root
+                    .get_pointer(&format!("/steps/{i}/operations"))
+                    .map(|node| &node.value)
+                {
+                    Some(NodeValue::Array(ops)) => ops
+                        .iter()
+                        .filter_map(|op| match &op.value {
+                            NodeValue::Str(key) => Some(key.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                (name, bottom, operations)
+            })
             .collect()
     })
+}
+
+/// Operations claimed by more than one step of `id` on the same board side.
+///
+/// The editor blocks the click that would create one, so this should only ever fire
+/// for a profile that arrived some other way — hand-edited, imported, or written by a
+/// build with different rules. Subscribes to store mutations.
+pub fn use_conflicting_operations(id: Uuid) -> Vec<OperationConflict> {
+    subscribe();
+    let claims = step_operation_claims(id);
+    conflicting_operations(
+        claims
+            .iter()
+            .map(|(name, bottom, ops)| (name.as_str(), *bottom, ops.as_slice())),
+    )
+}
+
+/// The step already running `key` on the same side as `step`, as `(index, name)`.
+///
+/// Drives the disabled checkbox: the editor names the owner rather than merely refusing,
+/// because "you cannot tick this" without saying why is indistinguishable from a bug.
+/// `None` for a repeatable operation, for `step` itself, and for the other side.
+fn operation_owner(id: Uuid, step: usize, key: &str) -> Option<(usize, String)> {
+    if !operation_once_per_side(key) {
+        return None;
+    }
+    let claims = step_operation_claims(id);
+    let side = claims.get(step)?.1;
+    claims
+        .iter()
+        .enumerate()
+        .find(|(index, (_, bottom, ops))| {
+            *index != step && *bottom == side && ops.iter().any(|op| op == key)
+        })
+        .map(|(index, (name, _, _))| (index, name.clone()))
 }
 
 /// The `<option>` value standing for "no profile chosen".
@@ -644,13 +690,26 @@ pub fn OperationsEditor(id: Uuid, step: usize) -> Element {
     rsx! {
         div { class: "field operations-editor",
             label { "Operations" }
-            for (key , op_label) in MACHINING_OPERATIONS.iter().copied() {
-                OperationToggle {
-                    id,
-                    step,
-                    op_key: key.to_string(),
-                    label: op_label.to_string(),
-                    checked: enabled.iter().any(|op| op == key),
+            for op in MACHINING_OPERATIONS.iter() {
+                {
+                    let checked = enabled.iter().any(|enabled_key| enabled_key == op.key);
+                    // Only an *unticked* box is ever blocked. If two steps somehow both
+                    // hold the operation — a hand-edited profile — both stay tickable,
+                    // because otherwise neither could be unticked and the conflict would
+                    // be unfixable from the editor that reported it.
+                    let owner = (!checked)
+                        .then(|| operation_owner(id, step, op.key))
+                        .flatten();
+                    rsx! {
+                        OperationToggle {
+                            id,
+                            step,
+                            op_key: op.key.to_string(),
+                            label: op.label.to_string(),
+                            checked,
+                            blocked_by: owner,
+                        }
+                    }
                 }
             }
         }
@@ -658,13 +717,34 @@ pub fn OperationsEditor(id: Uuid, step: usize) -> Element {
 }
 
 /// One operation checkbox within an [`OperationsEditor`].
+///
+/// `blocked_by` is the `(index, name)` of the step that already runs this operation on
+/// the same board side, which makes the box unavailable — the board has the feature
+/// once, so cutting it in a second step cuts it twice.
 #[component]
-fn OperationToggle(id: Uuid, step: usize, op_key: String, label: String, checked: bool) -> Element {
+fn OperationToggle(
+    id: Uuid,
+    step: usize,
+    op_key: String,
+    label: String,
+    checked: bool,
+    blocked_by: Option<(usize, String)>,
+) -> Element {
+    let title = match blocked_by.as_ref() {
+        Some((index, name)) => format!(
+            "Already run by {}, which machines the same side",
+            step_reference(*index, name)
+        ),
+        None => String::new(),
+    };
     rsx! {
-        label { class: "checkbox-line",
+        label {
+            class: if blocked_by.is_some() { "checkbox-line is-blocked" } else { "checkbox-line" },
+            title: "{title}",
             input {
                 r#type: "checkbox",
                 checked,
+                disabled: blocked_by.is_some(),
                 onchange: move |evt| {
                     let mut current = read_operations(id, step);
                     if evt.checked() {
@@ -677,13 +757,18 @@ fn OperationToggle(id: Uuid, step: usize, op_key: String, label: String, checked
                     // Persist in schema order regardless of click order.
                     let ordered: Vec<String> = MACHINING_OPERATIONS
                         .iter()
-                        .filter(|(k, _)| current.iter().any(|op| op == k))
-                        .map(|(k, _)| (*k).to_string())
+                        .filter(|op| current.iter().any(|enabled_key| enabled_key == op.key))
+                        .map(|op| op.key.to_string())
                         .collect();
                     set_operations(id, step, &ordered);
                 },
             }
             span { "{label}" }
+            // The ordinal alone beside the box; the full reference is in the tooltip.
+            // Steps often share a name, so the number is the part that identifies one.
+            if let Some((index, _)) = blocked_by.as_ref() {
+                span { class: "operation-blocked-note", "in step {index + 1}" }
+            }
         }
     }
 }

@@ -34,7 +34,7 @@ use log::warn;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::data::model::EdgeTab;
+use crate::data::model::{EdgeTab, MACHINING_OPERATIONS};
 use crate::paths::AppDirs;
 
 /// Every schema the application persists, embedded at build time. The order is
@@ -516,15 +516,41 @@ impl AppData {
         })
     }
 
-    /// Appends a fresh default step (one `drill_pth` operation; op-config objects
-    /// materialize on re-parse). Bindings are left absent until the user picks
-    /// them.
+    /// Appends a fresh default step with one operation (op-config objects materialize
+    /// on re-parse). Bindings are left absent until the user picks them.
+    ///
+    /// The operation is the first the new step is actually allowed to run: most of them
+    /// may only be claimed by one step per board side, so defaulting to `drill_pth`
+    /// unconditionally would make "+ Add step" produce a profile that cannot generate.
+    /// The new step machines the top side (the schema default), so only top-side steps
+    /// are counted against it.
     pub fn add_step(&mut self, id: Uuid) -> bool {
         self.edit_document_value(id, |value| {
             let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) else {
                 return;
             };
-            steps.push(serde_json::json!({ "name": "Machining step", "operations": ["drill_pth"] }));
+
+            let claimed: Vec<&str> = steps
+                .iter()
+                .filter(|step| {
+                    // Absent means top, which is the schema default for a step that has
+                    // never had the field written.
+                    step.get("side_to_machine").and_then(Value::as_str).unwrap_or("top") != "bottom"
+                })
+                .filter_map(|step| step.get("operations").and_then(Value::as_array))
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+
+            let operation = MACHINING_OPERATIONS
+                .iter()
+                .find(|op| !op.once_per_side || !claimed.contains(&op.key))
+                // Unreachable while any operation is repeatable, but a step must carry
+                // at least one (`minItems: 1`), and a step the gate then complains about
+                // is better than one the schema rejects.
+                .map_or(MACHINING_OPERATIONS[0].key, |op| op.key);
+
+            steps.push(serde_json::json!({ "name": "Machining step", "operations": [operation] }));
         })
     }
 
@@ -1716,6 +1742,57 @@ mod tests {
         assert_eq!(step_count(&data), 1);
         assert!(data.remove_step(id, 0));
         assert_eq!(step_count(&data), 1, "a profile always keeps at least one step");
+    }
+
+    /// "+ Add step" must not produce a profile that cannot generate.
+    ///
+    /// Most operations may be claimed by only one step per board side, and the default
+    /// step used to be `drill_pth` unconditionally — so adding a step to the default
+    /// profile created an immediate clash with step 1, in the one click that is the only
+    /// route to a second step. Each new step takes the first operation still free.
+    #[test]
+    fn an_added_step_defaults_to_an_operation_no_other_step_has_claimed() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+
+        let operations = |data: &AppData, step: usize| -> Vec<String> {
+            match &data
+                .get(id)
+                .unwrap()
+                .root
+                .get_pointer(&format!("/steps/{step}/operations"))
+                .unwrap()
+                .value
+            {
+                NodeValue::Array(items) => items
+                    .iter()
+                    .filter_map(|item| match &item.value {
+                        NodeValue::Str(key) => Some(key.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        assert_eq!(operations(&data, 0), vec!["drill_pth".to_string()], "the seeded step");
+
+        assert!(data.add_step(id));
+        assert_eq!(operations(&data, 1), vec!["drill_npth".to_string()], "PTH is taken");
+        assert!(data.add_step(id));
+        assert_eq!(operations(&data, 2), vec!["route_board".to_string()], "and so is NPTH");
+
+        // Past the once-per-side operations it settles on the repeatable one rather
+        // than running out — a step must carry at least one operation.
+        assert!(data.add_step(id));
+        assert!(data.add_step(id));
+        assert_eq!(operations(&data, 3), vec!["drill_locating_pins".to_string()]);
+        assert_eq!(
+            operations(&data, 4),
+            vec!["drill_locating_pins".to_string()],
+            "pins are repeatable, so they stay available"
+        );
     }
 
     #[test]

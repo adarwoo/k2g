@@ -144,15 +144,28 @@ pub struct AppState {
 
 include!("state.rs");
 
-/// Resolved references used by the active job.
+/// Resolved references used by the active job — everything a regeneration must watch.
+///
+/// The profile ids are **sets over every step**, not one id each. They were single
+/// because the job had a single machine, fixture and toolset; a step owns its own, so a
+/// second step's CNC went unwatched and editing it changed no program. Same for the
+/// tools: the rack is per step, so a tool loaded only by step 2 still belongs here.
 #[allow(dead_code)]
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct JobReferences {
     pub process_profile_id: Option<String>,
-    pub cnc_profile_id: Option<String>,
-    pub fixture_profile_id: Option<String>,
-    pub toolset_profile_id: Option<String>,
+    pub cnc_profile_ids: BTreeSet<String>,
+    pub fixture_profile_ids: BTreeSet<String>,
+    pub toolset_profile_ids: BTreeSet<String>,
     pub referenced_tool_ids: BTreeSet<String>,
+    /// The machining profile exactly as persisted — every step, binding, operation and
+    /// per-operation setting.
+    ///
+    /// The regeneration trigger used to fingerprint the in-memory `JobProfile`, which is
+    /// the **step-0 flattened** projection: adding a step, configuring it, or deleting it
+    /// changed nothing the trigger could see, so no program was ever regenerated for it.
+    /// The document is the only representation that carries all the steps.
+    pub machining_document: String,
 }
 
 /// Canonical application state owned by context.

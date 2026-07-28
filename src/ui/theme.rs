@@ -1542,8 +1542,15 @@ body {
  *
  * Group opacity rather than a ghost variant of every colour: the kind colours and the
  * hatch patterns stay exactly as they are, and there is one number to tune.
+ *
+ * The class is doubled to raise its specificity to 0,2,0. Several board classes set an
+ * `opacity` of their own (`.board-outline-band` is 0.9), and as a plain single-class rule
+ * this one loses to any of them declared later in the sheet — which it did, leaving the
+ * routed outline drawn at full strength with a ghost class that did nothing. Ghosting
+ * still belongs on a wrapping group where there is one; this only means a stray use
+ * cannot fail in silence.
  */
-.board-step-ghost {
+.board-step-ghost.board-step-ghost {
     opacity: 0.18;
 }
 
@@ -2194,6 +2201,12 @@ p {
     font-weight: 600;
 }
 
+/* A fault the profile cannot generate with, as opposed to something to think about. */
+.diag-error {
+    color: var(--err);
+    font-weight: 600;
+}
+
 /* Job summary: an aligned two-column (label · value) table. Muted uppercase
    labels line up in the first column; values are emphasized in the second. */
 .job-summary {
@@ -2587,6 +2600,23 @@ p {
     align-items: center;
     gap: 8px;
     font-size: 12px;
+}
+
+/*
+ * An operation another step has already claimed on this board side. Dimmed rather than
+ * hidden: the operator needs to see that the job does drill its plated holes somewhere,
+ * and the note beside it says where. `not-allowed` on the label as well as the box, so
+ * the whole row answers the click the same way.
+ */
+.checkbox-line.is-blocked {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.operation-blocked-note {
+    font-size: 11px;
+    color: var(--text-subtle);
+    font-style: italic;
 }
 
 .card-grid {
@@ -3045,10 +3075,16 @@ th {
     stroke: color-mix(in srgb, var(--warn) 85%, var(--text));
 }
 
+/*
+ * The nominal edge cut — where the board actually ends. Drawn thin on purpose: it is a
+ * boundary, not a machining feature, and the routed kerf band it sits inside is the
+ * thing with real width. `non-scaling-stroke` keeps it this many CSS pixels at every
+ * zoom, so the number is a screen weight rather than a board dimension.
+ */
 .board-edge-shape {
     fill: none;
     stroke: color-mix(in srgb, var(--ok) 70%, var(--accent));
-    stroke-width: 3;
+    stroke-width: 1.5;
     stroke-linecap: butt;
     stroke-linejoin: miter;
     stroke-miterlimit: 10;
@@ -4385,4 +4421,85 @@ summary {
     font-style: italic;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::APP_STYLE;
+
+    /// `(selector, body)` for every top-level rule in the sheet, comments removed.
+    ///
+    /// Deliberately naive: at-rules (`@media`, `@keyframes`) nest a block, which this
+    /// splitter mangles into selectors that no caller matches, so their contents are
+    /// skipped rather than misread. No board feature rule lives inside one.
+    fn rules() -> Vec<(String, String)> {
+        let mut css = String::with_capacity(APP_STYLE.len());
+        let mut rest = APP_STYLE;
+        while let Some(open) = rest.find("/*") {
+            css.push_str(&rest[..open]);
+            match rest[open + 2..].find("*/") {
+                Some(close) => rest = &rest[open + 2 + close + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        css.push_str(rest);
+
+        css.split('}')
+            .filter_map(|block| {
+                let (selector, body) = block.split_once('{')?;
+                Some((selector.trim().to_string(), body.trim().to_string()))
+            })
+            .collect()
+    }
+
+    /// A rule's specificity, counted as class-like selector components — enough here
+    /// because the board sheet uses no ids and no inline styles.
+    fn class_count(selector: &str) -> usize {
+        selector.matches('.').count() + selector.matches(':').count()
+    }
+
+    /// Ghosting a board feature must survive the cascade.
+    ///
+    /// `.board-step-ghost` only sets `opacity`, and so do several of the classes it is
+    /// drawn alongside — `.board-outline-band` is 0.9. As two plain single-class rules
+    /// those tie on specificity, and the one declared later in the sheet wins: the
+    /// routed outline was drawn at full strength with a ghost class that did nothing,
+    /// and nothing anywhere reported it. Hence the doubled selector; hence this test,
+    /// because the doubling reads like a typo and invites being tidied away.
+    #[test]
+    fn the_step_ghost_outranks_the_board_classes_that_set_their_own_opacity() {
+        let rules = rules();
+
+        let (ghost_index, ghost_selector) = rules
+            .iter()
+            .enumerate()
+            .find(|(_, (selector, body))| {
+                selector.contains("board-step-ghost") && body.contains("opacity")
+            })
+            .map(|(index, (selector, _))| (index, selector.clone()))
+            .expect("the sheet declares a .board-step-ghost opacity rule");
+        let ghost_rank = class_count(&ghost_selector);
+
+        for (index, (selector, body)) in rules.iter().enumerate() {
+            // Only the plain single-class board rules can land on the same element as a
+            // ghost class; a compound or state selector (`.board-reload-btn:hover`)
+            // cannot, and would be a false alarm.
+            let simple_board_class = selector.starts_with(".board-")
+                && !selector.contains([' ', ',', ':', '>']);
+            if index == ghost_index || !simple_board_class || !body.contains("opacity") {
+                continue;
+            }
+
+            let wins = ghost_rank > class_count(selector)
+                || (ghost_rank == class_count(selector) && ghost_index > index);
+            assert!(
+                wins,
+                "{selector} sets its own opacity and outranks {ghost_selector}, so ghosting \
+                 an element carrying both classes would do nothing"
+            );
+        }
+    }
+}
 

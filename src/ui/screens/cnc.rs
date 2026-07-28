@@ -65,10 +65,24 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
     };
 
     vec![
-        group("", &["/name", "/machine/atc_slot_count"]),
+        group(
+            "",
+            &[
+                "/name",
+                "/machine/output_file_extension",
+                "/machine/atc_slot_count",
+            ],
+        ),
         group(
             "Spindle",
             &["/machine/spindle_rpm_min", "/machine/spindle_rpm_max"],
+        ),
+        // Axis feed ceilings sit beside the spindle range because the two are
+        // solved together: a tool rated faster than the machine can feed is run at
+        // a lower RPM to preserve its chip load (see `gcode::feeds::resolve`).
+        group(
+            "Feed limits",
+            &["/machine/max_feed_xy", "/machine/max_feed_z"],
         ),
         group("Axis scaling", &["/machine/scaling/x", "/machine/scaling/y"]),
         group(
@@ -105,4 +119,47 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
         ),
         group("Tool change", &["/primitives/change_tool"]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cnc_field_groups;
+
+    /// Every field the schema requires must be reachable in the editor.
+    ///
+    /// The group list is a hand-written allow-list of pointers, so adding a
+    /// property to `cnc.yaml` does *not* make it editable — `max_feed_xy`,
+    /// `max_feed_z`, and `output_file_extension` were all required by the schema
+    /// and invisible in the UI until this test existed. A defaulted field is the
+    /// easiest kind to lose this way: the backfill keeps profiles loading, so
+    /// nothing complains and the operator simply cannot reach the setting.
+    #[test]
+    fn every_required_field_is_editable() {
+        const CNC_SCHEMA: &str = include_str!("../../../schemas/cnc.yaml");
+        let schema: serde_yaml::Value = serde_yaml::from_str(CNC_SCHEMA).expect("cnc.yaml parses");
+
+        let pointers: Vec<String> = cnc_field_groups()
+            .into_iter()
+            .flat_map(|g| g.fields)
+            .collect();
+
+        for section in ["machine", "primitives"] {
+            let required = schema["properties"][section]["required"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{section} declares required fields"));
+
+            for field in required {
+                let name = field.as_str().expect("required entries are strings");
+                // A nested object (`scaling`) is covered by its leaf pointers, so
+                // match on the prefix rather than on equality.
+                let prefix = format!("/{section}/{name}");
+                assert!(
+                    pointers
+                        .iter()
+                        .any(|p| p == &prefix || p.starts_with(&format!("{prefix}/"))),
+                    "cnc.yaml requires {section}.{name} but the CNC editor has no field for it"
+                );
+            }
+        }
+    }
 }

@@ -10,7 +10,7 @@ use crate::data::Profile;
 use crate::ui::bindings::{
     add_step, clone_named, create_named, data_revision, export_yaml, import_yaml,
     machining_operations, move_step, refresh_legacy_machining, remove_profile_result, remove_step,
-    use_duplicate_primitives, use_operations, use_profiles, use_step_count, BindingPicker,
+    use_conflicting_operations, use_operations, use_profiles, use_step_count, BindingPicker,
     OperationsEditor, SchemaField, SchemaForm,
 };
 
@@ -224,7 +224,7 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
 #[component]
 fn MachiningDetail(id: Uuid) -> Element {
     let step_count = use_step_count(id);
-    let duplicates = use_duplicate_primitives(id);
+    let conflicts = use_conflicting_operations(id);
 
     rsx! {
         div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
@@ -232,10 +232,13 @@ fn MachiningDetail(id: Uuid) -> Element {
                 div { class: "edit-grid",
                     SchemaField { id, ptr: "/name".to_string() }
 
-                    if !duplicates.is_empty() {
-                        p { class: "diag-status diag-warning",
-                            "Warning: {duplicates.join(\", \")} is used in more than one step — is that intended?"
-                        }
+                    // The editor cannot produce these — the offending checkbox is
+                    // disabled — so a conflict here came in from a hand-edited or
+                    // imported file. Stated as a fault rather than asked about ("is that
+                    // intended?"), because it is one: the job will refuse to generate
+                    // until it is resolved.
+                    for conflict in conflicts.iter() {
+                        p { class: "diag-status diag-error", "{conflict.message()}" }
                     }
 
                     // A profile with one step is just a profile: nothing here says
@@ -322,14 +325,14 @@ fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
             SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
 
             // Configuration sections for the currently enabled operations.
-            for (key , op_label) in machining_operations().iter().copied() {
-                if enabled_ops.iter().any(|op| op == key) {
+            for op in machining_operations().iter() {
+                if enabled_ops.iter().any(|enabled| enabled == op.key) {
                     div { class: "schema-section",
-                        h4 { class: "section-title", "{op_label}" }
-                        if key == "drill_locating_pins" {
+                        h4 { class: "section-title", "{op.label}" }
+                        if op.key == "drill_locating_pins" {
                             p { class: "field-hint", "No additional options." }
                         } else {
-                            SchemaForm { id, ptr: format!("/steps/{index}/{key}") }
+                            SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
                         }
                     }
                 }

@@ -102,6 +102,29 @@ The oblong `major` axis + hole centre come from the board hole (`drill_x`/`drill
 the strategy from the step config; the drill tool from the assignment; the slot router
 from the rack's mandatory router.
 
+### 3.1 One side, one claim
+
+Every operation above except `drill_locating_pins` may be claimed by **at most one step
+per board side**. They each remove material the board has *once*, so a second step
+claiming the same one does not add work — it repeats it, driving a tool back through
+holes that are already there, into a board the first step may have released from its
+tabs.
+
+The rule is **per side, not per profile**: a side is its own setup with its own
+geometry, so milling the component side and then the solder side is two distinct jobs
+that happen to share a key.
+
+`drill_locating_pins` is exempt because it registers the board against a *fixture*
+rather than cutting a feature of the board: a job that re-fixtures genuinely drills a
+second set. Engraving will be exempt for the same reason when it lands — several passes
+at different depths, or over different regions, are all legitimately engraving.
+
+Enforced in two places, because profiles arrive by more than one route: the machining
+editor disables an operation another step has claimed (naming that step), and
+`tooling::duplicate_operations_reason` makes it a readiness no-go for a profile that was
+hand-edited or imported. The table of which operations are constrained is
+`data::model::operations`, mirroring the `operation_key` enum.
+
 > **Routed paths keep KiCad's move types — they are not flattened to G1.** KiCad gives
 > an *unordered* set of edge moves (line, arc, bezier). Stitching's job is to **re-order
 > them into continuous closed loops** and snap segment endpoints for perfect continuity;

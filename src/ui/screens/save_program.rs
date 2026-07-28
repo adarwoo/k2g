@@ -29,7 +29,20 @@ use crate::runtime::{with_ctx_mut, AppCtx, GCODE_FILE_EXTENSION};
 #[component]
 pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let has_program = snapshot.has_any_program();
+    // Saveable means *both* that a program exists and that the job it came from is still
+    // the job on screen. The orchestrator clears the programs when a regeneration it
+    // cannot run falls due, so this is a second guard rather than the only one — but the
+    // failure it prevents is writing the wrong G-code to a machine, so two is right. It
+    // reads the same gate the status pill does, because a Save button live next to a
+    // pill saying "Not ready" is the contradiction that started this.
+    let is_ready = snapshot
+        .status
+        .get(crate::runtime::STATUS_KEY_GENERATION_READINESS)
+        .map(|value| value == "true")
+        .unwrap_or(false);
+    let is_current = is_ready
+        && !matches!(snapshot.generation_state, crate::ui::navigation::GenerationState::Running);
+    let has_program = snapshot.has_any_program() && is_current;
     // A one-step job saves exactly as it always did: one dialog, `{board}.nc`, no modal
     // and no `_step1` suffix. The plan dialog exists only because N programs cannot each
     // be named by a save dialog when there is one folder prompt between them.
@@ -61,7 +74,13 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
                 class: "btn btn-primary",
                 r#type: "button",
                 disabled: !has_program,
-                title: if has_program { "Save the G-code program" } else { "No program to save yet" },
+                title: match (has_program, snapshot.has_any_program()) {
+                    (true, _) => "Save the G-code program",
+                    // Distinguish "nothing generated" from "what was generated no longer
+                    // matches the job", which are different things to do something about.
+                    (false, true) => "The job has changed — no current program to save",
+                    (false, false) => "No program to save yet",
+                },
                 onclick: move |_| {
                     if multi_step {
                         let start = state.read().gcode_save_directory_or_default();
