@@ -897,6 +897,10 @@ fn load_normalized(
 /// The `linear_cut` template shipped as the schema default — the repair target below.
 const LINEAR_CUT_DEFAULT: &str = "`G1 X{x} Y{y} Z{z} F{feedrate}";
 
+/// The axis feed limit shipped as the schema default, for backfilling profiles written
+/// before `machine.max_feed_xy`/`max_feed_z` existed. Must match `schemas/cnc.yaml`.
+const MAX_FEED_DEFAULT: &str = "5000mm/min";
+
 /// The retired `cut_arc` variable that used to arrive as a ready-made "G2"/"G3".
 const ARC_CMD_PLACEHOLDER: &str = "{arc_cmd}";
 
@@ -994,6 +998,21 @@ fn drop_trailing_speed_line(template: &str) -> String {
 /// emits a feed (variable or hardcoded) is left exactly as the operator wrote it.
 fn normalize_cnc_value(value: &mut Value, path: &Path) {
     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("cnc.yaml").to_string();
+
+    // The axis feed limits became required after profiles were already in the field.
+    // Backfilled with the schema's own conservative default rather than merely reported:
+    // the parser would fill the same value in memory anyway, so leaving the document
+    // without them buys nothing and warns on every launch until the profile is next
+    // edited. 5000 mm/min is deliberately slow — a machine that is faster says so in its
+    // specification, and the operator raises it.
+    if let Some(machine) = value.pointer_mut("/machine").and_then(Value::as_object_mut) {
+        for key in ["max_feed_xy", "max_feed_z"] {
+            if !machine.contains_key(key) {
+                warn!("[{file}] machine.{key} was missing; filled in at {MAX_FEED_DEFAULT}");
+                machine.insert(key.into(), Value::from(MAX_FEED_DEFAULT));
+            }
+        }
+    }
 
     // `linear_cut` with no feed at all.
     if let Some(template) = value.pointer("/primitives/linear_cut").and_then(Value::as_str) {

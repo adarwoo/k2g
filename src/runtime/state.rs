@@ -12,7 +12,7 @@ impl AppState {
 
         let mut state = Self {
             selected_screen: Screen::Job,
-            selected_job_view: JobCenterView::Code, // TEMP-CAPTURE
+            selected_job_view: JobCenterView::Board,
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
