@@ -20,6 +20,10 @@ pub struct MachineProfile {
     /// The same for Z. Kept separate because Z is usually the slower axis and drilling is
     /// entirely Z motion, so this is the limit that most often binds.
     pub max_feed_z: FeedRate,
+    /// Extension a saved program takes, without the dot. The CNC's primitives decide the
+    /// output format, so the name a program is saved under belongs with them — a step
+    /// whose machine emits Excellon must not be written as `.nc`.
+    pub output_file_extension: String,
     pub atc_slot_count: u8,
     pub scaling_x: f32,
     pub scaling_y: f32,
@@ -56,6 +60,7 @@ impl Default for MachineProfile {
             // would let an unconfigured CNC silently produce a program.
             max_feed_xy: FeedRate::from_mm_per_min(0.0),
             max_feed_z: FeedRate::from_mm_per_min(0.0),
+            output_file_extension: String::new(),
             atc_slot_count: 0,
             scaling_x: 1.0,
             scaling_y: 1.0,

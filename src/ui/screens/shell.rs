@@ -49,14 +49,31 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
         .map(|value| value == "true")
         .unwrap_or(false);
     let not_ready = has_blocking_error || !is_ready;
+    // A job is N programs, one per step. The one-step wording is exactly what it always
+    // was — a single-step job must show no trace of the step machinery — and only a
+    // multi-step job counts out loud.
+    let total = snapshot.programs.len();
+    let ready_count = snapshot.programs.iter().filter(|s| s.program().is_some()).count();
+    let failed: Vec<String> = snapshot
+        .programs
+        .iter()
+        .filter(|s| s.failure().is_some())
+        .map(|s| format!("Step {}: {}", s.index + 1, s.failure().unwrap_or_default()))
+        .collect();
     let status_label = match snapshot.generation_state {
-        GenerationState::Running => "Generating…",
-        GenerationState::Failed => "Generation failed",
-        _ if not_ready => "Not ready",
-        GenerationState::Idle if snapshot.gcode.is_empty() => "No program",
-        GenerationState::Idle if snapshot.gcode_modified => "Program edited",
-        GenerationState::Idle => "Program ready",
+        GenerationState::Running => "Generating…".to_string(),
+        GenerationState::Failed => "Generation failed".to_string(),
+        _ if not_ready => "Not ready".to_string(),
+        GenerationState::Idle if ready_count == 0 => "No program".to_string(),
+        // Partly failed is styled as an error even though saving is possible: a job with
+        // a step that produced nothing is not one to walk away from.
+        GenerationState::Idle if !failed.is_empty() => {
+            format!("{} of {total} steps failed", failed.len())
+        }
+        GenerationState::Idle if total > 1 => format!("{total} programs ready"),
+        GenerationState::Idle => "Program ready".to_string(),
     };
+    let status_detail = failed.join(" · ");
 
     rsx! {
         header { class: "shell-topbar",
@@ -141,10 +158,12 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
                         GenerationState::Running => "status-pill status-warn",
                         GenerationState::Failed => "status-pill status-err",
                         _ if not_ready => "status-pill status-err",
-                        GenerationState::Idle if snapshot.gcode.is_empty() => "status-pill status-warn",
-                        GenerationState::Idle if snapshot.gcode_modified => "status-pill status-warn",
+                        GenerationState::Idle if ready_count == 0 => "status-pill status-warn",
+                        GenerationState::Idle if !failed.is_empty() => "status-pill status-err",
                         GenerationState::Idle => "status-pill status-ok",
                     },
+                    // Which steps failed, without spending pill width on them.
+                    title: status_detail,
                     "{status_label}"
                 }
 

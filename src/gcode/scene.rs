@@ -1,4 +1,4 @@
-//! The 3D machining view's **scene** — a [`MachiningPlan`] turned into geometry.
+//! The 3D machining view's **scene** — one machining step turned into geometry.
 //!
 //! This is everything about the 3D view that can be decided in Rust, which is
 //! deliberately as much as possible: the JavaScript downstream receives this and owns
@@ -26,7 +26,7 @@
 use serde::Serialize;
 use units::Length;
 
-use crate::gcode::plan::{MachiningPlan, OpKind, Point, ToolBlock, ZProfile};
+use crate::gcode::plan::{OpKind, Point, StepPlan, ToolBlock, ZProfile};
 use crate::gcode::routing::{self, RouteMove};
 
 /// Chord tolerance for tessellating an arc, in millimetres.
@@ -178,14 +178,18 @@ impl BoardSolid {
     }
 }
 
-/// Builds one [`ToolTrace`] per tool block, in plan order.
+/// Builds one [`ToolTrace`] per tool block of **one step**, in plan order.
 ///
 /// Blocks arrive already phase-ordered and TSP-ordered, so this only has to walk them.
 /// The tool's park position between blocks is not modelled: a trace starts at its first
 /// entry, because where the spindle sits during a tool change is the machine's business
 /// and drawing a line to it would imply a cutting move that never happens.
-pub fn trace_plan(plan: &MachiningPlan) -> Vec<ToolTrace> {
-    plan.steps.iter().flat_map(|step| step.blocks.iter().map(trace_block)).collect()
+///
+/// Per step because a step is a physical setup: two steps may be cut on different
+/// machines, in different fixtures, with the board turned over between them. Drawing
+/// their toolpaths in one scene would compose motions that never coexist.
+pub fn trace_step(step: &StepPlan) -> Vec<ToolTrace> {
+    step.blocks.iter().map(trace_block).collect()
 }
 
 /// Walks one block's ops into runs of motion.
@@ -418,11 +422,8 @@ mod tests {
         }
     }
 
-    fn plan_of(blocks: Vec<ToolBlock>) -> MachiningPlan {
-        MachiningPlan {
-            steps: vec![StepPlan { index: 0, name: "s".into(), blocks, notes: vec![] }],
-            note: None,
-        }
+    fn step_of(blocks: Vec<ToolBlock>) -> StepPlan {
+        StepPlan { index: 0, name: "s".into(), blocks, notes: vec![] }
     }
 
     /// A drill op is a point in the plan — the cycle is inside the primitive — so the
@@ -430,7 +431,7 @@ mod tests {
     /// in Z at all.
     #[test]
     fn a_point_drill_becomes_a_visible_plunge_and_retract() {
-        let traces = trace_plan(&plan_of(vec![block(1.0, vec![op(OpKind::Drill, pt(5.0, 5.0), pt(5.0, 5.0))])]));
+        let traces = trace_step(&step_of(vec![block(1.0, vec![op(OpKind::Drill, pt(5.0, 5.0), pt(5.0, 5.0))])]));
         assert_eq!(traces.len(), 1);
         let moves = &traces[0].moves;
 
@@ -446,7 +447,7 @@ mod tests {
     /// judge whether the ordering is sane.
     #[test]
     fn the_transit_between_ops_is_a_rapid_at_the_retract_plane() {
-        let traces = trace_plan(&plan_of(vec![block(
+        let traces = trace_step(&step_of(vec![block(
             1.0,
             vec![
                 op(OpKind::Drill, pt(0.0, 0.0), pt(0.0, 0.0)),
@@ -469,7 +470,7 @@ mod tests {
     /// moves; left unmerged it would be hundreds of line objects for one hole.
     #[test]
     fn runs_of_the_same_kind_are_merged_into_one_polyline() {
-        let traces = trace_plan(&plan_of(vec![block(
+        let traces = trace_step(&step_of(vec![block(
             1.0,
             vec![op(
                 OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) },
@@ -492,7 +493,7 @@ mod tests {
     /// the program will not send it.
     #[test]
     fn a_routed_hole_is_drawn_inside_its_own_wall() {
-        let traces = trace_plan(&plan_of(vec![block(
+        let traces = trace_step(&step_of(vec![block(
             1.0,
             vec![op(
                 OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) },
@@ -547,7 +548,7 @@ mod tests {
     /// 3D legend and the Tooling tab cannot disagree.
     #[test]
     fn each_tool_block_becomes_one_trace_with_its_rack_identity() {
-        let traces = trace_plan(&plan_of(vec![
+        let traces = trace_step(&step_of(vec![
             block(0.8, vec![op(OpKind::Drill, pt(0.0, 0.0), pt(0.0, 0.0))]),
             ToolBlock {
                 tool_id: "t2".into(),
@@ -571,7 +572,7 @@ mod tests {
     /// loaded that tool, and a legend entry with no path is informative.
     #[test]
     fn a_block_with_no_ops_yields_an_empty_trace() {
-        let traces = trace_plan(&plan_of(vec![block(1.0, vec![])]));
+        let traces = trace_step(&step_of(vec![block(1.0, vec![])]));
         assert_eq!(traces.len(), 1);
         assert!(traces[0].moves.is_empty());
         assert_eq!(traces[0].change_at, None);

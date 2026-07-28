@@ -1,6 +1,6 @@
 //! The 3D machining view — a WebGL toolpath render inside the WebView.
 //!
-//! Draws what [`scene::trace_plan`](crate::gcode::scene::trace_plan) extracts from the
+//! Draws what [`scene::trace_step`](crate::gcode::scene::trace_step) extracts from the
 //! machining plan: one coloured polyline set per tool block, rapids muted and thin
 //! against solid cutting moves, orbitable so the Z motion is actually legible.
 //!
@@ -302,9 +302,12 @@ impl ScenePayload {
     /// All of it decided here, in Rust: the renderer never sees a `MachiningPlan`, it
     /// gets points and colours, which is the entire reason the untested half of this
     /// feature stays small.
-    fn build(ctx: &AppCtx) -> Self {
-        let traces = scene::trace_plan(&plan_machining(ctx));
-        let board = machining_plan::board_solid(ctx);
+    /// One step, not the whole plan: a step is a physical setup, and compositing two
+    /// setups' toolpaths into one scene would draw motions that never coexist.
+    fn build(ctx: &AppCtx, step: usize) -> Self {
+        let plan = plan_machining(ctx);
+        let traces = plan.steps.get(step).map(scene::trace_step).unwrap_or_default();
+        let board = machining_plan::board_solid(ctx, step);
         Self {
             point_count: traces.iter().map(|t| t.point_count()).sum(),
             tool_count: traces.len(),
@@ -328,7 +331,8 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     let payload = use_memo(move || {
         let _ = crate::ui::bindings::data_revision();
         let snapshot = state.read().clone();
-        ScenePayload::build(&snapshot)
+        let step = snapshot.selected_step;
+        ScenePayload::build(&snapshot, step)
     });
 
     // `use_effect` runs after the node exists, which is the whole point — the script

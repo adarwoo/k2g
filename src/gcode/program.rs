@@ -41,6 +41,87 @@ pub struct StepRender {
     pub is_atc: bool,
 }
 
+/// Everything one step needs to render a **complete, standalone program**: the
+/// program-layer primitives and the values they read, taken from *this step's* CNC and
+/// fixture, wrapped around the body context.
+///
+/// Per step because a step is an autonomous setup — it names its own CNC, and a CNC owns
+/// the output templates. Two steps may legitimately emit different dialects; one could be
+/// Excellon (op-planner §9.2). Held apart from [`StepRender`] rather than folded into it
+/// so the body renderer's contract stays honest about what it actually reads.
+#[derive(Clone)]
+pub struct ProgramRender {
+    pub cnc_name: String,
+    pub initialise_tpl: String,
+    pub conclude_tpl: String,
+    /// The CNC's `line_number` primitive. Empty disables numbering.
+    pub line_number_tpl: String,
+    /// This step's fixture's safe travel height — the header and footer retract to it.
+    pub z_safe: units::Length,
+    /// Which of the machine's stored zeros this step's fixture sits in, as an ordinal.
+    pub work_coordinate_system: u8,
+    /// The extension a saved program takes, from the CNC profile — so an Excellon step
+    /// is not written as `.nc`.
+    pub file_extension: String,
+    pub body: StepRender,
+}
+
+/// Renders one step into a finished program: `initialise`, the step's body, `conclude`,
+/// then this CNC's line numbering over the whole thing.
+///
+/// **Builds its own [`Coder`].** The Coder deliberately carries the modal unit state that
+/// `initialise` establishes (`metric()` and friends) into every later primitive — that is
+/// what lets a body emit bare lengths. Sharing one across steps therefore leaks step 1's
+/// unit mode into step 2, which is precisely the cross-contamination the per-step model
+/// exists to prevent. One program, one Coder.
+///
+/// Numbering runs here rather than over an assembled job for the same reason: each step is
+/// a whole program, so each restarts its `N` sequence at the top.
+pub fn render_step_program(
+    step: &StepPlan,
+    render: &ProgramRender,
+    pcb_filename: &str,
+    timestamp: &str,
+    tool_feeds: &BTreeMap<String, ToolFeed>,
+) -> Result<String, BodyError> {
+    let coder = Coder::new();
+
+    // `initialise` and `conclude` are program-layer primitives and see the same values: a
+    // footer typically retracts to `z_safe`, and either may echo the source file. A fresh
+    // scope for each, but the Coder's unit mode persists between them.
+    let program_scope = || {
+        let mut scope = Scope::new();
+        scope.push("pcb_filename", pcb_filename.to_string());
+        scope.push("timestamp", timestamp.to_string());
+        scope.push("z_safe", render.z_safe);
+        scope.push("work_coordinate_system", render.work_coordinate_system as i64);
+        scope
+    };
+
+    let mut scope = program_scope();
+    let header = coder
+        .render("initialise", &render.initialise_tpl, &mut scope)
+        .map_err(|err| BodyError::Render { primitive: "initialise".into(), message: err.to_string() })?;
+
+    let body = render_step_body(&coder, step, &render.body, tool_feeds)?;
+
+    let mut scope = program_scope();
+    let footer = coder
+        .render("conclude", &render.conclude_tpl, &mut scope)
+        .map_err(|err| BodyError::Render { primitive: "conclude".into(), message: err.to_string() })?;
+
+    // Joined with single newlines (trailing ones trimmed) so an empty or multi-line body
+    // never introduces stray blank lines.
+    let assembled = [header, body, footer]
+        .iter()
+        .map(|section| section.trim_end_matches('\n'))
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    number_lines(&coder, &assembled, &render.line_number_tpl)
+}
+
 /// A stock tool's identity + rated running values, looked up by tool id when a block
 /// is rendered. The rated pair is required — a `None` becomes a [`BodyError::Feeds`].
 #[derive(Clone)]

@@ -89,6 +89,12 @@ pub struct AppEvent {
 pub struct AppState {
     pub selected_screen: Screen,
     pub selected_job_view: JobCenterView,
+    /// Which machining step every Job view is showing. In-memory only, like
+    /// [`AppState::selected_job_view`], and deliberately absent from the regeneration
+    /// fingerprint: looking at another step is not a change to the job. Clamped to the
+    /// profile's step count on every mutation (see `sync_after_mutation`), so a removed
+    /// step cannot leave it dangling.
+    pub selected_step: usize,
     pub unit_system: UserUnitSystem,
     pub theme: Theme,
     pub machines: Vec<MachineProfile>,
@@ -109,8 +115,11 @@ pub struct AppState {
     pub events: Vec<AppEvent>,
     pub generation_state: GenerationState,
     pub project_config: JobConfig,
-    pub gcode: String,
-    pub gcode_modified: bool,
+    /// One program per machining step, in step order — a step owns its CNC, and a CNC
+    /// owns the output format, so the steps of one job are separate programs rather than
+    /// sections of one. A step that could not be rendered is present and carries its
+    /// reason (see [`ProgramOutcome`]) instead of being missing.
+    pub programs: Vec<StepProgram>,
     pub suppress_persistence: bool,
     pub show_first_launch: bool,
     pub rack_slots: BTreeMap<u8, RackSlot>,

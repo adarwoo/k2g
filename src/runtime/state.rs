@@ -13,6 +13,7 @@ impl AppState {
         let mut state = Self {
             selected_screen: Screen::Job,
             selected_job_view: JobCenterView::Board,
+            selected_step: 0,
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -44,11 +45,10 @@ impl AppState {
                 mouse_bite_pitch: Length::from_mm(0.8),
                 mouse_bite_drill_tool_id: None,
             },
-            // No program until generation actually runs (kicked at launch when the
+            // No programs until generation actually runs (kicked at launch when the
             // job is ready; re-run on every mutation). Seeding a canned sample here
             // made the Code view show fake GCode that was never generated.
-            gcode: String::new(),
-            gcode_modified: false,
+            programs: Vec::new(),
             suppress_persistence: false,
             show_first_launch: true,
             rack_slots: BTreeMap::new(),
@@ -420,6 +420,16 @@ impl AppState {
     /// so `panel.kicad_pcb` becomes `panel`) plus the program extension. Falls back to
     /// a generic stem when no board is loaded, so the dialog is never blank.
     pub fn gcode_default_file_name(&self) -> String {
+        self.program_file_name(0, 1, GCODE_FILE_EXTENSION)
+    }
+
+    /// What the program for `index` is saved as.
+    ///
+    /// A one-step job is named for the board alone — a `_step1` suffix on the only file
+    /// there is would be noise, and the whole point of the single-step case is that
+    /// nothing hints steps exist. Beyond one, the ordinal is what tells two files apart
+    /// on the operator's USB key.
+    pub fn program_file_name(&self, index: usize, step_count: usize, extension: &str) -> String {
         let stem = self
             .board
             .as_ref()
@@ -428,7 +438,29 @@ impl AppState {
             .map(sanitize_file_stem)
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "program".to_string());
-        format!("{stem}.{GCODE_FILE_EXTENSION}")
+        let extension = extension.trim().trim_start_matches('.');
+        let extension = if extension.is_empty() { GCODE_FILE_EXTENSION } else { extension };
+        if step_count <= 1 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}_step{}.{extension}", index + 1)
+        }
+    }
+
+    /// The program for the step the Job views are showing, if that step has one.
+    pub fn selected_program(&self) -> Option<&StepProgram> {
+        self.programs.get(self.selected_step)
+    }
+
+    /// Every step that produced a program, paired with it — what the save flow offers.
+    /// A failed step is simply absent here; its reason is on the Code view.
+    pub fn ready_programs(&self) -> Vec<(&StepProgram, &Program)> {
+        self.programs.iter().filter_map(|step| step.program().map(|p| (step, p))).collect()
+    }
+
+    /// Whether there is anything at all to save.
+    pub fn has_any_program(&self) -> bool {
+        self.programs.iter().any(|step| step.program().is_some())
     }
 
     pub fn select_fixture_profile_by_id(&mut self, id: Option<String>) {
@@ -486,7 +518,6 @@ impl AppState {
             .filter(|op| profile.default_operations.contains(op))
             .collect::<Vec<_>>();
         self.project_config.selected_operations = ordered_operations;
-        self.gcode_modified = false;
         self.validate_current_job_references();
         self.persist_job();
         self.persist_realms(&[PersistRealm::GlobalSettings]);
@@ -1074,6 +1105,7 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "spindle_rpm_max": machine.spindle_rpm_max.to_string(),
             "max_feed_xy": machine.max_feed_xy.to_string(),
             "max_feed_z": machine.max_feed_z.to_string(),
+            "output_file_extension": machine.output_file_extension,
             "atc_slot_count": machine.atc_slot_count,
             "scaling": {
                 "x": machine.scaling_x,
@@ -1114,6 +1146,7 @@ fn machine_required_paths() -> &'static [&'static str] {
         "machine.spindle_rpm_max",
         "machine.max_feed_xy",
         "machine.max_feed_z",
+        "machine.output_file_extension",
         "machine.atc_slot_count",
         "machine.scaling.x",
         "machine.scaling.y",
@@ -1212,6 +1245,17 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
     let max_feed_xy = feed_at("/machine/max_feed_xy");
     let max_feed_z = feed_at("/machine/max_feed_z");
 
+    // Defaulted by the schema and backfilled on load, so the fallback here is only
+    // reached by a value the pattern rejects. Matches the schema rather than inventing
+    // a third answer.
+    let output_file_extension = value
+        .pointer("/machine/output_file_extension")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or(GCODE_FILE_EXTENSION)
+        .to_string();
+
     let atc_slot_count = value
         .pointer("/machine/atc_slot_count")
         .and_then(Value::as_u64)
@@ -1240,6 +1284,7 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         spindle_rpm_max,
         max_feed_xy,
         max_feed_z,
+        output_file_extension,
         atc_slot_count,
         scaling_x,
         scaling_y,
@@ -2070,6 +2115,54 @@ mod gcode_save_tests {
     #[test]
     fn the_host_default_is_always_a_path() {
         assert!(!host_default_save_directory().as_os_str().is_empty());
+    }
+
+    /// A state carrying just enough for the naming rules.
+    fn named_board(name: &str) -> AppState {
+        let mut app = AppState::new(&UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+        });
+        app.board = Some(pcb::BoardSnapshot {
+            name: name.to_string(),
+            thickness: None,
+            bounding_box: None,
+            edge_shapes: Vec::new(),
+            holes: Vec::new(),
+        });
+        app
+    }
+
+    /// A single-step job is named for the board alone: a `_step1` suffix on the only file
+    /// there is would be the step machinery showing through, which is exactly what the
+    /// one-step case must not do.
+    #[test]
+    fn one_step_is_named_for_the_board_and_more_steps_carry_the_ordinal() {
+        let app = named_board("panel");
+        assert_eq!(app.program_file_name(0, 1, "nc"), "panel.nc");
+        assert_eq!(app.gcode_default_file_name(), "panel.nc", "the old name is unchanged");
+
+        assert_eq!(app.program_file_name(0, 3, "nc"), "panel_step1.nc");
+        assert_eq!(app.program_file_name(2, 3, "nc"), "panel_step3.nc");
+    }
+
+    /// The extension comes from the step's own CNC, so a machine that emits Excellon does
+    /// not have its output called `.nc`.
+    #[test]
+    fn the_steps_own_extension_is_honoured() {
+        let app = named_board("panel");
+        assert_eq!(app.program_file_name(1, 2, "drl"), "panel_step2.drl");
+        // A profile that somehow carries none still produces a usable name.
+        assert_eq!(app.program_file_name(0, 1, ""), "panel.nc");
+        assert_eq!(app.program_file_name(0, 1, ".ngc"), "panel.ngc", "a stray dot is tolerated");
+    }
+
+    /// The board's name is sanitised in the per-step form too — the suffix must not be
+    /// the only part that is safe to write.
+    #[test]
+    fn the_per_step_name_is_sanitised_like_the_single_one() {
+        let app = named_board("panel v2: rev/3");
+        assert_eq!(app.program_file_name(1, 2, "nc"), "panel v2_ rev_3_step2.nc");
     }
 }
 

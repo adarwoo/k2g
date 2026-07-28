@@ -78,6 +78,15 @@ impl AppCtx {
         self.job_references = collect_job_references(&self.app);
         let change_set = collect_mutation_changes(previous_app, &self.app);
 
+        // Keep the viewed step inside the profile. Removing a step, or switching to a
+        // profile with fewer, would otherwise leave every Job view pointed at a step that
+        // no longer exists — which reads as an empty job rather than as a stale index.
+        let step_count = crate::runtime::tooling::step_headers(&self.app).len();
+        if previous_app.selected_process_profile_id != self.app.selected_process_profile_id {
+            self.app.selected_step = 0;
+        }
+        self.app.selected_step = self.app.selected_step.min(step_count.saturating_sub(1));
+
         self.status.insert(
             STATUS_KEY_REGENERATION.to_string(),
             match self.app.generation_state {
@@ -195,6 +204,43 @@ impl AppCtx {
     /// `machine_profile_to_value`), the spindle range for the feed/speed clamp, and the
     /// ATC flag (a manual machine gets an operator prompt). Empty templates when the
     /// step has no resolvable CNC — a case the readiness gate already blocks.
+    /// The program context for one step, from **its own** CNC and fixture.
+    ///
+    /// Both used to be taken from the job-level (step-0 projected) profile, which meant a
+    /// second step on a different fixture had its header retract to the first step's safe
+    /// height and zero into the first step's work coordinate system — a wrong program, not
+    /// merely an inelegant one.
+    fn build_program_render_ctx(
+        &self,
+        raw: &crate::runtime::tooling::StepRaw,
+    ) -> crate::gcode::program::ProgramRender {
+        let machine = raw
+            .cnc_id
+            .and_then(|id| self.app.machines.iter().find(|m| m.id == id.to_string()));
+        let fixture = raw
+            .fixture_id
+            .and_then(|id| self.app.fixtures.iter().find(|f| f.id == id.to_string()));
+
+        crate::gcode::program::ProgramRender {
+            cnc_name: machine.map(|m| m.name.clone()).unwrap_or_default(),
+            // The legacy `gcode_header`/`gcode_footer` fields carry the
+            // `initialise`/`conclude` primitives — see the crosswalk in
+            // `machine_profile_from_value`.
+            initialise_tpl: machine.map(|m| m.gcode_header.clone()).unwrap_or_default(),
+            conclude_tpl: machine.map(|m| m.gcode_footer.clone()).unwrap_or_default(),
+            line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
+            // The fixture's safe travel height, clear of clamps and fixture hardware, per
+            // the Z-model. A conservative 5 mm only when no fixture resolves — which the
+            // reference check already flags.
+            z_safe: fixture.map(|f| f.z_safe).unwrap_or(Length::from_mm(5.0)),
+            work_coordinate_system: fixture.map(|f| f.work_coordinate_system).unwrap_or(1),
+            file_extension: machine
+                .map(|m| m.output_file_extension.clone())
+                .unwrap_or_else(|| crate::runtime::GCODE_FILE_EXTENSION.to_string()),
+            body: Self::build_step_render_ctx(machine),
+        }
+    }
+
     fn build_step_render_ctx(machine: Option<&MachineProfile>) -> crate::gcode::program::StepRender {
         use crate::gcode::feeds::{MachineLimits, SpindleRange};
         match machine {
@@ -241,19 +287,6 @@ impl AppCtx {
         let process_profile_name = process
             .map(|profile| profile.name.clone())
             .unwrap_or_default();
-        let machine = process.and_then(|profile| {
-            self.app
-                .machines
-                .iter()
-                .find(|machine| machine.id == profile.cnc_profile_id)
-        });
-        let cnc_profile_name = machine.map(|machine| machine.name.clone()).unwrap_or_default();
-        // The CNC's preamble templates (the legacy `gcode_header`/`gcode_footer`
-        // fields carry the `initialise`/`conclude` primitives — see the crosswalk in
-        // `machine_profile_from_value`).
-        let initialise_template = machine.map(|machine| machine.gcode_header.clone()).unwrap_or_default();
-        let conclude_template = machine.map(|machine| machine.gcode_footer.clone()).unwrap_or_default();
-
         let operations = self
             .app
             .project_config
@@ -264,37 +297,17 @@ impl AppCtx {
 
         let pcb_filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        // `z_safe` is the fixture's safe travel height (clear of clamps and fixture
-        // hardware) per the Z-model — the header/footer retract to it. Falls back to a
-        // conservative 5 mm only when no fixture resolves (an incomplete job, which the
-        // reference check already flags).
-        let fixture = process.and_then(|profile| {
-            self.app
-                .fixtures
-                .iter()
-                .find(|fixture| fixture.id == profile.fixture_profile_id)
-        });
-        let z_safe = fixture.map(|fixture| fixture.z_safe).unwrap_or(Length::from_mm(5.0));
-        // Which of the machine's stored zeros the fixture sits in. An ordinal — the
-        // `initialise` template turns it into the controller's own word for it.
-        let work_coordinate_system =
-            fixture.map(|fixture| fixture.work_coordinate_system).unwrap_or(1);
 
-        // Body-phase inputs: the resolved drill plan, the per-step CNC render context
-        // (`step_render[i]` matches `plan.steps[i]`), and the tool→feed/speed lookup.
-        // Built here on the main thread; the worker only renders.
+        // The resolved drill plan plus one program context per step (`steps[i]` matches
+        // `plan.steps[i]`) and the tool→feed/speed lookup. Built here on the main thread;
+        // the worker only renders.
         let plan = machining_plan::plan_machining(self);
-        let step_render = process
+        let steps = process
             .and_then(|profile| Uuid::parse_str(&profile.id).ok())
             .map(|profile_id| {
                 tooling::read_steps(profile_id)
                     .iter()
-                    .map(|raw| {
-                        let machine = raw
-                            .cnc_id
-                            .and_then(|id| self.app.machines.iter().find(|m| m.id == id.to_string()));
-                        Self::build_step_render_ctx(machine)
-                    })
+                    .map(|raw| self.build_program_render_ctx(raw))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -314,21 +327,7 @@ impl AppCtx {
             })
             .collect();
 
-        GenerationInput {
-            process_profile_name,
-            cnc_profile_name,
-            operations,
-            initialise_template,
-            conclude_template,
-            pcb_filename,
-            timestamp,
-            z_safe,
-            work_coordinate_system,
-            plan,
-            step_render,
-            tool_feeds,
-            line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
-        }
+        GenerationInput { process_profile_name, operations, pcb_filename, timestamp, plan, steps, tool_feeds }
     }
 
     pub fn ensure_catalogs_loaded(&mut self) {

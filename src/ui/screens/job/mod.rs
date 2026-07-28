@@ -39,7 +39,15 @@ use tooling::ToolingView;
 #[component]
 pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Element {
     let snapshot = state.read().clone();
-    let has_atc = snapshot.selected_machine_has_atc();
+    // Every view below shows one step. The steps come from the datastore rather than from
+    // a plan so the chrome does not vanish when there is no board to plan against.
+    let steps = crate::runtime::tooling::step_headers(&snapshot);
+    let selected_step = snapshot.selected_step.min(steps.len().saturating_sub(1));
+
+    // The rack belongs to *this step's* machine: a step names its own CNC, so whether
+    // there is a rack to show can differ between steps of one job. (This used to ask the
+    // job-level machine, which is the step-0 projection.)
+    let has_atc = steps.get(selected_step).map(|s| s.is_atc).unwrap_or(false);
     let mut views =
         vec![JobCenterView::Board, JobCenterView::Machining, JobCenterView::Code, JobCenterView::Tooling];
     if has_atc {
@@ -51,6 +59,10 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
     } else {
         snapshot.selected_job_view
     };
+
+    // A one-step job must show no trace of steps, so the whole row is absent rather than
+    // rendered with a single chip.
+    let show_steps = steps.len() > 1;
     rsx! {
         section {
             class: if docked { "panel grow project-main job-panel-docked" } else { "panel grow project-main" },
@@ -71,6 +83,43 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
                             move |_| super::mutate_ctx(state, |s| s.selected_job_view = target)
                         },
                         "{view.label()}"
+                    }
+                }
+            }
+
+            if show_steps {
+                div { class: "project-step-chips",
+                    for step in steps.iter() {
+                        {
+                            let index = step.index;
+                            let failed = snapshot
+                                .programs
+                                .get(index)
+                                .and_then(|program| program.failure())
+                                .map(str::to_string);
+                            let label = if step.name.trim().is_empty() {
+                                format!("Step {}", index + 1)
+                            } else {
+                                step.name.clone()
+                            };
+                            rsx! {
+                                button {
+                                    key: "{index}",
+                                    // A step whose program failed says so here, so the
+                                    // failure is discoverable without opening Code.
+                                    class: match (index == selected_step, failed.is_some()) {
+                                        (true, true) => "project-step-chip active has-error",
+                                        (true, false) => "project-step-chip active",
+                                        (false, true) => "project-step-chip has-error",
+                                        (false, false) => "project-step-chip",
+                                    },
+                                    title: failed.clone().unwrap_or_else(|| step.cnc_name.clone()),
+                                    onclick: move |_| super::mutate_ctx(state, |s| s.selected_step = index),
+                                    span { class: "project-step-chip-index", "{index + 1}" }
+                                    "{label}"
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -35,7 +35,7 @@ use crate::gcode::planner::{
 use crate::gcode::{oblong, outline, scene};
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, missing_bindings, plan_routers, read_steps,
-    HoleGroup, OblongStrategy, RouterPlan, StepRaw,
+    HoleGroup, RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
 
@@ -77,15 +77,15 @@ pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
 /// every drilled hole, all placed into machine space so the board and the toolpaths share
 /// one frame.
 ///
-/// Uses the **first step's** placement. Steps could in principle resolve different CNC
-/// scaling calibrations, but they describe setups of the same physical board, and drawing
-/// one workpiece per step would say something untrue about the job. If that ever stops
-/// being an approximation it will be because a profile mixes machines, which is worth
-/// noticing rather than papering over.
+/// Placed by **`step`'s own** fixture origin and CNC scaling, because that is the setup
+/// its toolpaths are drawn in. This used to take the first step's placement and call it an
+/// approximation; once the view shows one step at a time that justification is gone — a
+/// second step in a different fixture would have had its paths drawn against a workpiece
+/// positioned by the first step's origin.
 ///
 /// `None` when there is no board or the outline could not be stitched — the toolpaths
 /// still render, just without a workpiece under them.
-pub fn board_solid(ctx: &AppCtx) -> Option<scene::BoardSolid> {
+pub fn board_solid(ctx: &AppCtx, step: usize) -> Option<scene::BoardSolid> {
     let board = ctx.board.as_ref()?;
     let stitched = ctx.stitched_board_data.as_ref()?;
     if !stitched.errors.is_empty() {
@@ -93,17 +93,17 @@ pub fn board_solid(ctx: &AppCtx) -> Option<scene::BoardSolid> {
     }
 
     let orientation = with_appdata(|data| data.job_board_orientation()) as f64;
-    let first = ctx
+    let raw = ctx
         .selected_process_profile_id
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
         .map(read_steps)
-        .and_then(|steps| steps.into_iter().next());
-    let cnc = first
+        .and_then(|steps| steps.into_iter().nth(step));
+    let cnc = raw
         .as_ref()
         .and_then(|raw| raw.cnc_id)
         .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
-    let first_fixture = first
+    let fixture = raw
         .as_ref()
         .and_then(|raw| raw.fixture_id)
         .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
@@ -113,7 +113,7 @@ pub fn board_solid(ctx: &AppCtx) -> Option<scene::BoardSolid> {
     let placement = Placement::new(
         board.bounding_box.as_ref(),
         orientation,
-        first_fixture
+        fixture
             .map(|f| BoardOrigin::from_edges(&f.origin_x0, &f.origin_y0))
             .unwrap_or_default(),
         cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
@@ -173,10 +173,10 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     let name = raw.name.clone();
     let mut notes: Vec<String> = Vec::new();
 
-    let has_pth = raw.operations.iter().any(|op| op == "drill_pth");
-    let has_npth = raw.operations.iter().any(|op| op == "drill_npth");
-    let has_route = raw.operations.iter().any(|op| op == "route_board" || op == "mill_board");
-    let has_locating = raw.operations.iter().any(|op| op == "drill_locating_pins");
+    let has_pth = raw.drills_pth();
+    let has_npth = raw.drills_npth();
+    let has_route = raw.routes_outline();
+    let has_locating = raw.drills_locating_pins();
 
     // Every binding is required to plan. Defaulting a missing CNC to "no ATC, unity
     // scaling" or a missing fixture to nominal heights would produce a plausible-looking
@@ -242,7 +242,7 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     // shared planner so this and the Tooling tab produce the same rack, and thus the
     // same slot numbers.
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
-    let oblong = OblongStrategy::from_key(&raw.drill.oblong);
+    let oblong = raw.oblong_strategy();
     let routers =
         plan_routers(&ctx.tools, toolset, &groups, has_route, has_oblongs && oblong.routes());
 

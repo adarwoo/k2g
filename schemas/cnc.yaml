@@ -138,6 +138,27 @@ properties:
         $ref: "units.yaml#/$defs/feed"
 
       # -----------------------------------------------------------------------
+      # output_file_extension
+      # -----------------------------------------------------------------------
+      # What a saved program for this machine is called. A machining step names its
+      # own CNC, and the CNC's primitives decide the output *format* — a step whose
+      # primitives emit Excellon should not be saved as `.nc`.
+      #
+      # Written without the dot. Valid examples:
+      #   output_file_extension: nc
+      #   output_file_extension: ngc
+      #   output_file_extension: drl
+      #
+      output_file_extension:
+        description: >
+          Extension for programs saved for this machine, without the leading dot. The
+          CNC's primitives decide the output format, so the extension belongs with them
+          rather than with the save dialog.
+        type: string
+        pattern: '^[A-Za-z0-9]{1,8}$'
+        default: "nc"
+
+      # -----------------------------------------------------------------------
       # atc_slot_count
       # -----------------------------------------------------------------------
       # Number of automatic tool changer slots.
@@ -281,6 +302,8 @@ properties:
       # loads with the conservative 5000mm/min filled in rather than being rejected.
       - max_feed_xy
       - max_feed_z
+      # Likewise defaulted, so an older profile loads as the G-code machine it was.
+      - output_file_extension
       - atc_slot_count
       - scaling
 

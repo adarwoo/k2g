@@ -23,6 +23,7 @@ machine:
   # its chip load is still met.
   max_feed_xy: "5000mm/min"
   max_feed_z: "5000mm/min"
+  output_file_extension: "nc"
   atc_slot_count: 0
   scaling:
     x: 1.0

@@ -238,9 +238,15 @@ fn MachiningDetail(id: Uuid) -> Element {
                         }
                     }
 
-                    h4 { class: "section-title", "Machining steps" }
-                    p { class: "field-hint",
-                        "Each step is one physical setup with its own CNC, fixture, toolset and operations. Steps run in order."
+                    // A profile with one step is just a profile: nothing here says
+                    // "step", and the single card renders as a plain section, so the
+                    // screen reads like the CNC and Fixture editors. The word returns
+                    // the moment a second step exists.
+                    if step_count > 1 {
+                        h4 { class: "section-title", "Machining steps" }
+                        p { class: "field-hint",
+                            "Each step is one physical setup with its own CNC, fixture, toolset and operations. Steps run in order."
+                        }
                     }
 
                     for index in 0..step_count {
@@ -265,34 +271,47 @@ fn MachiningDetail(id: Uuid) -> Element {
 #[component]
 fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
     let enabled_ops = use_operations(id, index);
+    // One component with conditional chrome rather than two: duplicating the field list
+    // for the single-step case is how the two would drift apart.
+    let multi = step_count > 1;
 
     rsx! {
-        div { class: "schema-section step-card",
-            div { class: "step-card-header",
-                h4 { class: "section-title", "Step {index + 1}" }
-                div { class: "step-card-actions",
-                    button {
-                        r#type: "button", class: "icon-btn", disabled: index == 0,
-                        title: "Move step up",
-                        onclick: move |_| move_step(id, index, index.saturating_sub(1)),
-                        "↑"
-                    }
-                    button {
-                        r#type: "button", class: "icon-btn", disabled: index + 1 >= step_count,
-                        title: "Move step down",
-                        onclick: move |_| move_step(id, index, index + 1),
-                        "↓"
-                    }
-                    button {
-                        r#type: "button", class: "icon-btn icon-btn-danger", disabled: step_count <= 1,
-                        title: "Remove step",
-                        onclick: move |_| remove_step(id, index),
-                        "✕"
+        div { class: if multi { "schema-section step-card" } else { "schema-section" },
+            // The heading and the reorder/remove controls are all statements about a step
+            // among steps. With one step every one of them is inert (the remove button is
+            // already disabled), so they are absent rather than greyed.
+            if multi {
+                div { class: "step-card-header",
+                    h4 { class: "section-title", "Step {index + 1}" }
+                    div { class: "step-card-actions",
+                        button {
+                            r#type: "button", class: "icon-btn", disabled: index == 0,
+                            title: "Move step up",
+                            onclick: move |_| move_step(id, index, index.saturating_sub(1)),
+                            "↑"
+                        }
+                        button {
+                            r#type: "button", class: "icon-btn", disabled: index + 1 >= step_count,
+                            title: "Move step down",
+                            onclick: move |_| move_step(id, index, index + 1),
+                            "↓"
+                        }
+                        button {
+                            r#type: "button", class: "icon-btn icon-btn-danger", disabled: step_count <= 1,
+                            title: "Remove step",
+                            onclick: move |_| remove_step(id, index),
+                            "✕"
+                        }
                     }
                 }
             }
 
-            SchemaField { id, ptr: format!("/steps/{index}/name") }
+            // A step's name distinguishes it from its siblings; with no siblings there is
+            // nothing to distinguish. Still stored, so adding a second step later starts
+            // from whatever this one was called.
+            if multi {
+                SchemaField { id, ptr: format!("/steps/{index}/name") }
+            }
 
             BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
             BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }

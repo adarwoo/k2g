@@ -47,20 +47,41 @@ pub struct ToolingPlan {
     pub rack_schedule: Option<RackSchedule>,
 }
 
-/// The rack schedule for the Rack view: a matrix of physical slots (rows) × resolved
-/// steps (columns), each cell the tool loaded and whether that slot must change.
+/// The rack across the whole job: physical slots × resolved steps, each cell the tool
+/// loaded and whether that slot must change before that step.
+///
+/// Computed for every step even though the Rack view shows one, because
+/// [`SlotChange::Kept`] is only knowable from the sequence — "already in the rack" is a
+/// statement about the steps before this one. [`rack_for_step`] projects one step out.
 pub struct RackSchedule {
-    /// Column headers — one per resolved step, in order.
-    pub steps: Vec<String>,
+    /// One per *resolved* step that loads tools, in order — which is a **subset** of the
+    /// profile's steps, so a column's position is not its step index. Hence
+    /// [`RackStepColumn::step_index`].
+    pub steps: Vec<RackStepColumn>,
     /// One row per physical (non-disabled) slot, in `T`-order.
     pub slots: Vec<RackSlotSchedule>,
+}
+
+/// Which step a schedule column belongs to. Identity only — what the step is *called*
+/// is the step chips' business.
+pub struct RackStepColumn {
+    /// Index into the profile's steps — *not* the column's own position.
+    pub step_index: usize,
+}
+
+/// One slot as it stands for a single step — what [`rack_for_step`] projects.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RackSlotView {
+    /// Slot label, e.g. `T1`.
+    pub slot: String,
+    /// The tool in it for this step, or `None` when the slot is empty.
+    pub tool: Option<String>,
+    pub status: SlotChange,
 }
 
 pub struct RackSlotSchedule {
     /// Slot label, e.g. `T1`.
     pub slot: String,
-    /// A toolset-pinned slot — the operator set it up and it never changes.
-    pub fixed: bool,
     /// One cell per step, aligned with [`RackSchedule::steps`].
     pub cells: Vec<RackCell>,
 }
@@ -85,7 +106,6 @@ pub enum SlotChange {
 }
 
 pub struct StepPlan {
-    pub index: usize,
     pub name: String,
     pub outcome: StepOutcome,
 }
@@ -156,6 +176,47 @@ pub(crate) struct StepRaw {
     /// be the bottom-side one. Today this exists to *refuse* such a step — see the
     /// readiness gate in `orchestration`.
     pub(crate) machines_bottom: bool,
+}
+
+/// What a step machines, asked of its enabled `operations`.
+///
+/// These read one line each, and existed as identical closures at the top of *both*
+/// `plan_step`s (this module's and the operation planner's) plus, once the Board view
+/// started drawing per step, a third caller. Three copies of "which key means drilling"
+/// is three places for a renamed operation key to hide, so they live on the raw step
+/// itself — the thing that actually owns the list.
+impl StepRaw {
+    /// Plated holes: pads and vias.
+    pub(crate) fn drills_pth(&self) -> bool {
+        self.enabled("drill_pth")
+    }
+
+    /// Non-plated holes: mounting holes and the like.
+    pub(crate) fn drills_npth(&self) -> bool {
+        self.enabled("drill_npth")
+    }
+
+    /// The board boundary, by either route (a contour cut) or mill (area clearing).
+    /// One predicate because both cut the outline; they differ in *how*, which is the
+    /// planner's business rather than this question's.
+    pub(crate) fn routes_outline(&self) -> bool {
+        self.enabled("route_board") || self.enabled("mill_board")
+    }
+
+    /// Locating pins. Planned nowhere yet — the board model carries no locating-pin
+    /// geometry — so today this only decides whether the step says so in a note.
+    pub(crate) fn drills_locating_pins(&self) -> bool {
+        self.enabled("drill_locating_pins")
+    }
+
+    /// How this step makes an oblong hole (drill the ends, route the slot, or both).
+    pub(crate) fn oblong_strategy(&self) -> OblongStrategy {
+        OblongStrategy::from_key(&self.drill.oblong)
+    }
+
+    fn enabled(&self, key: &str) -> bool {
+        self.operations.iter().any(|op| op == key)
+    }
 }
 
 /// How a through-cut contour is held until the operator breaks it out
@@ -337,7 +398,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
     // The physical rack is the first resolvable step's toolset (jobs share one toolset
     // in the common case; a later step on a different toolset still schedules into this
     // layout). Collect each resolved step's tools for the cross-step schedule as we go.
-    let mut schedule_input: Vec<(String, Vec<String>)> = Vec::new();
+    let mut schedule_input: Vec<(usize, String, Vec<String>)> = Vec::new();
     let mut schedule_toolset: Option<crate::data::model::ToolsetProfile> = None;
 
     let steps: Vec<StepPlan> = raw_steps
@@ -347,7 +408,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
             let outcome = plan_step(ctx, &raw);
             if let StepOutcome::Resolved(resolved) = &outcome {
                 if !resolved.tool_ids.is_empty() {
-                    schedule_input.push((raw.name.clone(), resolved.tool_ids.clone()));
+                    schedule_input.push((index, raw.name.clone(), resolved.tool_ids.clone()));
                     if schedule_toolset.is_none() {
                         schedule_toolset = raw
                             .toolset_id
@@ -356,7 +417,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
                     }
                 }
             }
-            StepPlan { index, name: raw.name.clone(), outcome }
+            StepPlan { name: raw.name.clone(), outcome }
         })
         .collect();
 
@@ -376,7 +437,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
 fn build_rack_schedule(
     ctx: &AppState,
     toolset: &crate::data::model::ToolsetProfile,
-    steps: &[(String, Vec<String>)],
+    steps: &[(usize, String, Vec<String>)],
 ) -> RackSchedule {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -426,25 +487,58 @@ fn build_rack_schedule(
                 }
             })
             .collect();
-        rows.push(RackSlotSchedule { slot: format!("T{index}"), fixed: is_fixed, cells });
+        rows.push(RackSlotSchedule { slot: format!("T{index}"), cells });
     }
 
-    RackSchedule { steps: steps.iter().map(|(name, _)| name.clone()).collect(), slots: rows }
+    RackSchedule {
+        steps: steps
+            .iter()
+            .map(|(step_index, _, _)| RackStepColumn { step_index: *step_index })
+            .collect(),
+        slots: rows,
+    }
 }
 
 /// The core cross-step spare-slot schedule (ctx-free, so it is unit-testable): for each
 /// step, the resulting spare-slot → tool-id state and the set of slots changed that
 /// step. A tool already loaded is kept in place; a new one takes an empty slot, or
 /// evicts a not-needed one. Fixed tools are excluded (they never occupy a spare slot).
+/// The rack as it stands **for one step**: every physical slot, the tool in it, and
+/// whether the operator must change that slot before running this step.
+///
+/// `None` when the step has no column — it resolved nothing, or loads no tools, so there
+/// is no rack state to describe. Projected rather than recomputed because
+/// [`SlotChange::Kept`] depends on the steps before this one; the schedule is the only
+/// place that knows.
+pub fn rack_for_step(schedule: &RackSchedule, step_index: usize) -> Option<Vec<RackSlotView>> {
+    // Column position is not step index — only resolved, tool-loading steps get columns.
+    let column = schedule.steps.iter().position(|s| s.step_index == step_index)?;
+    Some(
+        schedule
+            .slots
+            .iter()
+            .map(|row| RackSlotView {
+                slot: row.slot.clone(),
+                tool: row.cells.get(column).and_then(|cell| cell.tool.clone()),
+                status: row
+                    .cells
+                    .get(column)
+                    .map(|cell| cell.status)
+                    .unwrap_or(SlotChange::Empty),
+            })
+            .collect(),
+    )
+}
+
 fn schedule_spare_slots(
     spare_slots: &[u8],
     fixed_tools: &std::collections::BTreeSet<String>,
-    steps: &[(String, Vec<String>)],
+    steps: &[(usize, String, Vec<String>)],
 ) -> Vec<(std::collections::BTreeMap<u8, String>, std::collections::BTreeSet<u8>)> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut loaded: BTreeMap<u8, String> = BTreeMap::new();
     let mut snapshots = Vec::new();
-    for (_, step_tools) in steps {
+    for (_, _, step_tools) in steps {
         let dynamic: Vec<&String> = step_tools.iter().filter(|t| !fixed_tools.contains(*t)).collect();
         let needed: BTreeSet<&String> = dynamic.iter().copied().collect();
         let mut changed: BTreeSet<u8> = BTreeSet::new();
@@ -480,6 +574,98 @@ fn pick_slot(
 }
 
 /// Reads every step's operations, bindings and drill config from the profile document.
+/// What the selected step actually machines, as the Board view needs it.
+///
+/// Derived from the very predicates the Tooling and Machining plans use, so the drawing
+/// cannot claim a feature is machined that the plan skips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepTargets {
+    pub pth: bool,
+    pub npth: bool,
+    /// The board boundary — the outline band is the step's work only if it routes or
+    /// mills it.
+    pub outline: bool,
+}
+
+impl StepTargets {
+    /// Whether this step makes `hole`.
+    ///
+    /// Delegated to [`HoleGroup::from_hole`], which is already the app's single hole
+    /// classifier, rather than re-deciding here: one answer, not two that could drift.
+    /// The oblong strategy needs no separate condition — every strategy either drills the
+    /// ends or routes the slot, so a slot this step's operations cover is machined either
+    /// way.
+    pub fn machines(&self, hole: &pcb::BoardHole) -> bool {
+        HoleGroup::from_hole(hole, self.pth, self.npth).is_some()
+    }
+}
+
+/// What the step at `index` machines, or `None` when there is no such step to ask about
+/// — in which case the Board view draws the whole board, which is what a board with no
+/// machining profile selected should look like.
+pub fn step_targets(ctx: &AppState, index: usize) -> Option<StepTargets> {
+    let profile_id = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    if !appdata_ready() {
+        return None;
+    }
+    let raw = read_steps(profile_id).into_iter().nth(index)?;
+    Some(StepTargets {
+        pth: raw.drills_pth(),
+        npth: raw.drills_npth(),
+        outline: raw.routes_outline(),
+    })
+}
+
+/// One machining step as the Job chrome needs it: what to call it, and the couple of
+/// facts that decide what is shown for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepHeader {
+    pub index: usize,
+    pub name: String,
+    pub cnc_name: String,
+    /// Whether *this step's* CNC changes tools automatically. Per step because the Rack
+    /// tab is only meaningful for a machine with a rack, and two steps of one job may run
+    /// on different machines.
+    pub is_atc: bool,
+}
+
+/// The selected profile's steps, in order — the one read the step chips, the Rack tab
+/// gate and the save dialog share.
+///
+/// Read from the datastore rather than derived from a plan: a plan yields no steps when
+/// no board is loaded or the store is not ready, and the step chrome must not blink out
+/// of existence because KiCad went away.
+pub fn step_headers(ctx: &AppState) -> Vec<StepHeader> {
+    let Some(profile_id) = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+    else {
+        return Vec::new();
+    };
+    if !appdata_ready() {
+        return Vec::new();
+    }
+    read_steps(profile_id)
+        .into_iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let machine = raw
+                .cnc_id
+                .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
+            StepHeader {
+                index,
+                name: raw.name,
+                cnc_name: machine.map(|m| m.name.clone()).unwrap_or_default(),
+                is_atc: machine.map(|m| m.atc_slot_count > 0).unwrap_or(false),
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
     with_appdata(|data| {
         let Some(doc) = data.get(profile_id) else {
@@ -657,10 +843,10 @@ pub(crate) fn bottom_side_steps_reason(steps: &[StepRaw]) -> Option<String> {
 
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
 fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
-    let has_pth = raw.operations.iter().any(|op| op == "drill_pth");
-    let has_npth = raw.operations.iter().any(|op| op == "drill_npth");
-    let has_route = raw.operations.iter().any(|op| op == "route_board" || op == "mill_board");
-    let has_locating = raw.operations.iter().any(|op| op == "drill_locating_pins");
+    let has_pth = raw.drills_pth();
+    let has_npth = raw.drills_npth();
+    let has_route = raw.routes_outline();
+    let has_locating = raw.drills_locating_pins();
 
     // Every binding is required, and for the same reason the Machining plan requires
     // them: a defaulted fixture or CNC yields a plausible answer about hardware the
@@ -691,7 +877,7 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
 
     // A router is needed for the board outline and/or for oblong slots that route.
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
-    let oblong = OblongStrategy::from_key(&raw.drill.oblong);
+    let oblong = raw.oblong_strategy();
     let (oblong_drills, oblong_routes) = (oblong.drills(), oblong.routes());
     let routes_slots = has_oblongs && oblong_routes;
 
@@ -1970,8 +2156,8 @@ mod tests {
         // Spare slots T2/T3/T4; a tool "fix" is pinned (fixed) elsewhere.
         let fixed: BTreeSet<String> = ["fix".to_string()].into_iter().collect();
         let steps = vec![
-            ("s1".to_string(), vec!["fix".into(), "A".into(), "B".into()]),
-            ("s2".to_string(), vec!["fix".into(), "B".into(), "C".into()]),
+            (0, "s1".to_string(), vec!["fix".into(), "A".into(), "B".into()]),
+            (1, "s2".to_string(), vec!["fix".into(), "B".into(), "C".into()]),
         ];
         let snaps = schedule_spare_slots(&[2, 3, 4], &fixed, &steps);
 
@@ -1989,6 +2175,36 @@ mod tests {
         assert_eq!(changed2, &BTreeSet::from([4]), "only the new tool's slot changes");
     }
 
+    /// Columns exist only for steps that resolved *and* loaded tools, so a column's
+    /// position is not its step index. Projecting by position would show step 3 the rack
+    /// belonging to whichever step happened to be third in the schedule.
+    #[test]
+    fn the_rack_is_projected_by_step_index_not_by_column_position() {
+        let schedule = RackSchedule {
+            // Steps 0 and 2 resolved; step 1 loaded nothing and has no column.
+            steps: vec![RackStepColumn { step_index: 0 }, RackStepColumn { step_index: 2 }],
+            slots: vec![RackSlotSchedule {
+                slot: "T1".to_string(),
+                cells: vec![
+                    RackCell { tool: Some("drill".into()), status: SlotChange::Load },
+                    RackCell { tool: Some("router".into()), status: SlotChange::Kept },
+                ],
+            }],
+        };
+
+        let step0 = rack_for_step(&schedule, 0).expect("step 0 has a column");
+        assert_eq!(step0[0].tool.as_deref(), Some("drill"));
+        assert_eq!(step0[0].status, SlotChange::Load);
+
+        // The *second* column belongs to step 2, not step 1.
+        assert_eq!(rack_for_step(&schedule, 1), None, "a step with no column has no rack");
+        let step2 = rack_for_step(&schedule, 2).expect("step 2 has a column");
+        assert_eq!(step2[0].tool.as_deref(), Some("router"));
+        assert_eq!(step2[0].status, SlotChange::Kept, "carried over from an earlier step");
+
+        assert_eq!(rack_for_step(&schedule, 9), None, "a step beyond the profile has none");
+    }
+
     #[test]
     fn overflow_reuses_a_slot_by_evicting_a_tool_not_needed_this_step() {
         use std::collections::BTreeSet;
@@ -1996,7 +2212,7 @@ mod tests {
         let snaps = schedule_spare_slots(
             &[1],
             &BTreeSet::new(),
-            &[("s1".into(), vec!["A".into()]), ("s2".into(), vec!["B".into()])],
+            &[(0, "s1".into(), vec!["A".into()]), (1, "s2".into(), vec!["B".into()])],
         );
         assert_eq!(snaps[0].0.get(&1), Some(&"A".to_string()));
         assert_eq!(snaps[1].0.get(&1), Some(&"B".to_string()), "B evicts the idle A");

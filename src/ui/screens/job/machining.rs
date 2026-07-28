@@ -17,7 +17,7 @@ use crate::runtime::AppCtx;
 /// keeps a dense board (hundreds of holes) from flooding the DOM.
 const OP_LIST_CAP: usize = 40;
 
-/// The machining view: the operation plan, step by step.
+/// The machining view: the operation plan for the selected step.
 #[component]
 pub fn MachiningView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
@@ -27,6 +27,10 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
 
     let steps: Vec<StepVm> = plan.steps.iter().map(|step| step_vm(&snapshot, unit, step)).collect();
     let has_steps = !steps.is_empty();
+    let selected = snapshot.selected_step.min(steps.len().saturating_sub(1));
+    // Counting steps is only worth saying when there is more than one — a job with a
+    // single step must not mention that steps exist at all.
+    let multi_step = steps.len() > 1;
 
     rsx! {
         div { class: "screen single tooling-view",
@@ -36,9 +40,11 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
             Machining3dView { state }
 
             div { class: "machining-summary",
-                div { class: "impact-item",
-                    div { class: "impact-name", "Machining steps" }
-                    div { class: "impact-state", "{steps.len()}" }
+                if multi_step {
+                    div { class: "impact-item",
+                        div { class: "impact-name", "Machining steps" }
+                        div { class: "impact-state", "{steps.len()}" }
+                    }
                 }
                 div { class: "impact-item",
                     div { class: "impact-name", "Atomic operations" }
@@ -50,13 +56,8 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
                 p { class: "diag-status", "{note}" }
             }
 
-            for (position , step) in steps.iter().enumerate() {
-                if position > 0 {
-                    hr { class: "tooling-separator" }
-                }
-
+            if let Some(step) = steps.get(selected) {
                 div { class: "tooling-step",
-                    h3 { class: "tooling-step-title", "Step {step.index + 1}: {step.name}" }
                     p { class: "diag-status", "{step.summary}" }
 
                     if step.blocks.is_empty() {
@@ -115,10 +116,9 @@ pub fn MachiningView(state: Signal<AppCtx>) -> Element {
     }
 }
 
-/// A step, flattened for rendering.
+/// A step, flattened for rendering. It carries no identity: which step this is, and
+/// what it is called, are the step chips' business.
 struct StepVm {
-    index: usize,
-    name: String,
     summary: String,
     blocks: Vec<BlockVm>,
     notes: Vec<String>,
@@ -151,7 +151,7 @@ fn step_vm(ctx: &AppCtx, unit: UserUnitSystem, step: &StepPlan) -> StepVm {
         travel,
     );
     let blocks = step.blocks.iter().map(|block| block_vm(ctx, unit, block)).collect();
-    StepVm { index: step.index, name: step.name.clone(), summary, blocks, notes: step.notes.clone() }
+    StepVm { summary, blocks, notes: step.notes.clone() }
 }
 
 /// Builds a block's view model: a header line and the capped, ordered op list.

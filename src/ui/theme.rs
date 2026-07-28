@@ -1526,6 +1526,125 @@ body {
     color: var(--text);
 }
 
+/*
+ * The machining step every view below is showing. A second row rather than more tabs in
+ * the first: the two choices are orthogonal — which view, and which step — and reading
+ * them as one set of eight buttons would suggest they are alternatives.
+ *
+ * Rendered only when the profile has more than one step, so a single-step job shows no
+ * trace of the step machinery (see `JobViewPanel`). Smaller than the view tabs because
+ * the view is the primary choice and this qualifies it.
+ */
+/*
+ * A board feature the selected machining step does not make. Still drawn — you cannot
+ * judge one step of a board without seeing the board it is part of — but pushed back so
+ * what *this* step cuts is unambiguous.
+ *
+ * Group opacity rather than a ghost variant of every colour: the kind colours and the
+ * hatch patterns stay exactly as they are, and there is one number to tune.
+ */
+.board-step-ghost {
+    opacity: 0.18;
+}
+
+/* The pre-save plan: one row per step, named before the folder is chosen. Wider than the
+   default wizard because a row carries a step label, its CNC and an editable file name. */
+.save-plan-dialog {
+    width: min(680px, 92vw);
+}
+
+.save-plan-table {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 46vh;
+    overflow-y: auto;
+}
+
+.save-plan-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+}
+
+.save-plan-step {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.save-plan-step-name {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.save-plan-step-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
+.save-plan-name {
+    font-family: var(--mono, Consolas, monospace);
+    font-size: 12px;
+}
+
+.project-step-chips {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.project-step-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev);
+    color: var(--text-subtle);
+    border-radius: 999px;
+    padding: 4px 10px 4px 5px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.project-step-chip:hover {
+    background: var(--bg-hover);
+}
+
+.project-step-chip.active {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--text);
+}
+
+/* The ordinal is what the saved file is named after (`board_step2.nc`), so it is shown
+   even when the step carries a name of its own. */
+.project-step-chip-index {
+    display: grid;
+    place-items: center;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-subtle) 22%, transparent);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+/* A step that produced no program. Reads at a glance without opening Code, which is
+   where the reason itself lives. */
+.project-step-chip.has-error {
+    border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+    color: var(--err);
+}
+
+.project-step-chip.has-error .project-step-chip-index {
+    background: color-mix(in srgb, var(--err) 25%, transparent);
+}
+
 .machining-summary {
     display: grid;
     grid-template-columns: repeat(2, minmax(220px, 1fr));

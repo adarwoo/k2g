@@ -16,6 +16,7 @@ use std::path::Path;
 use pcb::{BoardEdgeShape, BoardSnapshot, Contour, HoleKind};
 use units::Length;
 
+use crate::runtime::tooling::{step_targets, StepTargets};
 use crate::runtime::AppCtx;
 use units::user_format as unit_format;
 
@@ -105,6 +106,10 @@ struct BoardHoleMarker {
     kind: HoleKind,
     base: DrillBaseShape,
     modifier: DrillModifier,
+    /// Whether the selected machining step makes this feature. `false` draws it ghosted:
+    /// still there, because a board is unreadable without its own geometry, but plainly
+    /// not this step's work.
+    machined: bool,
 }
 
 #[derive(Clone)]
@@ -134,6 +139,8 @@ struct BoardSlotFeature {
     outline_path: String,
     /// Hole kind, for the boundary colour.
     kind: HoleKind,
+    /// See [`BoardHoleMarker::machined`].
+    machined: bool,
 }
 
 /// One distinct slot size present on the board, for the legend. Keyed by kind as well
@@ -231,11 +238,19 @@ fn stadium_path(half_travel: f64, half_width: f64) -> String {
 ///
 /// `zoom` only feeds the drill-symbol legibility floor; slot bands stay geometrically
 /// true at every zoom, since their whole point is showing the real swept area.
+/// Whether the selected step makes `hole`. No targets means no step to filter by — every
+/// feature is drawn at full strength, which is what a board with no machining profile
+/// selected should look like.
+fn machines(targets: Option<&StepTargets>, hole: &pcb::BoardHole) -> bool {
+    targets.map(|t| t.machines(hole)).unwrap_or(true)
+}
+
 fn resolve_board_features(
     board: &BoardSnapshot,
     view_width: f64,
     view_height: f64,
     zoom: f64,
+    targets: Option<&StepTargets>,
 ) -> BoardFeatures {
     let Some(bbox) = board.bounding_box.as_ref() else {
         return BoardFeatures::default();
@@ -290,6 +305,7 @@ fn resolve_board_features(
                 half_travel,
                 outline_path: stadium_path(half_travel, half_width),
                 kind: hole.kind.clone(),
+                machined: machines(targets, hole),
             });
             if !features.slot_legend.iter().any(|entry| {
                 (entry.length_mm - length_mm).abs() < 1e-6
@@ -324,6 +340,7 @@ fn resolve_board_features(
             kind: hole.kind.clone(),
             base,
             modifier,
+            machined: machines(targets, hole),
         });
     }
 
@@ -495,6 +512,11 @@ fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String 
 #[component]
 pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
+    // What the selected step actually machines. `None` — no profile, or no such step —
+    // draws the whole board at full strength, which is the right picture when there is no
+    // step to be showing.
+    let step_targets = step_targets(&snapshot, snapshot.selected_step);
+    let routes_outline = step_targets.map(|t| t.outline).unwrap_or(true);
     let board_refresh_status = use_signal(String::new);
     let open_board_filenames = use_signal(Vec::<String>::new);
     let mut selected_board_filename = use_signal(String::new);
@@ -558,7 +580,13 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
         .board
         .as_ref()
         .map(|board| {
-            resolve_board_features(board, board_view_width, board_view_height, zoom_value)
+            resolve_board_features(
+                board,
+                board_view_width,
+                board_view_height,
+                zoom_value,
+                step_targets.as_ref(),
+            )
         })
         .unwrap_or_default();
     let board_hole_markers = &features.holes;
@@ -839,13 +867,21 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     // nominal size. Without a clean stitch there is no inside to
                                                     // keep out of, so fall back to a band centred on the raw edge
                                                     // fragments — still "this edge is routed", just unsided.
+                                                    // Ghosted when the selected step does not cut the outline: the
+                                                    // kerf is drawn so the board still reads as a board, but it is
+                                                    // plainly another step's work.
                                                     if let Some(outline) = stitched_outline.as_ref() {
                                                         {
                                                             let double_kerf = outline_band_width * 2.0;
+                                                            let band_class = if routes_outline {
+                                                                "board-outline-band"
+                                                            } else {
+                                                                "board-outline-band board-step-ghost"
+                                                            };
                                                             rsx! {
                                                                 path {
                                                                     d: "{outline}",
-                                                                    class: "board-outline-band",
+                                                                    class: "{band_class}",
                                                                     stroke_width: "{double_kerf}",
                                                                     mask: "url(#board-outside-route-mask)",
                                                                 }
@@ -853,7 +889,15 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     } else {
                                                         for shape in board_edge_shapes_svg.iter() {
-                                                            {edge_shape_element(shape, "board-outline-band", Some(outline_band_width))}
+                                                            {edge_shape_element(
+                                                                shape,
+                                                                if routes_outline {
+                                                                    "board-outline-band"
+                                                                } else {
+                                                                    "board-outline-band board-step-ghost"
+                                                                },
+                                                                Some(outline_band_width),
+                                                            )}
                                                         }
                                                     }
                                                     for shape in board_edge_shapes_svg.iter() {
@@ -871,6 +915,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                             rsx! {
                                                                 g {
                                                                     key: "board-slot-{idx}",
+                                                                    class: if slot.machined { "" } else { "board-step-ghost" },
                                                                     transform: "translate({slot.x} {slot.y}) rotate({slot.rotation_deg})",
 
                                                                     path { d: "{slot.outline_path}", class: "{band_class}" }
@@ -903,6 +948,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                             rsx! {
                                                                 g {
                                                                     key: "hole-marker-{idx}",
+                                                                    class: if marker.machined { "" } else { "board-step-ghost" },
                                                                     transform: "translate({marker.x} {marker.y}) rotate({marker.rotation_deg})",
 
                                                                     // Base outline.
@@ -1400,12 +1446,42 @@ mod tests {
             edge_shapes: Vec::new(),
             holes: vec![hole(0.8, 0.8, None), hole(3.2, 1.6, Some(0.0)), hole(0.8, 0.8, None)],
         };
-        let features = resolve_board_features(&board, 1000.0, 1000.0, 1.0);
+        let features = resolve_board_features(&board, 1000.0, 1000.0, 1.0, None);
         assert_eq!(features.holes.len(), 2, "two round holes get drill symbols");
         assert_eq!(features.slots.len(), 1, "the oblong becomes a routed band");
         assert_eq!(features.drill_legend.len(), 1, "one 0.8 mm size class, no slot entry");
         assert_eq!(features.slot_legend.len(), 1);
         assert!((features.slot_legend[0].length_mm - 3.2).abs() < 1e-9);
         assert!((features.slot_legend[0].width_mm - 1.6).abs() < 1e-9);
+        assert!(
+            features.holes.iter().all(|marker| marker.machined),
+            "with no step to filter by, every feature is the job's work"
+        );
+    }
+
+    /// The board is drawn per step: a step that drills only plated holes ghosts the
+    /// non-plated ones rather than hiding them, so the board still reads as a board.
+    #[test]
+    fn a_step_ghosts_the_features_it_does_not_machine() {
+        let mut npth = hole(1.2, 1.2, None);
+        npth.kind = HoleKind::PadNpth;
+        let board = BoardSnapshot {
+            name: "t".into(),
+            thickness: None,
+            bounding_box: Some(pcb::BoardBoundingBox {
+                x: Length::from_mm(0.0),
+                y: Length::from_mm(0.0),
+                width: Length::from_mm(100.0),
+                height: Length::from_mm(100.0),
+            }),
+            edge_shapes: Vec::new(),
+            holes: vec![hole(0.8, 0.8, None), npth],
+        };
+        let pth_only = StepTargets { pth: true, npth: false, outline: false };
+        let features = resolve_board_features(&board, 1000.0, 1000.0, 1.0, Some(&pth_only));
+
+        assert_eq!(features.holes.len(), 2, "both holes are still drawn");
+        assert!(features.holes[0].machined, "the plated hole is this step's work");
+        assert!(!features.holes[1].machined, "the non-plated one is not");
     }
 }

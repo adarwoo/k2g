@@ -29,10 +29,23 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
             )
         });
 
-    let is_empty = snapshot.gcode.trim().is_empty();
-    let highlighted = highlight_program(&snapshot.gcode);
-    let line_count = snapshot.gcode.lines().count();
-    let char_count = snapshot.gcode.len();
+    // One step's program, not the job's — a step names its own CNC, so the steps of one
+    // job are separate programs rather than sections of one.
+    let selected = snapshot.selected_program();
+    let program = selected.and_then(|step| step.program());
+    let step_failure = selected.and_then(|step| step.failure()).map(str::to_string);
+    let text = program.map(|p| p.text.as_str()).unwrap_or_default();
+
+    let is_empty = text.trim().is_empty();
+    let highlighted = highlight_program(text);
+    let line_count = text.lines().count();
+    let char_count = text.len();
+    // Named only when there is more than one step: with a single step the CNC is the
+    // job's CNC and stating it here would be noise.
+    let cnc_name = selected
+        .filter(|_| snapshot.programs.len() > 1)
+        .map(|step| step.cnc_name.clone())
+        .filter(|name| !name.is_empty());
 
     // When there is no program, explain *why*: the readiness gate's no-go reasons
     // (why generation hasn't run) rather than a generic message. These are kept
@@ -58,6 +71,15 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
                     match snapshot.generation_state {
                         GenerationState::Running => rsx! {
                             div { class: "gcode-empty-title", "Generating…" }
+                        },
+                        // The step's own reason, not a pointer to the Logs screen: a step
+                        // fails alone now, so the failure belongs beside the step it
+                        // belongs to rather than as a whole-job diagnostic elsewhere.
+                        _ if step_failure.is_some() => rsx! {
+                            div { class: "gcode-empty-block",
+                                div { class: "gcode-empty-title", "This step produced no program" }
+                                div { "{step_failure.clone().unwrap_or_default()}" }
+                            }
                         },
                         GenerationState::Failed => rsx! {
                             div { class: "gcode-empty-block",
@@ -108,6 +130,9 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
                     } else {
                         "Board thickness (PCB): unavailable"
                     }
+                }
+                if let Some(name) = cnc_name.as_ref() {
+                    span { "CNC: {name}" }
                 }
             }
         }

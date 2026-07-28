@@ -901,6 +901,9 @@ const LINEAR_CUT_DEFAULT: &str = "`G1 X{x} Y{y} Z{z} F{feedrate}";
 /// before `machine.max_feed_xy`/`max_feed_z` existed. Must match `schemas/cnc.yaml`.
 const MAX_FEED_DEFAULT: &str = "5000mm/min";
 
+/// The program extension shipped as the schema default, for the same reason.
+const OUTPUT_EXTENSION_DEFAULT: &str = "nc";
+
 /// The retired `cut_arc` variable that used to arrive as a ready-made "G2"/"G3".
 const ARC_CMD_PLACEHOLDER: &str = "{arc_cmd}";
 
@@ -1011,6 +1014,12 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
                 warn!("[{file}] machine.{key} was missing; filled in at {MAX_FEED_DEFAULT}");
                 machine.insert(key.into(), Value::from(MAX_FEED_DEFAULT));
             }
+        }
+        // Likewise required-with-a-default. Silent rather than warned: every profile
+        // that predates the key was a G-code machine, so the default is not an
+        // assumption about the hardware the way a feed limit is.
+        if !machine.contains_key("output_file_extension") {
+            machine.insert("output_file_extension".into(), Value::from(OUTPUT_EXTENSION_DEFAULT));
         }
     }
 

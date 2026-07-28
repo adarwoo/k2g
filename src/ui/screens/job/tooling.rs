@@ -1,19 +1,24 @@
-//! Job "Tooling" view — the per-step tooling plan (Specification.md §3 "Tooling
-//! plan"). Runs the tool-selection assigner for each machining step and shows, per
-//! step, the resolved rack (T1..Tn) and every machining requirement with its count
-//! and resolved tool. A step with no solution renders its diagnostics as an error.
+//! Job "Tooling" view — the tooling plan for the **selected** machining step
+//! (Specification.md §3 "Tooling plan"): the resolved rack (T1..Tn) and every machining
+//! requirement with its count and resolved tool. A step with no solution renders its
+//! diagnostics as an error.
+//!
+//! One step at a time because a step is an autonomous setup with its own toolset; which
+//! step is showing is the step chips' business (see [`super::JobViewPanel`]), so nothing
+//! here names it.
 
 use dioxus::prelude::*;
 
 use crate::runtime::tooling::{plan_tooling, StepOutcome};
 use crate::runtime::AppCtx;
 
-/// The tooling-plan view: one section per machining step, separated by a rule.
+/// The tooling plan for the selected machining step.
 #[component]
 pub fn ToolingView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
     let plan = plan_tooling(&snapshot);
     let has_steps = !plan.steps.is_empty();
+    let selected = snapshot.selected_step.min(plan.steps.len().saturating_sub(1));
 
     rsx! {
         div { class: "screen single tooling-view",
@@ -21,13 +26,10 @@ pub fn ToolingView(state: Signal<AppCtx>) -> Element {
                 p { class: "diag-status", "{note}" }
             }
 
-            for (position , step) in plan.steps.iter().enumerate() {
-                if position > 0 {
-                    hr { class: "tooling-separator" }
-                }
-
+            // One step: which one is the step chips' business, and with a single step
+            // there is nothing to choose, so no heading names it here either.
+            if let Some(step) = plan.steps.get(selected) {
                 div { class: "tooling-step",
-                    h3 { class: "tooling-step-title", "Step {step.index + 1}: {step.name}" }
 
                     match &step.outcome {
                         StepOutcome::Empty => rsx! {
