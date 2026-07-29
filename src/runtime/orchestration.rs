@@ -237,6 +237,7 @@ impl AppCtx {
             initialise_tpl: machine.map(|m| m.gcode_header.clone()).unwrap_or_default(),
             conclude_tpl: machine.map(|m| m.gcode_footer.clone()).unwrap_or_default(),
             line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
+            set_unit_tpl: machine.map(|m| m.set_unit_tpl.clone()).unwrap_or_default(),
             // The fixture's safe travel height, clear of clamps and fixture hardware, per
             // the Z-model. A conservative 5 mm only when no fixture resolves — which the
             // reference check already flags.

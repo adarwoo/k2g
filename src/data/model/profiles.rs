@@ -29,6 +29,10 @@ pub struct MachineProfile {
     pub scaling_y: f32,
     /// The `line_number` primitive; empty means the program is not numbered.
     pub line_number_tpl: String,
+    /// The `set_unit` primitive — how this machine is told which unit system to work
+    /// in, emitted by a template's `metric()`/`imperial()` call. Empty for a machine
+    /// that has no unit statement.
+    pub set_unit_tpl: String,
     /// How many stored zero points the controller holds — the count a fixture's
     /// `work_coordinate_system` indexes into.
     pub work_coordinate_systems: u8,
@@ -65,6 +69,7 @@ impl Default for MachineProfile {
             scaling_x: 1.0,
             scaling_y: 1.0,
             line_number_tpl: String::new(),
+            set_unit_tpl: String::new(),
             work_coordinate_systems: 1,
             gcode_header: "".to_string(),
             gcode_footer: "".to_string(),

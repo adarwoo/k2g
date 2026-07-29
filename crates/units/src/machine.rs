@@ -12,7 +12,7 @@
 //! dialect — so a `Mil` system maps to `Imperial` here.
 
 use crate::display::{format_number, UserUnitDisplay, UserUnitSystem};
-use crate::types::{FeedRate, Length, RotationalSpeed};
+use crate::types::{Angle, FeedRate, Length, RotationalSpeed};
 
 /// Collapses the UI-only `Mil` presentation onto `Imperial`, since GCode emits
 /// millimetres or inches only.
@@ -51,11 +51,22 @@ pub fn number_speed(speed: RotationalSpeed, system: UserUnitSystem) -> String {
     format_number(speed.user_value(machine_system(system)), 0)
 }
 
+/// An angle as a bare number of degrees, to 0.01°.
+///
+/// System-invariant, like rpm — a degree is a degree in either dialect, so the
+/// `system` argument is taken only to keep the four `number_*` calls uniform for the
+/// engine's type-dispatched `fmt`. Two decimals matches what
+/// [`UserUnitDisplay::user_value`] already rounds an `Angle` to, so a value shown in
+/// the UI and the same value emitted into a program never disagree.
+pub fn number_angle(angle: Angle, system: UserUnitSystem) -> String {
+    format_number(angle.user_value(machine_system(system)), 2)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{number_feed, number_length, number_speed};
+    use super::{number_angle, number_feed, number_length, number_speed};
     use crate::display::UserUnitSystem;
-    use crate::types::{FeedRate, Length, RotationalSpeed};
+    use crate::types::{Angle, FeedRate, Length, RotationalSpeed};
 
     #[test]
     fn length_emits_bare_number_whole_and_fractional() {
@@ -77,5 +88,15 @@ mod tests {
     fn feed_and_speed_emit_bare_numbers() {
         assert_eq!(number_feed(FeedRate::from_mm_per_min(300.0), UserUnitSystem::Metric), "300");
         assert_eq!(number_speed(RotationalSpeed::from_rpm(12000.0), UserUnitSystem::Metric), "12000");
+    }
+
+    /// Degrees are the same number in either dialect, so the system must not change
+    /// the digits — an angle that shifted with the machine's unit mode would rotate a
+    /// slot differently in an imperial program than a metric one.
+    #[test]
+    fn angle_emits_the_same_bare_degrees_in_either_system() {
+        assert_eq!(number_angle(Angle::from_degrees(90.0), UserUnitSystem::Metric), "90");
+        assert_eq!(number_angle(Angle::from_degrees(90.0), UserUnitSystem::Imperial), "90");
+        assert_eq!(number_angle(Angle::from_degrees(22.5), UserUnitSystem::Metric), "22.5");
     }
 }

@@ -95,7 +95,7 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
         ),
         group(
             "Program lifecycle",
-            &["/primitives/initialise", "/primitives/conclude"],
+            &["/primitives/initialise", "/primitives/set_unit", "/primitives/conclude"],
         ),
         group(
             "Motion / spindle / drilling",

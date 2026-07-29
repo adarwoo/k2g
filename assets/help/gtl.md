@@ -1,7 +1,7 @@
 # GCode template syntax
 
-The program lifecycle and motion fields (`initialise`, `rapid_move`,
-`peck_drill`, `change_tool`, …) are written in the **GCode Template Language**.
+The program lifecycle and motion fields (`initialise`, `rapid_move`, `drill`,
+`change_tool`, …) are written in the **GCode Template Language**.
 Each field is a small script: most lines are the GCode you want, and the
 engine fills in coordinates, feeds and speeds for you — already converted to the
 machine's active unit.
@@ -42,10 +42,10 @@ optional prefix is the safe shape, because the line is still finished by an
 ordinary emit:
 
 ```
-if dry_run {
-    `(SIMULATED) `
+if z_bottom < z_retract {
+    `(plunging) `
 }
-`G1 X{x} Y{y} F{feed}
+`G1 Z{z_bottom} F{z_feedrate}
 ```
 
 **Take care to finish the line.** A line left open runs straight into whatever is
@@ -70,7 +70,7 @@ don't need spaces between fields:
 You can compute inside the braces too:
 
 ```
-`G1 Z{z_bottom - clearance} F{z_feed}
+`G1 Z{z_bottom + z_retract} F{z_feedrate}
 ```
 
 ## Units are automatic
@@ -79,40 +79,66 @@ A CNC coordinate system is *modal* — once the program says `G21` (mm) or `G20`
 (inch), every coordinate is in that unit. You never track this yourself:
 
 - Call **`metric()`** once (usually in `initialise`) to work in millimetres, or
-  **`imperial()`** for inches. That call emits the matching `G21` / `G20` **and**
-  tells the engine how to format every value from then on.
+  **`imperial()`** for inches. That call emits your machine's word for it **and**
+  tells the engine how to format every value from then on — one call, so the two
+  can never disagree.
+- What it emits is yours to set, in the **`set_unit`** field: usually
+  `` `{if metric { "G21" } else { "G20" }} ``, and empty for a machine that has no
+  unit command at all.
 - A length like `{z_safe}` then prints as mm or inches automatically. Feeds
   print as mm/min or in/min. Spindle speeds (rpm) are the same either way.
 
 Need a specific unit regardless of mode? Use an explicit accessor, which gives a
-plain number: `{z_safe.mm}`, `{z_safe.inch}`, `{z_feed.mm_per_min}`.
+plain number: `{z_safe.mm}`, `{z_safe.inch}`, `{z_feedrate.mm_per_min}`.
+
+## Comparing values with units
+
+Values keep their unit type, so comparisons and maths are unit-correct: `10mm` and
+`1cm` are equal, and `z_retract - z_bottom` is still a length that prints in the
+active unit. You also get `max`, `min`, `abs` and `clamp`.
+
+What you **cannot** do is compare a measurement with a bare number:
+
+```
+if z > 5          // error — five what?
+if z > z_bottom   // fine
+if z.mm > 5       // fine — you named the unit yourself
+```
+
+That is deliberate. A silent answer here would be worse than an error: a loop like
+`while z > z_bottom` whose bound was accidentally a plain number would simply never
+run, and the program would come out with no cutting moves in it.
 
 ## Loops and conditions
 
-Everything outside a backtick line is an ordinary script. Values keep their unit
-type, so comparisons and maths are unit-correct (`z > z_bottom`, `z - peck`).
+Everything outside a backtick line is an ordinary script.
 
-A manual peck-drill cycle for a controller without a canned `G83`:
+A manual peck-drill cycle for a controller without a canned `G83`, in three bites:
 
 ```
 `G0 X{x} Y{y}
 `G0 Z{z_retract}
 let z = z_retract;
+let step = (z_retract - z_bottom) / 3;
 while z > z_bottom {
-    z = max(z - peck, z_bottom);
-    `G1 Z{z} F{z_feed}
+    z = max(z - step, z_bottom);
+    `G1 Z{z} F{z_feedrate}
     `G0 Z{z_retract}
 }
 ```
 
+Every name in there is one the `drill` field is given — see **Values available**
+below. `max` is what lands the last bite exactly on `z_bottom` instead of past it.
+
 Branching — note each emitted line is on **its own line** (a backtick is only
-recognised at the start of a line, never in the middle):
+recognised at the start of a line, never in the middle). An arc, choosing its
+direction from the `clockwise` flag the field is given:
 
 ```
-if has_positioning_pins {
-    `G56
+if clockwise {
+    `G2 X{x} Y{y} I{i} J{j} F{xy_feedrate}
 } else {
-    `G54
+    `G3 X{x} Y{y} I{i} J{j} F{xy_feedrate}
 }
 ```
 
@@ -132,14 +158,21 @@ if has_positioning_pins {
 | `` `` ``             | nothing                                             |
 | `{ expr }`           | evaluate `expr`, convert to the active unit, insert |
 | `{{` / `}}`          | a literal `{` / `}`                                 |
-| `metric()`           | switch to mm, emit `G21`                             |
-| `imperial()`         | switch to inch, emit `G20`                           |
+| `metric()`           | switch to mm, emit the `set_unit` field              |
+| `imperial()`         | switch to inch, emit the `set_unit` field            |
 | `{ v.mm }`           | force millimetres (plain number, no conversion)     |
+| `{ v.inch }`         | the same in inches; also `.cm`, `.mil`, `.mm_per_min`, `.rpm`, `.degrees` |
+| `max(a, b)`          | also `min`, `abs`, `clamp(v, lo, hi)` — on measurements or numbers |
 | `//`                 | script comment (not emitted)                        |
 
 ## Values available
 
-Each field is given the variables relevant to that operation (for a drilling
-primitive: `x`, `y`, `z_bottom`, `z_retract`, `peck`, `z_feed`, `rpm`, …), plus
-any custom attributes defined on the CNC profile. Lengths, feeds and speeds are
-typed, so they format and combine correctly.
+Each field is given the variables relevant to that operation, and **only** those —
+`drill` gets `x`, `y`, `z_bottom`, `z_retract` and `z_feedrate`; `cut_arc` gets a
+centre offset and a direction; `line_number` gets the line's number and its text.
+A name the field is not given is an error, not an empty value, so a typo is caught
+in the preview rather than in the program.
+
+The panel beside the editor lists exactly what the field you are editing has, with
+each one's type. Lengths, feeds and speeds are typed, so they format and combine
+correctly.

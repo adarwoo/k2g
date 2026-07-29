@@ -931,22 +931,12 @@ fn load_normalized(
     store.parse_texts(schema_id, dir, &items)
 }
 
-/// The `linear_cut` template shipped as the schema default — the repair target below.
-const LINEAR_CUT_DEFAULT: &str = "`G1 X{x} Y{y} Z{z} F{feedrate}";
-
 /// The axis feed limit shipped as the schema default, for backfilling profiles written
 /// before `machine.max_feed_xy`/`max_feed_z` existed. Must match `schemas/cnc.yaml`.
 const MAX_FEED_DEFAULT: &str = "5000mm/min";
 
 /// The program extension shipped as the schema default, for the same reason.
 const OUTPUT_EXTENSION_DEFAULT: &str = "nc";
-
-/// The retired `cut_arc` variable that used to arrive as a ready-made "G2"/"G3".
-const ARC_CMD_PLACEHOLDER: &str = "{arc_cmd}";
-
-/// What it becomes: the profile naming the direction itself. GTL has no ternary, so
-/// this is a Rhai if-expression.
-const ARC_DIRECTION_EXPR: &str = r#"{if clockwise { "G2" } else { "G3" }}"#;
 
 /// Whether a motion template emits a feed word at all: either through the `{feedrate}`
 /// variable or as a hardcoded `F<number>`.
@@ -961,37 +951,24 @@ fn emits_a_feed(template: &str) -> bool {
             .any(|w| w[0] == b'F' && (w[1].is_ascii_digit() || w[1] == b'.'))
 }
 
-/// What a hardcoded `G54` becomes: the ordinal the fixture supplies, mapped the
-/// conventional way. `work_coordinate_system` of 1 yields `G54`, so a default fixture
-/// gets byte-identical output.
-const WCS_EXPRESSION: &str = "G{53 + work_coordinate_system}";
-
-/// Replaces every whole-word occurrence of `word` in `text`, or `None` if there are
-/// none.
+/// Whether `text` contains `word` as a whole word.
 ///
-/// Whole-word so `G54` inside `G540` or `XG54` is left alone. GCode words are delimited
-/// by whitespace or line ends in every dialect this touches, which is what makes the
-/// rule safe to apply to a template we did not write.
-fn replace_word(text: &str, word: &str, replacement: &str) -> Option<String> {
+/// Whole-word so `G54` inside `G540`, `XG54` or `G54.1` does not count. Machine words
+/// are delimited by whitespace or line ends in every dialect this touches, which is what
+/// makes the rule safe to apply to a template we did not write.
+fn contains_word(text: &str, word: &str) -> bool {
     let is_boundary = |c: Option<char>| c.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '.');
-    let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    let mut replaced = false;
 
     while let Some(hit) = rest.find(word) {
         let before = rest[..hit].chars().next_back();
         let after = rest[hit + word.len()..].chars().next();
-        out.push_str(&rest[..hit]);
         if is_boundary(before) && is_boundary(after) {
-            out.push_str(replacement);
-            replaced = true;
-        } else {
-            out.push_str(word);
+            return true;
         }
         rest = &rest[hit + word.len()..];
     }
-    out.push_str(rest);
-    replaced.then_some(out)
+    false
 }
 
 /// Whether a template emits a spindle-speed word — an `S` followed by the `{rpm}`
@@ -1060,92 +1037,80 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
         }
     }
 
-    // `linear_cut` with no feed at all.
+    // The three checks below **report** and do not rewrite. Each was once a repair that
+    // wrote a replacement template, and every one of those replacements was machine code
+    // this application had chosen — a G1 line, a G2/G3 pair, a G-word expression. That is
+    // exactly what the primitives exist to keep out of here: the profile owns the machine
+    // language, so a profile that needs changing is told, in terms of the variable or
+    // behaviour at fault, and the operator makes the edit in the primitive editor.
+    //
+    // Reporting is also the only correct behaviour for a profile that is not G-code at
+    // all: an Excellon `linear_cut` legitimately carries no `F` word, and "repairing" it
+    // into a G1 line would have destroyed it.
+
+    // `linear_cut` with no feed at all. A G1 with no F runs at whatever feed is modal —
+    // after a drill block that is the drill's plunge feed, and a router driven at a
+    // drill's plunge feed breaks. Worth saying loudly.
     if let Some(template) = value.pointer("/primitives/linear_cut").and_then(Value::as_str) {
         if !emits_a_feed(template) {
             warn!(
-                "[{file}] primitives.linear_cut emitted no feed rate ('{template}'); \
-                 repaired to the current default so routing moves carry F"
+                "[{file}] primitives.linear_cut emits no feed rate ('{template}'), so a \
+                 routing move will run at whatever feed is left over from the previous \
+                 block — a drill's plunge feed, which breaks routers. Add the feed \
+                 variable to the template."
             );
-            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
-            {
-                primitives.insert("linear_cut".into(), Value::from(LINEAR_CUT_DEFAULT));
-            }
         }
     }
 
-    // `cut_arc` was handed a ready-made `{arc_cmd}` word. It is now handed the
-    // direction as a boolean and the profile names it, so a template still asking for
-    // `arc_cmd` would fail to render with "variable not found" — a hard generation
-    // failure. The substitution is safe because `arc_cmd` was only ever G2 or G3.
-    if let Some(template) = value.pointer("/primitives/cut_arc").and_then(Value::as_str) {
-        if template.contains(ARC_CMD_PLACEHOLDER) {
-            warn!(
-                "[{file}] primitives.cut_arc used the retired {{arc_cmd}} variable; \
-                 rewritten to branch on the new `clockwise` boolean"
-            );
-            let repaired = template.replace(ARC_CMD_PLACEHOLDER, ARC_DIRECTION_EXPR);
-            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
-            {
-                primitives.insert("cut_arc".into(), Value::from(repaired));
-            }
-        }
-    }
-
-    // `initialise` used to name a work coordinate system outright — the shipped default
-    // was `G17 G54 G40 …`. That silently overrode whatever the step's fixture said it
-    // was set up in, which is the one thing a fixture most needs to be able to say. The
-    // ordinal now comes in as a variable and the template maps it, so a literal `G54`
-    // becomes the expression that yields G54 for the first system: identical output for
-    // a default fixture, and correct for every other one.
+    // `initialise` naming a work coordinate system outright overrides whatever the step's
+    // fixture says it is set up in — the one thing a fixture most needs to be able to
+    // say. `work_coordinate_system` arrives as an ordinal for the template to map.
     //
-    // Only `G54` is rewritten, and only as a whole word. A profile naming a different
-    // system (a Bantam's `G55`, say) is doing so because its machine reserves the lower
-    // ones, and guessing that machine's offset is not something to do behind its back.
+    // Only a whole-word `G54` is looked for, because that was this application's own
+    // shipped default. A profile naming a different system (a Bantam's `G55`, say) is
+    // doing so because its machine reserves the lower ones.
     if let Some(template) = value.pointer("/primitives/initialise").and_then(Value::as_str) {
-        if let Some(repaired) = replace_word(template, "G54", WCS_EXPRESSION) {
+        if contains_word(template, "G54") {
             warn!(
-                "[{file}] primitives.initialise selected G54 outright, ignoring the \
-                 fixture's work coordinate system; rewritten to follow it"
+                "[{file}] primitives.initialise selects G54 outright, ignoring the \
+                 fixture's work coordinate system. The ordinal is in scope as \
+                 `work_coordinate_system` — map it in the template so a fixture set up \
+                 in another offset is honoured."
             );
-            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
-            {
-                primitives.insert("initialise".into(), Value::from(repaired));
-            }
         }
     }
 
     // `change_tool` used to end with `S{rpm}`, and `start_spindle` opens with the same
-    // word — and the Coder always emits the two adjacent, so the program carried two
-    // identical S words in a row. Drop the trailing one, but *only* when `start_spindle`
-    // really does set the speed: a profile that programs S before M06 on purpose (some
-    // controllers want it) must keep working.
+    // word — and the Coder always emits the two adjacent, so such a program carries two
+    // identical S words in a row. Harmless, and the operator's line to delete: editing
+    // someone's tool-change template on their behalf means deciding what a spindle-speed
+    // line looks like on their machine.
     let spindle_sets_speed = value
         .pointer("/primitives/start_spindle")
         .and_then(Value::as_str)
         .is_some_and(sets_spindle_speed);
     if spindle_sets_speed {
         if let Some(template) = value.pointer("/primitives/change_tool").and_then(Value::as_str) {
-            let trimmed = drop_trailing_speed_line(template);
-            if trimmed != template {
+            if drop_trailing_speed_line(template) != template {
                 warn!(
-                    "[{file}] primitives.change_tool set the spindle speed that \
-                     start_spindle sets immediately after; dropped the duplicate S"
+                    "[{file}] primitives.change_tool ends by setting the spindle speed \
+                     that start_spindle sets immediately afterwards, so every tool change \
+                     emits it twice. Drop the trailing line if your controller does not \
+                     want it."
                 );
-                if let Some(primitives) =
-                    value.pointer_mut("/primitives").and_then(Value::as_object_mut)
-                {
-                    primitives.insert("change_tool".into(), Value::from(trimmed));
-                }
             }
         }
     }
 
     // `machine.line_numbering_increment` was a bare integer the application turned into
-    // "N<n> " itself. Numbering is now a template, so the field is retired — and it must
-    // be *removed*, or `additionalProperties: false` rejects the whole profile. Its value
-    // is folded into a seeded `line_number` template so the program keeps numbering
-    // exactly as before rather than silently losing it.
+    // an "N<n> " prefix itself. Numbering is now a template, so the field is retired —
+    // and it must be *removed* here, or `additionalProperties: false` rejects the whole
+    // profile. Dropping a dead key is not the same as authoring machine code, so that
+    // part stays; what does **not** happen any more is seeding a `line_number` template
+    // from it, because "N" is a G-code word and this profile may not be G-code.
+    //
+    // The cost is honest and stated: a profile upgraded from the retired field stops
+    // numbering until its operator writes the template the warning describes.
     let increment = value
         .pointer_mut("/machine")
         .and_then(Value::as_object_mut)
@@ -1156,22 +1121,13 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
             .pointer("/primitives/line_number")
             .and_then(Value::as_str)
             .is_some_and(|t| !t.trim().is_empty());
-        if !already_set {
-            // The trailing space sits inside the closing backtick, which both suppresses
-            // the newline and keeps the space from being trimmed.
-            let seeded = if increment == 0 {
-                String::new()
-            } else {
-                format!("`N{{line * {increment}}} `")
-            };
+        if !already_set && increment != 0 {
             warn!(
-                "[{file}] machine.line_numbering_increment ({increment}) is retired; \
-                 carried over into primitives.line_number"
+                "[{file}] machine.line_numbering_increment ({increment}) is retired and \
+                 this profile has no primitives.line_number, so its programs are no \
+                 longer numbered. Put the numbering word your controller expects in that \
+                 field, stepping by {increment} — `line` counts the program's lines."
             );
-            if let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut)
-            {
-                primitives.insert("line_number".into(), Value::from(seeded));
-            }
         }
     }
 }
@@ -1592,6 +1548,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every profile saved before `set_unit` existed has no such key, and none of them
+    /// were rewritten — the schema default is what keeps them emitting their unit
+    /// statement, and is why moving `G21`/`G20` out of the application needed no
+    /// migration pass. If that default is ever dropped, those profiles fall silent
+    /// about their units, which this catches.
+    #[test]
+    fn a_profile_written_before_set_unit_existed_still_states_its_units() {
+        let store = build_datastore();
+        let mut seed = parse_yaml_value(include_str!(
+            "../../assets/cnc_templates/genmitsu_3018.yaml"
+        ))
+        .expect("the bundled template parses");
+        seed.pointer_mut("/primitives")
+            .and_then(Value::as_object_mut)
+            .expect("the template has primitives")
+            .remove("set_unit")
+            .expect("which included set_unit before this test removed it");
+
+        let node = store
+            .instantiate_from("cnc.yaml", &seed)
+            .expect("a profile without set_unit still instantiates");
+
+        assert_eq!(
+            node.to_value().pointer("/primitives/set_unit").and_then(Value::as_str),
+            Some(r#"`{if metric { "G21" } else { "G20" }}"#),
+            "the schema default stands in for the key the old profile never had"
+        );
     }
 
     #[test]
@@ -2274,25 +2259,39 @@ mod tests {
 
     /// A `linear_cut` that cannot emit a feed is repaired; one that can — by variable or
     /// hardcoded — is left exactly as the operator wrote it.
+    /// Loading a profile reports what is wrong with it and **changes no template**.
+    ///
+    /// Every one of these checks was once a repair that wrote a replacement, and every
+    /// replacement was machine code this application had chosen — a G1 line, a G2/G3
+    /// pair, a G-word expression, an N-word prefix. The profile owns the machine
+    /// language; a profile that needs changing gets a warning naming the variable or
+    /// behaviour at fault, and its operator makes the edit.
+    ///
+    /// This also keeps a non-G-code profile safe: an Excellon `linear_cut` carries no
+    /// `F` word, and the old feed "repair" would have overwritten it with a G1 line.
     #[test]
-    fn a_feedless_linear_cut_is_repaired_and_a_feeding_one_is_left_alone() {
-        let repaired = |template: &str| {
-            let mut value = serde_json::json!({ "primitives": { "linear_cut": template } });
+    fn loading_a_profile_never_rewrites_its_templates() {
+        let untouched = |primitives: Value| {
+            let mut value = serde_json::json!({ "primitives": primitives });
+            let before = value.clone();
             normalize_cnc_value(&mut value, Path::new("machine.yaml"));
-            value
-                .pointer("/primitives/linear_cut")
-                .and_then(Value::as_str)
-                .unwrap()
-                .to_string()
+            assert_eq!(value, before, "load must not edit a template");
         };
 
-        // The old shipped default: spindle speed but no F at all.
-        assert_eq!(repaired("`G1 X{x} Y{y} Z{z} S{s}"), LINEAR_CUT_DEFAULT);
-        // Already carries the variable.
-        assert_eq!(repaired(LINEAR_CUT_DEFAULT), LINEAR_CUT_DEFAULT);
-        // A profile that pins its own feed is a deliberate choice, not a defect.
-        let pinned = "`G1 X{x} Y{y} Z{z} F250";
-        assert_eq!(repaired(pinned), pinned);
+        // No feed at all — warned about (a router at a drill's plunge feed breaks), kept.
+        untouched(serde_json::json!({ "linear_cut": "`G1 X{x} Y{y} Z{z} S{s}" }));
+        // The retired `{arc_cmd}` variable — warned about, kept; it fails at render,
+        // which is the honest outcome and better than inventing G2/G3 here.
+        untouched(serde_json::json!({ "cut_arc": "`{arc_cmd} X{x} Y{y} I{i} J{j}" }));
+        // A hardcoded work offset — warned about, kept.
+        untouched(serde_json::json!({ "initialise": "`G17 G54 G40 G49 G80 G90" }));
+        // A duplicate spindle speed across change_tool/start_spindle — warned, kept.
+        untouched(serde_json::json!({
+            "change_tool": "`T{slot} M06\n`S{rpm}",
+            "start_spindle": "`S{rpm}\n`M3",
+        }));
+        // An Excellon-style cut with no F word: nothing to repair it into.
+        untouched(serde_json::json!({ "linear_cut": "`X{x}Y{y}" }));
 
         // A profile with no primitives block at all must not panic.
         let mut bare = serde_json::json!({ "name": "no primitives" });
@@ -2339,134 +2338,47 @@ mod tests {
         assert_eq!(bare, serde_json::json!({ "name": "Tape" }));
     }
 
-    /// `initialise` naming `G54` outright silently overrode the step fixture's own work
-    /// coordinate system — the one thing a fixture most needs to be able to say. It is
-    /// rewritten to follow the fixture, which for the default ordinal emits `G54` still.
+    /// The detection behind the `G54` warning is whole-word, so a profile is not nagged
+    /// about a `G54` that is part of something else. It has to be exact: the warning
+    /// tells an operator to go and edit a template, and sending them after a word that
+    /// is not there wastes their time.
     #[test]
-    fn an_initialise_that_hardcodes_g54_is_rewritten_to_follow_the_fixture() {
-        let repaired = |template: &str| {
-            let mut value = serde_json::json!({ "primitives": { "initialise": template } });
-            normalize_cnc_value(&mut value, Path::new("machine.yaml"));
-            value.pointer("/primitives/initialise").and_then(Value::as_str).unwrap().to_string()
-        };
-
-        assert_eq!(
-            repaired("`G17 G54 G40 G49 G80 G90"),
-            "`G17 G{53 + work_coordinate_system} G40 G49 G80 G90"
-        );
-
-        // A profile naming a *different* system does so because its machine reserves
-        // the lower ones (a Bantam's G54 is its own reference). Guessing that offset
-        // behind its back would move the job somewhere unintended.
-        let bantam = "`G17 G90\n`G55";
-        assert_eq!(repaired(bantam), bantam);
-
-        // Already following the fixture, or no preamble at all.
-        let following = "`G17 G{53 + work_coordinate_system} G40";
-        assert_eq!(repaired(following), following);
+    fn the_word_check_respects_boundaries() {
+        assert!(contains_word("G17 G54 G40", "G54"));
+        assert!(contains_word("G54", "G54"), "alone on the line");
+        assert!(contains_word("a\nG54\nb", "G54"));
+        assert!(contains_word("G540 G54", "G54"), "the second one counts");
+        assert!(!contains_word("G540", "G54"), "not a prefix");
+        assert!(!contains_word("G54.1", "G54"), "not part of a decimal word");
+        assert!(!contains_word("XG54", "G54"), "not a suffix");
+        assert!(!contains_word("nothing here", "G54"));
     }
 
-    /// The rewrite is whole-word, so a `G54` that is part of something else survives —
-    /// this is editing a template we did not write.
+    /// The retired `line_numbering_increment` must still be **removed** —
+    /// `additionalProperties: false` would reject the whole profile otherwise — but its
+    /// value is no longer turned into a `line_number` template, because an "N" prefix is
+    /// a G-code word and this profile may not be G-code.
+    ///
+    /// Dropping a dead key is not the same as authoring machine code; the difference is
+    /// the whole of this test.
     #[test]
-    fn the_word_replacement_respects_boundaries() {
-        assert_eq!(replace_word("G17 G54 G40", "G54", "X").as_deref(), Some("G17 X G40"));
-        assert_eq!(replace_word("G54", "G54", "X").as_deref(), Some("X"), "alone on the line");
-        assert_eq!(replace_word("a\nG54\nb", "G54", "X").as_deref(), Some("a\nX\nb"));
-        assert_eq!(replace_word("G540 G54", "G54", "X").as_deref(), Some("G540 X"), "not a prefix");
-        assert_eq!(replace_word("G54.1", "G54", "X"), None, "not part of a decimal word");
-        assert_eq!(replace_word("XG54", "G54", "X"), None, "not a suffix");
-        assert_eq!(replace_word("nothing here", "G54", "X"), None);
-    }
-
-    /// `change_tool` used to end with the same `S{rpm}` that `start_spindle` opens with,
-    /// and the two are always emitted adjacent — so every program carried a duplicated S.
-    #[test]
-    fn a_change_tool_that_duplicates_the_spindle_speed_loses_it() {
-        let repaired = |change_tool: &str, start_spindle: &str| {
-            let mut value = serde_json::json!({
-                "primitives": { "change_tool": change_tool, "start_spindle": start_spindle }
-            });
-            normalize_cnc_value(&mut value, Path::new("machine.yaml"));
-            value.pointer("/primitives/change_tool").and_then(Value::as_str).unwrap().to_string()
-        };
-        let starts = "`S{rpm}\n`M03";
-
-        assert_eq!(repaired("`M05\n`T{slot} M06\n`S{rpm}", starts), "`M05\n`T{slot} M06");
-        assert_eq!(
-            repaired("`M05\n`T{slot} M06\n`S{rpm}\n", starts),
-            "`M05\n`T{slot} M06\n",
-            "a block scalar keeps its trailing newline"
-        );
-
-        // Left alone when start_spindle does not set the speed — then change_tool is the
-        // only thing that does, and dropping it would leave the spindle unprogrammed.
-        let manual = "`M05\n`T{slot} M06\n`S{rpm}";
-        assert_eq!(repaired(manual, "`M03"), manual);
-
-        // Left alone when the S shares its line with the tool change: removing that line
-        // would remove the M06 with it.
-        let combined = "`M05\n`T{slot} M06 S{rpm}";
-        assert_eq!(repaired(combined, starts), combined);
-
-        // Already clean.
-        let clean = "`M05\n`T{slot} M06";
-        assert_eq!(repaired(clean, starts), clean);
-    }
-
-    /// `cut_arc` is now handed the direction as a boolean, so a saved template still
-    /// asking for `{arc_cmd}` would fail at render with "variable not found" — a hard
-    /// generation failure. It is rewritten rather than merely flagged.
-    #[test]
-    fn a_cut_arc_using_the_retired_arc_cmd_is_rewritten_to_branch_on_clockwise() {
-        let mut value = serde_json::json!({
-            "primitives": { "cut_arc": "`{arc_cmd} X{x} Y{y} I{i} J{j} F{xy_feedrate}" }
+    fn the_retired_line_numbering_increment_is_dropped_without_seeding_a_template() {
+        let mut profile = serde_json::json!({
+            "machine": { "atc_slot_count": 0, "line_numbering_increment": 10 },
+            "primitives": {}
         });
-        normalize_cnc_value(&mut value, Path::new("machine.yaml"));
-        assert_eq!(
-            value.pointer("/primitives/cut_arc").and_then(Value::as_str),
-            Some(r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#)
-        );
+        normalize_cnc_value(&mut profile, Path::new("machine.yaml"));
 
-        // A profile that already branches is left exactly as its author wrote it —
-        // including one that names the directions the other way round.
-        let custom = r#"`{if clockwise { "G02" } else { "G03" }} X{x} Y{y}"#;
-        let mut untouched = serde_json::json!({ "primitives": { "cut_arc": custom } });
-        normalize_cnc_value(&mut untouched, Path::new("machine.yaml"));
-        assert_eq!(untouched.pointer("/primitives/cut_arc").and_then(Value::as_str), Some(custom));
-    }
-
-    /// The retired `line_numbering_increment` must be removed — `additionalProperties:
-    /// false` would reject the whole profile — and its value carried into the new
-    /// template, so a program that was numbered stays numbered.
-    #[test]
-    fn the_retired_line_numbering_increment_becomes_a_line_number_template() {
-        let profile = |increment: u64| {
-            serde_json::json!({
-                "machine": { "atc_slot_count": 0, "line_numbering_increment": increment },
-                "primitives": {}
-            })
-        };
-
-        let mut numbered = profile(10);
-        normalize_cnc_value(&mut numbered, Path::new("machine.yaml"));
         assert!(
-            numbered.pointer("/machine/line_numbering_increment").is_none(),
+            profile.pointer("/machine/line_numbering_increment").is_none(),
             "the retired field must not survive into validation"
         );
-        assert_eq!(
-            numbered.pointer("/primitives/line_number").and_then(Value::as_str),
-            Some("`N{line * 10} `"),
-            "the increment moves into the template's own arithmetic"
+        assert!(
+            profile.pointer("/primitives/line_number").is_none(),
+            "numbering is the profile's to define; the warning says so"
         );
 
-        // Zero meant "no numbering", which is now an empty template.
-        let mut off = profile(0);
-        normalize_cnc_value(&mut off, Path::new("machine.yaml"));
-        assert_eq!(off.pointer("/primitives/line_number").and_then(Value::as_str), Some(""));
-
-        // A profile that already has a template keeps it; the stale field is still
-        // dropped so the profile validates.
+        // A profile that already has a template keeps it, untouched.
         let mut both = serde_json::json!({
             "machine": { "line_numbering_increment": 10 },
             "primitives": { "line_number": "`/{line}:`" }

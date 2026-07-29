@@ -370,6 +370,7 @@ mod tests {
             initialise_tpl: crate::gcode::program::sample_initialise_tpl(),
             conclude_tpl: crate::gcode::program::sample_conclude_tpl(),
             line_number_tpl: String::new(),
+            set_unit_tpl: crate::gcode::program::sample_set_unit_tpl(),
             z_safe: units::Length::from_mm(5.0),
             work_coordinate_system: 1,
             file_extension: "nc".to_string(),

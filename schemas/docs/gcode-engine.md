@@ -47,8 +47,9 @@ is the important part:
   resolver. It lives in the k2g binary's `src/gcode/` and, on a `gtl::Gtl`:
   (a) registers the **GCode dialect** — unit-typed `fmt` overloads over
   `units::machine::{number_length, number_feed, number_speed}`, and the modal
-  `metric()`/`imperial()` built-ins (each emits `G21`/`G20` via `Gtl::writer` and
-  flips a mode flag the `fmt` overloads read); (b) manages the three-layer scope
+  `metric()`/`imperial()` built-ins (each emits the profile's `set_unit` primitive
+  via `Gtl::writer` and flips a mode flag the `fmt` overloads read — the host layer
+  holds no unit word of its own); (b) manages the three-layer scope
   and the namespaced job context (§2); (c) builds the `PrimitivePlan`
   (OperationPlanner) and drives `expand` over it. The current
   `src/gcode/template.rs` WIP is superseded.
@@ -186,18 +187,48 @@ while z > z_bottom {            // Length vs Length, compared in canonical units
 }
 ```
 
-Minimum registered surface for phase 1:
+**Built (2026-07-29) — `src/gcode/dialect.rs`.** The registered surface, for each of
+the four types:
 
-- `Length ± Length → Length`, `Length * number → Length`,
-  `FeedRate * number → FeedRate`
-- comparisons `< > <= >= ==` on each unit type (canonical-unit compare)
-- `max`, `min`, `abs`, `clamp` over unit types
+- `T ± T → T`, unary `-T`, `T * number → T` (and `number * T`), `T / number → T`,
+  `T / T → number`
+- comparisons `< > <= >= == !=` (canonical-unit compare)
+- `max`, `min`, `abs`, `clamp`
 - read accessors: `.mm .cm .inch .mil` (Length), `.mm_per_min .in_per_min`
   (FeedRate), `.rpm`, `.degrees .radians` — each returns a plain number, the
   escape hatch for forcing a specific unit (GTL §4)
 
-The `units` types are `Copy` newtypes today, so these are small operator impls or
-`register_fn` additions — no redesign of the crate.
+Division and unary minus go past the "minimum" above: a stepover or pass count is
+unwritable without `T / T`, and both are the same four lines as the rest.
+`clamp` is k2g's own for **numbers too** — Rhai ships none at any type.
+
+Four decisions worth keeping:
+
+- **Registration only.** The `units` types gain no `PartialOrd`, and their derived
+  `PartialEq` is untouched. That `PartialEq` is *structural* over `(scalar, unit)`,
+  so `10mm != 1cm` — right for "did the operator edit this field" (profile
+  dirty-checking, Dioxus props, board snapshots; 132 `derive` sites), wrong for a
+  script. A canonical `PartialOrd` beside a structural `PartialEq` would also break
+  the consistency those two traits owe each other. The script meaning therefore lives
+  on the engine, where it reaches nothing else.
+- **Canonical compare with a tolerance** — 1 nm for a length rounded to the micron.
+  It is what lets `while z > z_bottom` stop on the bound rather than spin on a
+  last-bit difference left by a unit conversion. Not transitive; nothing reachable
+  from a template can observe that at this scale.
+- **Arithmetic carries in mm**, not nm: `Length::from_nm` takes an `i64`, and a
+  saturating cast would turn an overflow into a plausible coordinate instead of an
+  error. `max`/`min`/`abs`/`clamp` return one of their **arguments** unchanged, so
+  `z = max(z - peck, z_bottom)` hands back the identical bound and the loop cannot
+  take one more pass than the author wrote.
+- **A mismatched comparison raises.** Rhai answers a comparison between two different
+  non-numeric types with a *constant* — `false` for `== < <= > >=`, `true` for `!=` —
+  with no error. So `z > 5` would quietly be false and a depth loop whose bound is
+  accidentally a bare number would emit no cutting moves at all. Every such
+  combination is registered to fail with the type name and the `.mm` way out; leaving
+  them unregistered is not the neutral choice it appears to be.
+
+Still missing from §2's model: the namespaced job context. A template sees only what
+its call site pushes.
 
 ---
 
@@ -308,8 +339,12 @@ below — `metric()`/`imperial()`, the unit-typed `fmt` overloads, and the
 unit-type math and accessors — is **registered by the Coder** on the engine
 (§1.1). `throw` is Rhai core.
 
-- **Unit switching:** `metric()` (emits `G21`, sets metric formatting),
-  `imperial()` (emits `G20`, sets imperial).
+- **Unit switching:** `metric()` / `imperial()` set the formatting **and** emit the
+  profile's `set_unit` primitive. No GCode word is built into the engine: `set_unit`
+  is where a machine says how it is told its unit system (`G21`/`G20` for a G-code
+  controller, an `INCH`/`METRIC` header for Excellon, nothing at all for a machine
+  fixed to one system). The two effects are one call so the emitted word and the
+  formatter can never disagree.
 - **Math:** `min`, `max`, `abs`, `clamp` over numbers and unit types.
 - **Formatting:** `fmt(v)` (internal; the emit-time type-driven formatter, GTL
   §4) and the `.mm/.inch/...` accessors. `fmt` is a thin type-dispatch over

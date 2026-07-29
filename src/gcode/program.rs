@@ -56,6 +56,9 @@ pub struct ProgramRender {
     pub conclude_tpl: String,
     /// The CNC's `line_number` primitive. Empty disables numbering.
     pub line_number_tpl: String,
+    /// The CNC's `set_unit` primitive — what `metric()`/`imperial()` emit. Empty for a
+    /// machine with no unit statement.
+    pub set_unit_tpl: String,
     /// This step's fixture's safe travel height — the header and footer retract to it.
     pub z_safe: units::Length,
     /// Which of the machine's stored zeros this step's fixture sits in, as an ordinal.
@@ -84,7 +87,7 @@ pub fn render_step_program(
     timestamp: &str,
     tool_feeds: &BTreeMap<String, ToolFeed>,
 ) -> Result<String, BodyError> {
-    let coder = Coder::new();
+    let coder = Coder::with_unit_commands(&render.set_unit_tpl)?;
 
     // `initialise` and `conclude` are program-layer primitives and see the same values: a
     // footer typically retracts to `z_safe`, and either may echo the source file. A fresh
@@ -439,6 +442,14 @@ pub(crate) fn sample_initialise_tpl() -> String {
 #[cfg(test)]
 pub(crate) fn sample_conclude_tpl() -> String {
     "`(end of file)".to_string()
+}
+
+/// See [`sample_initialise_tpl`]. The G-code pair lives here, in a *fixture*, precisely
+/// because it may not live in the application: a real program's `G21` comes from the
+/// profile's `set_unit` primitive.
+#[cfg(test)]
+pub(crate) fn sample_set_unit_tpl() -> String {
+    "`{if metric { \"G21\" } else { \"G20\" }}".to_string()
 }
 
 #[cfg(test)]

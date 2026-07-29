@@ -26,6 +26,9 @@ machine:
   tool_length_measurement: auto_setter
 
 primitives:
+  # How this machine is told which unit system to use. Emitted by the metric() and
+  # imperial() calls below; the application holds no G-code word of its own.
+  set_unit: '`{if metric { "G21" } else { "G20" }}'
   initialise: |
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     `G17 G{53 + work_coordinate_system} G40 G49 G80 G90

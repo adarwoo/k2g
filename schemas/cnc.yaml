@@ -328,17 +328,23 @@ properties:
   #     initialise. That call fixes how every later value is formatted and
   #     mirrors the machine's own modal state, so the author never tracks units.
   #   - Display precision follows the active unit system automatically.
-  #   - Values keep their unit type in script logic, so `z - z_step` and
+  #   - Values keep their unit type in script logic, so `z - z_retract` and
   #     `z > z_bottom` are unit-correct; conversion to a number happens only at
   #     emit. Force a specific unit with an accessor: {z_safe.mm}, {z_safe.inch}.
+  #     max/min/abs/clamp work on them too.
+  #   - A measurement cannot be compared with a bare number: `z > 5` is an error
+  #     (five what?). Write `z > z_bottom`, or name the unit: `z.mm > 5`.
   #
-  # Example (a multi-pass depth loop, e.g. cutting to depth in steps):
+  # Example (a multi-pass depth loop, e.g. cutting to depth in steps). Every name
+  # here is one the `drill` primitive declares below — a template may only use the
+  # variables listed for the primitive it belongs to:
   #
   #     `G0 X{x} Y{y}
   #     `G0 Z{z_retract}
   #     let z = z_retract;
+  #     let step = (z_retract - z_bottom) / 3;
   #     while z > z_bottom {
-  #         z = max(z - z_step, z_bottom);
+  #         z = max(z - step, z_bottom);
   #         `G1 Z{z} F{z_feedrate}
   #         `G0 Z{z_retract}
   #     }
@@ -573,6 +579,31 @@ properties:
         x-variables:
           - { name: text, type: string, description: "Banner/comment text to insert." }
         default: "`( {text} )"
+
+      # How this machine is told which unit system to work in.
+      #
+      # Rendered by the `metric()` / `imperial()` calls a template makes — those set
+      # how every later value is formatted, and emit this. The two halves are one
+      # call on purpose: a profile that emitted G20 while the engine formatted in
+      # millimetres would cut inch-mode geometry from metric numbers, silently.
+      #
+      # This exists so no GCode word is built into the application. The default is
+      # the usual G21/G20 pair, but a machine that has no unit statement leaves it
+      # empty, and a controller that spells it some other way says so here.
+      #
+      # `metric` is the boolean to branch on; `unit` is the same choice as a string
+      # ("metric" / "imperial") for a dialect that needs more than two branches.
+      #
+      set_unit:
+        description: >-
+          How the machine is told which unit system to work in, emitted by a
+          template's metric()/imperial() call. Empty for a machine with no unit
+          statement.
+        type: string
+        x-variables:
+          - { name: metric, type: boolean, description: "True for millimetres, false for inches." }
+          - { name: unit, type: string, description: "The same choice as a string: \"metric\" or \"imperial\"." }
+        default: '`{if metric { "G21" } else { "G20" }}'
 
       # Optional line-number primitive.
       #

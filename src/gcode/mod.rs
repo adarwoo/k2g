@@ -7,6 +7,7 @@
 
 pub mod assigner;
 pub mod coder;
+pub mod dialect;
 pub mod feeds;
 pub mod oblong;
 pub mod outline;

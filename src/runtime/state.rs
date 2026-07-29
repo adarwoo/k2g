@@ -1161,6 +1161,7 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
         },
         "primitives": {
             "line_number": machine.line_number_tpl,
+            "set_unit": machine.set_unit_tpl,
             "initialise": machine.gcode_header,
             "rapid_move": machine.drill_first_move,
             "linear_cut": machine.drill_cycle_mode_series,
@@ -1341,6 +1342,11 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .clamp(1, u8::MAX as u64) as u8,
         line_number_tpl: value
             .pointer("/primitives/line_number")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        set_unit_tpl: value
+            .pointer("/primitives/set_unit")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),

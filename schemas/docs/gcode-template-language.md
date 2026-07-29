@@ -134,15 +134,21 @@ as itself).
 
 ## 5. Modal unit state
 
-- `metric()` sets the formatter to metric **and** emits `G21`.
-- `imperial()` sets the formatter to imperial **and** emits `G20`.
+- `metric()` sets the formatter to metric **and** emits the machine's word for it.
+- `imperial()` does the same for inches.
+- **What they emit is the profile's**, from its `set_unit` primitive — typically
+  `` `{if metric { "G21" } else { "G20" }} ``, empty for a machine with no unit
+  statement, and whatever a non-GCode controller wants otherwise. The engine holds
+  no unit word of its own; it only knows that a machine has a unit mode.
 - The mode is **program-scoped state**: it is set once (normally in
   `initialise`) and *persists across every primitive* in the generated program,
-  exactly mirroring the machine's own modal state. `peck_drill` does not re-set
-  units; it inherits whatever `initialise` established.
+  exactly mirroring the machine's own modal state. A drilling primitive does not
+  re-set units; it inherits whatever `initialise` established.
 
 This is the mechanism behind principle #1: the same call that tells the machine
-the unit (`G21`) tells the formatter the unit, so the two can never desync.
+the unit tells the formatter the unit, so the two can never desync. Splitting them —
+letting a template emit its own unit word and set the mode separately — would allow
+a program in inch mode carrying millimetre numbers, with nothing to catch it.
 
 ---
 
@@ -150,17 +156,28 @@ the unit (`G21`) tells the formatter the unit, so the two can never desync.
 
 Variables provided to a primitive are the `units` crate's typed values
 (`Length`, `FeedRate`, `RotationalSpeed`, `Angle`) plus plain scalars and
-strings. To make script logic natural, the engine registers, at minimum:
+strings. To make script logic natural, the engine registers, for each unit type:
 
-- Arithmetic: `Length ± Length → Length`, `Length * number → Length`,
-  `FeedRate * number → FeedRate`.
-- Ordering: `<  >  <=  >=  ==` on each unit type (compared in canonical units).
-- Helpers: `max(a, b)`, `min(a, b)`, `abs(a)`, `clamp(v, lo, hi)` for unit types.
+- Arithmetic: `T ± T → T`, unary `-T`, `T * number → T` (either order),
+  `T / number → T`, and `T / T → number` for a ratio such as a pass count.
+- Ordering: `<  >  <=  >=  ==  !=`, compared in canonical units — so `10mm` and
+  `1cm` are equal, and a tie is judged within 1 nm so a depth loop terminates on
+  its bound rather than on a rounding difference.
+- Helpers: `max(a, b)`, `min(a, b)`, `abs(a)`, `clamp(v, lo, hi)`. These return one
+  of their arguments unchanged, which is what makes `z = max(z - peck, z_bottom)`
+  land exactly on the bound.
 - Accessors: `.mm`, `.cm`, `.inch`, `.mil` on `Length`; `.mm_per_min`,
   `.in_per_min` on `FeedRate`; `.rpm`; `.degrees`, `.radians`.
 
-(The `units` types are `Copy` newtypes today, so these are small `register_fn`
-additions or thin operator impls — no redesign of the crate.)
+**A typed value and a plain number cannot be compared.** `z > 5` is an error, not
+`false`: five what? Write `z > z_bottom`, or take the number out yourself with an
+accessor — `z.mm > 5`. The same holds across types (`z > rpm`) and for a name that
+does not resolve. This is registered deliberately: Rhai's own answer to comparing
+two unlike types is a silent constant, and a depth loop that quietly never runs
+would emit a program with no cutting moves in it.
+
+Division by zero is an error too, rather than an infinity that would reach the
+controller as a coordinate.
 
 ---
 
@@ -217,8 +234,8 @@ if has_positioning_pins {
 ```
 
 Notes:
-- `metric()` emits `G21` at its position and fixes the unit for the whole
-  program.
+- `metric()` emits the profile's unit statement at its position and fixes the
+  unit for the whole program.
 - The `if` is a plain Rhai line — no wrapping braces. (The old text-first model
   needed `{ ... }` to "escape into" Rhai; here Rhai is the default, so control
   flow is written directly.)
