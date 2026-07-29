@@ -58,6 +58,17 @@ impl AppState {
             last_removable_media_path: load_persisted_directory("last_removable_media_path"),
             job_view_pinned: load_persisted_flag("job_view_pinned"),
             job_pin_width: load_persisted_job_pin_width(),
+            window_width: load_persisted_window_dimension(
+                "window_width",
+                DEFAULT_WINDOW_WIDTH,
+                MIN_WINDOW_WIDTH,
+            ),
+            window_height: load_persisted_window_dimension(
+                "window_height",
+                DEFAULT_WINDOW_HEIGHT,
+                MIN_WINDOW_HEIGHT,
+            ),
+            window_maximized: load_persisted_flag("window_maximized"),
         };
 
         state.hydrate_from_persistence();
@@ -269,6 +280,9 @@ impl AppState {
             "last_removable_media_path": self.last_removable_media_path,
             "job_view_pinned": self.job_view_pinned,
             "job_pin_width": self.job_pin_width,
+            "window_width": self.window_width,
+            "window_height": self.window_height,
+            "window_maximized": self.window_maximized,
         })
     }
 
@@ -387,6 +401,38 @@ impl AppState {
         }
         self.job_pin_width = width;
         self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records the window's inner size and maximized state, so the next launch reopens
+    /// the window the user last left (see [`crate::ui::window_state`]).
+    ///
+    /// `size` is `None` while the window is maximized: the inner size then *is* the
+    /// screen, and storing it would make the next un-maximize yield a screen-sized
+    /// window that is no longer maximized. The stored restore size is kept instead.
+    ///
+    /// A no-op when nothing changed, so the resize stream a drag produces collapses to
+    /// one settings write per distinct size rather than one per frame.
+    pub fn set_window_geometry(&mut self, size: Option<(i64, i64)>, maximized: bool) {
+        let mut changed = false;
+
+        if let Some((width, height)) = size {
+            let width = width.clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_DIMENSION);
+            let height = height.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_DIMENSION);
+            if (self.window_width, self.window_height) != (width, height) {
+                self.window_width = width;
+                self.window_height = height;
+                changed = true;
+            }
+        }
+
+        if self.window_maximized != maximized {
+            self.window_maximized = maximized;
+            changed = true;
+        }
+
+        if changed {
+            self.persist_realms(&[PersistRealm::GlobalSettings]);
+        }
     }
 
     /// Records the directory a save wrote to and mirrors it to `global.setting.yaml`.
@@ -1980,6 +2026,16 @@ fn load_persisted_job_pin_width() -> i64 {
         .and_then(|state| state.global_settings.get("job_pin_width").and_then(Value::as_i64))
         .unwrap_or(DEFAULT_JOB_PIN_WIDTH)
         .clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH)
+}
+
+/// A persisted window dimension, clamped so a stale or hand-edited settings file cannot
+/// open a window too small to operate (or absurdly large). `minimum` differs per axis;
+/// the upper rail does not.
+fn load_persisted_window_dimension(key: &str, default: i64, minimum: i64) -> i64 {
+    persistence_state()
+        .and_then(|state| state.global_settings.get(key).and_then(Value::as_i64))
+        .unwrap_or(default)
+        .clamp(minimum, MAX_WINDOW_DIMENSION)
 }
 
 /// A remembered directory from the settings file, if it carries one under `key`.

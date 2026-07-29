@@ -4,6 +4,7 @@ pub mod navigation;
 pub mod screens;
 pub mod show_when;
 pub mod theme;
+pub mod window_state;
 
 use std::sync::OnceLock;
 
@@ -52,8 +53,13 @@ pub fn launch(data: UiLaunchData) {
     // context from it (AppData is the single reader/writer of persisted state).
     crate::runtime::initialize_ctx(boot_data().clone());
 
+    // Reopen the window the last session left. This reads the ctx, so it must follow
+    // `initialize_ctx`; the matching recorder is mounted by `screens::AppRoot`.
+    let (size, maximized) = window_state::launch_geometry();
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("k2g - KiCAD to GCode")
+        .with_inner_size(size)
+        .with_maximized(maximized)
         .with_window_icon(load_window_icon());
 
     // The error trap goes in first, so it is already listening while three.js parses.

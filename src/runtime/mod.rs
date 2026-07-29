@@ -49,6 +49,21 @@ pub const DEFAULT_JOB_PIN_WIDTH: i64 = 560;
 pub const MIN_JOB_PIN_WIDTH: i64 = 380;
 pub const MAX_JOB_PIN_WIDTH: i64 = 1000;
 
+/// Size a fresh install opens the window at, in logical pixels. Wide enough for the
+/// docked Job column the layout wants (see the 1250px media query in the theme), and
+/// small enough for an ordinary laptop panel — a screen it still overflows is handled
+/// at launch by the monitor clamp in [`crate::ui::window_state`].
+pub const DEFAULT_WINDOW_WIDTH: i64 = 1400;
+pub const DEFAULT_WINDOW_HEIGHT: i64 = 900;
+
+/// Bounds a stored window size is clamped to, matching `schemas/settings.yaml`. The
+/// minimum keeps a stale or hand-edited settings file from opening a window too small
+/// to operate; the maximum is only a sanity rail, since the real limit is whichever
+/// monitor the window reopens on.
+pub const MIN_WINDOW_WIDTH: i64 = 640;
+pub const MIN_WINDOW_HEIGHT: i64 = 480;
+pub const MAX_WINDOW_DIMENSION: i64 = 20000;
+
 pub const STATUS_KEY_REGENERATION: &str = "regeneration.status";
 pub const STATUS_KEY_KICAD: &str = "kicad.status";
 pub const STATUS_KEY_PROJECT_HAS_BOARD: &str = "project.has_board";
@@ -140,6 +155,13 @@ pub struct AppState {
     pub job_view_pinned: bool,
     /// Width of the docked Job column in pixels, as left by the split handle.
     pub job_pin_width: i64,
+    /// Inner size of the application window in logical pixels, as the user last left
+    /// it — restored at the next launch. While the window is maximized these keep the
+    /// *restored* size, so un-maximizing gives back the window that was maximized.
+    pub window_width: i64,
+    pub window_height: i64,
+    /// Whether the window was maximized when it was last closed.
+    pub window_maximized: bool,
 }
 
 include!("state.rs");
@@ -304,6 +326,9 @@ fn default_global_settings() -> Value {
         "last_removable_media_path": Value::Null,
         "job_view_pinned": false,
         "job_pin_width": DEFAULT_JOB_PIN_WIDTH,
+        "window_width": DEFAULT_WINDOW_WIDTH,
+        "window_height": DEFAULT_WINDOW_HEIGHT,
+        "window_maximized": false,
     })
 }
 
@@ -434,6 +459,26 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
     let result = f(&mut guard);
     guard.sync_after_mutation(&previous_app);
     result
+}
+
+/// Records the window's geometry for the next launch, persisting only what changed.
+///
+/// `size` is the inner size in logical pixels, or `None` while the window is maximized
+/// (see [`AppState::set_window_geometry`]).
+///
+/// Deliberately *not* routed through [`with_ctx_mut`]: that clones the whole app state
+/// and runs the post-mutation sync (board re-stitching, the regeneration trigger) —
+/// work a window resize has no business provoking. Nothing in the UI renders from these
+/// fields either, so there is no signal to bump. Silent when the ctx is not yet live,
+/// so an early event cannot panic the event loop.
+pub fn store_window_geometry(size: Option<(i64, i64)>, maximized: bool) {
+    let Some(lock) = GLOBAL_CTX.get() else {
+        return;
+    };
+    let Ok(mut guard) = lock.write() else {
+        return;
+    };
+    guard.app.set_window_geometry(size, maximized);
 }
 
 pub fn apply_ui_command(command: UiCommand) {

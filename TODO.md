@@ -172,9 +172,6 @@ The shadow profiles can be edited (they should be expanded in a temporary user f
 we keep everything the same! Nice.
 But cloning, import, delete are not available. Also, the
 
-7. Remove the cli
-No cli! We
-
 8. Fix bugs. Refresh on the top must be improved.
 If started from KiCAD (env var) - fixed + reload
 If started stand alone = dropdown + refresh
@@ -204,6 +201,10 @@ Lines too thick
 Check board orientation and scale
 (Should scale to the window - with a minimum size so the holes can be seen)
 
-13. Add About section
 
-14. Add Log section (allow the user to increase the level + persist in config)
+Bugs / improvemmet
+-------------------
+Max feed rate for the CNC -> Do we care? - Yes we do.
+In the CNC : Mill board edge?
+Oversize is global - not bblong
+Route board edge: Cut board

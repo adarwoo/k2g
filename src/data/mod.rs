@@ -798,6 +798,17 @@ pub fn with_appdata<R>(f: impl FnOnce(&AppData) -> R) -> R {
     f(&guard)
 }
 
+/// Blocks until every scheduled write of the global store has landed on disk.
+///
+/// Needed at shutdown: the store lives in a `static` that is never dropped, so the
+/// writer thread's own drain-on-drop never runs and a write queued moments before exit
+/// would die with the process. A no-op when the store was never initialized.
+pub fn flush_appdata() {
+    if appdata_ready() {
+        with_appdata(|data| data.flush());
+    }
+}
+
 /// Runs `f` with an exclusive write lock on the global store.
 pub fn with_appdata_mut<R>(f: impl FnOnce(&mut AppData) -> R) -> R {
     let lock = APP_DATA.get().expect("AppData must be initialized before use");

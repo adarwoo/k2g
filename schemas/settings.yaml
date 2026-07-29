@@ -94,6 +94,33 @@ properties:
     type: [string, "null"]
     default: null
 
+  window_width:
+    description: |
+      Inner width of the application window in logical (DPI-independent) pixels, as the
+      user last left it. Logical rather than device pixels so moving the window to a
+      display with a different scale factor reopens it the same apparent size. While the
+      window is maximized this keeps the *restored* size, so un-maximizing gives back the
+      window that was maximized rather than a screen-sized one.
+    type: integer
+    minimum: 640
+    maximum: 20000
+    default: 1400
+
+  window_height:
+    description: |
+      Inner height of the application window in logical pixels. See `window_width`; a
+      size that no longer fits the display it reopens on is shrunk at launch.
+    type: integer
+    minimum: 480
+    maximum: 20000
+    default: 900
+
+  window_maximized:
+    description: |
+      Whether the window was maximized when the application last closed.
+    type: boolean
+    default: false
+
 required:
   [
     units,

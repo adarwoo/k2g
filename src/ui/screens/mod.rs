@@ -40,6 +40,9 @@ pub fn AppRoot() -> Element {
     let state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
 
+    // Remember the window's size and maximized state for the next launch.
+    crate::ui::window_state::use_window_geometry();
+
     // Bridge background generation → UI. The worker publishes results into the
     // global ctx off the UI thread and bumps a wake channel; re-sync the signal on
     // each bump so the Job views refresh without a user action. (The startup board
