@@ -599,7 +599,14 @@ mod tests {
 
     #[test]
     fn a_toast_names_the_file_not_the_whole_path() {
-        assert_eq!(file_name_of(Path::new("E:\\jobs\\panel.nc")), "panel.nc");
+        // Built from components so the separator is the host's. `Path` treats `\` as one
+        // only on Windows, so a hard-coded `E:\jobs\panel.nc` reads as a single long
+        // filename on the Linux CI and the assertion fails there for no real reason.
+        let nested: PathBuf = ["jobs", "panel.nc"].iter().collect();
+        assert_eq!(file_name_of(&nested), "panel.nc");
         assert_eq!(file_name_of(Path::new("panel.nc")), "panel.nc");
+        // The shape the app actually produces: an absolute path with a drive letter.
+        #[cfg(windows)]
+        assert_eq!(file_name_of(Path::new("E:\\jobs\\panel.nc")), "panel.nc");
     }
 }
