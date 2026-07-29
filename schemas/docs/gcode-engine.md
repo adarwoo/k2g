@@ -147,10 +147,12 @@ scope:
   the machine's modal `G21`/`G20` state, so it must survive from `initialise`
   through every later primitive.
 - **Line-number counter** — the position of each program line, passed to the
-  `line_number` primitive as `line` (1-based, non-blank lines only). The word
-  itself, the increment and the separator are all the profile's template; the
-  engine only counts. Numbering is a whole-program pass, applied after the
-  sections are assembled.
+  `line_number` primitive as `line` (1-based, non-blank lines only), alongside
+  the line itself as `text`. The word, the increment and the separator are all
+  the profile's template; the engine only counts. `text` extends that to the
+  *decision*: a template that emits nothing for a line leaves it unnumbered,
+  which is how the Masso profiles keep `N` words off their comments. Numbering
+  is a whole-program pass, applied after the sections are assembled.
 
 Everything a *script* declares is call-local; only these engine facts carry over.
 

@@ -358,13 +358,19 @@ fn feeds_error_text(error: FeedsError) -> String {
 }
 
 /// Prefixes every non-blank line of the assembled program with the CNC's `line_number`
-/// primitive, rendered with `line` = 1, 2, 3 … .
+/// primitive, rendered with `line` = 1, 2, 3 … and `text` = the line about to be numbered.
 ///
 /// Line numbering is a whole-program concern — no primitive can know its own position —
 /// so it runs once here, over the finished program, rather than inside the templates that
 /// built it. The **format** is still entirely the profile's: the template decides the
 /// word, the increment (`{line * 10}`) and the separator, and ends with a backtick so no
 /// newline is emitted between the prefix and the line it numbers.
+///
+/// `text` is what makes the *decision* the profile's too, not just the format: a template
+/// that emits nothing for a line leaves it unnumbered, so a controller that should not see
+/// `N` words on its comments says so in its own template rather than asking for a rule
+/// here. The line is still emitted by this function either way — the primitive contributes
+/// a prefix, never the line itself.
 ///
 /// An empty template disables numbering and the program is returned unchanged — what
 /// `line_numbering_increment: 0` used to mean. Blank lines are dropped when numbering, so
@@ -381,6 +387,7 @@ pub fn number_lines(coder: &Coder, program: &str, template: &str) -> Result<Stri
     for (index, line) in program.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let mut scope = Scope::new();
         scope.push("line", index as i64 + 1);
+        scope.push("text", line.to_string());
         let prefix = render_one(coder, "line_number", template, &mut scope)?;
         out.push(format!("{prefix}{line}"));
     }
@@ -710,6 +717,54 @@ mod tests {
             "N10 \nG21",
             "the emitted newline separates the number from its line"
         );
+    }
+
+    /// The line itself is in scope as `text`, so *whether* to number is the profile's
+    /// decision as much as how — a template that emits nothing leaves that line bare,
+    /// which is how a profile keeps `N` words off its comments. The line is still
+    /// emitted: the primitive only ever contributes a prefix.
+    #[test]
+    fn a_line_number_template_can_read_the_line_and_skip_it() {
+        let coder = Coder::new();
+        let skip_comments = "if !text.starts_with(\"(\") {\n    `N{line * 10} `\n}";
+        assert_eq!(
+            number_lines(&coder, "(header)\nG21\n(done)\nG0 Z5", skip_comments).unwrap(),
+            "(header)\nN20 G21\n(done)\nN40 G0 Z5",
+            "comments pass through unnumbered, and the count still spans every line"
+        );
+    }
+
+    /// The bundled templates carry real script now, not just substitution, and a Rhai
+    /// error in one would otherwise surface as a failed generation in the field — a
+    /// profile seeded from a template is never rendered until a job runs.
+    #[test]
+    fn every_bundled_line_number_template_renders() {
+        let coder = Coder::new();
+        for (key, yaml) in [
+            ("genmitsu_3018", include_str!("../../assets/cnc_templates/genmitsu_3018.yaml")),
+            ("masso_g3_with_atc", include_str!("../../assets/cnc_templates/masso_g3_with_atc.yaml")),
+            ("masso_g3_no_atc", include_str!("../../assets/cnc_templates/masso_g3_no_atc.yaml")),
+            ("batam", include_str!("../../assets/cnc_templates/batam.yaml")),
+        ] {
+            let value: serde_json::Value =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("[{key}] is not YAML: {e}"));
+            let template = value
+                .pointer("/primitives/line_number")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("[{key}] has no line_number primitive"));
+
+            let numbered = number_lines(&coder, "(a comment)\nG21", template)
+                .unwrap_or_else(|e| panic!("[{key}] line_number failed to render: {e:?}"));
+            let lines: Vec<&str> = numbered.lines().collect();
+            assert!(lines[1].contains("G21"), "[{key}] lost the line it numbers");
+            // Only the Masso profiles opt out of numbering comments; the others are
+            // pinned here as numbering everything, so a change to either is deliberate.
+            if key.starts_with("masso") {
+                assert_eq!(lines[0], "(a comment)", "[{key}] numbered a comment");
+            } else {
+                assert!(lines[0].starts_with('N'), "[{key}] left a line unnumbered");
+            }
+        }
     }
 
     /// A template that cannot render stops generation: quietly shipping an unnumbered

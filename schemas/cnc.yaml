@@ -577,7 +577,7 @@ properties:
       # Optional line-number primitive.
       #
       # Expected placeholders include:
-      #   {line}
+      #   {line}, {text}
       #
       # Emitted as a PREFIX to each program line, so it must not end the line:
       # close the template with a backtick, which suppresses the newline and keeps
@@ -591,6 +591,15 @@ properties:
       # own arithmetic. Numbering is a whole-program pass, so this is applied after
       # the program is assembled, not by the primitives that build it.
       #
+      # `text` is the line about to be numbered, so the template can decide *whether*
+      # to number as well as how. Emitting nothing leaves that line unnumbered — how a
+      # profile skips its comments:
+      #
+      #   line_number: |
+      #     if !text.starts_with("(") {
+      #         `N{line * 10} `
+      #     }
+      #
       line_number:
         description: >-
           Optional per-line number prefix. Absent or empty means the program is not
@@ -598,6 +607,7 @@ properties:
         type: string
         x-variables:
           - { name: line, type: integer, description: "1-based index of the program line being numbered, counting non-blank lines only." }
+          - { name: text, type: string, description: "The program line about to be numbered — emit nothing to leave it unnumbered (e.g. comments)." }
         default: ""
 
     required:

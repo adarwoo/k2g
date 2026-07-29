@@ -10,10 +10,11 @@
 //! The operation/call layers (tool values, coordinates) and the drilling/routing
 //! primitives arrive in later phases; see the scope model in docs/gcode-engine.md §2.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use gtl::{Gtl, GtlError, Scope};
+use gtl::{Gtl, GtlError, Scope, Template};
 use units::{FeedRate, Length, RotationalSpeed, UserUnitSystem};
 
 use crate::gcode::primitive_vars::{PrimitiveVar, VarType};
@@ -23,6 +24,13 @@ use crate::gcode::primitive_vars::{PrimitiveVar, VarType};
 /// unit mode is engine state that carries from `initialise` through later calls.
 pub struct Coder {
     gtl: Gtl,
+    /// Templates this Coder has already parsed, keyed by primitive name, each stored
+    /// beside the source it was compiled from. See [`Coder::template_for`].
+    cache: RefCell<HashMap<String, (String, Rc<Template>)>>,
+    /// How many templates this Coder has actually parsed. The cache leaves no trace in
+    /// the rendered GCode — by design — so this counter is the only way to assert that
+    /// it works; the tests read it.
+    compiles: Cell<usize>,
 }
 
 impl Coder {
@@ -75,13 +83,63 @@ impl Coder {
             units::machine::number_speed(rpm, mode.get())
         });
 
-        Self { gtl }
+        Self { gtl, cache: RefCell::new(HashMap::new()), compiles: Cell::new(0) }
     }
 
-    /// Compiles and runs one primitive template against `scope`, returning its GCode.
+    /// Renders one primitive template against `scope`, returning its GCode. The template
+    /// is parsed on first use and reused thereafter (see [`Coder::template_for`]).
     pub fn render(&self, name: &str, source: &str, scope: &mut Scope) -> Result<String, GtlError> {
-        let template = self.gtl.compile(name, source)?;
+        let template = self.template_for(name, source)?;
         self.gtl.run(&template, scope)
+    }
+
+    /// The compiled template for `name`, parsing it only if this Coder has not already
+    /// parsed *this* source under that name.
+    ///
+    /// Rendering used to transpile and parse on every call — once per hole, per routing
+    /// move, and once per output line of the finished program, always from identical
+    /// source. A Coder is built per machining step, so its lifetime is exactly the right
+    /// cache scope: the entry dies with the program it served.
+    ///
+    /// Keyed on the primitive **name**, with the source compared on a hit rather than
+    /// hashed. Generation renders one source per name, so every call after the first is a
+    /// hit; the profile editor renders freshly-typed source under a fixed name, so the
+    /// comparison invalidates exactly, with no chance of a hash collision serving stale
+    /// GCode. One short string compare per call is nothing beside a parse.
+    ///
+    /// Handed out as an `Rc` so a hit costs a refcount bump — `Template` is `Clone`, but
+    /// cloning one clones the whole AST — and so the borrow is released before the
+    /// template runs.
+    ///
+    /// Sound only because [`gtl::Gtl::compile`] compiles with **no** scope: Rhai's
+    /// optimizer therefore folds literals alone and never propagates scope constants
+    /// into the AST, which is what makes one AST safe to run against every call's
+    /// different scope. Compiling with a scope would quietly break that.
+    fn template_for(&self, name: &str, source: &str) -> Result<Rc<Template>, GtlError> {
+        let hit = self
+            .cache
+            .borrow()
+            .get(name)
+            .and_then(|(cached, template)| (cached == source).then(|| template.clone()));
+        if let Some(template) = hit {
+            return Ok(template);
+        }
+
+        // A failed compile is *not* cached: the editor's next keystroke may well fix it,
+        // and a poisoned entry would keep reporting the old error.
+        let template = Rc::new(self.gtl.compile(name, source)?);
+        self.compiles.set(self.compiles.get() + 1);
+        self.cache
+            .borrow_mut()
+            .insert(name.to_string(), (source.to_string(), template.clone()));
+        Ok(template)
+    }
+
+    /// How many templates this Coder has parsed — the cache's only observable effect,
+    /// and so only needed by the tests that assert it.
+    #[cfg(test)]
+    pub fn compiles(&self) -> usize {
+        self.compiles.get()
     }
 
     /// Validates *and* previews a primitive: renders `source` against a scope of
@@ -94,7 +152,7 @@ impl Coder {
     pub fn preview(&self, name: &str, source: &str, vars: &[PrimitiveVar]) -> Result<String, GtlError> {
         let mut scope = Scope::new();
         for var in vars {
-            push_sample(&mut scope, var);
+            push_sample(&mut scope, name, var);
         }
         self.render(name, source, &mut scope)
     }
@@ -104,10 +162,10 @@ impl Coder {
 /// registered/default `fmt` overloads render it. Feed/rpm/angle are previewed as
 /// plain numbers for now (the Coder formats real `Length`; the other unit types
 /// gain `fmt` registrations when generation begins using them).
-fn push_sample(scope: &mut Scope, var: &PrimitiveVar) {
+fn push_sample(scope: &mut Scope, primitive: &str, var: &PrimitiveVar) {
     match var.var_type {
         VarType::String => {
-            scope.push(var.name.clone(), sample_string(&var.name));
+            scope.push(var.name.clone(), sample_string(primitive, &var.name));
         }
         VarType::Boolean => {
             // `true` so the preview of a two-branch template (`cut_arc`'s direction)
@@ -137,14 +195,19 @@ fn push_sample(scope: &mut Scope, var: &PrimitiveVar) {
 
 /// A readable sample for a string variable — a realistic value for the well-known
 /// names, a neutral placeholder otherwise.
-fn sample_string(name: &str) -> String {
-    match name {
-        "pcb_filename" => "board.kicad_pcb",
-        "timestamp" => "2026-01-01 12:00:00",
-        "arc_cmd" => "G2",
-        "manual_message" => "(change tool)",
-        "message" => "Paused",
-        "text" => "Section",
+///
+/// Keyed by primitive as well as by name, because `text` means two different things: a
+/// caption to `banner`, and the whole program line to `line_number` — whose template may
+/// branch on it, so a caption there would preview a case that never occurs.
+fn sample_string(primitive: &str, name: &str) -> String {
+    match (primitive, name) {
+        ("line_number", "text") => "G1 X10 Y5 F600",
+        (_, "pcb_filename") => "board.kicad_pcb",
+        (_, "timestamp") => "2026-01-01 12:00:00",
+        (_, "arc_cmd") => "G2",
+        (_, "manual_message") => "(change tool)",
+        (_, "message") => "Paused",
+        (_, "text") => "Section",
         _ => "sample",
     }
     .to_string()
@@ -196,6 +259,72 @@ mod tests {
         assert!(coder.render("bad", "`G0 Z{z_safe", &mut scope).is_err());
     }
 
+    /// The whole point of the cache: `line_number` renders once per line of the finished
+    /// program and `drill` once per hole, so a per-call parse is thousands of parses of
+    /// identical source. Rendering leaves no trace of the cache in its output, so the
+    /// parse count is what has to be asserted.
+    #[test]
+    fn a_repeated_primitive_is_parsed_only_once() {
+        let coder = Coder::new();
+        let source = "`N{line * 10} `";
+
+        let outputs: Vec<String> = (1..=3)
+            .map(|line| {
+                let mut scope = Scope::new();
+                scope.push("line", line as i64);
+                coder.render("line_number", source, &mut scope).unwrap()
+            })
+            .collect();
+
+        assert_eq!(outputs, vec!["N10 ", "N20 ", "N30 "], "each call still renders its own values");
+        assert_eq!(coder.compiles(), 1, "parsed on the first call only");
+    }
+
+    /// The profile editor renders freshly-typed source under a fixed primitive name, so
+    /// the cache must follow the edit. Serving the previous parse here would show the
+    /// author a preview of the template they no longer have.
+    #[test]
+    fn a_changed_source_under_the_same_name_is_reparsed() {
+        let coder = Coder::new();
+        let banner = |source: &str| {
+            let mut scope = Scope::new();
+            scope.push("text", "Section".to_string());
+            coder.render("banner", source, &mut scope).unwrap()
+        };
+
+        assert_eq!(banner("`( {text} )"), "( Section )\n");
+        assert_eq!(banner("`; {text}"), "; Section\n", "the edit is what renders");
+        assert_eq!(coder.compiles(), 2, "the changed source was parsed again");
+    }
+
+    /// A Coder is built per machining step, so its cache is per step too — the same
+    /// isolation the unit mode already has, for the same reason.
+    #[test]
+    fn two_coders_do_not_share_a_cache() {
+        let source = "`G21";
+        let first = Coder::new();
+        first.render("initialise", source, &mut Scope::new()).unwrap();
+        assert_eq!(first.compiles(), 1);
+
+        let second = Coder::new();
+        assert_eq!(second.compiles(), 0, "a fresh Coder starts empty");
+        second.render("initialise", source, &mut Scope::new()).unwrap();
+        assert_eq!(second.compiles(), 1, "and parses for itself");
+    }
+
+    /// A failed parse must not take the name's slot: in the editor the next keystroke is
+    /// usually the fix, and a poisoned entry would keep reporting the broken template.
+    #[test]
+    fn a_broken_template_is_not_cached() {
+        let coder = Coder::new();
+        assert!(coder.render("initialise", "`G0 Z{z_safe", &mut Scope::new()).is_err());
+        assert_eq!(coder.compiles(), 0, "nothing was parsed, so nothing was stored");
+
+        let fixed = coder.render("initialise", "`G0 Z5", &mut Scope::new()).unwrap();
+        assert_eq!(fixed, "G0 Z5\n", "the repaired source renders");
+        assert_eq!(coder.compiles(), 1);
+    }
+
     #[test]
     fn preview_renders_declared_variables_and_rejects_undeclared_ones() {
         let coder = Coder::new();
@@ -212,5 +341,24 @@ mod tests {
         // the `z_safe not found` class the editor is meant to catch early.
         let err = coder.preview("initialise", "`G0 X{feedrate}", &vars);
         assert!(err.is_err(), "undeclared variable must fail preview");
+    }
+
+    /// `line_number` gets a GCode line as its `text` sample, not a banner caption, so a
+    /// template that branches on the line previews the case it will actually meet. The
+    /// editor is where these templates get written; previewing the wrong branch would
+    /// send the author looking for a bug that isn't there.
+    #[test]
+    fn the_line_number_preview_samples_a_program_line() {
+        let coder = Coder::new();
+        let vars = crate::gcode::primitive_vars::variables_for("line_number");
+
+        let numbered = coder
+            .preview("line_number", "if !text.starts_with(\"(\") {\n    `N{line * 10} `\n}", &vars)
+            .expect("line and text are both declared");
+        assert_eq!(numbered, "N10 ", "the sample line is code, so it is numbered");
+
+        // `banner`'s caption sample is untouched by the split.
+        let caption = coder.preview("banner", "`( {text} )", &crate::gcode::primitive_vars::variables_for("banner"));
+        assert!(caption.unwrap().contains("Section"));
     }
 }

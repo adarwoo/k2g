@@ -376,7 +376,7 @@ Optional primitive attributes:
 
 - `primitives.pause` -> optional pause/message insertion point
 - `primitives.banner` -> optional comment/banner insertion point
-- `primitives.line_number` -> optional per-line `N` prefix; absent/empty means the program is not numbered
+- `primitives.line_number` -> optional per-line `N` prefix; absent/empty means the program is not numbered. Receives the line being numbered as `text`, so a profile may skip lines (its comments, say) by emitting nothing for them
 
 Compatibility and fallback requirements:
 

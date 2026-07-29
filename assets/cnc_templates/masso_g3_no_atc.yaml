@@ -53,4 +53,11 @@ primitives:
     `MSG {message}
     `M1
   banner: "`( {text} )"
-  line_number: '`N{line * 10} `'
+  # Comments are left unnumbered: an `N` word in front of a `(...)` or `;` line buys
+  # nothing — nothing seeks to it, and it only widens the program the operator reads on
+  # the console. `text` is the line about to be numbered; emitting nothing leaves it
+  # alone.
+  line_number: |
+    if !text.starts_with("(") && !text.starts_with(";") {
+        `N{line * 10} `
+    }
