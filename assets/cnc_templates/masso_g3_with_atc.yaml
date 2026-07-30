@@ -1,14 +1,21 @@
-# Masso G3 - With ATC (Automatic Tool Changer)
-# Suitable for a Masso G3 build with an 8-slot automatic tool changer.
-# Tool changes are fully automatic; no manual prompt is emitted.
+# =============================================================================
+# CNC profile: MASSO G3 (ATC), firmware 5.13
+# Conforms to cnc.yaml, schema_version 1.
 #
-# Primitives use the GCode Template Language (see docs/gcode-template-language.md):
-# a backtick line emits GCode, other lines are Rhai script, and {expr} in an emit
-# line is evaluated and unit-converted. metric() emits G21 and fixes the unit.
+# Dialect notes baked into this profile:
+#   - No G49 and no G43: MASSO applies tool length from its tool table at M06.
+#   - No G10 anywhere: a generated program must never WRITE offsets.
+#   - T before M06: MASSO requires "T{n} M06"; the reverse is unpredictable.
+#   - Extended work offsets G54.1 P1..P100 accepted (firmware 5.13+). Cloning
+#     this profile for 5.12 or earlier: delete the marked loop in set_origin.
+#   - Drilling uses the modal G81 form: cycle opened on the first hole of a
+#     block, bare coordinates after, G80 on the last.
+# =============================================================================
 
 name: "Masso G3 - With ATC"
 
 machine:
+  # 60k spindle; min is typical for this class - set it from the VFD's floor.
   spindle_rpm_min: "10000rpm"
   spindle_rpm_max: "60000rpm"
   # Conservative starting values: the machine's real limits are on its
@@ -16,81 +23,190 @@ machine:
   # its chip load is still met.
   max_feed_xy: "5000mm/min"
   max_feed_z: "5000mm/min"
+
   output_file_extension: "nc"
-  atc_slot_count: 8
+
+  # 9-slot rack. (Set 8 when running with the dust hood fitted, or model the
+  # blocked slot in the toolset instead - whichever way k2g ends up encoding it.)
+  atc_slot_count: 9
+
   scaling:
     x: 1.0
     y: 1.0
+
+  # MASSO homes to a repeatable machine origin; stored work offsets survive
+  # power cycles (backup battery permitting).
   has_repeatable_home: true
+
+  # Tool setter measures every tool automatically at M06, so tool_measure is
+  # skipped entirely for this machine.
   tool_length_measurement: auto_setter
 
 primitives:
-  # How this machine is told which unit system to use. Emitted by the metric() and
-  # imperial() calls below; the application holds no G-code word of its own.
+
+  # ===========================================================================
+  # Program
+  # ===========================================================================
+
+  # Header. First retract is G53 (machine coordinates): at this point the
+  # controller still carries the previous job's tool and offset, so a work-
+  # coordinate Z would resolve against state this program didn't set. Only
+  # after set_origin() is a work-coordinate z_safe meaningful.
+  program_begin: |
+    let board = filename;
+    board.replace(".kicad_pcb", "");
+    `(Created by kicad2gcode from '{board}'`
+    if steps.len() > 1 {
+       if steps[step_index].name != "" {
+           ` - step {step_index + 1} of {steps.len()}: {steps[step_index].name}`
+       } else {
+           ` - step {step_index + 1} of {steps.len()}`
+       }
+    }
+    ` - {timestamp})
+    `(Target: MASSO G3 firmware 5.13)
+    `G53 Z0
+    `G17 G40 G80 G90
+    metric();
+    set_origin();
+    `G0 Z{z_safe}
+
+  # Footer. M05 is belt-and-braces - the body has already stopped the spindle,
+  # but the footer must be safe even if a future path reaches it early.
+  # Park via G53 so it does not depend on the work offset still being valid,
+  # and clear of the board so the operator can reach the work.
+  # M30 last: nothing after it executes.
+  program_end: |
+    `(end of program)
+    `M05
+    `G53 Z0
+    `G53 X0 Y0
+    `M30
+
+  # G21/G20 as standard.
   set_unit: '`{if metric { "G21" } else { "G20" }}'
-  # Which stored zero the fixture sits in. The MASSO has the usual six plus the
-  # extended G54.1 P1..P100 bank, which is where most of its offsets live.
+
+  # G54..G59 plus MASSO's extended offsets G54.1 P1..P100 (firmware 5.13+).
   set_origin: |
     let key = origin_reference;
     key.trim();
     key.make_upper();
-    key.replace(" ", "");          // "G54.1 P7" -> "G54.1P7"
+    key.replace(" ", "");
     if key.is_empty() {
-        throw "the fixture has no origin reference. Leaving it blank would run the " +
-              "job against whatever origin the controller happens to have active. " +
-              "Set it to G54-G59, or G54.1 P1 to G54.1 P100.";
+        throw "the fixture has no origin reference. Leaving it blank would run " +
+              "the job against whatever origin the controller happens to have " +
+              "active. Set it to G54-G59, or G54.1 P1 to G54.1 P100.";
     }
     let valid = [];
     for n in 54..=59 { valid.push("G" + n); }
-    // --- extended offsets: MASSO 5.13+ only. -------------------
-    // Delete this loop when cloning for 5.12 or earlier.
+    // --- Extended offsets: MASSO firmware 5.13 or later only. ---------------
+    // Cloning this profile for 5.12 or earlier: DELETE the next line.
     for p in 1..=100 { valid.push("G54.1P" + p); }
-    // -----------------------------------------------------------
+    // ------------------------------------------------------------------------
     if !valid.contains(key) {
-        throw "'" + origin_reference + "' is not a valid origin reference for this " +
-              "machine. MASSO G3 accepts G54 to G59, and G54.1 P1 to G54.1 P100 on " +
-              "firmware 5.13 or later. Check the value in the fixture profile " +
-              "against the work offset shown on the MASSO F1 screen.";
+        throw "'" + origin_reference + "' is not a valid origin reference for " +
+              "this machine. MASSO G3 accepts G54 to G59, and G54.1 P1 to " +
+              "G54.1 P100 on firmware 5.13 or later. Check the value in the " +
+              "fixture profile against the offset shown on the MASSO F1 screen.";
     }
-    // Re-space the extended form for readability in the output.
     if key.starts_with("G54.1P") {
-        `G54.1 P`
-        `{key.sub_string(6)}
+        `G54.1 P{key.sub_string(6)}
     } else {
         `{key}
     }
-  initialise: |
-    `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    `G17 G40 G49 G80 G90
-    set_origin();
-    metric();
-    `G0 Z{z_safe}
-  rapid_move: "`G0 X{x} Y{y} Z{z}"
-  linear_cut: "`G1 X{x} Y{y} Z{z} F{feedrate}"
-  start_spindle: |
-    `S{rpm}
-    `M3
-  stop_spindle: "`M5"
-  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
-  cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
-  cut_bezier: |
-    `; cut_bezier fallback
-  change_tool: |
+
+  # ===========================================================================
+  # Tools and spindle
+  # ===========================================================================
+
+  # ATC change. Spindle stopped first; T before M06 (MASSO requires this
+  # order). The tool setter fires at M06, so nothing else is needed here.
+  # manual_message is empty on this machine; the guard keeps the template
+  # correct if the profile is ever cloned for a manual-change MASSO.
+  tool_change: |
     `M05
+    if manual_message != "" {
+        pause(manual_message);
+    }
     `T{slot} M06
-  conclude: |
-    `(end of file)
-    `G0 Z{z_safe}
-    `G0 X0 Y0
+
+  # Auto setter at M06 - nothing to emit, and the engine skips this primitive
+  # anyway because tool_length_measurement is auto_setter.
+  tool_measure: ""
+
+  # S before M03, then a spin-up dwell so the first plunge never happens on a
+  # spindle still ramping. 2 s suits a 60k air-cooled spindle; set it from the
+  # VFD's measured ramp time.
+  spindle_start: |
+    `S{rpm}
+    `M03
+    `G4 P2.0
+
+  spindle_stop: "`M05"
+
+  # ===========================================================================
+  # Motion
+  # ===========================================================================
+
+  move_rapid: "`G0 X{x} Y{y} Z{z}"
+
+  # Always carries its own F - after a drill block the modal feed is the
+  # plunge feed, which a routing move must never inherit.
+  cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
+
+  # IJK centre-offset form (the R form cannot express a full circle, and round
+  # pads/slot ends are full circles).
+  cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
+
+
+  # ===========================================================================
+  # Drilling
+  # ===========================================================================
+
+  # Modal canned cycle: G81 with full words on the first hole of the block,
+  # bare coordinates for the rest, G80 after the last. A one-hole block opens
+  # and cancels immediately, which is correct rather than a special case.
+  #
+  # NOTE - restart trade-off: bare-coordinate lines make "start from line N"
+  # unsafe mid-block (no Z/R/F on the line the controller resumes at). For a
+  # restartable program, replace the body with the single fully-worded line:
+  #   `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+  # and keep the trailing G80.
+  drill: |
+    if index == 0 {
+        `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+    } else {
+        `X{x} Y{y}
+    }
+    if index == count - 1 {
+        `G80
+    }
+
+  # ===========================================================================
+  # Operator
+  # ===========================================================================
+
+  comment: "`( {text} )"
+
+  # On-screen message, non-blocking.
+  message: "`(MSG, {text})"
+
+  # Message then a hard stop; cycle start resumes. M00 rather than M01 so the
+  # stop does not depend on the optional-stop switch being enabled.
   pause: |
-    `MSG {message}
-    `M1
-  banner: "`( {text} )"
-  # Comments are left unnumbered: an `N` word in front of a `(...)` or `;` line buys
-  # nothing — nothing seeks to it, and it only widens the program the operator reads on
-  # the console. `text` is the line about to be numbered; emitting nothing leaves it
-  # alone.
-  line_number: |
-    if !text.starts_with("(") && !text.starts_with(";") {
-        `N{line * 10} `
+    `(MSG, {text})
+    `M00
+
+  # ===========================================================================
+  # Output formatting
+  # ===========================================================================
+
+  # N-numbering in steps of 10, comments left bare so they read cleanly and
+  # renumbering never touches them. Clear this template to diff two generated
+  # programs without every line changing.
+  line_format: |
+    if text.starts_with("(") {
+        `{text}
+    } else {
+        `N{(index + 1) * 10} {text}
     }

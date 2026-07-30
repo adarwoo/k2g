@@ -157,6 +157,66 @@ especially:
 
 ---
 
+## 5.9 Deferred from the primitive rename (2026-07-30)
+
+Raised while renaming the primitives and giving them a kind/category taxonomy.
+
+### ~~Primitive fallback chain~~ — done (2026-07-30), and `cut_bezier` retired (2026-07-31)
+
+`x-fallback` in `schemas/cnc.yaml` declares it, `machine.curve_tolerance` carries the
+approximation tolerance as a machine fact, and `degrade_moves` in
+`src/gcode/program.rs` applies it. A blank `tool_measure` still means "this machine
+needs no measurement block" — only a primitive declaring `x-fallback` is degraded, and
+`the_declared_fallback_chain_is_the_one_the_renderer_walks` pins that.
+
+The same tolerance drives a new pass in the other direction, `src/gcode/arcfit.rs`: a
+routed outline's offset polyline is fitted with arcs before it is emitted, so a curved
+board edge is cut as `G2`/`G3` rather than as hundreds of chords. That is what makes the
+`cut_arc` → `cut_linear` fallback load-bearing rather than theoretical.
+
+**The chain is `cut_arc` → `cut_linear`, not the three links first proposed.**
+`cut_bezier` was built and then removed, and the reasoning is worth keeping:
+
+- The one curve source reaching the generator is the routed outline, and that path is
+  *offset* by the tool radius. The offset of a bezier is not a bezier — it is not even
+  rational, bar the Pythagorean-hodograph family, which arbitrary KiCad control points
+  will never be. So there was never a bezier left to hand a template.
+- `pcb::routing_offset` flattens to a polyline before the generator sees anything
+  anyway, because Clipper does the self-intersection and concave-corner work that
+  actually decides correctness. Any bezier emission would have been *fitted to a
+  polyline*, i.e. no more faithful than the arcs.
+- A primitive nothing can emit is the trap `x-kind` exists to close: it sits in the
+  editor asking to be filled in and then does nothing.
+
+A profile carrying the retired key is migrated in `normalize_cnc_value` — dropped
+quietly when blank (all four bundled profiles shipped it so), reported when the
+operator had written something, because that is their work going.
+
+**If it comes back**, the case is `score`/`vgroove` (`machining.yaml`'s `outline.cut`,
+declared and unimplemented): those cut *on* the line, so the KiCad bezier is exactly
+the toolpath and a spline-capable controller could take it natively. Even then most
+controllers have no spline word — there is no such thing in RS-274/NGC, and G5 /
+G06.2 / `BSPLINE` are per-vendor — so that path needs the arc fitter regardless, and
+the bezier would be an optimisation for a minority. Worth adding then, informed by
+what vgroove actually needs, rather than guessed at now.
+
+### `Gtl::run` — save/restore instead of clear
+
+`Gtl::run` clears the shared output buffer on entry, so a template cannot render
+another template in place. Two workarounds exist because of it: `set_unit`/`set_origin`
+are pre-rendered at `Coder` construction, and the operator callables
+(`comment`/`message`/`pause`) render on a **second `Gtl`** whose output is pushed into
+the first (`Coder::build`).
+
+Swapping the buffer out on entry and restoring it on exit would make nesting work
+directly and retire both. It was not done with the callables because the natives would
+need an `Rc<Gtl>` back-reference to the very engine they are registered on — a
+construction-order problem and a reference cycle. Worth revisiting as its own change,
+with the sub-renderer's recursion guard (the sub-engine simply has no callables
+registered) replaced by an explicit depth limit.
+
+---
+
 ## 6. Suggested sequencing
 
 1. **Runtime-verify** the current pipeline (§5.2) — cheap, de-risks everything.

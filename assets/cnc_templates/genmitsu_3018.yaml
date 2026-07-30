@@ -47,30 +47,30 @@ primitives:
               "G58 G59. Extended offsets (G54.1 P...) are not available on GRBL.";
     }
     `{key}
-  initialise: |
-    `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+  program_begin: |
+    `(Created by kicad2gcode from '{filename}' - {timestamp})
     `G17 G40 G49 G80 G90
     set_origin();
     metric();
     `G0 Z{z_safe}
-  rapid_move: "`G0 X{x} Y{y} Z{z}"
-  linear_cut: "`G1 X{x} Y{y} Z{z} F{feedrate}"
-  start_spindle: |
+  move_rapid: "`G0 X{x} Y{y} Z{z}"
+  cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
+  spindle_start: |
     `S{rpm}
     `M03
-  stop_spindle: "`M05"
+  spindle_stop: "`M05"
   drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
   cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
-  cut_bezier: |
-    `; cut_bezier fallback
-  change_tool: |
+  tool_change: |
     `M05
     `{manual_message}
     `T{slot} M06
-  conclude: |
+  program_end: |
     `(end of file)
   pause: |
-    `MSG {message}
+    `MSG {text}
     `M01
-  banner: "`( {text} )"
-  line_number: '`N{line * 10} `'
+  comment: "`( {text} )"
+  # `line_format` owns the WHOLE line — `{text}` must be emitted or the G-code is lost.
+  # `index` counts non-blank lines from 0, so the first line is N10.
+  line_format: "`N{(index + 1) * 10} {text}"

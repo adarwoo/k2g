@@ -119,6 +119,40 @@ pub struct Gtl {
     output: Rc<RefCell<String>>,
 }
 
+/// How many Rhai operations one template may execute before it is stopped.
+///
+/// Templates are **author-written scripts with loops**, so `while z > z_bottom` with the
+/// decrement left out does not fail — it runs forever. Without a ceiling that hangs
+/// whatever thread called it, and the worst case is not the generation worker (which the
+/// user can at least see is busy) but the *editor*: its live preview re-renders on every
+/// keystroke, on the UI thread, so one bad loop freezes the application with no way back
+/// to the template that caused it.
+///
+/// Rhai's own default is `0`, meaning unlimited, so this has to be set deliberately.
+///
+/// The value is chosen from measurement, not taste. Two figures bound it:
+///
+/// - **What a real template costs.** The most demanding shape a profile writes is a
+///   bounded loop — a peck cycle (~20 passes), a drill chain (~50 holes), or the MASSO
+///   `set_origin` building its 106-entry offset table. A deliberately extreme 2000-pass
+///   loop measures at **~20–30k operations**, already an order of magnitude beyond any of
+///   those.
+/// - **What a runaway costs before it is stopped.** Measured at ~0.95M operations/second
+///   in a debug build and ~14M/s in release. Debug is the number that matters: it is what
+///   a developer feels, and it is the slower of the two.
+///
+/// 200k therefore leaves ~7–10× headroom over the extreme loop (~200× over a realistic
+/// one) while capping the stall at roughly **210 ms debug / 15 ms release** — noticeable
+/// while a loop is broken, invisible otherwise, and nothing like a hang.
+///
+/// It also bounds everything downstream: a `while true { … }` that emits cannot grow the
+/// output buffer without bound, because each emit costs operations from the same budget.
+///
+/// The budget is **per `run` call**, not per engine — see
+/// `the_operation_budget_resets_for_every_run`, which is load-bearing: one engine renders
+/// every primitive of a board, so a cumulative counter would fail a job part-way through.
+pub const MAX_OPERATIONS: u64 = 200_000;
+
 impl Gtl {
     /// Build an engine with the language surface registered: `emit(text)` and a
     /// default `fmt(value)` for plain scalars and strings. Register the host
@@ -127,6 +161,10 @@ impl Gtl {
     pub fn new() -> Self {
         let output = Rc::new(RefCell::new(String::new()));
         let mut engine = Engine::new();
+
+        // A template that never terminates must not take the caller down with it.
+        // See [`MAX_OPERATIONS`] — this is off by default in Rhai.
+        engine.set_max_operations(MAX_OPERATIONS);
 
         let sink = output.clone();
         engine.register_fn("emit", move |text: ImmutableString| {
@@ -211,20 +249,29 @@ impl Default for Gtl {
 }
 
 /// Map a Rhai evaluation failure to a [`GtlError`], distinguishing a scripted
-/// `throw` (a deliberate precondition failure) from other runtime errors.
+/// `throw` (a deliberate precondition failure) and a runaway loop from other
+/// runtime errors.
 fn map_eval_error(name: &str, err: Box<EvalAltResult>) -> GtlError {
     let pos = err.position();
     let line = pos.line().unwrap_or(0);
-    if let EvalAltResult::ErrorRuntime(value, _) = err.as_ref() {
-        return GtlError::Thrown {
+    match err.as_ref() {
+        EvalAltResult::ErrorRuntime(value, _) => GtlError::Thrown {
             template: name.to_string(),
             value: value.to_string(),
-        };
-    }
-    GtlError::Runtime {
-        template: name.to_string(),
-        line,
-        message: err.to_string(),
+        },
+        // Given its own variant so the message can name the likely cause. Rhai's
+        // rendering is "Too many operations", which is true and useless to an author
+        // who did not know operations were being counted.
+        EvalAltResult::ErrorTooManyOperations(_) => GtlError::Runaway {
+            template: name.to_string(),
+            line,
+            limit: MAX_OPERATIONS,
+        },
+        _ => GtlError::Runtime {
+            template: name.to_string(),
+            line,
+            message: err.to_string(),
+        },
     }
 }
 
@@ -332,6 +379,102 @@ while z > z_bottom {
         assert!(matches!(err, GtlError::Parse { line: 1, .. }), "{err:?}");
     }
 
+    /// **A template that never terminates must not hang the caller.**
+    ///
+    /// This is not a hypothetical: templates are author-written scripts with loops, and
+    /// the editor re-renders one on every keystroke *on the UI thread*. Before the
+    /// operation ceiling this test would not have failed — it would have hung the run.
+    ///
+    /// The elapsed-time assertion is the real subject. A limit that stops the loop but
+    /// takes ten seconds to do it still freezes the application. The bound is loose
+    /// relative to the measured ~210 ms debug cost, so the test is about "bounded, and
+    /// fast enough not to read as a hang" rather than about this machine's speed.
+    #[test]
+    fn a_runaway_loop_is_stopped_quickly() {
+        let gtl = Gtl::new();
+        let started = std::time::Instant::now();
+        let error = render(&gtl, "let z = 1;\nwhile z > 0 {\n    `G1 Z{z}\n}", &mut Scope::new())
+            .expect_err("an endless loop must not return a program");
+        let elapsed = started.elapsed();
+
+        match error {
+            GtlError::Runaway { template, line, limit } => {
+                assert_eq!(template, "test");
+                assert_eq!(limit, MAX_OPERATIONS);
+                assert!(line > 0, "the author needs a line to look at, got {line}");
+            }
+            other => panic!("expected Runaway, got {other:?}"),
+        }
+        assert!(
+            elapsed < std::time::Duration::from_millis(750),
+            "the ceiling must stop it fast enough not to be felt: took {elapsed:?}"
+        );
+    }
+
+    /// The message has to send the author somewhere. "Too many operations" — Rhai's own
+    /// wording — describes the symptom to someone who did not know operations were being
+    /// counted, and says nothing about loops.
+    #[test]
+    fn a_runaway_says_what_to_look_for() {
+        let gtl = Gtl::new();
+        let error =
+            render(&gtl, "while true {\n    `x\n}", &mut Scope::new()).expect_err("stopped");
+        let text = error.to_string();
+        assert!(text.contains("did not finish"), "{text}");
+        assert!(text.contains("loop"), "the likely cause must be named: {text}");
+    }
+
+    /// A runaway that emits cannot exhaust memory first: every `emit` costs operations
+    /// from the same budget, so the output is bounded by the ceiling too.
+    #[test]
+    fn a_runaway_that_emits_cannot_grow_without_bound() {
+        let gtl = Gtl::new();
+        let error = render(&gtl, "while true {\n    `G1 X1 Y1 Z1 F100\n}", &mut Scope::new());
+        assert!(matches!(error, Err(GtlError::Runaway { .. })), "{error:?}");
+    }
+
+    /// **The budget is per `run`, not per engine.**
+    ///
+    /// One engine renders every primitive of a whole board — thousands of calls — so a
+    /// counter that accumulated across runs would abort a real job part-way through, and
+    /// would do it as a "runaway loop" error against a template with no loop in it. The
+    /// failure would scale with board size, so it would pass every small test and appear
+    /// only on real work.
+    ///
+    /// Rhai resets the count per evaluation; this pins that, because the whole design
+    /// depends on it and it is not visible at the call site.
+    #[test]
+    fn the_operation_budget_resets_for_every_run() {
+        let gtl = Gtl::new();
+        // Each pass is a few thousand operations; 200 of them far exceed one budget in
+        // total, so this only passes if the count starts again each time.
+        let tmpl = gtl
+            .compile("t", "let z = 500;\nwhile z > 0 {\n    `G1 Z{z}\n    z -= 1;\n}")
+            .unwrap();
+        for pass in 0..200 {
+            let out = gtl
+                .run(&tmpl, &mut Scope::new())
+                .unwrap_or_else(|e| panic!("pass {pass} must not exhaust a shared budget: {e}"));
+            assert_eq!(out.lines().count(), 500);
+        }
+    }
+
+    /// The ceiling must not be so tight that a legitimate template trips it. A peck loop
+    /// over a deep hole is the most demanding shape a real profile writes, and it has to
+    /// clear the limit with room to spare.
+    #[test]
+    fn a_long_but_finite_loop_still_completes() {
+        let gtl = Gtl::new();
+        // 2000 passes — an order of magnitude more than any real peck cycle.
+        let out = render(
+            &gtl,
+            "let z = 2000;\nwhile z > 0 {\n    `G1 Z{z}\n    z -= 1;\n}",
+            &mut Scope::new(),
+        )
+        .expect("a bounded loop must not be mistaken for a runaway");
+        assert_eq!(out.lines().count(), 2000);
+    }
+
     #[test]
     fn host_registers_dialect_functions() {
         let mut gtl = Gtl::new();
@@ -364,5 +507,6 @@ while z > z_bottom {
         assert_eq!(render(&gtl, "preamble();\n`G0", &mut scope).unwrap(), "G21\nG90\nG0\n");
     }
 }
+
 
 

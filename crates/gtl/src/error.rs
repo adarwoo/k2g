@@ -34,4 +34,25 @@ pub enum GtlError {
     /// thrown value rendered as text.
     #[error("{template}: thrown: {value}")]
     Thrown { template: String, value: String },
+
+    /// The template ran past [`crate::MAX_OPERATIONS`] and was stopped.
+    ///
+    /// Almost always a loop whose condition never becomes false — the classic being a
+    /// `while z > z_bottom` whose body forgets to change `z`. Kept apart from
+    /// [`Self::Runtime`] because the cause and the fix are specific, and because Rhai's
+    /// own wording for it ("Too many operations") describes the symptom to someone who
+    /// has no idea their engine counts operations.
+    ///
+    /// `line` is where execution had reached, which for a runaway loop is a line *inside*
+    /// it — the useful place to look.
+    #[error(
+        "{template}:{line}: did not finish — stopped after {limit} operations. \
+         A loop is most likely never ending: check that its condition can become false \
+         (e.g. that the depth in `while z > z_bottom` is actually decreasing)."
+    )]
+    Runaway {
+        template: String,
+        line: usize,
+        limit: u64,
+    },
 }

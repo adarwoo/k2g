@@ -207,21 +207,47 @@ Within each project type, operation ordering uses a Travelling Salesman Problem 
 
 All project types produce an ordered list of primitives. These are resolved to GCode by the CNC RHAI expressions in the final pass, decoupling the algorithm from machine-specific dialect.
 
-Primitive set:
+Each primitive declares **how it is invoked** (`x-kind`) and **where it belongs in the
+editor** (`x-category`) in `schemas/cnc.yaml`; the CNC editor builds its sections and its
+per-field badge from those, so the schema is the only place the set is listed.
 
-- `initialise`
-- `move_slow(x, y)` — positioning move
-- `start_spindle`
-- `stop_spindle`
-- `drill`
-- `peck_drill`
-- `cut_arc`
-- `cut_bezier` — native on some CNCs (e.g. Siemens G3.4); resolved to arc approximation on others
-- `change_tool`
-- `conclude`
-- `set_unit` — what `metric()`/`imperial()` emit
-- `set_origin` — what `set_origin()` emits, and what validates the fixture's Machine
-  Origin Reference against the offsets this controller has
+The two are independent — `operator` holds three callables, `program` holds two
+generators and two callables.
+
+| Kind | Meaning |
+|---|---|
+| `generator` | the application emits it at a defined point in the program |
+| `callable` | **nothing emits it** — a template calls it by name |
+| `filter` | applied to every line of the finished program |
+
+Primitive set, by category:
+
+| Category | Primitives |
+|---|---|
+| **Program** | `program_begin`, `program_end` *(generators)*; `set_unit`, `set_origin` *(callables)* |
+| **Tools and spindle** | `tool_change`, `tool_measure`, `spindle_start`, `spindle_stop` |
+| **Motion** | `move_rapid`, `cut_linear`, `cut_arc` |
+| **Drilling** | `drill` |
+| **Operator** | `comment`, `message`, `pause` *(all callables, each taking text)* |
+| **Output formatting** | `line_format` *(filter)* |
+
+Notes:
+
+- `set_unit` is what `metric()`/`imperial()` emit; `set_origin` is what `set_origin()`
+  emits, **and** what validates the fixture's Machine Origin Reference against the
+  offsets this controller actually has.
+- `tool_measure` is emitted only on a machine whose `tool_length_measurement` is
+  `manual` — one with an automatic setter measures at M06.
+- `drill` receives `index`/`count` over its block's run of holes, so a profile can emit a
+  modal cycle (open on the first, bare coordinates after, cancel on the last).
+- A blank `cut_arc` is not "emit nothing": the schema's `x-fallback` degrades it to
+  `cut_linear` chords at `machine.curve_tolerance`, so a controller with no arc word
+  still cuts the curve. Blank means "emits nothing" on every primitive that does *not*
+  declare `x-fallback` — a blank `tool_measure` still means this machine needs none.
+- There is no `cut_bezier`. It was built and retired (see `outstanding.md` §5.9): the
+  routed outline is offset by the tool radius and the offset of a bezier is not a
+  bezier, so nothing could ever emit one. Curves reach the machine as arcs fitted to
+  the offset polyline (`src/gcode/arcfit.rs`).
 
 ### Entity model (as built)
 
@@ -390,11 +416,11 @@ Testing:
 Pure function: `PrimitivePlan + CNC RHAI profile → GCode text`.
 
 - No board data; purely a dialect resolver mapping primitives to machine-specific GCode.
-- `cut_bezier` falls back to arc approximation for CNCs that do not support native bezier.
+- A blank `cut_arc` falls back to chord approximation for CNCs with no arc word.
 
 Testing:
 - Snapshot tests per CNC profile against a fixed PrimitivePlan.
-- Verify `cut_bezier` fallback path for non-native CNCs.
+- Verify the `cut_arc` -> `cut_linear` fallback for CNCs with no arc word.
 - Verify RHAI expression errors surface as typed diagnostics, not panics.
 - Verify line numbering toggle and increment produce correct output.
 

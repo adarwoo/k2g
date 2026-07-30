@@ -34,6 +34,7 @@ use crate::gcode::assigner::{
     OverflowPolicy, RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
 use crate::gcode::feeds::{self, Limited, MachineLimits, Motion, SpindleRange};
+use crate::gcode::step_data::StepValue;
 use crate::runtime::AppState;
 
 /// The full tooling plan: one entry per machining step (in order).
@@ -716,6 +717,60 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
             })
             .collect()
     })
+}
+
+/// Reads the profile's `steps` array whole, as the program templates see it.
+///
+/// The complement of [`read_steps`]: that one projects the handful of fields the planner
+/// acts on, hand-written field by field. This one takes the array verbatim, so a field
+/// added to `machining.yaml`'s `$defs/step` reaches `program_begin` without a change
+/// here — the templates are the operator's, and which of their own settings they want to
+/// print in a header is not this application's to enumerate.
+///
+/// Walks [`NodeValue`] rather than calling `Node::to_value()`, because that renders a
+/// `2.0mm` as the string `"2.0mm"`. Keeping it a [`Length`] is what lets a template
+/// interpolate it and have it follow the program's own unit mode — see
+/// [`StepValue`](crate::gcode::step_data::StepValue).
+pub(crate) fn read_step_values(profile_id: Uuid) -> Vec<StepValue> {
+    with_appdata(|data| {
+        let Some(doc) = data.get(profile_id) else {
+            return Vec::new();
+        };
+        match doc.root.get_pointer("/steps").map(|node| &node.value) {
+            Some(NodeValue::Array(items)) => items.iter().map(node_to_step_value).collect(),
+            _ => Vec::new(),
+        }
+    })
+}
+
+/// One document node as the template-facing tree.
+///
+/// An identity and a reference both become their UUID text: a template that wants to
+/// name the machine a step binds uses the `cnc_name` the orchestrator resolves beside
+/// it, and the raw id stays available for one that needs it verbatim.
+fn node_to_step_value(node: &Node) -> StepValue {
+    match &node.value {
+        NodeValue::Null => StepValue::Null,
+        NodeValue::Bool(v) => StepValue::Bool(*v),
+        NodeValue::Int(v) => StepValue::Int(*v),
+        NodeValue::Float(v) => StepValue::Number(*v),
+        NodeValue::Str(v) => StepValue::Text(v.clone()),
+        NodeValue::Id(id) => StepValue::Text(id.to_string()),
+        NodeValue::Ref(r) => StepValue::Text(r.raw.to_string()),
+        NodeValue::Unit(UnitValue::Length(v)) => StepValue::Length(*v),
+        NodeValue::Unit(UnitValue::Feed(v)) => StepValue::Feed(*v),
+        NodeValue::Unit(UnitValue::Angle(v)) => StepValue::Angle(*v),
+        NodeValue::Unit(UnitValue::Rpm(v)) => StepValue::Rpm(*v),
+        NodeValue::Array(items) => {
+            StepValue::List(items.iter().map(node_to_step_value).collect())
+        }
+        NodeValue::Object(fields) => StepValue::Map(
+            fields
+                .iter()
+                .map(|(key, child)| (key.clone(), node_to_step_value(child)))
+                .collect(),
+        ),
+    }
 }
 
 /// Reads a `retention` block at `base`, falling back to `default` per field.
@@ -1427,9 +1482,11 @@ pub(crate) fn derate_notes(
 ) -> Vec<String> {
     // (tool name, scale, rated feed) per cause, where scale is running rpm ÷ rated rpm.
     let mut capped: Vec<(&str, f64, FeedRate)> = Vec::new();
-    let mut raised: Vec<(&str, f64, FeedRate)> = Vec::new();
     let mut feed_bound: Vec<(&str, f64, FeedRate)> = Vec::new();
-    let mut conflicted: Vec<(&str, f64, FeedRate)> = Vec::new();
+    // Ranked by rated *speed* rather than by scale: nothing is scaled for these, so every
+    // entry's scale is 1.0 and picking the "deepest" by it would name an arbitrary tool.
+    // The slowest tool is the one furthest outside what the machine can do.
+    let mut below_floor: Vec<(&str, RotationalSpeed, FeedRate)> = Vec::new();
 
     for tool in tools {
         let Ok(resolved) = feeds::resolve(tool.feed, tool.speed, limits, tool.motion) else {
@@ -1443,10 +1500,11 @@ pub(crate) fn derate_notes(
         let entry = (tool.name.as_str(), scale, rated_feed);
         match resolved.limit {
             Limited::No => {}
-            Limited::Spindle if scale < 1.0 => capped.push(entry),
-            Limited::Spindle => raised.push(entry),
+            Limited::Spindle => capped.push(entry),
             Limited::Feed => feed_bound.push(entry),
-            Limited::Conflict => conflicted.push(entry),
+            Limited::SpindleFloor => {
+                below_floor.push((tool.name.as_str(), rated_speed, rated_feed))
+            }
         }
     }
 
@@ -1469,39 +1527,31 @@ pub(crate) fn derate_notes(
             rated.unit_display(unit).user,
         ));
     }
-    if let Some(worst) = raised.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
-        notes.push(format!(
-            "{} of {total} tool(s) are rated below {machine}'s {} floor — the spindle is raised \
-             and feeds scaled up in proportion. Largest: {} at {} of its rated {}.",
-            raised.len(),
-            unit_format::format_rotational_speed_display(limits.spindle.min),
-            worst.0,
-            percent(worst.1),
-            worst.2.unit_display(unit).user,
-        ));
-    }
-    if let Some((name, scale, rated)) = deepest(&feed_bound) {
+    if let Some((name, _, rated)) = deepest(&feed_bound) {
         notes.push(format!(
             "{} of {total} tool(s) want a feed faster than {machine} can move ({} in XY, {} on Z) \
-             — the spindle is lowered to suit, which holds chip load but makes the job slower. \
-             Deepest: {name} at {} of its rated {}. Raise the machine's feed limits if it really \
-             is faster.",
+             — the feed is capped and the spindle keeps its speed, so they cut lighter than rated. \
+             Worst: {name}, rated {}. Raise the machine's feed limits if it really is faster.",
             feed_bound.len(),
             limits.max_feed_xy.unit_display(unit).user,
             limits.max_feed_z.unit_display(unit).user,
-            percent(scale),
             rated.unit_display(unit).user,
         ));
     }
-    if let Some((name, _, rated)) = deepest(&conflicted) {
+    // Nothing was altered for these — the program carries the tool's own rated pair. What
+    // the machine does with a speed below its floor is the machine's business, and that is
+    // exactly why it is worth saying out loud.
+    let slowest = below_floor.iter().min_by(|a, b| a.1.as_rpm().total_cmp(&b.1.as_rpm()));
+    if let Some((name, rated_speed, rated_feed)) = slowest {
         notes.push(format!(
-            "{} of {total} tool(s) cannot meet their rated chip load on {machine}: the feed they \
-             need is beyond the axis ({} on Z) at every speed the spindle will run ({} minimum), \
-             so the feed is capped and they will cut lighter than rated. Worst: {name}, rated {}.",
-            conflicted.len(),
-            limits.max_feed_z.unit_display(unit).user,
+            "{} of {total} tool(s) are rated below {machine}'s {} minimum — the program still \
+             commands their rated speed, but the machine will not turn that slowly, so the cut \
+             will be heavier per revolution than rated. Slowest: {name} at {}, rated {}. Use a \
+             tool the spindle can run, or correct the machine's minimum.",
+            below_floor.len(),
             unit_format::format_rotational_speed_display(limits.spindle.min),
-            rated.unit_display(unit).user,
+            unit_format::format_rotational_speed_display(*rated_speed),
+            rated_feed.unit_display(unit).user,
         ));
     }
     notes
@@ -1803,18 +1853,25 @@ mod tests {
         assert!(note.contains("20000mm/min"), "against the rated feed: {note}");
     }
 
-    /// The two directions mean opposite things, so they never share a line.
+    /// Over the ceiling and under the floor are opposite problems with opposite fixes, so
+    /// they never share a line. Only the first is something the application does anything
+    /// about — a tool under the floor is reported and left exactly as rated.
     #[test]
-    fn capping_and_raising_are_reported_separately() {
+    fn being_over_the_ceiling_and_under_the_floor_are_reported_separately() {
         let tools = vec![
-            loaded("1.0mm drill", 14_400.0, 48_000.0), // above the ceiling
-            loaded("slow cutter", 200.0, 1_000.0),     // below the floor
+            loaded("1.0mm drill", 14_400.0, 48_000.0), // above the ceiling → scaled
+            loaded("slow cutter", 200.0, 1_000.0),     // below the floor   → reported only
         ];
         let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
         assert_eq!(notes.len(), 2, "one per direction: {notes:#?}");
         assert!(notes[0].contains("capped"), "capping first: {}", notes[0]);
-        assert!(notes[1].contains("raised"), "then raising: {}", notes[1]);
-        assert!(notes[1].contains("slow cutter") && notes[1].contains("500%"), "{}", notes[1]);
+        assert!(notes[1].contains("below"), "then the floor: {}", notes[1]);
+        assert!(notes[1].contains("slow cutter"), "{}", notes[1]);
+        assert!(
+            notes[1].contains("still commands their rated speed"),
+            "must say nothing was changed: {}",
+            notes[1]
+        );
     }
 
     /// The guard against alarm fatigue: a machine that can reach the ratings says nothing.
@@ -1851,10 +1908,10 @@ mod tests {
         assert!(!notes[0].contains("no feed") && !notes[0].contains("no speed"), "{}", notes[0]);
     }
 
-    /// "Worst" is the deepest cut when capping but the largest increase when raising —
-    /// opposite ends of the scale, and easy to get backwards.
+    /// "Worst" is the deepest derate — the smallest fraction of the rated speed — and it
+    /// is easy to pick the wrong end of the list.
     #[test]
-    fn the_worst_offender_is_picked_from_the_right_end_of_each_range() {
+    fn the_worst_offender_is_the_deepest_derate() {
         let capped = vec![
             loaded("mild", 1_000.0, 30_000.0),  // → 80%
             loaded("severe", 1_000.0, 96_000.0), // → 25%
@@ -1862,12 +1919,14 @@ mod tests {
         let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &capped, UserUnitSystem::Metric);
         assert!(notes[0].contains("severe") && notes[0].contains("25%"), "{}", notes[0]);
 
-        let raised = vec![
-            loaded("mild", 1_000.0, 4_000.0), // → 125%
-            loaded("severe", 1_000.0, 500.0), // → 1000%
+        // Under the floor nothing is scaled, so the tools are ranked by rated speed and
+        // the slowest — the furthest from what the machine can do — is the one named.
+        let below = vec![
+            loaded("mild", 1_000.0, 4_000.0),
+            loaded("severe", 1_000.0, 500.0),
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &raised, UserUnitSystem::Metric);
-        assert!(notes[0].contains("severe") && notes[0].contains("1000%"), "{}", notes[0]);
+        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &below, UserUnitSystem::Metric);
+        assert!(notes[0].contains("severe"), "{}", notes[0]);
     }
 
     /// A machine that can reach the speed but not move that fast gets its own line, with
@@ -1886,14 +1945,19 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:#?}");
         assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
         assert!(notes[0].contains("1500mm/min"), "names the Z limit: {}", notes[0]);
-        assert!(notes[0].contains("7.5%"), "7500 of 100000 rpm: {}", notes[0]);
+        assert!(
+            notes[0].contains("the spindle keeps its speed"),
+            "must say the spindle was not derated for it: {}",
+            notes[0]
+        );
+        assert!(notes[0].contains("cut lighter than rated"), "and what that costs: {}", notes[0]);
         assert!(notes[0].contains("Raise the machine's feed limits"), "names the fix: {}", notes[0]);
     }
 
-    /// The unsolvable case says plainly that the chip load is *not* being met — it is the
-    /// one message here that is about damage rather than about speed.
+    /// A high spindle floor no longer changes the answer: the floor is not in the formula,
+    /// so this is the same axis-bound case as above and gets the same single note.
     #[test]
-    fn an_unreachable_chip_load_is_called_out_as_such() {
+    fn a_high_spindle_floor_does_not_add_a_second_complaint() {
         let tools = vec![loaded("0.3mm drill", 20_000.0, 100_000.0)];
         let notes = derate_notes(
             "CNC#1",
@@ -1901,9 +1965,8 @@ mod tests {
             &tools,
             UserUnitSystem::Metric,
         );
-        assert_eq!(notes.len(), 1, "{notes:#?}");
-        assert!(notes[0].contains("cannot meet their rated chip load"), "{}", notes[0]);
-        assert!(notes[0].contains("cut lighter than rated"), "{}", notes[0]);
+        assert_eq!(notes.len(), 1, "the floor is irrelevant at 100000 rpm: {notes:#?}");
+        assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
     }
 
     /// A router's plunge is derated to a third, so the same Z allows three times the feed

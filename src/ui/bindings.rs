@@ -1363,6 +1363,33 @@ fn PrimitiveEditorModal(
                 div { class: "primitive-modal-head",
                     h2 { "Edit primitive" }
                     code { class: "primitive-modal-name", "{primitive}" }
+                    // How this primitive is invoked. The single most useful thing to say
+                    // here: a Callable does nothing at all until another template calls
+                    // it, and nothing else on this screen would tell the author that.
+                    if let Some(kind) = crate::gcode::primitive_vars::kind_of(&primitive) {
+                        span {
+                            class: match kind {
+                                crate::gcode::primitive_vars::PrimitiveKind::Callable => "primitive-kind is-callable",
+                                crate::gcode::primitive_vars::PrimitiveKind::Filter => "primitive-kind is-filter",
+                                crate::gcode::primitive_vars::PrimitiveKind::Generator => "primitive-kind",
+                            },
+                            title: "{kind.hint()}",
+                            "{kind.label()}"
+                        }
+                    }
+                }
+                if let Some(kind) = crate::gcode::primitive_vars::kind_of(&primitive) {
+                    div { class: "primitive-modal-hint", "{kind.hint()}" }
+                }
+                // What leaving it blank does. Without this an author faced with an empty
+                // `cut_arc` has no way to tell "not supported yet" from "your machine has
+                // no word for this, and the application handles it" — and blank means
+                // something different on every other primitive, where it emits nothing.
+                if let Some(fallback) = crate::gcode::primitive_vars::fallback_for(&primitive) {
+                    div { class: "primitive-modal-hint",
+                        "Leave blank if this machine has no such word: the move is \
+                         approximated with {fallback} instead, to the CNC's curve tolerance."
+                    }
                 }
 
                 div { class: "primitive-modal-body",
@@ -1413,7 +1440,19 @@ fn PrimitiveEditorModal(
                         ul { class: "primitive-vars-list",
                             li { class: "primitive-var",
                                 code { class: "primitive-var-name", "metric() / imperial()" }
-                                div { class: "primitive-var-desc", "Set the output unit (emit G21 / G20)." }
+                                div { class: "primitive-var-desc", "Set the output unit and emit the set_unit primitive." }
+                            }
+                            li { class: "primitive-var",
+                                code { class: "primitive-var-name", "set_origin()" }
+                                div { class: "primitive-var-desc",
+                                    "Emit the validated work-origin selection for the step's fixture."
+                                }
+                            }
+                            li { class: "primitive-var",
+                                code { class: "primitive-var-name", "comment(t) · message(t) · pause(t)" }
+                                div { class: "primitive-var-desc",
+                                    "Emit the matching operator primitive with your text."
+                                }
                             }
                             li { class: "primitive-var",
                                 code { class: "primitive-var-name", "`…`  ·  {{expr}}" }

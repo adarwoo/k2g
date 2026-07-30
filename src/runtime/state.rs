@@ -11,6 +11,14 @@ struct RuntimeIssueDraft {
 /// wholesale — which is what makes the banner clear itself the moment a run succeeds.
 pub const GENERATION_ERROR_DOMAIN: &str = "generation";
 
+/// The diagnostics domain the readiness gate's no-go reasons live in.
+///
+/// Held apart from [`GENERATION_ERROR_DOMAIN`] because the two say different things and
+/// are replaced on different events: that one is *the last run failed*, published when a
+/// run finishes; this one is *a run cannot start*, published every time the gate is
+/// evaluated. Sharing a domain would have each clearing the other's entries.
+pub const READINESS_ERROR_DOMAIN: &str = "readiness";
+
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(boot: &UiLaunchData) -> Self {
@@ -377,6 +385,50 @@ impl AppState {
         }
     }
 
+    /// Replaces the standing readiness diagnostics with the gate's current no-go reasons.
+    ///
+    /// The same argument as [`Self::set_generation_errors`], applied to the other half of
+    /// the problem. A *failed* run was a standing condition and became a banner entry; a
+    /// run that never started was left as a `log::warn!` and a pill reading "Not ready",
+    /// so the only way to learn why the application was refusing to work was to open the
+    /// Logs screen and read it. The reasons were already rendered in one place — the Job's
+    /// Code tab — but only there, and only once the operator had thought to look.
+    ///
+    /// Anything that holds the gate shut belongs on screen, wherever the operator is
+    /// standing. That is the whole rule, and this is what applies it.
+    ///
+    /// Like its sibling this is a domain replace, so it clears itself: a gate that opens
+    /// publishes an empty list and the banner goes away with nobody having to dismiss it.
+    ///
+    /// Quiet (no toast) deliberately. The gate is re-evaluated on every mutation, so the
+    /// same unchanged reason would raise a toast on each keystroke of an unrelated edit.
+    ///
+    /// Idempotent for the same reason: an unchanged set is left alone rather than cleared
+    /// and re-pushed. Re-pushing would mint fresh ids on every mutation, and those ids key
+    /// the banner's detail list — so an operator with the details open would have the
+    /// entry they were reading torn down and rebuilt under them as they typed elsewhere.
+    pub fn set_readiness_errors(&mut self, reasons: &[String]) {
+        let unchanged = self
+            .errors
+            .iter()
+            .filter(|error| error.domain == READINESS_ERROR_DOMAIN)
+            .map(|error| error.message.as_str())
+            .eq(reasons.iter().map(String::as_str));
+        if unchanged {
+            return;
+        }
+
+        self.clear_runtime_errors(READINESS_ERROR_DOMAIN);
+        for reason in reasons {
+            self.push_runtime_error_quiet(
+                READINESS_ERROR_DOMAIN,
+                None,
+                reason.clone(),
+                Some("The job cannot be generated until this is resolved.".to_string()),
+            );
+        }
+    }
+
     fn profile_owner_tag(kind: &str, id: &str) -> String {
         format!("{kind}:{id}")
     }
@@ -506,16 +558,37 @@ impl AppState {
     /// so `panel.kicad_pcb` becomes `panel`) plus the program extension. Falls back to
     /// a generic stem when no board is loaded, so the dialog is never blank.
     pub fn gcode_default_file_name(&self) -> String {
-        self.program_file_name(0, 1, GCODE_FILE_EXTENSION)
+        self.program_file_name(0, 1, "", GCODE_FILE_EXTENSION)
     }
 
     /// What the program for `index` is saved as.
     ///
     /// A one-step job is named for the board alone — a `_step1` suffix on the only file
     /// there is would be noise, and the whole point of the single-step case is that
-    /// nothing hints steps exist. Beyond one, the ordinal is what tells two files apart
-    /// on the operator's USB key.
-    pub fn program_file_name(&self, index: usize, step_count: usize, extension: &str) -> String {
+    /// nothing hints steps exist.
+    ///
+    /// Beyond one, the step is named by **the operator's own name for it** — a stick
+    /// holding `panel_Drill PTH.nc` and `panel_Route outline.nc` says what to load when,
+    /// which `panel_step1.nc` and `panel_step2.nc` do not, and the operator is the one
+    /// standing at the machine deciding. The ordinal is the fallback for a step left
+    /// unnamed, and for one whose name survives sanitising as nothing at all (a step
+    /// called `?` or `...`).
+    ///
+    /// Sanitised the same way the board name is, so one convention governs the whole
+    /// file name: characters Windows forbids become `_`, and spaces and case are kept
+    /// (`panel v2` already survives here, so a step name should not be held to a
+    /// stricter rule than the board is).
+    ///
+    /// **Uniqueness is the caller's** — step names need not be unique, and this cannot
+    /// see its siblings. See `save_rows`, which drops the colliding ones back to their
+    /// ordinals.
+    pub fn program_file_name(
+        &self,
+        index: usize,
+        step_count: usize,
+        step_name: &str,
+        extension: &str,
+    ) -> String {
         let stem = self
             .board
             .as_ref()
@@ -527,10 +600,20 @@ impl AppState {
         let extension = extension.trim().trim_start_matches('.');
         let extension = if extension.is_empty() { GCODE_FILE_EXTENSION } else { extension };
         if step_count <= 1 {
-            format!("{stem}.{extension}")
-        } else {
-            format!("{stem}_step{}.{extension}", index + 1)
+            return format!("{stem}.{extension}");
         }
+        // Falls back on "carries no letter or digit" rather than on "is empty", because
+        // sanitising replaces a forbidden character rather than dropping it: a step called
+        // `?` comes back as `_`, which is not empty and would name the file `panel__.nc`.
+        // A suffix made entirely of punctuation tells the operator nothing the ordinal
+        // does not tell them better.
+        let named = sanitize_file_stem(step_name);
+        let suffix = if named.chars().any(|c| c.is_alphanumeric()) {
+            named
+        } else {
+            format!("step{}", index + 1)
+        };
+        format!("{stem}_{suffix}.{extension}")
     }
 
     /// The program for the step the Job views are showing, if that step has one.
@@ -1193,27 +1276,35 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
             "max_feed_z": machine.max_feed_z.to_string(),
             "output_file_extension": machine.output_file_extension,
             "atc_slot_count": machine.atc_slot_count,
+            "curve_tolerance": machine.curve_tolerance.to_string(),
             "scaling": {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
             },
+            // In the fingerprint because it decides whether `tool_measure` is emitted, so
+            // flipping it must retrigger generation.
+            "tool_length_measurement": if machine.measures_tool_length { "manual" } else { "auto_setter" },
         },
+        // Keys in the schema's own order, and each field named after the key it carries —
+        // this crosswalk used to map `linear_cut` onto `drill_cycle_mode_series` and
+        // `banner` onto `route_retract`, names from a design that no longer exists.
         "primitives": {
-            "line_number": machine.line_number_tpl,
+            "program_begin": machine.program_begin_tpl,
+            "program_end": machine.program_end_tpl,
             "set_unit": machine.set_unit_tpl,
             "set_origin": machine.set_origin_tpl,
-            "initialise": machine.gcode_header,
-            "rapid_move": machine.drill_first_move,
-            "linear_cut": machine.drill_cycle_mode_series,
-            "start_spindle": machine.drill_cycle_start,
-            "stop_spindle": machine.drill_cycle_cancel,
-            "drill": machine.drill_next_hole,
-            "cut_arc": machine.route_plunge_and_offset,
-            "cut_bezier": machine.route_arc_up,
-            "change_tool": machine.tool_change_command,
-            "conclude": machine.gcode_footer,
-            "pause": machine.route_arc_down,
-            "banner": machine.route_retract,
+            "tool_change": machine.tool_change_tpl,
+            "tool_measure": machine.tool_measure_tpl,
+            "spindle_start": machine.spindle_start_tpl,
+            "spindle_stop": machine.spindle_stop_tpl,
+            "move_rapid": machine.move_rapid_tpl,
+            "cut_linear": machine.cut_linear_tpl,
+            "cut_arc": machine.cut_arc_tpl,
+            "drill": machine.drill_tpl,
+            "comment": machine.comment_tpl,
+            "message": machine.message_tpl,
+            "pause": machine.pause_tpl,
+            "line_format": machine.line_format_tpl,
         }
     })
 }
@@ -1226,28 +1317,43 @@ fn has_path(value: &Value, path: &str) -> bool {
     value.pointer(&pointer).is_some()
 }
 
-fn machine_required_paths() -> &'static [&'static str] {
-    &[
-        "id",
-        "machine.spindle_rpm_min",
-        "machine.spindle_rpm_max",
-        "machine.max_feed_xy",
-        "machine.max_feed_z",
-        "machine.output_file_extension",
-        "machine.atc_slot_count",
-        "machine.scaling.x",
-        "machine.scaling.y",
-        "primitives.initialise",
-        "primitives.rapid_move",
-        "primitives.linear_cut",
-        "primitives.start_spindle",
-        "primitives.stop_spindle",
-        "primitives.drill",
-        "primitives.cut_arc",
-        "primitives.cut_bezier",
-        "primitives.change_tool",
-        "primitives.conclude",
-    ]
+/// What a CNC profile must carry for the readiness gate to let a job generate.
+///
+/// The machine fields are stated here rather than taken from the schema on purpose: they
+/// are a deliberate **superset** of `cnc.yaml`'s own `machine.required` (which asks only
+/// for the spindle range). The rest carry schema defaults the loader materialises, and the
+/// generator reads every one of them, so a profile that somehow lacks one cannot produce a
+/// program even though the schema would accept it.
+///
+/// The **primitives** are not restated — they come from
+/// [`required_primitives`](crate::gcode::primitive_vars::required_primitives), which reads
+/// the schema. A restatement lived here and drifted: it still named the pre-rename
+/// primitives long after every profile had been migrated off them, which shut the gate on
+/// every job in existence. There is nothing to keep in step now.
+fn machine_required_paths() -> &'static [String] {
+    static PATHS: OnceLock<Vec<String>> = OnceLock::new();
+    PATHS.get_or_init(|| {
+        let mut paths: Vec<String> = [
+            "id",
+            "machine.spindle_rpm_min",
+            "machine.spindle_rpm_max",
+            "machine.max_feed_xy",
+            "machine.max_feed_z",
+            "machine.output_file_extension",
+            "machine.atc_slot_count",
+            "machine.scaling.x",
+            "machine.scaling.y",
+        ]
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect();
+        paths.extend(
+            crate::gcode::primitive_vars::required_primitives()
+                .iter()
+                .map(|name| format!("primitives.{name}")),
+        );
+        paths
+    })
 }
 
 fn fixture_required_paths() -> &'static [&'static str] {
@@ -1272,11 +1378,14 @@ fn toolset_required_paths() -> &'static [&'static str] {
     ]
 }
 
-fn collect_missing_required(value: &Value, required_paths: &[&str]) -> BTreeSet<String> {
+/// Generic over the path type so a hand-written `&[&str]` and a schema-derived
+/// `&[String]` can both be passed — see [`machine_required_paths`].
+fn collect_missing_required<S: AsRef<str>>(value: &Value, required_paths: &[S]) -> BTreeSet<String> {
     required_paths
         .iter()
+        .map(AsRef::as_ref)
         .filter(|path| !has_path(value, path))
-        .map(|path| (*path).to_string())
+        .map(str::to_string)
         .collect()
 }
 
@@ -1364,6 +1473,17 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         .or_else(|| value.get("scaling_y").and_then(Value::as_f64).map(|v| v as f32))
         .unwrap_or(100.0);
 
+    // One template, by the name the schema gives it. Absent reads as empty, which is a
+    // legitimate state for every optional primitive (and, for a required one, a profile
+    // the schema would already have rejected).
+    let primitive = |name: &str| -> String {
+        value
+            .pointer(&format!("/primitives/{name}"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+
     Some(MachineProfile {
         id,
         name,
@@ -1373,119 +1493,48 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         max_feed_z,
         output_file_extension,
         atc_slot_count,
+        // Schema-defaulted and materialised by the loader, so the fallback here is only
+        // reached by a value the unit parser rejects. Matches the schema rather than
+        // inventing a third answer.
+        curve_tolerance: value
+            .pointer("/machine/curve_tolerance")
+            .and_then(Value::as_str)
+            .and_then(|raw| Length::from_string(raw, Some(units::LengthUnit::Mm)).ok())
+            .unwrap_or_else(|| Length::from_mm(0.01)),
         scaling_x,
         scaling_y,
-        line_number_tpl: value
-            .pointer("/primitives/line_number")
+        line_format_tpl: primitive("line_format"),
+        set_unit_tpl: primitive("set_unit"),
+        set_origin_tpl: primitive("set_origin"),
+        // Each primitive reads from `/primitives/<its own name>` and nowhere else.
+        //
+        // Every one of these carried a chain of `or_else` fallbacks onto older document
+        // shapes (`/templates/…`, `/drill/cycle_start`, a bare top-level key). None could
+        // fire: this crosswalk is only ever handed a datastore-parsed document, and the
+        // schema's `additionalProperties: false` rejects a file carrying any of those
+        // shapes long before it reaches here. Dead chains that *look* like compatibility
+        // are worse than none — they suggest a file format is still supported when
+        // opening one would in fact be refused. Migration is `normalize_cnc_value`'s job.
+        program_begin_tpl: primitive("program_begin"),
+        program_end_tpl: primitive("program_end"),
+        tool_change_tpl: primitive("tool_change"),
+        tool_measure_tpl: primitive("tool_measure"),
+        spindle_start_tpl: primitive("spindle_start"),
+        spindle_stop_tpl: primitive("spindle_stop"),
+        move_rapid_tpl: primitive("move_rapid"),
+        cut_linear_tpl: primitive("cut_linear"),
+        cut_arc_tpl: primitive("cut_arc"),
+        drill_tpl: primitive("drill"),
+        comment_tpl: primitive("comment"),
+        message_tpl: primitive("message"),
+        pause_tpl: primitive("pause"),
+        // `auto_setter` measures at M06 and needs no block; `manual` is the case that
+        // does. Defaulting to the schema's own `manual` would make every profile emit a
+        // measurement it may not want, so an unreadable value reads as "no".
+        measures_tool_length: value
+            .pointer("/machine/tool_length_measurement")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        set_unit_tpl: value
-            .pointer("/primitives/set_unit")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        set_origin_tpl: value
-            .pointer("/primitives/set_origin")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        gcode_header: value
-            .pointer("/primitives/initialise")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/gcode_header").and_then(Value::as_str))
-            .or_else(|| value.get("header").and_then(Value::as_str))
-            .or_else(|| value.get("gcode_header").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        gcode_footer: value
-            .pointer("/primitives/conclude")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/gcode_footer").and_then(Value::as_str))
-            .or_else(|| value.get("footer").and_then(Value::as_str))
-            .or_else(|| value.get("gcode_footer").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_first_move: value
-            .pointer("/primitives/rapid_move")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_first_move").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/first_move").and_then(Value::as_str))
-            .or_else(|| value.get("drill_first_move").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_cycle_mode_series: value
-            .pointer("/primitives/linear_cut")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_cycle_mode_series").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/cycle_mode_series").and_then(Value::as_str))
-            .or_else(|| value.get("drill_cycle_mode_series").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_cycle_start: value
-            .pointer("/primitives/start_spindle")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_cycle_start").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/cycle_start").and_then(Value::as_str))
-            .or_else(|| value.get("drill_cycle_start").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_next_hole: value
-            .pointer("/primitives/drill")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_next_hole").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/next_hole").and_then(Value::as_str))
-            .or_else(|| value.get("drill_next_hole").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        drill_cycle_cancel: value
-            .pointer("/primitives/stop_spindle")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/drill_cycle_cancel").and_then(Value::as_str))
-            .or_else(|| value.pointer("/drill/cycle_cancel").and_then(Value::as_str))
-            .or_else(|| value.get("drill_cycle_cancel").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        route_plunge_and_offset: value
-            .pointer("/primitives/cut_arc")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/route_plunge_and_offset").and_then(Value::as_str))
-            .or_else(|| value.pointer("/route/plunge_and_offset").and_then(Value::as_str))
-            .or_else(|| value.get("route_plunge_and_offset").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        route_arc_up: value
-            .pointer("/primitives/cut_bezier")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/route_arc_up").and_then(Value::as_str))
-            .or_else(|| value.pointer("/route/arc_up").and_then(Value::as_str))
-            .or_else(|| value.get("route_arc_up").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        route_arc_down: value
-            .pointer("/primitives/pause")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/route_arc_down").and_then(Value::as_str))
-            .or_else(|| value.pointer("/route/arc_down").and_then(Value::as_str))
-            .or_else(|| value.get("route_arc_down").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        route_retract: value
-            .pointer("/primitives/banner")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/route_retract").and_then(Value::as_str))
-            .or_else(|| value.pointer("/route/retract").and_then(Value::as_str))
-            .or_else(|| value.get("route_retract").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
-        tool_change_command: value
-            .pointer("/primitives/change_tool")
-            .and_then(Value::as_str)
-            .or_else(|| value.pointer("/templates/tool_change_command").and_then(Value::as_str))
-            .or_else(|| value.pointer("/tool_change/command").and_then(Value::as_str))
-            .or_else(|| value.get("tool_change_command").and_then(Value::as_str))
-            .unwrap_or("")
-            .to_string(),
+            .is_some_and(|mode| mode == "manual"),
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
     })
@@ -2239,15 +2288,34 @@ mod gcode_save_tests {
 
     /// A single-step job is named for the board alone: a `_step1` suffix on the only file
     /// there is would be the step machinery showing through, which is exactly what the
-    /// one-step case must not do.
+    /// one-step case must not do. Its step name is ignored for the same reason.
     #[test]
-    fn one_step_is_named_for_the_board_and_more_steps_carry_the_ordinal() {
+    fn one_step_is_named_for_the_board_alone() {
         let app = named_board("panel");
-        assert_eq!(app.program_file_name(0, 1, "nc"), "panel.nc");
+        assert_eq!(app.program_file_name(0, 1, "", "nc"), "panel.nc");
+        assert_eq!(app.program_file_name(0, 1, "Drill PTH", "nc"), "panel.nc");
         assert_eq!(app.gcode_default_file_name(), "panel.nc", "the old name is unchanged");
+    }
 
-        assert_eq!(app.program_file_name(0, 3, "nc"), "panel_step1.nc");
-        assert_eq!(app.program_file_name(2, 3, "nc"), "panel_step3.nc");
+    /// Past one step the file is named for the step, because that is the name the operator
+    /// is working from: a stick holding `panel_Drill PTH.nc` says what to load when, and
+    /// `panel_step1.nc` does not.
+    #[test]
+    fn a_named_step_names_its_file() {
+        let app = named_board("panel");
+        assert_eq!(app.program_file_name(0, 3, "Drill PTH", "nc"), "panel_Drill PTH.nc");
+        assert_eq!(app.program_file_name(2, 3, "Route outline", "nc"), "panel_Route outline.nc");
+    }
+
+    /// The ordinal is the fallback, and has to survive a name that sanitises away to
+    /// nothing — a step called `?` must not produce `panel_.nc`.
+    #[test]
+    fn an_unnamed_step_falls_back_to_its_ordinal() {
+        let app = named_board("panel");
+        assert_eq!(app.program_file_name(0, 3, "", "nc"), "panel_step1.nc");
+        assert_eq!(app.program_file_name(2, 3, "   ", "nc"), "panel_step3.nc");
+        assert_eq!(app.program_file_name(1, 3, "?", "nc"), "panel_step2.nc", "sanitised to nothing");
+        assert_eq!(app.program_file_name(1, 3, "...", "nc"), "panel_step2.nc");
     }
 
     /// The extension comes from the step's own CNC, so a machine that emits Excellon does
@@ -2255,18 +2323,22 @@ mod gcode_save_tests {
     #[test]
     fn the_steps_own_extension_is_honoured() {
         let app = named_board("panel");
-        assert_eq!(app.program_file_name(1, 2, "drl"), "panel_step2.drl");
+        assert_eq!(app.program_file_name(1, 2, "", "drl"), "panel_step2.drl");
         // A profile that somehow carries none still produces a usable name.
-        assert_eq!(app.program_file_name(0, 1, ""), "panel.nc");
-        assert_eq!(app.program_file_name(0, 1, ".ngc"), "panel.ngc", "a stray dot is tolerated");
+        assert_eq!(app.program_file_name(0, 1, "", ""), "panel.nc");
+        assert_eq!(app.program_file_name(0, 1, "", ".ngc"), "panel.ngc", "a stray dot is tolerated");
     }
 
-    /// The board's name is sanitised in the per-step form too — the suffix must not be
-    /// the only part that is safe to write.
+    /// Both halves are sanitised, and by the same rule — the step name is the operator's
+    /// free text and is the likelier of the two to carry a slash or a colon.
     #[test]
-    fn the_per_step_name_is_sanitised_like_the_single_one() {
+    fn the_board_and_the_step_are_both_sanitised() {
         let app = named_board("panel v2: rev/3");
-        assert_eq!(app.program_file_name(1, 2, "nc"), "panel v2_ rev_3_step2.nc");
+        assert_eq!(app.program_file_name(1, 2, "", "nc"), "panel v2_ rev_3_step2.nc");
+        assert_eq!(
+            app.program_file_name(0, 2, "Drill: PTH/NPTH", "nc"),
+            "panel v2_ rev_3_Drill_ PTH_NPTH.nc"
+        );
     }
 }
 
@@ -2300,5 +2372,157 @@ mod job_dock_tests {
         const { assert!(DEFAULT_JOB_PIN_WIDTH < MAX_JOB_PIN_WIDTH) };
         assert_eq!((-500i64).clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
         assert_eq!(99_999i64.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MAX_JOB_PIN_WIDTH);
+    }
+}
+
+#[cfg(test)]
+mod readiness_gate_tests {
+    use super::*;
+
+    /// The required-primitive list must match the schema's, because it once did not.
+    ///
+    /// A hand-written copy lived in `machine_required_paths` and named `initialise`,
+    /// `change_tool`, `rapid_move` and four more — the names as they were *before*
+    /// `PRIMITIVE_RENAMES` migrated every stored profile onto `program_begin`,
+    /// `tool_change`, `move_rapid`. Nothing tied the two lists together, so the rename
+    /// landed without touching this one and every CNC profile in existence began
+    /// reporting seven missing required fields. The readiness gate then refused to
+    /// generate for any job at all, with a message that named neither the profile nor the
+    /// fields, and the only trace was a line in the log.
+    ///
+    /// The list is now read from the schema, so this asserts the wiring rather than a
+    /// duplicate: if `required_primitives` ever silently returns nothing — an unparsable
+    /// schema — the gate would stop checking primitives entirely and nothing else would
+    /// notice.
+    #[test]
+    fn the_required_primitives_come_from_the_schema_and_are_current() {
+        let required = crate::gcode::primitive_vars::required_primitives();
+        assert!(
+            !required.is_empty(),
+            "the schema's primitives.required list did not parse, so the gate is no \
+             longer checking that a profile can emit anything at all"
+        );
+
+        let paths = machine_required_paths();
+        for name in required {
+            assert!(
+                paths.iter().any(|path| path == &format!("primitives.{name}")),
+                "the schema requires primitive `{name}` but the readiness gate does not \
+                 check for it"
+            );
+        }
+
+        // The names that caused it, pinned by name: none of these may come back.
+        for retired in
+            ["initialise", "conclude", "change_tool", "start_spindle", "stop_spindle",
+             "rapid_move", "linear_cut", "banner", "line_number"]
+        {
+            assert!(
+                !paths.iter().any(|path| path == &format!("primitives.{retired}")),
+                "`{retired}` is a pre-rename primitive name; requiring it means requiring \
+                 a field no migrated profile has, which shuts the gate on every job"
+            );
+        }
+    }
+
+    /// A bundled CNC template must satisfy the gate.
+    ///
+    /// This is the end-to-end version of the test above, and the one that would have
+    /// caught the bug on its own: it takes a profile exactly as the application ships it
+    /// and asserts the gate finds nothing missing. Whatever the required list is derived
+    /// from, a template the application itself provides has to pass it.
+    #[test]
+    fn every_bundled_cnc_template_satisfies_the_readiness_gate() {
+        for (key, yaml) in crate::data::CNC_TEMPLATES {
+            let mut value: Value =
+                serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("{key} parses: {e}"));
+            // As loaded: the rename migration runs before anything reads a profile, and
+            // it is exactly the step whose output the stale list disagreed with.
+            crate::data::normalize_cnc_value(&mut value, std::path::Path::new("template.yaml"));
+            // Templates carry no id (one is minted on instantiation), so that alone is
+            // expected; nothing else may be.
+            let missing: Vec<String> = collect_missing_required(&value, machine_required_paths())
+                .into_iter()
+                .filter(|path| path != "id")
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "bundled template '{key}' would be judged incomplete, so a job using it \
+                 could never generate. Missing: {missing:?}"
+            );
+        }
+    }
+
+    fn bare_app() -> AppState {
+        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None })
+    }
+
+    /// A no-go reason becomes a standing diagnostic, and stops being one when it is fixed.
+    ///
+    /// This is the half the operator actually experiences: before it, a shut gate wrote a
+    /// `log::warn!` and set a pill to "Not ready", so the only way to find out what the
+    /// application objected to was to open the Logs screen. The banner sits above every
+    /// screen, so the reason is now wherever the operator is standing.
+    #[test]
+    fn a_no_go_reason_is_published_and_withdrawn_with_the_gate() {
+        let mut app = bare_app();
+        app.set_readiness_errors(&["CNC profile 'MASSO' is missing primitives.drill".to_string()]);
+
+        let published: Vec<&str> = app
+            .errors
+            .iter()
+            .filter(|e| e.domain == READINESS_ERROR_DOMAIN)
+            .map(|e| e.message.as_str())
+            .collect();
+        assert_eq!(published, ["CNC profile 'MASSO' is missing primitives.drill"]);
+
+        // The gate opening must take the banner with it, with nothing to dismiss.
+        app.set_readiness_errors(&[]);
+        assert!(app.errors.iter().all(|e| e.domain != READINESS_ERROR_DOMAIN));
+    }
+
+    /// Republishing an unchanged set must not disturb what is on screen.
+    ///
+    /// The gate is re-evaluated on every mutation, and the entries' ids key the banner's
+    /// detail list — so a clear-and-repush would tear down and rebuild the entry an
+    /// operator was reading, on every keystroke of an edit elsewhere.
+    #[test]
+    fn republishing_the_same_reasons_leaves_the_entries_alone() {
+        let mut app = bare_app();
+        let reasons = vec!["PCB data not loaded".to_string()];
+
+        app.set_readiness_errors(&reasons);
+        let first: Vec<String> = app.errors.iter().map(|e| e.id.clone()).collect();
+        app.set_readiness_errors(&reasons);
+        let second: Vec<String> = app.errors.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(first, second, "the same reasons must keep their identity");
+
+        app.set_readiness_errors(&["PCB data not loaded".to_string(), "Open contours detected".to_string()]);
+        assert_eq!(
+            app.errors.iter().filter(|e| e.domain == READINESS_ERROR_DOMAIN).count(),
+            2,
+            "a changed set does get republished"
+        );
+    }
+
+    /// The gate must not read its own output back as a reason to stay shut.
+    ///
+    /// Every readiness entry is `is_error`, and a blocking config error is itself a no-go
+    /// reason — so counting them would close the loop on itself: the gate shuts, publishes
+    /// why, sees its own publication as a blocking error, and stays shut however much the
+    /// operator fixes. Exactly the trap `GENERATION_ERROR_DOMAIN` is excluded to avoid,
+    /// one turn tighter.
+    #[test]
+    fn readiness_diagnostics_cannot_hold_the_gate_shut_by_themselves() {
+        let mut app = bare_app();
+        app.set_readiness_errors(&["Referenced CNC profile is missing".to_string()]);
+        assert!(
+            app.errors.iter().any(|e| e.is_error),
+            "the entries are errors — which is the whole hazard being guarded against"
+        );
+        assert!(
+            !has_blocking_config_error(&app),
+            "the gate counted its own no-go reasons as a blocking error, so no fix could              ever reopen it"
+        );
     }
 }

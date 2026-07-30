@@ -320,30 +320,27 @@ machine:
     feedrate: "mm/min"
 
 primitives:
-  initialise: |
-    (Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+  program_begin: |
+    (Created by kicad2gcode from '{filename}' - {timestamp})
     (Reset all back to safe defaults)
     G17 G54 G40 G49 G80 G90
     G21
     G10 P0
     G0 Z{z_safe}
   move_slow: "G0 X{x} Y{y}"
-  start_spindle: |
+  spindle_start: |
     S{rpm}
     M03
-  stop_spindle: "M05"
+  spindle_stop: "M05"
   drill: "G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
   peck_drill: "G83 X{x} Y{y} Z{z_bottom} R{z_retract} Q{peck} F{z_feedrate}"
   cut_arc: '{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
-  cut_bezier: |
-    ; cut_bezier fallback
-    ; implementation may expand into one or more arc segments
-  change_tool: |
+  tool_change: |
     M05
     {manual_message}
     T{slot} M06
     S{rpm}
-  conclude: |
+  program_end: |
     (end of file)
 
 RHAI parser and expression model:
@@ -360,31 +357,35 @@ Primitive templates as CNC configuration attributes (schema-required):
 - Each attribute is a string template containing GCode text with optional embedded RHAI expressions in `{}`.
 - Attribute values are compiled/evaluated through the same `parse_exp` path used by expression editors.
 
-Required primitive attributes:
+Every primitive declares `x-kind` (**how** it is invoked) and `x-category` (**where** the
+editor puts it). The kinds are `generator` (the application emits it at a defined point),
+`callable` (nothing emits it — a template calls it by name) and `filter` (applied to every
+line of the finished program). The editor badges each field with its kind, because a
+filled-in callable that nobody calls produces no output at all.
 
-- `primitives.initialise` -> maps to primitive `initialise`
-- `primitives.move_slow` -> maps to primitive `move_slow(x, y)`
-- `primitives.start_spindle` -> maps to primitive `start_spindle`
-- `primitives.stop_spindle` -> maps to primitive `stop_spindle`
-- `primitives.drill` -> maps to primitive `drill`
-- `primitives.peck_drill` -> maps to primitive `peck_drill`
-- `primitives.cut_arc` -> maps to primitive `cut_arc`
-- `primitives.cut_bezier` -> maps to primitive `cut_bezier`
-- `primitives.change_tool` -> maps to primitive `change_tool`
-- `primitives.conclude` -> maps to primitive `conclude`
+Required primitive attributes (all generators):
+
+- `primitives.program_begin` -> the program header, once per step
+- `primitives.program_end` -> the program footer, once per step
+- `primitives.tool_change` -> at the start of every tool block
+- `primitives.spindle_start` / `primitives.spindle_stop`
+- `primitives.move_rapid` -> positioning move
+- `primitives.cut_linear` -> linear cutting move; must emit a feed word
+- `primitives.cut_arc` -> arc move; blank falls back to `cut_linear` chords
+- `primitives.drill` -> one hole; also receives `index`/`count` over the block's run of holes, so a profile can emit a modal cycle
 
 Optional primitive attributes:
 
-- `primitives.set_unit` -> what `metric()`/`imperial()` emit; empty for a machine fixed to one unit system
-- `primitives.set_origin` -> what `set_origin()` emits, **and** what validates the step fixture's Machine Origin Reference. Receives it as `origin_reference` and is expected to `throw` when this controller has no such offset — generation then refuses, because an offset the machine lacks leaves the job running against whatever origin is currently active
-- `primitives.pause` -> optional pause/message insertion point
-- `primitives.banner` -> optional comment/banner insertion point
-- `primitives.line_number` -> optional per-line `N` prefix; absent/empty means the program is not numbered. Receives the line being numbered as `text`, so a profile may skip lines (its comments, say) by emitting nothing for them
+- `primitives.tool_measure` *(generator)* -> emitted between `tool_change` and `spindle_start`, and **only** on a machine whose `tool_length_measurement` is `manual`. Empty by default: a measurement cycle is machine-specific and there is no word safe to guess
+- `primitives.set_unit` *(callable)* -> what `metric()`/`imperial()` emit; empty for a machine fixed to one unit system
+- `primitives.set_origin` *(callable)* -> what `set_origin()` emits, **and** what validates the step fixture's Machine Origin Reference. Receives it as `origin_reference` and is expected to `throw` when this controller has no such offset — generation then refuses, because an offset the machine lacks leaves the job running against whatever origin is currently active
+- `primitives.comment` / `primitives.message` / `primitives.pause` *(callables)* -> called as `comment("…")`, `message("…")`, `pause("…")` from any template, each receiving the call site's text as `text`. `message` shows text without stopping; `pause` stops until the operator resumes
+- `primitives.line_format` *(filter)* -> runs over every line of the finished program, receiving `index` (non-blank lines from 0) and `text`, and emitting the **whole** replacement line. Empty leaves the program unchanged; emitting nothing for a line drops it. A template that never emits `text` throws the G-code away, so the retired `line` variable is gone — an un-migrated prefix template fails to render rather than producing bare line numbers
 
 Compatibility and fallback requirements:
 
 - If a required primitive attribute is missing, schema validation fails for that CNC profile.
-- `primitives.cut_bezier` may resolve to a native bezier command or an arc-approximation sequence; fallback behavior must be deterministic.
+- `primitives.cut_arc` left blank resolves to a deterministic chord approximation at `machine.curve_tolerance`, never to silence.
 - Primitive templates may reference custom attributes and active project properties through the RHAI scope.
 
 ### 6.7 Machining Profile Management

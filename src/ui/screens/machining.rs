@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 use uuid::Uuid;
 
@@ -93,21 +92,17 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
                             status_message.set("No profile selected".to_string());
                             return;
                         };
-                        let confirmed = MessageDialog::new()
-                            .set_level(MessageLevel::Warning)
-                            .set_title("Delete machining profile")
-                            .set_description("Delete this machining profile?")
-                            .set_buttons(MessageButtons::YesNo)
-                            .show();
-                        if confirmed == rfd::MessageDialogResult::Yes {
-                            match remove_profile_result(id) {
-                                Ok(()) => {
-                                    selected.set(None);
-                                    status_message.set("Machining profile deleted".to_string());
+                        spawn(async move {
+                            if super::profiles_common::confirm("Delete machining profile", "Delete this machining profile?").await {
+                                match remove_profile_result(id) {
+                                    Ok(()) => {
+                                        selected.set(None);
+                                        status_message.set("Machining profile deleted".to_string());
+                                    }
+                                    Err(message) => status_message.set(message),
                                 }
-                                Err(message) => status_message.set(message),
                             }
-                        }
+                        });
                     },
                     on_export: {
                         let current_name = current_name.clone();
@@ -121,48 +116,52 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
                                 "{}.machining-profile.yaml",
                                 slug_file_name(&name, "machining-profile"),
                             );
-                            let Some(path) = FileDialog::new()
-                                .set_title("Export machining profile")
-                                .set_file_name(&default_name)
-                                .add_filter("Machining profile YAML", &["yaml", "yml"])
-                                .save_file()
-                            else {
-                                return;
-                            };
-                            match export_yaml(id) {
-                                Some(yaml) => {
-                                    if fs::write(&path, yaml).is_ok() {
-                                        status_message.set("Machining profile exported".to_string());
-                                    } else {
-                                        status_message.set("Export failed: unable to write file".to_string());
+                            spawn(async move {
+                                let Some(path) = super::profiles_common::pick_export_file(
+                                    "Export machining profile",
+                                    "Machining profile YAML",
+                                    &default_name,
+                                )
+                                .await
+                                else {
+                                    return;
+                                };
+                                match export_yaml(id) {
+                                    Some(yaml) => {
+                                        if fs::write(&path, yaml).is_ok() {
+                                            status_message.set("Machining profile exported".to_string());
+                                        } else {
+                                            status_message.set("Export failed: unable to write file".to_string());
+                                        }
                                     }
+                                    None => status_message.set("Export failed".to_string()),
                                 }
-                                None => status_message.set("Export failed".to_string()),
-                            }
+                            });
                         }
                     },
                     on_import: move |_| {
-                        let Some(path) = FileDialog::new()
-                            .set_title("Import machining profile")
-                            .add_filter("Machining profile YAML", &["yaml", "yml"])
-                            .pick_file()
-                        else {
-                            return;
-                        };
-                        let text = match fs::read_to_string(&path) {
-                            Ok(text) => text,
-                            Err(_) => {
-                                status_message.set("Import failed: file not readable".to_string());
+                        spawn(async move {
+                            let Some(path) =
+                                super::profiles_common::pick_import_file("Import machining profile", "Machining profile YAML")
+                                    .await
+                            else {
                                 return;
+                            };
+                            let text = match fs::read_to_string(&path) {
+                                Ok(text) => text,
+                                Err(_) => {
+                                    status_message.set("Import failed: file not readable".to_string());
+                                    return;
+                                }
+                            };
+                            match import_yaml(Profile::Machining, &text) {
+                                Some(id) => {
+                                    selected.set(Some(id));
+                                    status_message.set("Machining profile imported and selected".to_string());
+                                }
+                                None => status_message.set("Import failed: invalid profile".to_string()),
                             }
-                        };
-                        match import_yaml(Profile::Machining, &text) {
-                            Some(id) => {
-                                selected.set(Some(id));
-                                status_message.set("Machining profile imported and selected".to_string());
-                            }
-                            None => status_message.set("Import failed: invalid profile".to_string()),
-                        }
+                            });
                     },
                 }
             }

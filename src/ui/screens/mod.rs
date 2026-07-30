@@ -180,3 +180,57 @@ pub fn AppRoot() -> Element {
 }
 
 
+
+#[cfg(test)]
+mod dialog_safety_tests {
+    /// Every screen that opens a native dialog. Compiled in so the test reads the shipping
+    /// source rather than walking the filesystem at test time.
+    const SCREEN_SOURCES: &[(&str, &str)] = &[
+        ("save_program.rs", include_str!("save_program.rs")),
+        ("catalog.rs", include_str!("catalog.rs")),
+        ("profile_manager.rs", include_str!("profile_manager.rs")),
+        ("machining.rs", include_str!("machining.rs")),
+        ("toolset.rs", include_str!("toolset.rs")),
+        ("profiles_common.rs", include_str!("profiles_common.rs")),
+    ];
+
+    /// No screen may open a **blocking** native dialog.
+    ///
+    /// `rfd::FileDialog` and `rfd::MessageDialog` (the non-`Async` types) run the
+    /// platform's own modal message pump. Called from a Dioxus event handler — which is
+    /// the only place a screen ever calls one — that pump re-enters tao's event loop and
+    /// `VirtualDom::render_immediate` while dioxus-core still holds a borrow of the
+    /// element arena for the event being dispatched. The result is
+    /// `RefCell already borrowed`, then a second panic as the first unwinds through the
+    /// dialog component's props: the application aborts, mid-save.
+    ///
+    /// It cost a crash report to find, and the fix is invisible in review — `FileDialog`
+    /// and `AsyncFileDialog` differ by five characters, and the blocking one works
+    /// perfectly every time it is tried by hand on a fast machine. Nothing else can catch
+    /// a re-entrancy fault in a unit test, so this reads the source instead.
+    #[test]
+    fn no_blocking_native_dialogs_in_the_screens() {
+        for (name, source) in SCREEN_SOURCES {
+            for (line_no, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                for blocking in ["FileDialog::new()", "MessageDialog::new()"] {
+                    let Some(at) = code.find(blocking) else { continue };
+                    // `AsyncFileDialog::new()` contains `FileDialog::new()`; the prefix is
+                    // what tells the two apart.
+                    if code[..at].ends_with("Async") {
+                        continue;
+                    }
+                    panic!(
+                        "{name}:{} opens a blocking `{blocking}`. Its modal pump re-enters \
+                         the Dioxus event loop and panics the element arena. Use \
+                         `rfd::Async…` driven by `spawn`, or the helpers in \
+                         `profiles_common` (`confirm`, `pick_import_file`, \
+                         `pick_export_file`).\n    {}",
+                        line_no + 1,
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+}

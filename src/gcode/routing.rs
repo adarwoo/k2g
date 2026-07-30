@@ -77,9 +77,22 @@ const MIN_REACH_MM: f64 = 1e-3;
 /// has a zero component, i.e. for every axis-aligned slot — and it formats as the GCode
 /// word `I-0`. Harmless to a controller, but noise in the program and a spurious textual
 /// difference between two paths that are geometrically the same.
-fn mm(value: f64) -> Length {
+pub(crate) fn mm(value: f64) -> Length {
     // `== 0.0` is true of −0.0, so this replaces it and leaves every other value alone.
     Length::from_mm(if value == 0.0 { 0.0 } else { value })
+}
+
+/// `a − b` as a length, with negative zero folded. The I/J offsets of a fitted arc are
+/// differences, so they meet `-0.0` for exactly the reason [`mm`] exists.
+pub(crate) fn delta(a: Length, b: Length) -> Length {
+    mm(a.as_mm() - b.as_mm())
+}
+
+/// `a + b` as a length. [`Length`] deliberately implements no arithmetic outside the GTL
+/// dialect, where a unit-checked meaning is registered for it; this is the plain-mm sum
+/// the geometry needs.
+pub(crate) fn sum(a: Length, b: Length) -> Length {
+    mm(a.as_mm() + b.as_mm())
 }
 
 /// One move of a routing toolpath, in **machine coordinates** (mm). The body renderer

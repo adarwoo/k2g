@@ -73,13 +73,16 @@ A bare backtick emits a blank line:
 ### 3.1.1 Continuing a line
 
 A closing backtick suppresses the newline, which lets one line be composed from
-several emits — a conditional prefix, a fragment built in a loop, or the
-`line_number` primitive, whose whole job is to prefix a line it does not own:
+several emits — a conditional prefix, or a fragment built in a loop:
 
 ```
-`N{line * 10} `             // => "N10 " with no newline; the line follows
+`G54.1 P`                   // => "G54.1 P" with no newline; the rest follows
 ``                          // => nothing at all
 ```
+
+(This was once how `line_format` worked — it emitted a prefix and the application
+appended the line. It now emits the whole line itself, so it no longer needs the
+closing form. See §5.3.)
 
 The closing backtick is a **delimiter** as much as a flag, and that is the point:
 trailing whitespace sits *inside* it, so the separating space above is visible in
@@ -141,9 +144,9 @@ as itself).
   statement, and whatever a non-GCode controller wants otherwise. The engine holds
   no unit word of its own; it only knows that a machine has a unit mode.
 - The mode is **program-scoped state**: it is set once (normally in
-  `initialise`) and *persists across every primitive* in the generated program,
+  `program_begin`) and *persists across every primitive* in the generated program,
   exactly mirroring the machine's own modal state. A drilling primitive does not
-  re-set units; it inherits whatever `initialise` established.
+  re-set units; it inherits whatever `program_begin` established.
 
 `set_origin()` is the third call of this shape, and the one that also **validates**:
 
@@ -157,7 +160,29 @@ as itself).
   wrong place with nothing reported.
 - Unlike the unit mode, it sets no state. It emits one statement and is done.
 
-All three are rendered **once, at Coder construction**, before any output exists —
+### 5.1 The operator callables — arguments at the call site
+
+`comment("…")`, `message("…")`, `pause("…")` are callable from any template and each
+renders its own primitive with the call site's text bound as `text`:
+
+```
+comment("Outline pass");     ->  ( Outline pass )
+```
+
+Nothing emits them automatically. They exist so a profile can annotate or interrupt its
+own output in its own dialect — the application supplies no wording and picks no
+placement.
+
+They differ from the three above in *when* they render: their text is only known at the
+call, so they cannot be pre-rendered. They render on a **second engine** whose output is
+pushed into the enclosing one, because `Gtl::run` clears the shared output buffer on
+entry and rendering in place would discard everything the caller had emitted. That
+second engine deliberately has no callables registered, so `comment()` inside a `comment`
+template is function-not-found rather than an infinite loop.
+
+### 5.2 Pre-rendering
+
+Both `set_unit` and `set_origin` are rendered **once, at Coder construction**, before any output exists —
 so a broken template or a rejected origin refuses the program rather than truncating
 it. That is also why the calls exist at all: `Gtl::run` clears the shared output
 buffer, so a primitive cannot render another primitive in place.
@@ -166,6 +191,27 @@ This is the mechanism behind principle #1: the same call that tells the machine
 the unit tells the formatter the unit, so the two can never desync. Splitting them —
 letting a template emit its own unit word and set the mode separately — would allow
 a program in inch mode carrying millimetre numbers, with nothing to catch it.
+### 5.3 `line_format` — the one filter
+
+Not a generator at all: it runs over **every line of the finished program**, receiving
+`index` (non-blank lines, from 0) and `text` (the line as generated), and emitting the
+line that replaces it.
+
+```
+`N{(index + 1) * 10} {text}         ->  N10 G0 X1 Y2
+```
+
+Two consequences of owning the whole line:
+
+- **`text` must be emitted**, or the G-code is discarded and the program comes out as a
+  column of bare line numbers.
+- **Emitting nothing drops the line**, which is how a profile removes one.
+
+Numbering used to be a *prefix* the application appended to. That form is
+indistinguishable from the destructive case above, so the variable it used (`line`) was
+retired along with it: an un-migrated template fails to render rather than quietly
+producing a numbered nothing.
+
 
 ---
 
@@ -234,10 +280,11 @@ emit("G0 X" + fmt(x) + " Y" + fmt(y));
 ```
 Output (metric, x = 3.2 mm, y = 7 mm): `G0 X3.2 Y7`
 
-### 8.2 `initialise` — establishes the modal unit
+### 8.2 `program_begin` — establishes the modal unit
 
 ```
-`(Created by k2g from '{pcb_filename}' - {now()})
+`(Created by k2g from '{filename}' - {now()})
+`(Step {step_index + 1} of {steps.len()}: {steps[step_index].name})
 `(Reset all back to safe defaults)
 `G17 G54 G40 G49 G80 G90
 metric();
@@ -337,6 +384,29 @@ reused.
 - Per `Specification.md` §6.6, evaluation must be deterministic for identical
   project inputs and must surface as typed diagnostics, never panics.
 
+### 10.1 Runaway templates
+
+A template is a script with loops, so **non-termination is an ordinary authoring
+mistake** — a `while z > z_bottom` whose body has not yet been written to decrease `z`.
+The editor makes it worse rather than better: it previews on every keystroke, on the UI
+thread, so the loop is executed *while it is being typed*.
+
+The engine therefore caps one render at `gtl::MAX_OPERATIONS` (200,000) and reports
+`GtlError::Runaway`, which names the likely cause rather than Rhai's own "Too many
+operations". Two properties matter and are pinned by tests:
+
+- **The budget is per render, not per engine.** One engine renders every primitive of a
+  board; a cumulative counter would abort a real job part-way through and blame a template
+  with no loop in it — a failure that scales with board size and so passes every small
+  test.
+- **It bounds output too.** A `while true` that emits cannot grow the buffer without
+  bound, because each emit costs from the same budget.
+
+The value is measured, not chosen by taste: a deliberately extreme 2000-pass loop costs
+~20–30k operations, and the ceiling costs ~210 ms to reach in a debug build (~15 ms in
+release). That is ~7–10× headroom over the extreme case and ~200× over a realistic peck
+cycle, while keeping the worst case well short of reading as a hang.
+
 ---
 
 ## 11. Line-oriented emit (settled) and its limits
@@ -362,7 +432,7 @@ Consequences:
 ## 12. Open decisions (need sign-off before coding)
 
 1. **Static preamble: per-line backtick, or a raw block?**
-   A large literal header (`initialise`) is ~10–15 backtick lines. Options:
+   A large literal header (`program_begin`) is ~10–15 backtick lines. Options:
    - **(A, recommended)** Per-line backtick everywhere. One uniform rule, no
      second syntax. Add a raw block later only if it bites.
    - **(B)** Add a triple-backtick fenced block now: a line that is exactly

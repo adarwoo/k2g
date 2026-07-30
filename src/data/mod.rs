@@ -55,7 +55,7 @@ const SCHEMAS: &[(&str, &str)] = &[
 
 /// Bundled CNC templates: `(key, embedded YAML)`. Each is a `cnc.yaml`-shaped
 /// seed with no `id`; see [`AppData::create_cnc_from_template`].
-const CNC_TEMPLATES: &[(&str, &str)] = &[
+pub(crate) const CNC_TEMPLATES: &[(&str, &str)] = &[
     ("genmitsu_3018", include_str!("../../assets/cnc_templates/genmitsu_3018.yaml")),
     ("masso_g3_with_atc", include_str!("../../assets/cnc_templates/masso_g3_with_atc.yaml")),
     ("masso_g3_no_atc", include_str!("../../assets/cnc_templates/masso_g3_no_atc.yaml")),
@@ -1013,8 +1013,11 @@ fn drop_trailing_speed_line(template: &str) -> String {
 /// plunge feed, and a router driven at a drill's plunge feed breaks. A saved profile that
 /// cannot emit a feed is therefore repaired rather than merely flagged; one that already
 /// emits a feed (variable or hardcoded) is left exactly as the operator wrote it.
-fn normalize_cnc_value(value: &mut Value, path: &Path) {
+pub(crate) fn normalize_cnc_value(value: &mut Value, path: &Path) {
     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("cnc.yaml").to_string();
+
+    // First, so every check below reads the current names.
+    rename_primitives(value, &file);
 
     // The axis feed limits became required after profiles were already in the field.
     // Backfilled with the schema's own conservative default rather than merely reported:
@@ -1051,10 +1054,10 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
     // `linear_cut` with no feed at all. A G1 with no F runs at whatever feed is modal —
     // after a drill block that is the drill's plunge feed, and a router driven at a
     // drill's plunge feed breaks. Worth saying loudly.
-    if let Some(template) = value.pointer("/primitives/linear_cut").and_then(Value::as_str) {
+    if let Some(template) = value.pointer("/primitives/cut_linear").and_then(Value::as_str) {
         if !emits_a_feed(template) {
             warn!(
-                "[{file}] primitives.linear_cut emits no feed rate ('{template}'), so a \
+                "[{file}] primitives.cut_linear emits no feed rate ('{template}'), so a \
                  routing move will run at whatever feed is left over from the previous \
                  block — a drill's plunge feed, which breaks routers. Add the feed \
                  variable to the template."
@@ -1076,13 +1079,66 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
     // Only a whole-word `G54` is looked for, because that was this application's own
     // shipped default. A profile naming a different system (a Bantam's `G55`, say) is
     // doing so because its machine reserves the lower ones.
-    if let Some(template) = value.pointer("/primitives/initialise").and_then(Value::as_str) {
+    if let Some(template) = value.pointer("/primitives/program_begin").and_then(Value::as_str) {
         if contains_word(template, "G54") {
             warn!(
-                "[{file}] primitives.initialise selects G54 outright, ignoring the \
+                "[{file}] primitives.program_begin selects G54 outright, ignoring the \
                  fixture's Machine Origin Reference. Call `set_origin();` there instead — \
                  it emits the fixture's own offset and refuses one this machine does not \
                  have."
+            );
+        }
+    }
+
+    // `cut_bezier` is retired, and must be *removed* here or `additionalProperties: false`
+    // rejects the whole profile — one unrecognised key taking every other template with it.
+    //
+    // It never had a producer. The one curve source that reaches the generator is the
+    // routed outline, and that path is offset by the tool radius: the offset of a bezier
+    // is not a bezier (it is not even rational, bar the Pythagorean-hodograph family), so
+    // there was no bezier left to emit by the time a template could have been asked for
+    // one. Curves reach the machine as fitted arcs instead — see `gcode::arcfit`.
+    //
+    // A blank one goes quietly; that is what all four bundled profiles shipped, and what
+    // the schema defaulted to. A profile whose operator actually wrote a spline word is
+    // told, because that is their work being dropped and a silent removal would be the one
+    // destructive outcome available here.
+    let bezier = value
+        .pointer_mut("/primitives")
+        .and_then(Value::as_object_mut)
+        .and_then(|primitives| primitives.remove("cut_bezier"));
+    if let Some(template) = bezier.as_ref().and_then(Value::as_str) {
+        if !template.trim().is_empty() {
+            warn!(
+                "[{file}] primitives.cut_bezier is retired and has been dropped. Nothing \
+                 ever emitted it: the routed outline is offset by the tool radius, and the \
+                 offset of a bezier is not a bezier, so curves are cut as fitted arcs \
+                 (machine.curve_tolerance) instead. Your template is in this file's \
+                 history if you need it back."
+            );
+        }
+    }
+
+    // `pcb_filename` is now `filename`. It was renamed when the program scope grew `steps`
+    // and `step_index`: with the step's own record in scope beside it, "the PCB's file
+    // name" no longer needed the qualifier to say which file it meant.
+    //
+    // Reported, not rewritten — the same call as `line` → `index` below. The rename is
+    // small enough to be tempting to apply here, and that is exactly the habit worth not
+    // starting: the header is the operator's, and an application that edits it while they
+    // are not looking is one they cannot trust with the rest of it. The failure is loud
+    // and per-step, so nothing is lost by leaving the edit to them.
+    for primitive in ["program_begin", "program_end"] {
+        let template = value
+            .pointer(&format!("/primitives/{primitive}"))
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if contains_word(template, "pcb_filename") {
+            warn!(
+                "[{file}] primitives.{primitive} uses `pcb_filename`, which is now \
+                 `filename` (the step's own record is in scope beside it as `steps` and \
+                 `step_index`). Rename it in the primitive editor; until then this step's \
+                 program fails to render."
             );
         }
     }
@@ -1093,15 +1149,15 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
     // someone's tool-change template on their behalf means deciding what a spindle-speed
     // line looks like on their machine.
     let spindle_sets_speed = value
-        .pointer("/primitives/start_spindle")
+        .pointer("/primitives/spindle_start")
         .and_then(Value::as_str)
         .is_some_and(sets_spindle_speed);
     if spindle_sets_speed {
-        if let Some(template) = value.pointer("/primitives/change_tool").and_then(Value::as_str) {
+        if let Some(template) = value.pointer("/primitives/tool_change").and_then(Value::as_str) {
             if drop_trailing_speed_line(template) != template {
                 warn!(
-                    "[{file}] primitives.change_tool ends by setting the spindle speed \
-                     that start_spindle sets immediately afterwards, so every tool change \
+                    "[{file}] primitives.tool_change ends by setting the spindle speed \
+                     that spindle_start sets immediately afterwards, so every tool change \
                      emits it twice. Drop the trailing line if your controller does not \
                      want it."
                 );
@@ -1125,15 +1181,84 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
         .and_then(|v| v.as_u64());
     if let Some(increment) = increment {
         let already_set = value
-            .pointer("/primitives/line_number")
+            .pointer("/primitives/line_format")
             .and_then(Value::as_str)
             .is_some_and(|t| !t.trim().is_empty());
         if !already_set && increment != 0 {
             warn!(
                 "[{file}] machine.line_numbering_increment ({increment}) is retired and \
-                 this profile has no primitives.line_number, so its programs are no \
+                 this profile has no primitives.line_format, so its programs are no \
                  longer numbered. Put the numbering word your controller expects in that \
-                 field, stepping by {increment} — `line` counts the program's lines."
+                 field, stepping by {increment}. It emits the whole line: `index` counts \
+                 the program's lines from 0, and `text` is the line itself."
+            );
+        }
+    }
+}
+
+/// The primitive names as they were, paired with what they are called now.
+///
+/// The names grew one at a time and stopped reading as a set — `initialise`/`conclude`
+/// beside `start_spindle`/`stop_spindle` beside `rapid_move`/`linear_cut`, three word
+/// orders for one family. The scheme is now noun-first within a family (`spindle_start`,
+/// `tool_change`, `cut_linear`), so related primitives sort together and a name can be
+/// guessed from what it does.
+const PRIMITIVE_RENAMES: &[(&str, &str)] = &[
+    ("initialise", "program_begin"),
+    ("conclude", "program_end"),
+    ("change_tool", "tool_change"),
+    ("start_spindle", "spindle_start"),
+    ("stop_spindle", "spindle_stop"),
+    ("rapid_move", "move_rapid"),
+    ("linear_cut", "cut_linear"),
+    ("banner", "comment"),
+    ("line_number", "line_format"),
+];
+
+/// Moves each renamed primitive onto its new key, **template untouched**.
+///
+/// A key move, not a rewrite: the template is the operator's own machine language and this
+/// function does not read a word of it. The move is not optional — the schema no longer
+/// declares the old names and `additionalProperties: false` would reject the whole profile,
+/// taking every other template with it.
+///
+/// An existing value under the new name wins and the old key is dropped: that is a profile
+/// already migrated (or hand-written), and clobbering the current template with a stale one
+/// would be the one destructive outcome available here.
+fn rename_primitives(value: &mut Value, file: &str) {
+    let Some(primitives) = value.pointer_mut("/primitives").and_then(Value::as_object_mut) else {
+        return;
+    };
+
+    let mut moved: Vec<&str> = Vec::new();
+    for (old, new) in PRIMITIVE_RENAMES {
+        let Some(template) = primitives.remove(*old) else { continue };
+        if primitives.contains_key(*new) {
+            continue; // already migrated — keep what is there
+        }
+        primitives.insert((*new).to_string(), template);
+        moved.push(new);
+    }
+
+    if !moved.is_empty() {
+        warn!("[{file}] primitives renamed on load: {}", moved.join(", "));
+    }
+
+    // `line_format` replaced `line_number` in **contract** as well as in name: it now emits
+    // the whole line rather than a prefix the application appends. A template carried over
+    // unchanged emits only its prefix, so the G-code would be dropped and the program would
+    // come out as a column of bare line numbers.
+    //
+    // It cannot silently do that — the old `line` variable is gone, so such a template fails
+    // to render and the step reports it. This warning is so the operator knows what to fix
+    // before they see that error rather than after.
+    if let Some(template) = primitives.get("line_format").and_then(Value::as_str) {
+        if !template.trim().is_empty() && !template.contains("text") {
+            warn!(
+                "[{file}] primitives.line_format now emits the WHOLE line, not a prefix, and \
+                 this template never mentions `text` — so it would emit line numbers and drop \
+                 the G-code. Add {{text}} to it (e.g. `` `N{{(index + 1) * 10}} {{text}} ``). \
+                 `line` is now `index` and counts from 0."
             );
         }
     }
@@ -2320,20 +2445,27 @@ mod tests {
             assert_eq!(value, before, "load must not edit a template");
         };
 
+        // Written under the current names, so the rename has nothing to move and the only
+        // thing this can observe is a template being edited — which is the whole point.
+        // (That the rename *moves* a key is asserted separately, by
+        // `renaming_the_primitives_moves_every_template_untouched`.)
+
         // No feed at all — warned about (a router at a drill's plunge feed breaks), kept.
-        untouched(serde_json::json!({ "linear_cut": "`G1 X{x} Y{y} Z{z} S{s}" }));
+        untouched(serde_json::json!({ "cut_linear": "`G1 X{x} Y{y} Z{z} S{s}" }));
         // The retired `{arc_cmd}` variable — warned about, kept; it fails at render,
         // which is the honest outcome and better than inventing G2/G3 here.
         untouched(serde_json::json!({ "cut_arc": "`{arc_cmd} X{x} Y{y} I{i} J{j}" }));
         // A hardcoded work offset — warned about, kept.
-        untouched(serde_json::json!({ "initialise": "`G17 G54 G40 G49 G80 G90" }));
-        // A duplicate spindle speed across change_tool/start_spindle — warned, kept.
+        untouched(serde_json::json!({ "program_begin": "`G17 G54 G40 G49 G80 G90" }));
+        // A duplicate spindle speed across tool_change/spindle_start — warned, kept.
         untouched(serde_json::json!({
-            "change_tool": "`T{slot} M06\n`S{rpm}",
-            "start_spindle": "`S{rpm}\n`M3",
+            "tool_change": "`T{slot} M06\n`S{rpm}",
+            "spindle_start": "`S{rpm}\n`M3",
         }));
         // An Excellon-style cut with no F word: nothing to repair it into.
-        untouched(serde_json::json!({ "linear_cut": "`X{x}Y{y}" }));
+        untouched(serde_json::json!({ "cut_linear": "`X{x}Y{y}" }));
+        // A `line_format` that would drop the G-code — warned about loudly, still kept.
+        untouched(serde_json::json!({ "line_format": "`N{index * 10} `" }));
 
         // A profile with no primitives block at all must not panic.
         let mut bare = serde_json::json!({ "name": "no primitives" });
@@ -2457,6 +2589,169 @@ mod tests {
         assert!(!contains_word("nothing here", "G54"));
     }
 
+    /// `pcb_filename` became `filename`, and the load path **says so without acting**.
+    ///
+    /// The rename is a one-word substitution, which is exactly what makes it tempting to
+    /// apply here — and exactly the habit worth not starting. The header is the
+    /// operator's; an application that edits it unasked is one they cannot trust with the
+    /// rest of it. So the check is verified by what it does *not* do: both templates come
+    /// through byte-identical, and the operator makes the edit having been told.
+    #[test]
+    fn the_filename_rename_is_reported_and_never_applied() {
+        let header = "`(from '{pcb_filename}' - {timestamp})\nset_origin();";
+        let footer = "`(end of {pcb_filename})";
+        let mut profile = serde_json::json!({
+            "machine": { "atc_slot_count": 0 },
+            "primitives": { "program_begin": header, "program_end": footer },
+        });
+        normalize_cnc_value(&mut profile, Path::new("machine.yaml"));
+
+        let at = |ptr: &str| profile.pointer(ptr).and_then(Value::as_str);
+        assert_eq!(at("/primitives/program_begin"), Some(header), "header untouched");
+        assert_eq!(at("/primitives/program_end"), Some(footer), "footer untouched");
+
+        // The detection is the shared whole-word check, so `{pcb_filename}` counts and an
+        // already-migrated `{filename}` does not — a profile that has been fixed must not
+        // be nagged on every launch.
+        assert!(contains_word(header, "pcb_filename"));
+        assert!(!contains_word("`(from '{filename}')", "pcb_filename"));
+    }
+
+    /// A stored `cut_bezier` must be **removed**, not merely ignored.
+    ///
+    /// `primitives` is `additionalProperties: false`, so a key the schema no longer
+    /// declares does not fail quietly — it rejects the entire profile, taking every other
+    /// template with it. All four bundled profiles shipped a `cut_bezier`, so every
+    /// operator who ever instantiated one has the key on disk.
+    #[test]
+    fn a_profile_carrying_the_retired_cut_bezier_still_loads() {
+        let mut profile = serde_json::json!({
+            "machine": { "atc_slot_count": 0 },
+            "primitives": {
+                "cut_bezier": "",
+                "cut_arc": "ARC",
+                "cut_linear": "CUT F{feedrate}",
+            }
+        });
+        normalize_cnc_value(&mut profile, Path::new("machine.yaml"));
+
+        assert!(
+            profile.pointer("/primitives/cut_bezier").is_none(),
+            "the retired key must not survive into validation"
+        );
+        // And nothing else may be disturbed on the way past.
+        let at = |ptr: &str| profile.pointer(ptr).and_then(Value::as_str);
+        assert_eq!(at("/primitives/cut_arc"), Some("ARC"));
+        assert_eq!(at("/primitives/cut_linear"), Some("CUT F{feedrate}"));
+    }
+
+    /// A hand-written spline template is dropped too — it has to be — but the operator is
+    /// told, because that is their work going and a silent removal is the one destructive
+    /// outcome available here. A blank one goes quietly; that is what shipped.
+    #[test]
+    fn a_written_cut_bezier_is_dropped_and_reported() {
+        let mut written = serde_json::json!({
+            "machine": { "atc_slot_count": 0 },
+            "primitives": { "cut_bezier": "`G5 I{x1} J{y1} P{x2} Q{y2} X{x} Y{y}" }
+        });
+        normalize_cnc_value(&mut written, Path::new("machine.yaml"));
+        assert!(written.pointer("/primitives/cut_bezier").is_none());
+
+        // The blank case takes the same path and must not panic or leave a residue.
+        let mut blank = serde_json::json!({
+            "machine": { "atc_slot_count": 0 },
+            "primitives": { "cut_bezier": "   " }
+        });
+        normalize_cnc_value(&mut blank, Path::new("machine.yaml"));
+        assert!(blank.pointer("/primitives/cut_bezier").is_none());
+    }
+
+    /// The primitive rename must move every template **byte-identical** onto its new key.
+    ///
+    /// This is the test that matters most in the rename: the templates are the operator's
+    /// own machine language, often edited by hand over months. The migration exists only
+    /// because `additionalProperties: false` would otherwise reject the whole profile — one
+    /// unrecognised key would take every other template down with it — so a mistake here
+    /// does not lose a name, it loses the work.
+    #[test]
+    fn renaming_the_primitives_moves_every_template_untouched() {
+        // Deliberately odd templates: nothing here is a name the new scheme would produce,
+        // so a template that ends up under the wrong key is visible rather than plausible.
+        let mut profile = serde_json::json!({
+            "machine": { "atc_slot_count": 0 },
+            "primitives": {
+                "initialise":    "INIT",
+                "conclude":      "END",
+                "change_tool":   "TC",
+                "start_spindle": "SPIN-ON",
+                "stop_spindle":  "SPIN-OFF",
+                "rapid_move":    "RAPID",
+                "linear_cut":    "CUT F{feedrate}",
+                "banner":        "BANNER {text}",
+                "line_number":   "NUM {text}",
+                // Untouched by the rename, and must stay exactly where they are.
+                "cut_arc":       "ARC",
+                "drill":         "DRILL",
+                "set_origin":    "ORIGIN",
+            }
+        });
+        normalize_cnc_value(&mut profile, Path::new("machine.yaml"));
+
+        let at = |ptr: &str| profile.pointer(ptr).and_then(Value::as_str).map(str::to_string);
+        for (new_key, expected) in [
+            ("program_begin", "INIT"),
+            ("program_end", "END"),
+            ("tool_change", "TC"),
+            ("spindle_start", "SPIN-ON"),
+            ("spindle_stop", "SPIN-OFF"),
+            ("move_rapid", "RAPID"),
+            ("cut_linear", "CUT F{feedrate}"),
+            ("comment", "BANNER {text}"),
+            ("line_format", "NUM {text}"),
+            ("cut_arc", "ARC"),
+            ("drill", "DRILL"),
+            ("set_origin", "ORIGIN"),
+        ] {
+            assert_eq!(
+                at(&format!("/primitives/{new_key}")).as_deref(),
+                Some(expected),
+                "{new_key} must carry its template across verbatim"
+            );
+        }
+
+        // No old key may survive — one of them rejects the entire profile.
+        for (old, _) in PRIMITIVE_RENAMES {
+            assert!(
+                profile.pointer(&format!("/primitives/{old}")).is_none(),
+                "'{old}' must not survive into validation"
+            );
+        }
+    }
+
+    /// A profile already on the new names is left alone, and a half-migrated one keeps the
+    /// **current** template rather than being clobbered by the stale one beside it.
+    #[test]
+    fn a_migrated_profile_is_not_migrated_twice() {
+        let mut already = serde_json::json!({
+            "primitives": { "program_begin": "NEW", "cut_linear": "CUT F{feedrate}" }
+        });
+        let before = already.clone();
+        normalize_cnc_value(&mut already, Path::new("machine.yaml"));
+        assert_eq!(already, before, "nothing to rename, nothing to change");
+
+        // Both keys present: the new one is what the operator is editing now.
+        let mut both = serde_json::json!({
+            "primitives": { "initialise": "STALE", "program_begin": "CURRENT" }
+        });
+        normalize_cnc_value(&mut both, Path::new("machine.yaml"));
+        assert_eq!(
+            both.pointer("/primitives/program_begin").and_then(Value::as_str),
+            Some("CURRENT"),
+            "the live template wins; the stale one is dropped, never promoted over it"
+        );
+        assert!(both.pointer("/primitives/initialise").is_none());
+    }
+
     /// The retired `line_numbering_increment` must still be **removed** —
     /// `additionalProperties: false` would reject the whole profile otherwise — but its
     /// value is no longer turned into a `line_number` template, because an "N" prefix is
@@ -2477,7 +2772,7 @@ mod tests {
             "the retired field must not survive into validation"
         );
         assert!(
-            profile.pointer("/primitives/line_number").is_none(),
+            profile.pointer("/primitives/line_format").is_none(),
             "numbering is the profile's to define; the warning says so"
         );
 
@@ -2489,7 +2784,7 @@ mod tests {
         normalize_cnc_value(&mut both, Path::new("machine.yaml"));
         assert!(both.pointer("/machine/line_numbering_increment").is_none());
         assert_eq!(
-            both.pointer("/primitives/line_number").and_then(Value::as_str),
+            both.pointer("/primitives/line_format").and_then(Value::as_str),
             Some("`/{line}:`")
         );
     }

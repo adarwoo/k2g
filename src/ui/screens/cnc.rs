@@ -89,39 +89,38 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
             "Zeroing & tool length",
             &["/machine/has_repeatable_home", "/machine/tool_length_measurement"],
         ),
-        // `set_origin` belongs with the lifecycle rather than beside the zeroing
-        // capabilities above: it is a template the header calls, not a machine fact.
-        group(
-            "Program lifecycle",
-            &[
-                "/primitives/initialise",
-                "/primitives/set_unit",
-                "/primitives/set_origin",
-                "/primitives/conclude",
-            ],
-        ),
-        group(
-            "Motion / spindle / drilling",
-            &[
-                "/primitives/rapid_move",
-                "/primitives/linear_cut",
-                "/primitives/start_spindle",
-                "/primitives/stop_spindle",
-                "/primitives/drill",
-            ],
-        ),
-        group(
-            "Arc / bezier & optional",
-            &[
-                "/primitives/cut_arc",
-                "/primitives/cut_bezier",
-                "/primitives/pause",
-                "/primitives/banner",
-                "/primitives/line_number",
-            ],
-        ),
-        group("Tool change", &["/primitives/change_tool"]),
     ]
+    .into_iter()
+    .chain(primitive_groups())
+    .collect()
+}
+
+/// The primitive sections, built from the schema's own `x-category` rather than from a
+/// hand-written list.
+///
+/// The list used to be hardcoded here in groups like "Arc / bezier & optional", which had
+/// two costs: adding a primitive to `cnc.yaml` did not make it editable until someone
+/// remembered to add it here too, and the groupings mixed things the application emits with
+/// things a template has to call — so the editor implied that filling in `set_origin` was
+/// enough to select an origin, when nothing happens unless `program_begin` calls it. The
+/// per-field *kind* badge is what actually says which is which; see
+/// [`PrimitiveCategory`](crate::gcode::primitive_vars::PrimitiveCategory).
+fn primitive_groups() -> Vec<FieldGroup> {
+    use crate::gcode::primitive_vars::{primitives_in, PrimitiveCategory};
+
+    PrimitiveCategory::ORDER
+        .iter()
+        .filter_map(|category| {
+            let fields: Vec<String> = primitives_in(*category)
+                .into_iter()
+                .map(|p| format!("/primitives/{}", p.name))
+                .collect();
+            // A category the schema declares nothing for is simply not shown, rather than
+            // rendered as an empty heading.
+            (!fields.is_empty())
+                .then(|| FieldGroup { title: category.title().to_string(), fields })
+        })
+        .collect()
 }
 
 #[cfg(test)]

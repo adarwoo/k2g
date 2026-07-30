@@ -19,7 +19,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
-use rfd::FileDialog;
 
 use crate::runtime::removable::{self, SaveTarget};
 use crate::runtime::{with_ctx_mut, AppCtx, GCODE_FILE_EXTENSION};
@@ -86,7 +85,7 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
                         let start = state.read().gcode_save_directory_or_default();
                         open_plan(false, start);
                     } else {
-                        save_anywhere(state);
+                        spawn(async move { save_anywhere(state).await });
                     }
                 },
                 "Save…"
@@ -105,7 +104,8 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
                             if multi_step {
                                 open_plan(true, target.directory.clone());
                             } else {
-                                save_to_medium(state, target.clone());
+                                let target = target.clone();
+                                spawn(async move { save_to_medium(state, target).await });
                             }
                         }
                     },
@@ -122,7 +122,13 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
                         plan_open.set(false);
                         let rows = plan_rows.read().clone();
                         let start = plan_start.read().clone();
-                        save_batch(state, rows, start, *plan_to_medium.read());
+                        let to_medium = *plan_to_medium.read();
+                        // Spawned, never called inline. `plan_open.set(false)` above has
+                        // just queued this dialog's unmount, and a blocking folder picker
+                        // here would let its modal pump re-enter the event loop and render
+                        // that pending unmount while the arena is still borrowed for this
+                        // very event — see `profiles_common::dialog_parent`.
+                        spawn(async move { save_batch(state, rows, start, to_medium).await });
                     },
                 }
             }
@@ -245,15 +251,18 @@ fn SaveProgramDialog(
 ///
 /// `pick_folder` rather than a save dialog per file: with N programs the operator would
 /// otherwise face N prompts, having already said what each is called.
-fn save_batch(state: Signal<AppCtx>, rows: Vec<SaveRow>, start: PathBuf, to_medium: bool) {
-    let Some(folder) = FileDialog::new()
+async fn save_batch(state: Signal<AppCtx>, rows: Vec<SaveRow>, start: PathBuf, to_medium: bool) {
+    let Some(folder) = rfd::AsyncFileDialog::new()
+        .set_parent(&*super::profiles_common::dialog_parent())
         .set_title(if to_medium { "Choose a folder on the removable medium" } else { "Choose a folder for the programs" })
         .set_directory(&start)
         .pick_folder()
+        .await
+        .map(|handle| handle.path().to_path_buf())
     else {
         return; // cancelled
     };
-    if !confirm_overwrites(&rows, &folder) {
+    if !confirm_overwrites(&rows, &folder).await {
         return;
     }
 
@@ -297,7 +306,7 @@ fn save_batch(state: Signal<AppCtx>, rows: Vec<SaveRow>, start: PathBuf, to_medi
 }
 
 /// The ordinary Save: a dialog anywhere, no eject.
-fn save_anywhere(state: Signal<AppCtx>) {
+async fn save_anywhere(state: Signal<AppCtx>) {
     let snapshot = state.read().clone();
     let Some(program) = snapshot.selected_program().and_then(|step| step.program()) else {
         return;
@@ -307,7 +316,9 @@ fn save_anywhere(state: Signal<AppCtx>) {
         &program.text,
         &snapshot.gcode_save_directory_or_default(),
         &snapshot.gcode_default_file_name(),
-    ) else {
+    )
+    .await
+    else {
         return; // cancelled, or reported already
     };
 
@@ -323,7 +334,7 @@ fn save_anywhere(state: Signal<AppCtx>) {
 /// starts on the medium. Which medium gets ejected is decided by where the file *actually*
 /// landed rather than by `target`, because the dialog lets the user navigate anywhere and
 /// ejecting a drive the program was not written to would be both useless and alarming.
-fn save_to_medium(state: Signal<AppCtx>, target: SaveTarget) {
+async fn save_to_medium(state: Signal<AppCtx>, target: SaveTarget) {
     let snapshot = state.read().clone();
     let Some(program) = snapshot.selected_program().and_then(|step| step.program()) else {
         return;
@@ -333,7 +344,9 @@ fn save_to_medium(state: Signal<AppCtx>, target: SaveTarget) {
         &program.text,
         &target.directory,
         &snapshot.gcode_default_file_name(),
-    ) else {
+    )
+    .await
+    else {
         return;
     };
 
@@ -367,19 +380,22 @@ fn save_to_medium(state: Signal<AppCtx>, target: SaveTarget) {
 /// when the user cancelled — indistinguishable from a failed write at the call site by
 /// design, because a failure has already been reported by then and neither should record
 /// a directory.
-fn run_save_dialog(
+async fn run_save_dialog(
     state: Signal<AppCtx>,
     program: &str,
     start_directory: &Path,
     file_name: &str,
 ) -> Option<PathBuf> {
-    let path = FileDialog::new()
+    let path = rfd::AsyncFileDialog::new()
+        .set_parent(&*super::profiles_common::dialog_parent())
         .set_title("Save G-code program")
         .set_directory(start_directory)
         .set_file_name(file_name)
         .add_filter("G-code", &[GCODE_FILE_EXTENSION, "ngc", "gcode", "tap"])
         .add_filter("All files", &["*"])
-        .save_file()?;
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())?;
 
     match fs::write(&path, program.as_bytes()) {
         Ok(()) => Some(path),
@@ -412,6 +428,33 @@ pub(crate) struct SaveRow {
     pub file_name: String,
 }
 
+/// Which steps may take their file name from their own step name: `true` where that name
+/// belongs to exactly one step.
+///
+/// A step name is the operator's label for a setup and is under no obligation to be
+/// unique — two steps called "Drill" are a perfectly reasonable profile. Naming files
+/// after them would produce the same name twice, which `validate_rows` then refuses: a
+/// clash the application invented and left the operator to fix in the dialog before it
+/// would let them save.
+///
+/// So the colliding steps fall back to their ordinals, which are unique by construction,
+/// and only they pay for it — a job with one "Drill" and one "Route" keeps both names.
+///
+/// Compared trimmed and case-folded, matching `validate_rows`, which is the check this
+/// exists to stay ahead of — and matching Windows, where `Drill.nc` and `drill.nc` are
+/// one file and the second write would silently replace the first.
+///
+/// Blank names collide with each other on the empty string and so all take their ordinal,
+/// which is the same answer `program_file_name` would reach on its own.
+fn names_belong_to_one_step_each(names: &[String]) -> Vec<bool> {
+    let key = |name: &String| name.trim().to_lowercase();
+    let mut uses: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for name in names {
+        *uses.entry(key(name)).or_insert(0) += 1;
+    }
+    names.iter().map(|name| uses.get(&key(name)).copied().unwrap_or(0) == 1).collect()
+}
+
 /// The rows a multi-step save starts from: one per step that produced a program.
 ///
 /// Named from the **step count**, not the number of programs: a three-step profile whose
@@ -419,20 +462,33 @@ pub(crate) struct SaveRow {
 /// the operator which setup the file belongs to.
 fn save_rows(snapshot: &AppCtx) -> Vec<SaveRow> {
     let step_count = snapshot.programs.len();
-    snapshot
-        .ready_programs()
+    let ready = snapshot.ready_programs();
+
+    let names: Vec<String> = ready.iter().map(|(step, _)| step.name.clone()).collect();
+    let usable = names_belong_to_one_step_each(&names);
+
+    ready
         .into_iter()
-        .map(|(step, program)| SaveRow {
-            step_index: step.index,
-            step_label: if step.name.trim().is_empty() {
-                format!("Step {}", step.index + 1)
-            } else {
-                format!("Step {}: {}", step.index + 1, step.name)
-            },
-            cnc_name: step.cnc_name.clone(),
-            line_count: program.text.lines().count(),
-            include: true,
-            file_name: snapshot.program_file_name(step.index, step_count, &program.extension),
+        .enumerate()
+        .map(|(position, (step, program))| {
+            let unique = usable[position];
+            SaveRow {
+                step_index: step.index,
+                step_label: if step.name.trim().is_empty() {
+                    format!("Step {}", step.index + 1)
+                } else {
+                    format!("Step {}: {}", step.index + 1, step.name)
+                },
+                cnc_name: step.cnc_name.clone(),
+                line_count: program.text.lines().count(),
+                include: true,
+                file_name: snapshot.program_file_name(
+                    step.index,
+                    step_count,
+                    if unique { step.name.as_str() } else { "" },
+                    &program.extension,
+                ),
+            }
         })
         .collect()
 }
@@ -513,7 +569,7 @@ fn write_rows(snapshot: &AppCtx, rows: &[SaveRow], folder: &Path) -> SaveReport 
 /// `pick_folder` has no overwrite confirmation, where `save_file` gets one from the OS —
 /// so without this, saving a multi-step job would silently clobber, which is a regression
 /// against the single-step behaviour. Returns whether to proceed.
-fn confirm_overwrites(rows: &[SaveRow], folder: &Path) -> bool {
+async fn confirm_overwrites(rows: &[SaveRow], folder: &Path) -> bool {
     let existing: Vec<String> = rows
         .iter()
         .filter(|row| row.include)
@@ -523,7 +579,8 @@ fn confirm_overwrites(rows: &[SaveRow], folder: &Path) -> bool {
     if existing.is_empty() {
         return true;
     }
-    rfd::MessageDialog::new()
+    rfd::AsyncMessageDialog::new()
+        .set_parent(&*super::profiles_common::dialog_parent())
         .set_title("Replace existing files?")
         .set_description(format!(
             "{} already exist{} in {}:\n\n{}\n\nReplace them?",
@@ -534,6 +591,7 @@ fn confirm_overwrites(rows: &[SaveRow], folder: &Path) -> bool {
         ))
         .set_buttons(rfd::MessageButtons::YesNo)
         .show()
+        .await
         == rfd::MessageDialogResult::Yes
 }
 
@@ -608,5 +666,53 @@ mod tests {
         // The shape the app actually produces: an absolute path with a drive letter.
         #[cfg(windows)]
         assert_eq!(file_name_of(Path::new("E:\\jobs\\panel.nc")), "panel.nc");
+    }
+
+    /// The rule that keeps the generated plan saveable.
+    ///
+    /// `validate_rows` refuses a duplicate file name, so a profile with two steps called
+    /// the same thing would have produced a plan the operator could not save without
+    /// editing it first — a clash the application created.
+    #[test]
+    fn a_step_name_is_used_only_when_it_belongs_to_one_step() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            names_belong_to_one_step_each(&names(&["Drill", "Route"])),
+            [true, true],
+            "distinct names are each the step's own"
+        );
+        assert_eq!(
+            names_belong_to_one_step_each(&names(&["Drill", "Drill"])),
+            [false, false],
+            "both fall back; neither may claim the name"
+        );
+        assert_eq!(
+            names_belong_to_one_step_each(&names(&["Drill", "Route", "Drill"])),
+            [false, true, false],
+            "only the clashing pair pays for it"
+        );
+    }
+
+    /// Case and surrounding space must not create a clash the check misses. On Windows
+    /// `Drill.nc` and `drill.nc` are one file, so the second write would replace the
+    /// first — silently, since neither the plan nor the overwrite prompt would see two
+    /// names as the same.
+    #[test]
+    fn the_clash_check_folds_case_and_space() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(names_belong_to_one_step_each(&names(&["Drill", "drill"])), [false, false]);
+        assert_eq!(names_belong_to_one_step_each(&names(&["Drill", " Drill "])), [false, false]);
+    }
+
+    /// Unnamed steps all collide on the empty string, so every one of them takes its
+    /// ordinal — which is what `program_file_name` would have done anyway.
+    #[test]
+    fn blank_names_all_fall_back() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(names_belong_to_one_step_each(&names(&["", "  ", "Route"])), [false, false, true]);
+        assert_eq!(names_belong_to_one_step_each(&names(&[""])), [true], "one blank has no clash");
     }
 }

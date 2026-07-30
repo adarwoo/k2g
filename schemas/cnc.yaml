@@ -176,6 +176,32 @@ properties:
         default: 0
 
       # -----------------------------------------------------------------------
+      # curve_tolerance
+      # -----------------------------------------------------------------------
+      # How far the emitted path may depart from the true curve.
+      #
+      # One value governs every approximation, so a profile cannot be accurate in
+      # one place and coarse in another:
+      #   - fitting arcs to a routed outline (a curved edge becomes G2/G3 rather
+      #     than hundreds of tiny G1 moves)
+      #   - flattening an arc into straight moves, when cut_arc is blank
+      #
+      # A machine fact, not a preference: 0.01 mm is right for a PCB router and
+      # absurd for a plasma table. Tighter costs program size and nothing else;
+      # looser is visible on the cut edge.
+      #
+      # Valid examples:
+      #   curve_tolerance: "0.01mm"
+      #   curve_tolerance: "0.5mil"
+      #
+      curve_tolerance:
+        description: >
+          Maximum deviation of the emitted path from the true curve. Governs arc
+          fitting and arc flattening alike.
+        default: "0.01mm"
+        $ref: "units.yaml#/$defs/size"
+
+      # -----------------------------------------------------------------------
       # scaling
       # -----------------------------------------------------------------------
       # Axis scaling factors.
@@ -338,192 +364,129 @@ properties:
   primitives:
     description: Primitive templates in the GCode Template Language (backtick lines emit GCode; other lines are Rhai script). See docs/gcode-template-language.md.
     type: object
+    # ---------------------------------------------------------------------------
+    # How to read this section
+    # ---------------------------------------------------------------------------
+    # Every primitive declares two things about itself, which the CNC editor reads
+    # so an author never has to guess how their template gets used:
+    #
+    #   x-kind      how it is invoked
+    #     generator   the application emits it, at a defined point in the program
+    #     callable    NOTHING emits it - a template calls it by name, e.g.
+    #                 `set_origin();` or `comment("Outline")`. Filling one in and
+    #                 not calling it produces no output at all.
+    #     filter      applied to every line of the finished program
+    #
+    #   x-category  where it belongs in the editor
+    #     program | tools | motion | drilling | operator | formatting
+    #
+    #   x-fallback  what a BLANK template falls back to (motion only)
+    #     On cut_arc (-> cut_linear). Leaving it blank does not drop the geometry:
+    #     a machine with no arc word has its curves cut as straight moves instead,
+    #     to machine.curve_tolerance.
+    #
+    #     This is why blankness cannot be a general rule in the renderer: a blank
+    #     tool_measure means "this machine needs no measurement block" and must keep
+    #     meaning exactly that. Only a primitive declaring x-fallback is degraded;
+    #     every other blank template still emits nothing.
+    #
+    # The two are independent: `operator` holds three callables, and `program`
+    # holds two generators plus two callables. That is simply what is true.
+    #
+    # Naming: noun-first within a family, so relatives sort together and a name can
+    # be guessed - `spindle_start`/`spindle_stop`, `tool_change`/`tool_measure`,
+    # `cut_linear`/`cut_arc`, `program_begin`/`program_end`. Profiles
+    # written under the old names are migrated on load (`normalize_cnc_value`).
     properties:
 
-      # Program initialization block.
+      # =======================================================================
+      # Program
+      # =======================================================================
+
+      # Program header. The first thing emitted, once per step.
       #
-      # Expected placeholders include:
-      #   {pcb_filename}
-      #   {timestamp}
-      #   {z_safe}
-      #
-      # Calls metric() to establish millimetre output (emits G21) before any
-      # coordinate is emitted.
-      #
-      initialise:
-        description: Program initialization block.
+      # Conventionally establishes the modal state the rest of the program relies
+      # on: call metric() (or imperial()) to fix the unit, and set_origin() to
+      # select the fixture's work offset. Neither happens unless this template
+      # calls it.
+      program_begin:
+        description: Program header, emitted once at the top of each step's program.
         type: string
+        x-kind: generator
+        x-category: program
         # Additional variables in scope for this primitive's GTL, beyond the shared
         # emit/fmt()/metric() surface. Read by the primitive editor's reference panel
         # and its validate/preview (the generation scopes are built to match).
         x-variables:
-          - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
+          - { name: filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
           - { name: origin_reference, type: string, description: "How the step fixture's zero is identified on this machine, as the operator entered it (e.g. 'G54', 'G54.1 P7'). Normally emitted by calling set_origin(), which validates it first; this raw value is here for a template that needs it verbatim. Do not do both, or the origin is emitted twice." }
+          - { name: steps, type: list, description: "Every step of the machining profile, in order - not just this one, so a header can say 'step 2 of 3'. Each entry holds the step's own settings (name, side_to_machine, operations, drill_pth, route_board, ...) plus cnc_name / fixture_name / toolset_name beside the ids it binds. Index it with step_index; steps.len() counts them. A list has no printed form - reach a field: steps[step_index].name." }
+          - { name: step_index, type: integer, description: "Which step of the machining profile this program is. 0 is the first, so an operator-facing count reads {step_index + 1} of {steps.len()}." }
         default: |
-          `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
+          `(Created by kicad2gcode from '{filename}' - {timestamp})
           `(Reset all back to safe defaults)
           `G17 G40 G49 G80 G90
           set_origin();
           metric();
-          `G10 P0
           `(Establish the Z-Safe)
           `G0 Z{z_safe}
 
-      # Rapid positioning move primitive.
-      #
-      # Expected placeholders include:
-      #   {x}
-      #   {y}
-      #   {z}
-      #
-      rapid_move:
-        description: Positioning move primitive. Takes x, y, and z.
+      # Program footer. The last thing emitted, once per step.
+      program_end:
+        description: Program footer, emitted once at the end of each step's program.
         type: string
+        x-kind: generator
+        x-category: program
+        # Same program-layer values as `program_begin`: the footer commonly retracts
+        # to `z_safe` and may echo the source file / timestamp. Generation builds
+        # the footer scope to match this list (see src/gcode/program.rs).
         x-variables:
-          - { name: x, type: length, description: "Target X coordinate." }
-          - { name: y, type: length, description: "Target Y coordinate." }
-          - { name: z, type: length, description: "Target Z coordinate." }
-        default: "`G0 X{x} Y{y} Z{z}"
-
-      # Linear cutting move primitive.
-      #
-      # Expected placeholders include:
-      #   {x}
-      #   {y}
-      #   {z}
-      #   {feedrate}
-      #   {s}
-      #
-      # The template MUST emit a feed word. A G1 with no F runs at whatever feed is
-      # modal — after a drill cycle that is the drill's plunge feed, which is not a
-      # feed a router should ever see.
-      #
-      linear_cut:
-        description: Linear cutting primitive. Takes x, y, z, and feedrate.
-        type: string
-        x-variables:
-          - { name: x, type: length, description: "Target X coordinate." }
-          - { name: y, type: length, description: "Target Y coordinate." }
-          - { name: z, type: length, description: "Target Z coordinate." }
-          - { name: feedrate, type: feed, description: "Feed for this move: the derated plunge feed when it enters the material, the lateral cutting feed otherwise. The application chooses which." }
-          - { name: s, type: rpm, description: "Spindle speed, for controllers that want it restated on the cut line. Normally already set by start_spindle." }
-        default: "`G1 X{x} Y{y} Z{z} F{feedrate}"
-
-      # Start spindle primitive.
-      #
-      # Expected placeholders include:
-      #   {rpm}
-      #
-      start_spindle:
-        description: Start spindle primitive.
-        type: string
-        x-variables:
-          - { name: rpm, type: rpm, description: "Spindle speed to command." }
+          - { name: filename, type: string, description: "Source KiCad PCB file name." }
+          - { name: timestamp, type: string, description: "Program generation time (local clock)." }
+          - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
+          - { name: origin_reference, type: string, description: "How the step fixture's zero is identified on this machine - for a footer that reselects it before parking. Prefer calling set_origin(), which validates it first." }
+          - { name: steps, type: list, description: "Every step of the machining profile, in order - see program_begin. Useful in a footer to name the step the operator sets up next: steps[step_index + 1].name, guarded by step_index + 1 < steps.len()." }
+          - { name: step_index, type: integer, description: "Which step of the machining profile this program is. 0 is the first." }
         default: |
-          `S{rpm}
-          `M03
+          `(end of file)
+          `G0 Z{z_safe}
+          `G0 X0 Y0
 
-      # Stop spindle primitive.
+      # How this machine is told which unit system to work in.
       #
-      stop_spindle:
-        description: Stop spindle primitive.
+      # CALLABLE: rendered by the `metric()` / `imperial()` calls a template makes.
+      # Those set how every later value is formatted AND emit this. The two halves
+      # are one call on purpose: a profile that emitted G20 while the engine
+      # formatted in millimetres would cut inch-mode geometry from metric numbers,
+      # silently.
+      #
+      # This exists so no GCode word is built into the application. The default is
+      # the usual G21/G20 pair, but a machine that has no unit statement leaves it
+      # empty, and a controller that spells it some other way says so here.
+      #
+      # `metric` is the boolean to branch on; `unit` is the same choice as a string
+      # ("metric" / "imperial") for a dialect that needs more than two branches.
+      set_unit:
+        description: >-
+          How the machine is told which unit system to work in. Called as metric()
+          or imperial() from another template - nothing emits it on its own. Empty
+          for a machine with no unit statement.
         type: string
-        x-variables: []
-        default: "`M05"
-
-      # Drill cycle primitive.
-      #
-      # Expected placeholders include:
-      #   {x}
-      #   {y}
-      #   {z_bottom}
-      #   {z_retract}
-      #   {z_feedrate}
-      #
-      drill:
-        description: Drill primitive template.
-        type: string
+        x-kind: callable
+        x-category: program
         x-variables:
-          - { name: x, type: length, description: "Hole X coordinate." }
-          - { name: y, type: length, description: "Hole Y coordinate." }
-          - { name: z_bottom, type: length, description: "Z depth at the bottom of the hole." }
-          - { name: z_retract, type: length, description: "Z retract (R plane) between holes." }
-          - { name: z_feedrate, type: feed, description: "Plunge feed rate." }
-        default: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+          - { name: metric, type: boolean, description: "True for millimetres, false for inches." }
+          - { name: unit, type: string, description: "The same choice as a string: \"metric\" or \"imperial\"." }
+        default: '`{if metric { "G21" } else { "G20" }}'
 
-      # Arc cutting primitive.
+      # Selects the machine's work origin - the stored zero the step's fixture sits in.
       #
-      # Expected placeholders include:
-      #   {clockwise}
-      #   {x}
-      #   {y}
-      #   {i}
-      #   {j}
-      #   {xy_feedrate}
-      #
-      # Direction arrives as a BOOLEAN, not as a ready-made word: the application
-      # decides which way the cutter goes round, the profile decides what that is
-      # called. GTL has no ternary, so the idiom is a Rhai if-expression:
-      #
-      #   {if clockwise { "G2" } else { "G3" }}
-      #
-      cut_arc:
-        description: Arc cutting primitive template.
-        type: string
-        x-variables:
-          - { name: clockwise, type: boolean, description: "True when the arc turns clockwise (conventionally G2), false counter-clockwise (G3). Use: {if clockwise { \"G2\" } else { \"G3\" }}." }
-          - { name: x, type: length, description: "Arc end-point X coordinate." }
-          - { name: y, type: length, description: "Arc end-point Y coordinate." }
-          - { name: i, type: length, description: "Arc centre X offset from the start point." }
-          - { name: j, type: length, description: "Arc centre Y offset from the start point." }
-          - { name: xy_feedrate, type: feed, description: "Cutting feed rate in the XY plane." }
-        default: "`{if clockwise { \"G2\" } else { \"G3\" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
-
-      # Bezier cutting primitive.
-      #
-      # May be native GCode for a controller that supports it, or a placeholder
-      # for expansion into arcs/segments by the application.
-      #
-      cut_bezier:
-        description: Bezier primitive template. May be native or an approximation sequence.
-        type: string
-        x-variables: []
-        default: |
-          `; cut_bezier fallback
-          `; implementation may expand into one or more arc segments
-
-      # Tool change primitive.
-      #
-      # Expected placeholders include:
-      #   {manual_message}
-      #   {slot}
-      #   {rpm}
-      #
-      # This primitive stops the spindle, prompts if the change is manual, and swaps
-      # the tool. It should NOT set the speed: `start_spindle` is always emitted
-      # immediately after it and opens with `S{rpm}`, so an `S` here is unconditionally
-      # redundant and shows up as two identical S words in a row. `rpm` stays available
-      # for a controller that genuinely wants the speed programmed before `M06`.
-      change_tool:
-        description: Tool change primitive template.
-        type: string
-        x-variables:
-          - { name: manual_message, type: string, description: "Operator prompt shown for a manual tool change." }
-          - { name: slot, type: integer, description: "Target tool/rack slot number." }
-          - { name: rpm, type: rpm, description: "Spindle speed for the block. Normally left to start_spindle, which follows immediately; use it only if the controller needs S before M06." }
-        default: |
-          `M05
-          `{manual_message}
-          `T{slot} M06
-
-      # Selects the machine's work origin — the stored zero the step's fixture sits in.
-      #
-      # Called as `set_origin();` from `initialise` (or `conclude`), NOT rendered in
-      # place: like metric()/imperial() it is a registered function, and what it emits
-      # is this template, rendered once before any G-code exists. So a `throw` here
-      # refuses the whole program rather than truncating one halfway through.
+      # CALLABLE: written as `set_origin();`, normally from `program_begin`. It is not
+      # rendered in place - like metric()/imperial() it is a registered function, and
+      # what it emits is this template, rendered once before any G-code exists. So a
+      # `throw` here refuses the whole program rather than truncating one halfway.
       #
       # This primitive owns the answer to "which origins does this controller have?",
       # because that is a machine fact and only the CNC profile knows it. The fixture
@@ -533,18 +496,20 @@ properties:
       # have leaves the job running against whatever origin is currently active, which
       # cuts the board in the wrong place and reports nothing.
       #
-      # The default below is the conservative six — every G-code controller has those.
+      # The default below is the conservative six - every G-code controller has those.
       # A machine with more (a MASSO's `G54.1 P1..P100`) or fewer (a Bantam, whose G54
       # is reserved for its own reference) says so in its own profile.
-      #
       set_origin:
         description: >-
           Validates and emits the work-origin selection for this machine. Called as
-          set_origin() from initialise; throws to refuse generation when the fixture's
-          origin reference is blank or is not an offset this controller has.
+          set_origin() from program_begin - nothing emits it on its own. Throws to
+          refuse generation when the fixture's origin reference is blank or is not an
+          offset this controller has.
         type: string
+        x-kind: callable
+        x-category: program
         x-variables:
-          - { name: origin_reference, type: string, description: "The step fixture's Machine Origin Reference, exactly as the operator entered it — unnormalised, so this template can report the original text in an error." }
+          - { name: origin_reference, type: string, description: "The step fixture's Machine Origin Reference, exactly as the operator entered it - unnormalised, so this template can report the original text in an error." }
         default: |
           let key = origin_reference;
           key.trim();
@@ -565,122 +530,271 @@ properties:
           }
           `{key}
 
-      # Program finalization block.
-      #
-      conclude:
-        description: Program conclude/finalization block.
-        type: string
-        # Same program-layer values as `initialise`: the footer commonly retracts
-        # to `z_safe` and may echo the source file / timestamp. Generation builds
-        # the conclude scope to match this list (see src/runtime/generation.rs).
-        x-variables:
-          - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
-          - { name: timestamp, type: string, description: "Program generation time (local clock)." }
-          - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
-          - { name: origin_reference, type: string, description: "How the step fixture's zero is identified on this machine — for a footer that reselects it before parking. Prefer calling set_origin(), which validates it first." }
-        default: |
-          `(end of file)
-          `G0 Z{z_safe}
-          `G0 X0 Y0
+      # =======================================================================
+      # Tools and spindle
+      # =======================================================================
 
-      # Optional pause/message primitive.
+      # Tool change. Emitted at the start of every tool block.
       #
-      # Expected placeholders include:
-      #   {message}
-      #
-      pause:
-        description: Optional pause/message insertion primitive.
+      # This primitive stops the spindle, prompts if the change is manual, and swaps
+      # the tool. It should NOT set the speed: `spindle_start` is always emitted
+      # immediately after it and opens with `S{rpm}`, so an `S` here is unconditionally
+      # redundant and shows up as two identical S words in a row. `rpm` stays available
+      # for a controller that genuinely wants the speed programmed before `M06`.
+      tool_change:
+        description: Tool change, emitted at the start of every tool block.
         type: string
+        x-kind: generator
+        x-category: tools
         x-variables:
-          - { name: message, type: string, description: "Message shown to the operator at the pause." }
+          - { name: manual_message, type: string, description: "Operator prompt shown for a manual tool change. Empty on an ATC machine." }
+          - { name: slot, type: integer, description: "Target tool/rack slot number." }
+          - { name: rpm, type: rpm, description: "Spindle speed for the block. Normally left to spindle_start, which follows immediately; use it only if the controller needs S before M06." }
         default: |
-          `MSG {message}
-          `M01
+          `M05
+          `{manual_message}
+          `T{slot} M06
 
-      # Optional comment/banner primitive.
+      # Tool length measurement, emitted between `tool_change` and `spindle_start`.
       #
-      # Expected placeholders include:
-      #   {text}
-      #
-      banner:
-        description: Optional comment/banner insertion primitive.
+      # Only on a machine whose `machine.tool_length_measurement` is `manual`: a
+      # controller with an automatic tool setter measures at M06 and needs nothing
+      # here, so this is skipped entirely for it. Empty by default, because a
+      # measurement cycle is machine-specific and there is no word that is safe to
+      # guess - an empty template emits nothing.
+      tool_measure:
+        description: >-
+          Tool length measurement, emitted after tool_change on a machine whose
+          tool_length_measurement is 'manual'. Empty (the default) emits nothing.
         type: string
+        x-kind: generator
+        x-category: tools
         x-variables:
-          - { name: text, type: string, description: "Banner/comment text to insert." }
+          - { name: slot, type: integer, description: "Tool/rack slot number just loaded." }
+          - { name: tool_name, type: string, description: "Display name of the tool, for an operator prompt." }
+          - { name: diameter, type: length, description: "Tool diameter, for a prompt or a probe offset." }
+        default: ""
+
+      # Start the spindle, emitted immediately after tool_change (and tool_measure).
+      spindle_start:
+        description: Start the spindle, emitted after the tool change of every tool block.
+        type: string
+        x-kind: generator
+        x-category: tools
+        x-variables:
+          - { name: rpm, type: rpm, description: "Spindle speed to command." }
+        default: |
+          `S{rpm}
+          `M03
+
+      # Stop the spindle, emitted once at the end of the step's body.
+      spindle_stop:
+        description: Stop the spindle, emitted once at the end of the step's body.
+        type: string
+        x-kind: generator
+        x-category: tools
+        x-variables: []
+        default: "`M05"
+
+      # =======================================================================
+      # Motion
+      # =======================================================================
+
+      # Rapid positioning move.
+      move_rapid:
+        description: Rapid positioning move. Takes x, y, and z.
+        type: string
+        x-kind: generator
+        x-category: motion
+        x-variables:
+          - { name: x, type: length, description: "Target X coordinate." }
+          - { name: y, type: length, description: "Target Y coordinate." }
+          - { name: z, type: length, description: "Target Z coordinate." }
+        default: "`G0 X{x} Y{y} Z{z}"
+
+      # Linear cutting move.
+      #
+      # The template MUST emit a feed word. A G1 with no F runs at whatever feed is
+      # modal - after a drill cycle that is the drill's plunge feed, which is not a
+      # feed a router should ever see.
+      cut_linear:
+        description: Linear cutting move. Takes x, y, z, and feedrate.
+        type: string
+        x-kind: generator
+        x-category: motion
+        x-variables:
+          - { name: x, type: length, description: "Target X coordinate." }
+          - { name: y, type: length, description: "Target Y coordinate." }
+          - { name: z, type: length, description: "Target Z coordinate." }
+          - { name: feedrate, type: feed, description: "Feed for this move: the derated plunge feed when it enters the material, the lateral cutting feed otherwise. The application chooses which." }
+          - { name: s, type: rpm, description: "Spindle speed, for controllers that want it restated on the cut line. Normally already set by spindle_start." }
+        default: "`G1 X{x} Y{y} Z{z} F{feedrate}"
+
+      # Arc cutting move.
+      #
+      # Direction arrives as a BOOLEAN, not as a ready-made word: the application
+      # decides which way the cutter goes round, the profile decides what that is
+      # called. GTL has no ternary, so the idiom is a Rhai if-expression:
+      #
+      #   {if clockwise { "G2" } else { "G3" }}
+      cut_arc:
+        description: Arc cutting move.
+        type: string
+        x-kind: generator
+        x-category: motion
+        # Leave this blank for a controller with no arc word and every arc is cut as
+        # short straight moves instead, to machine.curve_tolerance. Blank does NOT
+        # mean "emit nothing" here - see x-fallback in the notes above.
+        x-fallback: cut_linear
+        x-variables:
+          - { name: clockwise, type: boolean, description: "True when the arc turns clockwise (conventionally G2), false counter-clockwise (G3). Use: {if clockwise { \"G2\" } else { \"G3\" }}." }
+          - { name: x, type: length, description: "Arc end-point X coordinate." }
+          - { name: y, type: length, description: "Arc end-point Y coordinate." }
+          - { name: i, type: length, description: "Arc centre X offset from the start point." }
+          - { name: j, type: length, description: "Arc centre Y offset from the start point." }
+          - { name: xy_feedrate, type: feed, description: "Cutting feed rate in the XY plane." }
+        default: "`{if clockwise { \"G2\" } else { \"G3\" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"
+
+      # =======================================================================
+      # Drilling
+      # =======================================================================
+
+      # One hole. Emitted once per hole in a drill block.
+      #
+      # `index` and `count` describe the hole's place in that block's run of holes,
+      # which is what lets a profile emit a MODAL cycle - open it on the first hole,
+      # give bare coordinates for the rest, cancel it on the last:
+      #
+      #   if index == 0 {
+      #       `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+      #   } else {
+      #       `X{x} Y{y}
+      #   }
+      #   if index == count - 1 {
+      #       `G80
+      #   }
+      #
+      # A block with one hole therefore emits the cycle and cancels it immediately,
+      # which is correct rather than a special case.
+      drill:
+        description: One hole of a drill block. Takes position, depths, feed, and its place in the block.
+        type: string
+        x-kind: generator
+        x-category: drilling
+        x-variables:
+          - { name: x, type: length, description: "Hole X coordinate." }
+          - { name: y, type: length, description: "Hole Y coordinate." }
+          - { name: z_bottom, type: length, description: "Z depth at the bottom of the hole." }
+          - { name: z_retract, type: length, description: "Z retract (R plane) between holes." }
+          - { name: z_feedrate, type: feed, description: "Plunge feed rate." }
+          - { name: index, type: integer, description: "This hole's position in the block's run of holes, counting from 0. Use `index == 0` to open a modal cycle." }
+          - { name: count, type: integer, description: "How many holes this block drills. Use `index == count - 1` to cancel a modal cycle on the last one." }
+        default: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+
+      # =======================================================================
+      # Operator
+      # =======================================================================
+      #
+      # All three are CALLABLE with a text argument, from any template:
+      #
+      #   comment("Outline pass");
+      #   message("Check the vacuum");
+      #   pause("Fit the 2mm cutter, then resume");
+      #
+      # Nothing emits them on its own. They exist so a profile can annotate or
+      # interrupt its own output in its own dialect - the application supplies no
+      # wording and chooses no placement.
+
+      # A comment line. Annotation only; the machine does nothing with it.
+      comment:
+        description: >-
+          A comment line. Called as comment("text") from another template - nothing
+          emits it on its own.
+        type: string
+        x-kind: callable
+        x-category: operator
+        x-variables:
+          - { name: text, type: string, description: "The comment text, as passed to comment(...)." }
         default: "`( {text} )"
 
-      # How this machine is told which unit system to work in.
-      #
-      # Rendered by the `metric()` / `imperial()` calls a template makes — those set
-      # how every later value is formatted, and emit this. The two halves are one
-      # call on purpose: a profile that emitted G20 while the engine formatted in
-      # millimetres would cut inch-mode geometry from metric numbers, silently.
-      #
-      # This exists so no GCode word is built into the application. The default is
-      # the usual G21/G20 pair, but a machine that has no unit statement leaves it
-      # empty, and a controller that spells it some other way says so here.
-      #
-      # `metric` is the boolean to branch on; `unit` is the same choice as a string
-      # ("metric" / "imperial") for a dialect that needs more than two branches.
-      #
-      set_unit:
+      # A message to the operator that does NOT stop the program.
+      message:
         description: >-
-          How the machine is told which unit system to work in, emitted by a
-          template's metric()/imperial() call. Empty for a machine with no unit
-          statement.
+          Show text to the operator without stopping. Called as message("text") from
+          another template - nothing emits it on its own.
         type: string
+        x-kind: callable
+        x-category: operator
         x-variables:
-          - { name: metric, type: boolean, description: "True for millimetres, false for inches." }
-          - { name: unit, type: string, description: "The same choice as a string: \"metric\" or \"imperial\"." }
-        default: '`{if metric { "G21" } else { "G20" }}'
+          - { name: text, type: string, description: "The message text, as passed to message(...)." }
+        default: "`MSG {text}"
 
-      # Optional line-number primitive.
+      # A message that stops the program until the operator resumes it.
+      pause:
+        description: >-
+          Show text and wait for the operator to resume. Called as pause("text") from
+          another template - nothing emits it on its own.
+        type: string
+        x-kind: callable
+        x-category: operator
+        x-variables:
+          - { name: text, type: string, description: "The prompt shown at the stop, as passed to pause(...)." }
+        default: |
+          `MSG {text}
+          `M01
+
+      # =======================================================================
+      # Output formatting
+      # =======================================================================
+
+      # Rewrites every line of the finished program.
       #
-      # Expected placeholders include:
-      #   {line}, {text}
+      # A FILTER, not a generator: it receives each line and emits the line that
+      # replaces it, so it owns the whole line and not just a prefix. Emitting
+      # nothing DROPS that line, which is how a profile suppresses one.
       #
-      # Emitted as a PREFIX to each program line, so it must not end the line:
-      # close the template with a backtick, which suppresses the newline and keeps
-      # the separating space inside the delimiters where an editor cannot trim it.
+      #   line_format: "`N{(index + 1) * 10} {text}"        -> N10 G0 X1 Y2
       #
-      #   line_number: "`N{line * 10} `"
-      #
-      # `line` counts from 1 over the program's non-blank lines. Absent or empty
-      # means no numbering at all — which is what replaced the former
+      # Leave it empty for no formatting at all - the program is then emitted exactly
+      # as the generators built it. This replaced the former
       # `machine.line_numbering_increment`, whose value now lives in the template's
-      # own arithmetic. Numbering is a whole-program pass, so this is applied after
-      # the program is assembled, not by the primitives that build it.
+      # own arithmetic.
       #
-      # `text` is the line about to be numbered, so the template can decide *whether*
-      # to number as well as how. Emitting nothing leaves that line unnumbered — how a
-      # profile skips its comments:
+      # Because the template decides *whether* as well as *how*, a profile can leave
+      # its comments unnumbered:
       #
-      #   line_number: |
-      #     if !text.starts_with("(") {
-      #         `N{line * 10} `
+      #   line_format: |
+      #     if text.starts_with("(") {
+      #         `{text}
+      #     } else {
+      #         `N{(index + 1) * 10} {text}
       #     }
       #
-      line_number:
+      # A template that never mentions `text` emits line numbers and throws the
+      # G-code away. `normalize_cnc_value` warns about exactly that on load.
+      line_format:
         description: >-
-          Optional per-line number prefix. Absent or empty means the program is not
-          numbered. End the template with a backtick so no newline is emitted.
+          Rewrites every line of the finished program - it emits the WHOLE line, not a
+          prefix. Empty means the program is emitted unchanged; emitting nothing for a
+          line drops it.
         type: string
+        x-kind: filter
+        x-category: formatting
         x-variables:
-          - { name: line, type: integer, description: "1-based index of the program line being numbered, counting non-blank lines only." }
-          - { name: text, type: string, description: "The program line about to be numbered — emit nothing to leave it unnumbered (e.g. comments)." }
+          - { name: index, type: integer, description: "This line's position in the program, counting non-blank lines from 0." }
+          - { name: text, type: string, description: "The line as the generators produced it. Emit it, or the G-code is lost." }
         default: ""
 
     required:
-      - initialise
-      - rapid_move
-      - linear_cut
-      - start_spindle
-      - stop_spindle
+      - program_begin
+      - move_rapid
+      - cut_linear
+      - spindle_start
+      - spindle_stop
       - drill
       - cut_arc
-      - cut_bezier
-      - change_tool
-      - conclude
+      - tool_change
+      - program_end
 
     additionalProperties: false
 

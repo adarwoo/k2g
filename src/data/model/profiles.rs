@@ -25,10 +25,15 @@ pub struct MachineProfile {
     /// whose machine emits Excellon must not be written as `.nc`.
     pub output_file_extension: String,
     pub atc_slot_count: u8,
+    /// How far the emitted path may depart from the true curve. One value for arc
+    /// fitting and arc flattening alike, so a profile cannot be accurate in one and
+    /// coarse in the other. A machine fact: 0.01 mm suits a PCB router
+    /// and is absurd for a plasma table.
+    pub curve_tolerance: Length,
     pub scaling_x: f32,
     pub scaling_y: f32,
     /// The `line_number` primitive; empty means the program is not numbered.
-    pub line_number_tpl: String,
+    pub line_format_tpl: String,
     /// The `set_unit` primitive — how this machine is told which unit system to work
     /// in, emitted by a template's `metric()`/`imperial()` call. Empty for a machine
     /// that has no unit statement.
@@ -38,18 +43,31 @@ pub struct MachineProfile {
     /// fixture's origin reference, since which offsets exist is a machine fact. Empty for
     /// a machine that selects no origin.
     pub set_origin_tpl: String,
-    pub gcode_header: String,
-    pub gcode_footer: String,
-    pub drill_first_move: String,
-    pub drill_cycle_mode_series: String,
-    pub drill_cycle_start: String,
-    pub drill_next_hole: String,
-    pub drill_cycle_cancel: String,
-    pub route_plunge_and_offset: String,
-    pub route_arc_up: String,
-    pub route_arc_down: String,
-    pub route_retract: String,
-    pub tool_change_command: String,
+    // The rest, each named for the primitive it carries. They were once
+    // `gcode_header`, `drill_cycle_mode_series`, `route_arc_down` and the like — names
+    // from a design that predates the primitives, so the struct said `route_retract`
+    // for what is a comment and `drill_cycle_start` for what starts the spindle.
+    pub program_begin_tpl: String,
+    pub program_end_tpl: String,
+    pub tool_change_tpl: String,
+    /// Emitted after `tool_change`, but only on a machine whose
+    /// `tool_length_measurement` is `manual` — an automatic setter measures at M06.
+    pub tool_measure_tpl: String,
+    pub spindle_start_tpl: String,
+    pub spindle_stop_tpl: String,
+    pub move_rapid_tpl: String,
+    pub cut_linear_tpl: String,
+    pub cut_arc_tpl: String,
+    pub drill_tpl: String,
+    /// The operator callables. Nothing emits these — a template calls `comment("…")`,
+    /// `message("…")` or `pause("…")`.
+    pub comment_tpl: String,
+    pub message_tpl: String,
+    pub pause_tpl: String,
+    /// Whether this machine needs a measurement block after each tool change, from
+    /// `machine.tool_length_measurement`. Carried here so the renderer does not have to
+    /// re-read the profile document to answer it.
+    pub measures_tool_length: bool,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,
 }
@@ -68,23 +86,26 @@ impl Default for MachineProfile {
             max_feed_z: FeedRate::from_mm_per_min(0.0),
             output_file_extension: String::new(),
             atc_slot_count: 0,
+            curve_tolerance: Length::from_mm(0.01),
             scaling_x: 1.0,
             scaling_y: 1.0,
-            line_number_tpl: String::new(),
+            line_format_tpl: String::new(),
             set_unit_tpl: String::new(),
             set_origin_tpl: String::new(),
-            gcode_header: "".to_string(),
-            gcode_footer: "".to_string(),
-            drill_first_move: "".to_string(),
-            drill_cycle_mode_series: "".to_string(),
-            drill_cycle_start: "".to_string(),
-            drill_next_hole: "".to_string(),
-            drill_cycle_cancel: "".to_string(),
-            route_plunge_and_offset: "".to_string(),
-            route_arc_up: "".to_string(),
-            route_arc_down: "".to_string(),
-            route_retract: "".to_string(),
-            tool_change_command: "".to_string(),
+            program_begin_tpl: String::new(),
+            program_end_tpl: String::new(),
+            tool_change_tpl: String::new(),
+            tool_measure_tpl: String::new(),
+            spindle_start_tpl: String::new(),
+            spindle_stop_tpl: String::new(),
+            move_rapid_tpl: String::new(),
+            cut_linear_tpl: String::new(),
+            cut_arc_tpl: String::new(),
+            drill_tpl: String::new(),
+            comment_tpl: String::new(),
+            message_tpl: String::new(),
+            pause_tpl: String::new(),
+            measures_tool_length: false,
             pending_required_fields: BTreeSet::new(),
             usable: true,
         }

@@ -18,7 +18,7 @@
 //!
 //! let parser = GcodeTemplateParser::new();
 //! let ctx = TemplateContext {
-//!     pcb_filename: "pulsegen.kicad_pcb".to_string(),
+//!     filename: "pulsegen.kicad_pcb".to_string(),
 //!     has_positioning_pins: true,
 //!     z_safe_height: Length::from_mm(-40.0),
 //!     ..TemplateContext::default()
@@ -93,12 +93,12 @@ enum RenderUnitMode {
 /// Input data made available to Rhai expressions during rendering.
 ///
 /// The renderer preloads these fields into Rhai scope so templates can directly
-/// reference them (for example: `pcb_filename`, `has_positioning_pins`, and
+/// reference them (for example: `filename`, `has_positioning_pins`, and
 /// `z_safe_height.mm`).
 #[derive(Debug, Clone)]
 pub struct TemplateContext {
     /// Source PCB file name.
-    pub pcb_filename: String,
+    pub filename: String,
     /// Whether positioning pins are present.
     pub has_positioning_pins: bool,
     /// Safe Z height as a typed length.
@@ -110,7 +110,7 @@ pub struct TemplateContext {
 impl Default for TemplateContext {
     fn default() -> Self {
         Self {
-            pcb_filename: "board.kicad_pcb".to_string(),
+            filename: "board.kicad_pcb".to_string(),
             has_positioning_pins: false,
             z_safe_height: Length::from_mm(-40.0),
             extras: Map::new(),
@@ -126,7 +126,7 @@ impl TemplateContext {
 
     fn to_scope(&self) -> Scope<'static> {
         let mut scope = Scope::new();
-        scope.push("pcb_filename", self.pcb_filename.clone());
+        scope.push("filename", self.filename.clone());
         scope.push("has_positioning_pins", self.has_positioning_pins);
         scope.push("z_safe_height", length_to_rhai_map(&self.z_safe_height));
         scope.push("ctx", self.extras.clone());
@@ -423,7 +423,7 @@ use super::{length_to_rhai_map, GcodeTemplateParser, Length, RenderError, Templa
         assert_eq!(rendered, "N10 G0\nG56\nM30");
     }
 
-    const SPEC_TEMPLATE: &str = r#"(Created by k2g from '{pcb_filename}' - {now().format("%Y-%m-%d %H:%M:%S")})
+    const SPEC_TEMPLATE: &str = r#"(Created by k2g from '{filename}' - {now().format("%Y-%m-%d %H:%M:%S")})
 (Reset all back to safe defaults)
 G17 G54 G40 G49 G80 G90
 {use_metric()}G21
@@ -454,7 +454,7 @@ G0 Z{z_safe_height}
     fn renders_spec_template_with_prefilled_context() {
         let parser = GcodeTemplateParser::new();
         let context = TemplateContext {
-            pcb_filename: "pulsegen.kicad_pcb".to_string(),
+            filename: "pulsegen.kicad_pcb".to_string(),
             has_positioning_pins: true,
             z_safe_height: Length::from_mm(-40.0),
             ..TemplateContext::default()

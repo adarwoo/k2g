@@ -1,7 +1,7 @@
 # GCode template syntax
 
-The program lifecycle and motion fields (`initialise`, `rapid_move`, `drill`,
-`change_tool`, …) are written in the **GCode Template Language**.
+The program lifecycle and motion fields (`program_begin`, `move_rapid`, `drill`,
+`tool_change`, …) are written in the **GCode Template Language**.
 Each field is a small script: most lines are the GCode you want, and the
 engine fills in coordinates, feeds and speeds for you — already converted to the
 machine's active unit.
@@ -21,7 +21,7 @@ with the real values.
 ## Continuing a line — the closing backtick
 
 A backtick at the **end** of the line too means "don't break the line here", so
-whatever comes next carries on where this left off. The `line_number` field is
+whatever comes next carries on where this left off. The `line_format` field is
 the clearest case — its whole job is to put something in front of a line it does
 not otherwise touch:
 
@@ -78,7 +78,7 @@ You can compute inside the braces too:
 A CNC coordinate system is *modal* — once the program says `G21` (mm) or `G20`
 (inch), every coordinate is in that unit. You never track this yourself:
 
-- Call **`metric()`** once (usually in `initialise`) to work in millimetres, or
+- Call **`metric()`** once (usually in `program_begin`) to work in millimetres, or
   **`imperial()`** for inches. That call emits your machine's word for it **and**
   tells the engine how to format every value from then on — one call, so the two
   can never disagree.
@@ -91,12 +91,97 @@ A CNC coordinate system is *modal* — once the program says `G21` (mm) or `G20`
 Need a specific unit regardless of mode? Use an explicit accessor, which gives a
 plain number: `{z_safe.mm}`, `{z_safe.inch}`, `{z_feedrate.mm_per_min}`.
 
+## Loops are bounded
+
+A template is a script, so a loop that never ends would otherwise hang the application —
+and the editor runs your template on **every keystroke**, while it is still half-written.
+
+So a template is stopped after **200,000 operations** and reported as:
+
+```
+drill:3: did not finish — stopped after 200000 operations. A loop is most
+likely never ending: check that its condition can become false …
+```
+
+Almost always the loop body has stopped changing the value the condition tests:
+
+```
+let z = z_retract;
+while z > z_bottom {
+    `G1 Z{z} F{z_feedrate}
+    z = max(z - peck, z_bottom);   // <- forget this line and it never ends
+}
+```
+
+The budget is per render, not per program, so a board of thousands of holes is unaffected.
+It is also generous: a 2000-pass loop uses about a tenth of it, and no real cycle comes
+close.
+
+## Three kinds of primitive
+
+The editor shows a badge beside each primitive's name. It matters, because two of the
+three do nothing on their own:
+
+- **Generator** — the application emits it, at a fixed point in the program.
+  `program_begin`, `tool_change`, `drill`, `cut_linear` and the rest of the machining
+  primitives are all generators. Fill one in and it appears.
+- **Callable** — **nothing emits it.** It appears only where another template calls it
+  by name: `set_origin();`, `metric();`, `comment("Outline pass")`. A perfectly good
+  `set_origin` template produces no output at all if your `program_begin` never calls
+  it.
+- **Filter** — `line_format` alone. It runs over every line of the finished program.
+
+The callables you can use from any template:
+
+| Call | Emits |
+|---|---|
+| `metric()` / `imperial()` | `set_unit` — **and** sets how every value formats |
+| `set_origin()` | `set_origin` — the fixture's work offset, validated |
+| `comment("…")` | `comment` — an annotation the machine ignores |
+| `message("…")` | `message` — text for the operator, no stop |
+| `pause("…")` | `pause` — text, then wait for the operator to resume |
+
+The last three take your text as `{text}` inside their own template, so what a comment
+*looks* like stays the profile's business:
+
+```
+comment("Outline pass");     ->  ( Outline pass )
+```
+
+## Formatting every line
+
+`line_format` is handed each line of the finished program and emits the line that
+replaces it. It gets `index` (counting non-blank lines from 0) and `text` (the line as
+generated):
+
+```
+`N{(index + 1) * 10} {text}          ->  N10 G0 X1 Y2
+```
+
+Two things follow from it owning the whole line:
+
+- **You must emit `text`,** or the G-code is thrown away and you get a column of bare
+  line numbers.
+- **Emitting nothing drops the line** — which is how you remove one deliberately.
+
+Because the template decides *whether* as well as *how*, comments can go unnumbered:
+
+```
+if text.starts_with("(") {
+    `{text}
+} else {
+    `N{(index + 1) * 10} {text}
+}
+```
+
+Leave it empty and the program is emitted exactly as the generators built it.
+
 ## Selecting the work origin
 
 The fixture says which of the machine's stored zeros it sits in — its **Machine
 Origin Reference**, written the way your controller writes it (`G55`, or
 `G54.1 P7` on a MASSO). Emit it by calling **`set_origin()`**, usually in
-`initialise`:
+`program_begin`:
 
 ```
 `G17 G40 G49 G80 G90
@@ -136,11 +221,11 @@ Two things to know:
 
 - `set_origin` is rendered **once, before any G-code exists**, so a rejection is
   reported as "this program cannot be generated" rather than half a file.
-- For the same reason, the primitive editor's preview of `initialise` shows no
+- For the same reason, the primitive editor's preview of `program_begin` shows no
   origin line — the preview has no fixture to read. Preview the `set_origin` field
   itself to check it.
 
-`origin_reference` is also in scope directly in `initialise` and `conclude`, for a
+`origin_reference` is also in scope directly in `program_begin` and `program_end`, for a
 template that needs the raw text. Do not use both it and `set_origin()`, or the
 origin is emitted twice.
 
@@ -222,10 +307,59 @@ if clockwise {
 
 Each field is given the variables relevant to that operation, and **only** those —
 `drill` gets `x`, `y`, `z_bottom`, `z_retract` and `z_feedrate`; `cut_arc` gets a
-centre offset and a direction; `line_number` gets the line's number and its text.
+centre offset and a direction; `line_format` gets the line's number and its text.
 A name the field is not given is an error, not an empty value, so a typo is caught
 in the preview rather than in the program.
 
 The panel beside the editor lists exactly what the field you are editing has, with
 each one's type. Lengths, feeds and speeds are typed, so they format and combine
 correctly.
+
+## The job's steps, in the header and footer
+
+`program_begin` and `program_end` are also given the whole machining profile: `steps`
+is every step in order, and `step_index` says which one this program is — `0` for the
+first. So a header can name itself:
+
+```
+`(Step {step_index + 1} of {steps.len()}: {steps[step_index].name})
+`(Machine: {steps[step_index].cnc_name}, side: {steps[step_index].side_to_machine})
+```
+
+Each entry in `steps` is the step exactly as you set it up on the Machining screen, so
+its fields are that screen's fields: `name`, `side_to_machine`, `operations`, and the
+settings blocks `drill_pth`, `drill_npth`, `route_board` and `mill_board`. Reach into
+them with a dot, as deep as you like:
+
+```
+`(Finishing pass: {steps[step_index].route_board.finishing})
+`(Tabs: {steps[step_index].route_board.outline.retention.count})
+```
+
+Measurements inside a step are real measurements, so they convert with `metric()` and
+`imperial()` and take `.mm` / `.inch` like any other.
+
+The CNC, fixture and toolset a step uses are stored as identifiers, which are of no
+use in a comment — so each one has its name beside it: `cnc_name`, `fixture_name` and
+`toolset_name`. An unbound one is empty rather than missing.
+
+Two things to know:
+
+- **A list cannot be printed whole.** `{steps}` is an error; reach a field of one
+  entry — `{steps[step_index].name}`. `{steps.len()}` is fine, being a number.
+- **Index only what is there.** `steps[step_index + 1]` on the last step is an error.
+  A footer naming the next setup should ask first:
+
+```
+if step_index + 1 < steps.len() {
+    `(Next: {steps[step_index + 1].name})
+}
+```
+
+You can also walk the whole job with a loop:
+
+```
+for step in steps {
+    `(- {step.name} on {step.cnc_name})
+}
+```

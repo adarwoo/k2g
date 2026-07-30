@@ -17,10 +17,12 @@ use std::collections::BTreeMap;
 use gtl::Scope;
 use units::{FeedRate, RotationalSpeed};
 
+use crate::gcode::arcfit;
 use crate::gcode::coder::{Coder, ProgramPrimitives};
 use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, MachineLimits, Motion};
-use crate::gcode::plan::{OpKind, StepPlan};
+use crate::gcode::plan::{OpKind, Point, StepPlan};
 use crate::gcode::routing::{self, RouteMove};
+use crate::gcode::step_data::StepValue;
 
 /// The per-step rendering context the body needs beyond the plan: the CNC's operation
 /// primitive templates, its spindle and axis limits (for the feed/speed solve), and
@@ -29,16 +31,27 @@ use crate::gcode::routing::{self, RouteMove};
 #[derive(Clone)]
 pub struct StepRender {
     pub drill_tpl: String,
-    pub change_tool_tpl: String,
-    pub start_spindle_tpl: String,
-    pub stop_spindle_tpl: String,
+    pub tool_change_tpl: String,
+    /// Emitted between `tool_change` and `spindle_start`, and only when
+    /// [`Self::measures_tool_length`] — see there.
+    pub tool_measure_tpl: String,
+    pub spindle_start_tpl: String,
+    pub spindle_stop_tpl: String,
     /// Motion primitives used by routed holes (spiral pocket): rapid to position, feed
     /// cut (plunge + radial), and the arc for each full circle.
-    pub rapid_move_tpl: String,
-    pub linear_cut_tpl: String,
+    pub move_rapid_tpl: String,
+    pub cut_linear_tpl: String,
     pub cut_arc_tpl: String,
+    /// How far the emitted path may depart from the true curve
+    /// (`machine.curve_tolerance`). Governs arc fitting and arc flattening alike, so one
+    /// profile cannot be accurate in one and coarse in the other.
+    pub curve_tolerance: units::Length,
     pub limits: MachineLimits,
     pub is_atc: bool,
+    /// Whether this machine needs the tool measured after each change
+    /// (`machine.tool_length_measurement == manual`). A machine with an automatic setter
+    /// measures at M06, so emitting a block for it would be a second, redundant cycle.
+    pub measures_tool_length: bool,
 }
 
 /// Everything one step needs to render a **complete, standalone program**: the
@@ -52,16 +65,23 @@ pub struct StepRender {
 #[derive(Clone)]
 pub struct ProgramRender {
     pub cnc_name: String,
-    pub initialise_tpl: String,
-    pub conclude_tpl: String,
-    /// The CNC's `line_number` primitive. Empty disables numbering.
-    pub line_number_tpl: String,
+    pub program_begin_tpl: String,
+    pub program_end_tpl: String,
+    /// The CNC's `line_format` filter, applied to every line of the finished program.
+    /// Empty leaves the program exactly as the generators built it.
+    pub line_format_tpl: String,
     /// The CNC's `set_unit` primitive — what `metric()`/`imperial()` emit. Empty for a
     /// machine with no unit statement.
     pub set_unit_tpl: String,
     /// The CNC's `set_origin` primitive — what `set_origin()` emits, and what validates
     /// [`Self::origin_reference`]. Empty for a machine that selects no origin.
     pub set_origin_tpl: String,
+    /// The operator callables: what `comment("…")`, `message("…")` and `pause("…")` emit
+    /// when a template calls them. Empty means the machine has no word for it, and the
+    /// call emits nothing.
+    pub comment_tpl: String,
+    pub message_tpl: String,
+    pub pause_tpl: String,
     /// This step's fixture's safe travel height — the header and footer retract to it.
     pub z_safe: units::Length,
     /// Which of the machine's stored zeros this step's fixture sits in, named the way this
@@ -71,6 +91,22 @@ pub struct ProgramRender {
     /// is not written as `.nc`.
     pub file_extension: String,
     pub body: StepRender,
+}
+
+/// What every step's header and footer sees, identical across the whole job.
+///
+/// Gathered into one type rather than passed as loose arguments because these are the
+/// values that describe the *job* — as against [`ProgramRender`], which describes the
+/// *machine* this step runs on. A header reads from both, and the distinction is what
+/// keeps it clear which of the two a new value belongs on.
+pub struct ProgramContext<'a> {
+    /// The source KiCad board's file name.
+    pub filename: &'a str,
+    /// When the program was generated, by the local clock.
+    pub timestamp: &'a str,
+    /// Every step of the machining profile, in order, as the operator configured them.
+    /// `steps[step_index]` is the one being rendered.
+    pub steps: &'a [StepValue],
 }
 
 /// Renders one step into a finished program: `initialise`, the step's body, `conclude`,
@@ -87,8 +123,7 @@ pub struct ProgramRender {
 pub fn render_step_program(
     step: &StepPlan,
     render: &ProgramRender,
-    pcb_filename: &str,
-    timestamp: &str,
+    ctx: &ProgramContext,
     tool_feeds: &BTreeMap<String, ToolFeed>,
 ) -> Result<String, BodyError> {
     // Builds the Coder, which renders `set_unit` and `set_origin` up front — so a fixture
@@ -98,31 +133,44 @@ pub fn render_step_program(
         set_unit: &render.set_unit_tpl,
         set_origin: &render.set_origin_tpl,
         origin_reference: &render.origin_reference,
+        comment: &render.comment_tpl,
+        message: &render.message_tpl,
+        pause: &render.pause_tpl,
     })?;
 
-    // `initialise` and `conclude` are program-layer primitives and see the same values: a
-    // footer typically retracts to `z_safe`, and either may echo the source file. A fresh
-    // scope for each, but the Coder's unit mode persists between them.
+    // Converted once and cloned per scope: the array is the same for the header and the
+    // footer, and building it is the only part of the scope that walks a tree.
+    let steps = crate::gcode::step_data::to_array(ctx.steps);
+
+    // `program_begin` and `program_end` see the same values: a footer typically retracts
+    // to `z_safe`, and either may echo the source file. A fresh scope for each, but the
+    // Coder's unit mode persists between them.
+    //
+    // `step_index` is the plan's own step number, which is the enumeration of the
+    // profile's `/steps` array — so `steps[step_index]` is this step's record and no
+    // second index has to be kept in step with the first.
     let program_scope = || {
         let mut scope = Scope::new();
-        scope.push("pcb_filename", pcb_filename.to_string());
-        scope.push("timestamp", timestamp.to_string());
+        scope.push("filename", ctx.filename.to_string());
+        scope.push("timestamp", ctx.timestamp.to_string());
         scope.push("z_safe", render.z_safe);
         scope.push("origin_reference", render.origin_reference.clone());
+        scope.push("steps", steps.clone());
+        scope.push("step_index", step.index as i64);
         scope
     };
 
     let mut scope = program_scope();
     let header = coder
-        .render("initialise", &render.initialise_tpl, &mut scope)
-        .map_err(|err| BodyError::Render { primitive: "initialise".into(), message: err.to_string() })?;
+        .render("program_begin", &render.program_begin_tpl, &mut scope)
+        .map_err(|err| BodyError::Render { primitive: "program_begin".into(), message: err.to_string() })?;
 
     let body = render_step_body(&coder, step, &render.body, tool_feeds)?;
 
     let mut scope = program_scope();
     let footer = coder
-        .render("conclude", &render.conclude_tpl, &mut scope)
-        .map_err(|err| BodyError::Render { primitive: "conclude".into(), message: err.to_string() })?;
+        .render("program_end", &render.program_end_tpl, &mut scope)
+        .map_err(|err| BodyError::Render { primitive: "program_end".into(), message: err.to_string() })?;
 
     // Joined with single newlines (trailing ones trimmed) so an empty or multi-line body
     // never introduces stray blank lines.
@@ -133,7 +181,7 @@ pub fn render_step_program(
         .collect::<Vec<_>>()
         .join("\n");
 
-    number_lines(&coder, &assembled, &render.line_number_tpl)
+    format_lines(&coder, &assembled, &render.line_format_tpl)
 }
 
 /// A stock tool's identity + rated running values, looked up by tool id when a block
@@ -196,8 +244,9 @@ pub fn render_step_body(
             .map_err(|e| BodyError::Feeds { tool: name.clone(), message: feeds_error_text(e) })?;
         let slot = block.slot.unwrap_or(0) as i64;
 
-        // Tool-block boundary: change_tool then start_spindle (§7). change_tool leads
-        // with M05, so it also stops the previous block's spindle.
+        // Tool-block boundary: tool_change, then tool_measure on a machine that needs it,
+        // then spindle_start (§7). tool_change leads with M05, so it also stops the
+        // previous block's spindle.
         let manual_message = if render.is_atc {
             String::new()
         } else {
@@ -207,11 +256,28 @@ pub fn render_step_body(
         scope.push("manual_message", manual_message);
         scope.push("slot", slot);
         scope.push("rpm", fs.rpm);
-        out.push_str(&render_one(coder, "change_tool", &render.change_tool_tpl, &mut scope)?);
+        out.push_str(&render_one(coder, "tool_change", &render.tool_change_tpl, &mut scope)?);
+
+        // The tool has to be measured before it cuts, and after it is in the spindle —
+        // which is exactly here. Skipped on a machine with an automatic setter: that
+        // measures at M06, so a block here would be a second, redundant cycle.
+        if render.measures_tool_length {
+            let mut scope = Scope::new();
+            scope.push("slot", slot);
+            scope.push("tool_name", name.clone());
+            scope.push("diameter", block.diameter);
+            out.push_str(&render_one(coder, "tool_measure", &render.tool_measure_tpl, &mut scope)?);
+        }
 
         let mut scope = Scope::new();
         scope.push("rpm", fs.rpm);
-        out.push_str(&render_one(coder, "start_spindle", &render.start_spindle_tpl, &mut scope)?);
+        out.push_str(&render_one(coder, "spindle_start", &render.spindle_start_tpl, &mut scope)?);
+
+        // A hole's place in this block's run of holes, so a profile can open a modal cycle
+        // on the first and cancel it on the last. Counted over drill ops only: a block that
+        // also routes must not have its cycle "cancelled" by a routing op in between.
+        let drill_count = block.ops.iter().filter(|op| matches!(op.kind, OpKind::Drill)).count();
+        let mut drill_index = 0usize;
 
         // The block's ops: a point drill is one self-positioning cycle; a routed hole
         // expands into a spiral pocket (rapid → plunge → circles).
@@ -224,6 +290,9 @@ pub fn render_step_body(
                     scope.push("z_bottom", op.z.z_bottom);
                     scope.push("z_retract", op.z.z_retract);
                     scope.push("z_feedrate", fs.feed);
+                    scope.push("index", drill_index as i64);
+                    scope.push("count", drill_count as i64);
+                    drill_index += 1;
                     out.push_str(&render_one(coder, op.primitive, &render.drill_tpl, &mut scope)?);
                 }
                 OpKind::RouteHole { hole_diameter } => {
@@ -234,14 +303,19 @@ pub fn render_step_body(
                         hole_diameter,
                         block.diameter,
                     );
-                    for mv in &moves {
-                        out.push_str(&render_route_move(coder, render, mv, fs)?);
-                    }
+                    out.push_str(&render_moves(coder, render, moves, op.entry, fs)?);
                 }
                 OpKind::RouteContour { ref path } => {
                     // The span carries its own geometry: drop in at its start, feed
                     // through it, lift off at its end. The gap to the next span is the
                     // retaining tab, so the retract between them is not optional.
+                    //
+                    // The path arrives as a polyline because the routing offset is a
+                    // polygon operation (`pcb::routing_offset`), so a curved board edge
+                    // comes through as hundreds of chords. Fitting arcs back to it here —
+                    // after tab splitting, so no arc ever has to be cut in half — is what
+                    // turns those back into `G2`/`G3`. A run that no arc describes within
+                    // tolerance stays exactly the chords it already was.
                     let mut moves = Vec::with_capacity(path.len() + 2);
                     moves.push(RouteMove::Rapid {
                         x: path[0].x,
@@ -253,16 +327,27 @@ pub fn render_step_body(
                         y: path[0].y,
                         z: op.z.z_bottom,
                     });
-                    moves.extend(path[1..].iter().map(|p| RouteMove::Cut {
-                        x: p.x,
-                        y: p.y,
-                        z: op.z.z_bottom,
-                    }));
+                    let mut here = path[0];
+                    for seg in arcfit::fit(path, render.curve_tolerance) {
+                        match seg {
+                            arcfit::PathSeg::Line { to } => {
+                                moves.push(RouteMove::Cut { x: to.x, y: to.y, z: op.z.z_bottom });
+                            }
+                            arcfit::PathSeg::Arc { to, centre, ccw } => {
+                                moves.push(RouteMove::Arc {
+                                    x: to.x,
+                                    y: to.y,
+                                    i: routing::delta(centre.x, here.x),
+                                    j: routing::delta(centre.y, here.y),
+                                    ccw,
+                                });
+                            }
+                        }
+                        here = seg.end();
+                    }
                     let last = path[path.len() - 1];
                     moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
-                    for mv in &moves {
-                        out.push_str(&render_route_move(coder, render, mv, fs)?);
-                    }
+                    out.push_str(&render_moves(coder, render, moves, path[0], fs)?);
                 }
                 OpKind::RouteSlot { width, from_solid } => {
                     // entry/exit are the slot's medial-axis end centres (see `OpKind`).
@@ -275,9 +360,7 @@ pub fn render_step_body(
                         block.diameter,
                         from_solid,
                     );
-                    for mv in &moves {
-                        out.push_str(&render_route_move(coder, render, mv, fs)?);
-                    }
+                    out.push_str(&render_moves(coder, render, moves, op.entry, fs)?);
                 }
             }
         }
@@ -287,10 +370,88 @@ pub fn render_step_body(
     // harmlessly). Skipped when the step drilled nothing.
     if !step.blocks.is_empty() {
         let mut scope = Scope::new();
-        out.push_str(&render_one(coder, "stop_spindle", &render.stop_spindle_tpl, &mut scope)?);
+        out.push_str(&render_one(coder, "stop_spindle", &render.spindle_stop_tpl, &mut scope)?);
     }
 
     Ok(out)
+}
+
+/// Degrades a routing toolpath to what this machine can express, then renders it.
+///
+/// The single place a move list turns into text, so the fallback cannot be applied to one
+/// op kind and forgotten on another. `from` is where the tool stands when the sequence
+/// begins — [`degrade_moves`] needs it because an arc's start is implicit, being the
+/// previous move's end.
+fn render_moves(
+    coder: &Coder,
+    render: &StepRender,
+    moves: Vec<RouteMove>,
+    from: Point,
+    fs: FeedsSpeeds,
+) -> Result<String, BodyError> {
+    let mut out = String::new();
+    for mv in degrade_moves(moves, from, render) {
+        out.push_str(&render_route_move(coder, render, &mv, fs)?);
+    }
+    Ok(out)
+}
+
+/// Rewrites moves this machine has no word for into ones it has.
+///
+/// The schema's `x-fallback` chain, applied: `cut_arc` → `cut_linear`. A blank `cut_arc`
+/// does **not** mean "emit nothing" — it means the machine has no arc word, so say the
+/// curve another way, to `curve_tolerance`. Every other blank primitive keeps its existing
+/// meaning (a blank `tool_measure` still means *this machine needs no measurement block*),
+/// which is exactly why the fallback is declared per-primitive in the schema rather than
+/// inferred from emptiness here.
+///
+/// Done as a pass over the whole move list rather than inside [`render_route_move`]
+/// because an arc's **start** is implicit — it is the previous move's end — and only a
+/// walk of the sequence knows it. `from` is where the block begins.
+///
+/// `cut_linear` is the floor and has no fallback: a machine that cannot cut a straight
+/// line has nothing left to fall back to, and the render fails rather than emitting a
+/// program with the cuts missing.
+fn degrade_moves(moves: Vec<RouteMove>, from: Point, render: &StepRender) -> Vec<RouteMove> {
+    let has_arc = !render.cut_arc_tpl.trim().is_empty();
+    if has_arc {
+        return moves;
+    }
+
+    let tol = render.curve_tolerance;
+    let mut out = Vec::with_capacity(moves.len());
+    let mut here = from;
+    // Z is carried from the last move that set it: a fitted arc replaces a lateral cut at
+    // depth, and the chords standing in for it must be cut at that same depth.
+    let mut depth = units::Length::from_mm(0.0);
+
+    for mv in moves {
+        match mv {
+            RouteMove::Arc { x, y, i, j, ccw } => {
+                let end = Point::new(x, y);
+                let centre = Point::new(routing::sum(here.x, i), routing::sum(here.y, j));
+                for point in arcfit::flatten_arc(here, end, centre, ccw, tol) {
+                    out.push(RouteMove::Cut { x: point.x, y: point.y, z: depth });
+                }
+                here = end;
+            }
+            other => {
+                match other {
+                    RouteMove::Rapid { x, y, z }
+                    | RouteMove::Plunge { x, y, z }
+                    | RouteMove::Cut { x, y, z } => {
+                        here = Point::new(x, y);
+                        depth = z;
+                    }
+                    RouteMove::Arc { x, y, .. } => {
+                        here = Point::new(x, y);
+                    }
+                }
+                out.push(other);
+            }
+        }
+    }
+    out
 }
 
 /// Renders one move of a routing toolpath through the matching motion primitive:
@@ -322,7 +483,7 @@ fn render_route_move(
         s.push("feedrate", feed);
         // Legacy: templates that restate the spindle speed on the cut line.
         s.push("s", fs.rpm);
-        render_one(coder, "linear_cut", &render.linear_cut_tpl, &mut s)
+        render_one(coder, "linear_cut", &render.cut_linear_tpl, &mut s)
     }
 
     match *mv {
@@ -331,7 +492,7 @@ fn render_route_move(
             s.push("x", x);
             s.push("y", y);
             s.push("z", z);
-            render_one(coder, "rapid_move", &render.rapid_move_tpl, &mut s)
+            render_one(coder, "rapid_move", &render.move_rapid_tpl, &mut s)
         }
         RouteMove::Plunge { x, y, z } => {
             let plunge = FeedRate::from_mm_per_min(
@@ -371,39 +532,48 @@ fn feeds_error_text(error: FeedsError) -> String {
     }
 }
 
-/// Prefixes every non-blank line of the assembled program with the CNC's `line_number`
-/// primitive, rendered with `line` = 1, 2, 3 … and `text` = the line about to be numbered.
+/// Runs the CNC's `line_format` filter over every non-blank line of the assembled program.
 ///
-/// Line numbering is a whole-program concern — no primitive can know its own position —
-/// so it runs once here, over the finished program, rather than inside the templates that
-/// built it. The **format** is still entirely the profile's: the template decides the
-/// word, the increment (`{line * 10}`) and the separator, and ends with a backtick so no
-/// newline is emitted between the prefix and the line it numbers.
+/// A **filter**, not a generator: the template is handed `index` (0-based) and `text` (the
+/// line as the generators built it) and emits the line that replaces it. It therefore owns
+/// the whole line — the numbering word, the separator, and whether there is one at all:
 ///
-/// `text` is what makes the *decision* the profile's too, not just the format: a template
-/// that emits nothing for a line leaves it unnumbered, so a controller that should not see
-/// `N` words on its comments says so in its own template rather than asking for a rule
-/// here. The line is still emitted by this function either way — the primitive contributes
-/// a prefix, never the line itself.
+/// ```text
+/// line_format: "`N{(index + 1) * 10} {text}"     ->  N10 G0 X1 Y2
+/// ```
 ///
-/// An empty template disables numbering and the program is returned unchanged — what
-/// `line_numbering_increment: 0` used to mean. Blank lines are dropped when numbering, so
-/// the numbered program is contiguous.
+/// This is a whole-program concern — no primitive can know its own position — so it runs
+/// once here, over the finished program, rather than inside the templates that built it.
 ///
-/// A template that fails to render is a [`BodyError::Render`]: silently shipping an
-/// unnumbered program to a controller that requires line numbers would be worse than
-/// stopping.
-pub fn number_lines(coder: &Coder, program: &str, template: &str) -> Result<String, BodyError> {
+/// **Emitting nothing drops the line.** That is the mechanism by which a profile suppresses
+/// one, and it is also the trap: a template that never emits `text` throws the G-code away
+/// and leaves a column of bare line numbers. Nothing here can distinguish the two, so
+/// nothing here tries — instead the variable an old prefix-style template used (`line`) no
+/// longer exists, so such a template fails to render rather than quietly destroying the
+/// program, and `normalize_cnc_value` warns about it at load.
+///
+/// An empty template returns the program unchanged. Blank lines are dropped, so the
+/// filtered program is contiguous and `index` counts what the operator will actually see.
+///
+/// A template that fails to render is a [`BodyError::Render`]: shipping an unfiltered
+/// program to a controller that requires line numbers would be worse than stopping.
+pub fn format_lines(coder: &Coder, program: &str, template: &str) -> Result<String, BodyError> {
     if template.trim().is_empty() {
         return Ok(program.to_string());
     }
     let mut out: Vec<String> = Vec::new();
     for (index, line) in program.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let mut scope = Scope::new();
-        scope.push("line", index as i64 + 1);
+        scope.push("index", index as i64);
         scope.push("text", line.to_string());
-        let prefix = render_one(coder, "line_number", template, &mut scope)?;
-        out.push(format!("{prefix}{line}"));
+        let formatted = render_one(coder, "line_format", template, &mut scope)?;
+        // The filter owns the line, including its terminator: it emits one line's worth of
+        // text (with the newline its own emit added), and the join below puts the newlines
+        // back. A template that emitted nothing contributes no line at all.
+        let formatted = formatted.trim_end_matches('\n');
+        if !formatted.is_empty() {
+            out.push(formatted.to_string());
+        }
     }
     Ok(out.join("\n"))
 }
@@ -419,13 +589,19 @@ pub fn number_lines(coder: &Coder, program: &str, template: &str) -> Result<Stri
 pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
     StepRender {
         drill_tpl: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}".to_string(),
-        change_tool_tpl: "`{manual_message}\n`T{slot} M06".to_string(),
-        start_spindle_tpl: "`S{rpm}\n`M03".to_string(),
-        stop_spindle_tpl: "`M05".to_string(),
-        rapid_move_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
-        linear_cut_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
+        tool_change_tpl: "`{manual_message}\n`T{slot} M06".to_string(),
+        // Empty and off: a measurement block is machine-specific, and the tests that care
+        // about it supply their own. Off by default keeps every other test's expected
+        // output unchanged by its arrival.
+        tool_measure_tpl: String::new(),
+        measures_tool_length: false,
+        spindle_start_tpl: "`S{rpm}\n`M03".to_string(),
+        spindle_stop_tpl: "`M05".to_string(),
+        move_rapid_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
+        cut_linear_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
         cut_arc_tpl: r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#
             .to_string(),
+        curve_tolerance: units::Length::from_mm(0.01),
         limits: MachineLimits {
             spindle: feeds::SpindleRange::new(
                 RotationalSpeed::from_rpm(5_000.0),
@@ -446,7 +622,7 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
 /// [`sample_step_render`].
 #[cfg(test)]
 pub(crate) fn sample_initialise_tpl() -> String {
-    "`(k2g {pcb_filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}".to_string()
+    "`(k2g {filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}".to_string()
 }
 
 /// See [`sample_initialise_tpl`].
@@ -511,6 +687,76 @@ mod tests {
             }],
             notes: vec![],
         }
+    }
+
+    /// A one-op step routing `path` as a contour span.
+    fn contour_step(path: Vec<Point>) -> StepPlan {
+        let (entry, exit) = (path[0], path[path.len() - 1]);
+        StepPlan {
+            index: 0,
+            name: "Outline".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(2),
+                diameter: Length::from_mm(1.0),
+                ops: vec![AtomicOp {
+                    phase: Phase::Route,
+                    kind: OpKind::RouteContour { path },
+                    tool_id: "r1".to_string(),
+                    entry,
+                    exit,
+                    z: ZProfile {
+                        z_bottom: Length::from_mm(-2.1),
+                        z_retract: Length::from_mm(5.0),
+                        z_feed: None,
+                    },
+                    primitive: "route_contour",
+                    source: "outline".to_string(),
+                }],
+                travel_mm: 0.0,
+            }],
+            notes: vec![],
+        }
+    }
+
+    /// A 3.2 mm hole milled with a 1.0 mm router at (5,5) - its finishing lap is a full
+    /// circle, which is the arc case worth testing.
+    fn hole_step() -> StepPlan {
+        StepPlan {
+            index: 0,
+            name: "Route".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(2),
+                diameter: Length::from_mm(1.0),
+                ops: vec![AtomicOp {
+                    phase: Phase::Route,
+                    kind: OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) },
+                    tool_id: "r1".to_string(),
+                    entry: Point::new(Length::from_mm(5.0), Length::from_mm(5.0)),
+                    exit: Point::new(Length::from_mm(5.0), Length::from_mm(5.0)),
+                    z: ZProfile {
+                        z_bottom: Length::from_mm(-2.1),
+                        z_retract: Length::from_mm(5.0),
+                        z_feed: None,
+                    },
+                    primitive: "route_hole",
+                    source: "h1".to_string(),
+                }],
+                travel_mm: 0.0,
+            }],
+            notes: vec![],
+        }
+    }
+
+    /// A quarter circle of radius 10, sampled the way the stitcher tessellates one.
+    fn quarter_circle() -> Vec<Point> {
+        (0..=200)
+            .map(|i| {
+                let a = std::f64::consts::FRAC_PI_2 * (i as f64) / 200.0;
+                Point::new(Length::from_mm(10.0 * a.cos()), Length::from_mm(10.0 * a.sin()))
+            })
+            .collect()
     }
 
     fn feeds_for(feed: Option<f64>, speed: Option<f64>) -> BTreeMap<String, ToolFeed> {
@@ -715,52 +961,63 @@ mod tests {
         tf
     }
 
-    /// The number, its step and its separator all come from the profile's template —
-    /// the application only supplies `line`. The template's closing backtick is what
-    /// keeps the prefix on the same output line.
+    /// `line_format` emits the **whole line**: the number, its step, its separator and
+    /// the G-code itself all come from the profile's template. The application supplies
+    /// only `index` and `text`.
     #[test]
-    fn line_numbering_is_entirely_the_profiles_template() {
+    fn the_line_filter_is_entirely_the_profiles_template() {
         let coder = Coder::new();
         // Blank lines are dropped; the rest step by whatever arithmetic the profile
-        // writes, here the conventional ten.
+        // writes, here the conventional ten from a 0-based index.
         assert_eq!(
-            number_lines(&coder, "G21\n\nG0 Z5", "`N{line * 10} `").unwrap(),
+            format_lines(&coder, "G21\n\nG0 Z5", "`N{(index + 1) * 10} {text}").unwrap(),
             "N10 G21\nN20 G0 Z5"
         );
         // A different dialect is a template edit, not a code change.
         assert_eq!(
-            number_lines(&coder, "G21\nG0 Z5", "`/{line}:`").unwrap(),
-            "/1:G21\n/2:G0 Z5"
+            format_lines(&coder, "G21\nG0 Z5", "`/{index}:{text}").unwrap(),
+            "/0:G21\n/1:G0 Z5"
         );
-        // An empty template disables numbering — what `line_numbering_increment: 0` was.
-        assert_eq!(number_lines(&coder, "G21\nG0 Z5", "").unwrap(), "G21\nG0 Z5");
+        // An empty template leaves the program exactly as the generators built it.
+        assert_eq!(format_lines(&coder, "G21\nG0 Z5", "").unwrap(), "G21\nG0 Z5");
     }
 
-    /// Without the closing backtick the prefix would take the whole line to itself and
-    /// push the GCode onto the next one — so the parser rule is load-bearing here, and
-    /// this pins it.
+    /// The filter owns the line, so a template that never emits `text` throws the G-code
+    /// away. **The old prefix form is exactly that shape**, which is why `line` no longer
+    /// exists: an un-migrated template fails to render rather than silently producing a
+    /// column of bare line numbers. This is the guard for that.
     #[test]
-    fn a_line_number_template_without_the_closing_backtick_breaks_the_line() {
+    fn an_unmigrated_prefix_template_fails_rather_than_dropping_the_gcode() {
         let coder = Coder::new();
-        assert_eq!(
-            number_lines(&coder, "G21", "`N{line * 10} ").unwrap(),
-            "N10 \nG21",
-            "the emitted newline separates the number from its line"
+        let old_prefix_form = "`N{line * 10} `";
+        let result = format_lines(&coder, "G21\nG0 Z5", old_prefix_form);
+        assert!(
+            result.is_err(),
+            "the retired `line` variable must make this fail loudly, got: {result:?}"
         );
     }
 
-    /// The line itself is in scope as `text`, so *whether* to number is the profile's
-    /// decision as much as how — a template that emits nothing leaves that line bare,
-    /// which is how a profile keeps `N` words off its comments. The line is still
-    /// emitted: the primitive only ever contributes a prefix.
+    /// Emitting nothing for a line **drops** it — the mechanism by which a profile
+    /// suppresses a line, and the reverse of the old behaviour where the application
+    /// appended the line regardless.
     #[test]
-    fn a_line_number_template_can_read_the_line_and_skip_it() {
+    fn the_line_filter_can_rewrite_pass_through_or_drop_a_line() {
         let coder = Coder::new();
-        let skip_comments = "if !text.starts_with(\"(\") {\n    `N{line * 10} `\n}";
+
+        // Pass a comment through unnumbered, number the rest. `index` still counts every
+        // line, so the numbering reflects position in the program.
+        let skip_comments = "if text.starts_with(\"(\") {\n    `{text}\n} else {\n    `N{(index + 1) * 10} {text}\n}";
         assert_eq!(
-            number_lines(&coder, "(header)\nG21\n(done)\nG0 Z5", skip_comments).unwrap(),
-            "(header)\nN20 G21\n(done)\nN40 G0 Z5",
-            "comments pass through unnumbered, and the count still spans every line"
+            format_lines(&coder, "(header)\nG21\n(done)\nG0 Z5", skip_comments).unwrap(),
+            "(header)\nN20 G21\n(done)\nN40 G0 Z5"
+        );
+
+        // Emitting nothing removes the line altogether.
+        let drop_comments = "if !text.starts_with(\"(\") {\n    `{text}\n}";
+        assert_eq!(
+            format_lines(&coder, "(header)\nG21\n(done)\nG0 Z5", drop_comments).unwrap(),
+            "G21\nG0 Z5",
+            "a line the filter does not emit is not in the program"
         );
     }
 
@@ -768,7 +1025,7 @@ mod tests {
     /// error in one would otherwise surface as a failed generation in the field — a
     /// profile seeded from a template is never rendered until a job runs.
     #[test]
-    fn every_bundled_line_number_template_renders() {
+    fn every_bundled_line_filter_renders() {
         let coder = Coder::new();
         for (key, yaml) in [
             ("genmitsu_3018", include_str!("../../assets/cnc_templates/genmitsu_3018.yaml")),
@@ -779,13 +1036,14 @@ mod tests {
             let value: serde_json::Value =
                 serde_yaml::from_str(yaml).unwrap_or_else(|e| panic!("[{key}] is not YAML: {e}"));
             let template = value
-                .pointer("/primitives/line_number")
+                .pointer("/primitives/line_format")
                 .and_then(|v| v.as_str())
-                .unwrap_or_else(|| panic!("[{key}] has no line_number primitive"));
+                .unwrap_or_else(|| panic!("[{key}] has no line_format primitive"));
 
-            let numbered = number_lines(&coder, "(a comment)\nG21", template)
-                .unwrap_or_else(|e| panic!("[{key}] line_number failed to render: {e:?}"));
+            let numbered = format_lines(&coder, "(a comment)\nG21", template)
+                .unwrap_or_else(|e| panic!("[{key}] line_format failed to render: {e:?}"));
             let lines: Vec<&str> = numbered.lines().collect();
+            assert_eq!(lines.len(), 2, "[{key}] must not drop a line");
             assert!(lines[1].contains("G21"), "[{key}] lost the line it numbers");
             // Only the Masso profiles opt out of numbering comments; the others are
             // pinned here as numbering everything, so a change to either is deliberate.
@@ -793,18 +1051,141 @@ mod tests {
                 assert_eq!(lines[0], "(a comment)", "[{key}] numbered a comment");
             } else {
                 assert!(lines[0].starts_with('N'), "[{key}] left a line unnumbered");
+                assert!(lines[0].contains("(a comment)"), "[{key}] dropped the comment text");
             }
         }
     }
 
-    /// A template that cannot render stops generation: quietly shipping an unnumbered
-    /// program to a controller that requires numbers is the worse failure.
+    // ---- tool_measure -------------------------------------------------------------
+
+    /// Emitted between `tool_change` and `spindle_start` — the tool has to be in the
+    /// spindle and must not be cutting yet, which leaves exactly that gap.
     #[test]
-    fn a_broken_line_number_template_is_a_named_error() {
+    fn tool_measure_lands_between_the_change_and_the_spindle() {
         let coder = Coder::new();
-        let err = number_lines(&coder, "G21", "`N{nope}`").unwrap_err();
+        let render = StepRender {
+            tool_measure_tpl: "`M998 T{slot} ({tool_name} {diameter})".to_string(),
+            measures_tool_length: true,
+            ..render_ctx(true)
+        };
+        let out =
+            render_step_body(&coder, &one_block_step(), &render, &feeds_for(Some(300.0), Some(12_000.0)))
+                .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        let change = lines.iter().position(|l| l.contains("M06")).expect("tool change emitted");
+        let measure = lines.iter().position(|l| l.contains("M998")).expect("measure emitted");
+        let spindle = lines.iter().position(|l| l.starts_with('S')).expect("spindle started");
+        assert!(change < measure && measure < spindle, "wrong order:\n{out}");
+        assert!(lines[measure].contains("1.0mm drill"), "the tool is named: {}", lines[measure]);
+    }
+
+    /// A machine with an automatic setter measures at M06, so a block here would be a
+    /// second, redundant cycle. The template is still present — the machine flag is what
+    /// decides — so this cannot be mistaken for "the profile left it empty".
+    #[test]
+    fn tool_measure_is_skipped_on_a_machine_that_measures_itself() {
+        let coder = Coder::new();
+        let render = StepRender {
+            tool_measure_tpl: "`M998".to_string(),
+            measures_tool_length: false,
+            ..render_ctx(true)
+        };
+        let out =
+            render_step_body(&coder, &one_block_step(), &render, &feeds_for(Some(300.0), Some(12_000.0)))
+                .unwrap();
+        assert!(!out.contains("M998"), "an auto-setter machine measures at M06:\n{out}");
+    }
+
+    /// An empty template emits nothing even when the machine measures manually — the
+    /// profile has simply not said what its measurement cycle is.
+    #[test]
+    fn an_empty_tool_measure_template_emits_nothing() {
+        let coder = Coder::new();
+        let render =
+            StepRender { tool_measure_tpl: String::new(), measures_tool_length: true, ..render_ctx(true) };
+        let with_measure =
+            render_step_body(&coder, &one_block_step(), &render, &feeds_for(Some(300.0), Some(12_000.0)))
+                .unwrap();
+        let without = render_step_body(
+            &coder,
+            &one_block_step(),
+            &render_ctx(true),
+            &feeds_for(Some(300.0), Some(12_000.0)),
+        )
+        .unwrap();
+        assert_eq!(with_measure, without, "no template, no output, not even a blank line");
+    }
+
+    // ---- drill modality -----------------------------------------------------------
+
+    /// `index`/`count` let a profile open a modal cycle on the first hole, give bare
+    /// coordinates for the rest, and cancel it on the last — which is the whole reason
+    /// they exist, and what a G81 block is supposed to look like.
+    #[test]
+    fn a_modal_drill_template_opens_once_and_cancels_once() {
+        let coder = Coder::new();
+        let modal = "if index == 0 {\n    `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}\n} else {\n    `X{x} Y{y}\n}\nif index == count - 1 {\n    `G80\n}";
+        let mut step = one_block_step();
+        step.blocks[0].ops.push(drill_op(20.0, 4.0)); // three holes
+        let render = StepRender { drill_tpl: modal.to_string(), ..render_ctx(true) };
+
+        let out = render_step_body(&coder, &step, &render, &feeds_for(Some(300.0), Some(12_000.0)))
+            .unwrap();
+        assert_eq!(out.matches("G81").count(), 1, "the cycle opens once:\n{out}");
+        assert_eq!(out.matches("G80").count(), 1, "and is cancelled once:\n{out}");
+        // Two holes after the first carry coordinates alone.
+        assert_eq!(out.lines().filter(|l| l.starts_with("X")).count(), 2, "{out}");
+        // Order: open, two bare moves, cancel.
+        let lines: Vec<&str> = out.lines().collect();
+        let open = lines.iter().position(|l| l.contains("G81")).unwrap();
+        let cancel = lines.iter().position(|l| l.contains("G80")).unwrap();
+        assert!(open < cancel, "the cycle must be cancelled after it is opened:\n{out}");
+    }
+
+    /// One hole opens *and* cancels the cycle — correct, not a special case the template
+    /// has to guard.
+    #[test]
+    fn a_single_hole_block_opens_and_cancels_the_cycle() {
+        let coder = Coder::new();
+        let modal = "if index == 0 {\n    `G81 X{x} Y{y}\n}\nif index == count - 1 {\n    `G80\n}";
+        let mut step = one_block_step();
+        step.blocks[0].ops.truncate(1);
+        let render = StepRender { drill_tpl: modal.to_string(), ..render_ctx(true) };
+
+        let out = render_step_body(&coder, &step, &render, &feeds_for(Some(300.0), Some(12_000.0)))
+            .unwrap();
+        assert_eq!(out.matches("G81").count(), 1, "{out}");
+        assert_eq!(out.matches("G80").count(), 1, "{out}");
+    }
+
+    /// `count` counts **drill ops only**. A block that also routes must not have its cycle
+    /// "cancelled" early by a routing op being counted as a hole.
+    #[test]
+    fn the_drill_index_counts_holes_not_operations() {
+        let coder = Coder::new();
+        let mut step = one_block_step();
+        // Two drills plus a routed hole in the same block.
+        step.blocks[0].ops.push(AtomicOp {
+            kind: OpKind::RouteHole { hole_diameter: Length::from_mm(3.0) },
+            ..drill_op(30.0, 4.0)
+        });
+        let render =
+            StepRender { drill_tpl: "`H{index}/{count}".to_string(), ..render_ctx(true) };
+
+        let out = render_step_body(&coder, &step, &render, &feeds_for(Some(300.0), Some(12_000.0)))
+            .unwrap();
+        assert!(out.contains("H0/2") && out.contains("H1/2"), "two holes of two:\n{out}");
+        assert!(!out.contains("/3"), "the routed hole is not a drill:\n{out}");
+    }
+
+    /// A template that cannot render stops generation: quietly shipping an unformatted
+    /// program to a controller that requires line numbers is the worse failure.
+    #[test]
+    fn a_broken_line_filter_is_a_named_error() {
+        let coder = Coder::new();
+        let err = format_lines(&coder, "G21", "`N{nope}`").unwrap_err();
         match err {
-            BodyError::Render { primitive, .. } => assert_eq!(primitive, "line_number"),
+            BodyError::Render { primitive, .. } => assert_eq!(primitive, "line_format"),
             other => panic!("expected a Render error, got {other:?}"),
         }
     }
@@ -823,5 +1204,111 @@ mod tests {
             BodyError::Feeds { tool, .. } => assert_eq!(tool, "1.0mm drill"),
             other => panic!("expected a Feeds error, got {other:?}"),
         }
+    }
+
+    /// A contour arriving as a fine polyline comes out as `G2`/`G3`.
+    ///
+    /// The whole point of the fitting pass. The routing offset is a polygon operation, so
+    /// a curved board edge reaches here as hundreds of chords; emitting those verbatim is
+    /// what produced the enormous programs this replaces.
+    #[test]
+    fn a_curved_contour_is_emitted_as_arcs_not_hundreds_of_chords() {
+        let coder = Coder::new();
+        let body =
+            render_step_body(&coder, &contour_step(quarter_circle()), &render_ctx(true), &router_feed())
+                .expect("routes");
+
+        let arcs = body.lines().filter(|l| l.starts_with("G2 ") || l.starts_with("G3 ")).count();
+        let cuts = body.lines().filter(|l| l.starts_with("G1 ")).count();
+        assert_eq!(arcs, 1, "a quarter circle is one arc:\n{body}");
+        assert_eq!(cuts, 1, "only the plunge stays a G1, got {cuts}:\n{body}");
+    }
+
+    /// A straight-sided contour must be untouched by the fitter. Every routed outline that
+    /// exists today is one of these, so this is the regression guard on all of them.
+    #[test]
+    fn a_straight_contour_is_untouched_by_the_fitter() {
+        let coder = Coder::new();
+        let path: Vec<Point> = [(0.0, 0.0), (10.0, 0.0), (10.0, 8.0), (0.0, 8.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let body = render_step_body(&coder, &contour_step(path), &render_ctx(true), &router_feed())
+            .expect("routes");
+
+        assert!(
+            !body.contains("G2 ") && !body.contains("G3 "),
+            "square corners must not become arcs:\n{body}"
+        );
+        for expect in ["G1 X10 Y0", "G1 X10 Y8", "G1 X0 Y8"] {
+            assert!(body.contains(expect), "missing {expect}:\n{body}");
+        }
+    }
+
+    /// A controller with no arc word cuts the arc as chords rather than losing it.
+    ///
+    /// Before the fallback chain an empty motion template rendered to nothing at all, so
+    /// such a machine silently received a program with its routing missing — the failure
+    /// this leg exists to end. Asserted on a routed hole, whose finishing lap is a full
+    /// circle and so the worst case.
+    #[test]
+    fn an_empty_cut_arc_falls_back_to_straight_moves() {
+        let coder = Coder::new();
+        let render = StepRender { cut_arc_tpl: String::new(), ..render_ctx(true) };
+        let body = render_step_body(&coder, &hole_step(), &render, &router_feed()).expect("routes");
+
+        assert!(!body.contains("G2") && !body.contains("G3"), "no arc word is used:\n{body}");
+        let cuts = body.lines().filter(|l| l.starts_with("G1 ")).count();
+        assert!(cuts > 20, "the finishing lap must survive as chords, got {cuts}:\n{body}");
+
+        // And it must still *be* a circle: chord vertices at the wall radius (1.1 mm) from
+        // the hole centre at (5,5). A flattening that lost the geometry would still emit
+        // G1s, so counting them alone proves nothing.
+        let on_wall = body
+            .lines()
+            .filter_map(|l| {
+                let x = l.split('X').nth(1)?.split_whitespace().next()?.parse::<f64>().ok()?;
+                let y = l.split('Y').nth(1)?.split_whitespace().next()?.parse::<f64>().ok()?;
+                Some((x, y))
+            })
+            .filter(|(x, y)| ((x - 5.0f64).hypot(y - 5.0) - 1.1).abs() < 0.02)
+            .count();
+        assert!(on_wall > 20, "the lap should trace the wall, found {on_wall} points:\n{body}");
+    }
+
+    /// The fitted arcs of a curved contour degrade too, so a machine with no arc word
+    /// still gets the outline — as the chords it would have had before, not as nothing.
+    #[test]
+    fn a_curved_contour_still_cuts_on_a_machine_with_no_arc_word() {
+        let coder = Coder::new();
+        let render = StepRender { cut_arc_tpl: String::new(), ..render_ctx(true) };
+        let body =
+            render_step_body(&coder, &contour_step(quarter_circle()), &render, &router_feed())
+                .expect("routes");
+
+        assert!(!body.contains("G2") && !body.contains("G3"), "{body}");
+        let cuts = body.lines().filter(|l| l.starts_with("G1 ")).count();
+        assert!(cuts > 10, "the curve must still be cut, got {cuts} moves:\n{body}");
+    }
+
+    /// A tighter tolerance buys more chords — proof the profile field reaches the geometry
+    /// rather than a constant being used behind it.
+    #[test]
+    fn curve_tolerance_governs_the_flattening() {
+        let coder = Coder::new();
+        let count = |tol: f64| {
+            let render = StepRender {
+                cut_arc_tpl: String::new(),
+                curve_tolerance: Length::from_mm(tol),
+                ..render_ctx(true)
+            };
+            render_step_body(&coder, &hole_step(), &render, &router_feed())
+                .expect("routes")
+                .lines()
+                .filter(|l| l.starts_with("G1 "))
+                .count()
+        };
+        let (fine, coarse) = (count(0.001), count(0.05));
+        assert!(fine > coarse, "tighter tolerance must give more chords: {fine} vs {coarse}");
     }
 }

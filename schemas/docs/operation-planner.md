@@ -131,7 +131,7 @@ hand-edited or imported. The table of which operations are constrained is
 > tessellation is used **only internally** to resolve connectivity and nesting
 > (point-in-polygon), never as the output. A contour is therefore an ordered list of
 > **typed segments** (line / arc / bezier), and a route op expands to the matching
-> primitives — `linear_cut` (G1), `cut_arc` (G2/G3), `cut_bezier` — so arcs stay arcs.
+> primitives — `cut_linear` (G1), `cut_arc` (G2/G3) — so curves stay curves.
 > Rationale: one CNC arc is far more accurate and faster than the *n* × G1 chords a
 > tessellation emits. **The stitcher now carries this** (§9.6): `pcb::Contour` keeps
 > both `points` (tessellation, for topology/containment) and an ordered `segments`
@@ -206,7 +206,7 @@ machining + CNC + board bounds) and is a pure function of them.
 - **fixture origin** — where the board sits and which corner is X0/Y0 (the fixture
   `origin` x0/y0 = Left/Right/Front/Back).
 - **CNC scaling** — per-axis calibration (`machine.scaling.x/y`).
-- *(the machine origin — G54/G55, or a MASSO's G54.1 P7 — is selected in `initialise` by
+- *(the machine origin — G54/G55, or a MASSO's G54.1 P7 — is selected in `program_begin` by
   `set_origin()`, from the fixture's `origin_reference`; the Placement produces coordinates
   **relative to** it. The CNC's `set_origin` primitive also validates that reference, and
   refuses to generate when the machine has no such offset.)*
@@ -239,13 +239,13 @@ Because ops are placed in machine space, the §4 TSP minimises **physical** trav
 The Coder (`gcode-engine.md`) walks the ordered plan. The program-scope job context
 (`machine.*`, `cnc.*`, …) and modal unit state are injected once; then:
 
-- **At each tool-block boundary** — emit `change_tool` (slot, rpm, manual message) then
-  `start_spindle`.
-- **Per op** — `rapid_move` to `entry` at safe Z → the op's primitive
-  (`drill`/`peck_drill`, or `linear_cut`/`cut_arc` for routes) → retract.
+- **At each tool-block boundary** — emit `tool_change` (slot, rpm, manual message) then
+  `spindle_start`.
+- **Per op** — `move_rapid` to `entry` at safe Z → the op's primitive
+  (`drill`/`peck_drill`, or `cut_linear`/`cut_arc` for routes) → retract.
 - **Between ops** — the rapid at safe Z *is* the transit whose XY length the TSP
   minimised (`exit`ᵢ → `entry`ᵢ₊₁).
-- `initialise` / `conclude` bookend the program (already implemented).
+- `program_begin` / `program_end` bookend the program (already implemented).
 
 The plan slots into the empty **body** section of the current `[header, <body>, footer]`
 assembly in `run_generation` — **one program per step** (§9.2).
@@ -271,7 +271,7 @@ deterministic rule — no clock, no hash-map iteration order, no RNG.
    change** (the CNC's tool-change / park position) — the virtual origin the first move
    travels from.
 2. **Multi-step — one program per step.** Each step renders a **complete, standalone
-   program** (its own `initialise` + body + `conclude`); steps may target different
+   program** (its own `program_begin` + body + `program_end`); steps may target different
    CNCs/fixtures. A profile with K steps therefore produces **K programs — exactly one
    per step**. The output model (Code view + export) carries a program per step;
    `PrimitivePlan` is per-step.
@@ -304,9 +304,11 @@ deterministic rule — no clock, no hash-map iteration order, no RNG.
 
 **Still open:**
 
-7. **Bezier offset.** A bezier's offset isn't a bezier; approximate by biarc fit, or fall
-   back to the `cut_bezier` primitive. Rare in Edge.Cuts — decide when one actually
-   appears. (Lines and arcs, the 99 % case, offset exactly.)
+7. ~~**Bezier offset.**~~ Settled 2026-07-31. A bezier's offset isn't a bezier — nor
+   rational at all, bar the Pythagorean-hodograph family — so there is nothing to fall
+   back *to*, and the `cut_bezier` primitive was retired. Every curve, bezier or arc,
+   is offset as a polyline by Clipper and then re-fitted with arcs to
+   `machine.curve_tolerance` (`src/gcode/arcfit.rs`).
 8. **Drill-vs-peck threshold** — moot under (4); revisit only if `peck_drill` is
    reintroduced into the schema.
 

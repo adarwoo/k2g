@@ -8,7 +8,6 @@
 //! templates, and an optional delete-safety guard.
 
 use dioxus::prelude::*;
-use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
 use std::fs;
 use uuid::Uuid;
 
@@ -127,21 +126,17 @@ pub fn ProfileManager(
                                 return;
                             }
                         }
-                        let confirmed = MessageDialog::new()
-                            .set_level(MessageLevel::Warning)
-                            .set_title("Delete profile")
-                            .set_description("Delete this profile?")
-                            .set_buttons(MessageButtons::YesNo)
-                            .show();
-                        if confirmed == rfd::MessageDialogResult::Yes {
-                            match remove_profile_result(id) {
-                                Ok(()) => {
-                                    selected.set(None);
-                                    status_message.set("Profile deleted".to_string());
+                        spawn(async move {
+                            if super::profiles_common::confirm("Delete profile", "Delete this profile?").await {
+                                match remove_profile_result(id) {
+                                    Ok(()) => {
+                                        selected.set(None);
+                                        status_message.set("Profile deleted".to_string());
+                                    }
+                                    Err(message) => status_message.set(message),
                                 }
-                                Err(message) => status_message.set(message),
                             }
-                        }
+                        });
                     },
                     on_export: {
                         let current_name = current_name.clone();
@@ -153,48 +148,52 @@ pub fn ProfileManager(
                             };
                             let name = current_name.clone().unwrap_or_else(|| file_kind.clone());
                             let default_name = format!("{}.{}.yaml", slug_file_name(&name, &file_kind), file_kind);
-                            let Some(path) = FileDialog::new()
-                                .set_title("Export profile")
-                                .set_file_name(&default_name)
-                                .add_filter("Profile YAML", &["yaml", "yml"])
-                                .save_file()
-                            else {
-                                return;
-                            };
-                            match export_yaml(id) {
-                                Some(yaml) => {
-                                    if fs::write(&path, yaml).is_ok() {
-                                        status_message.set("Profile exported".to_string());
-                                    } else {
-                                        status_message.set("Export failed: unable to write file".to_string());
+                            spawn(async move {
+                                let Some(path) = super::profiles_common::pick_export_file(
+                                    "Export profile",
+                                    "Profile YAML",
+                                    &default_name,
+                                )
+                                .await
+                                else {
+                                    return;
+                                };
+                                match export_yaml(id) {
+                                    Some(yaml) => {
+                                        if fs::write(&path, yaml).is_ok() {
+                                            status_message.set("Profile exported".to_string());
+                                        } else {
+                                            status_message.set("Export failed: unable to write file".to_string());
+                                        }
                                     }
+                                    None => status_message.set("Export failed".to_string()),
                                 }
-                                None => status_message.set("Export failed".to_string()),
-                            }
+                            });
                         }
                     },
                     on_import: move |_| {
-                        let Some(path) = FileDialog::new()
-                            .set_title("Import profile")
-                            .add_filter("Profile YAML", &["yaml", "yml"])
-                            .pick_file()
-                        else {
-                            return;
-                        };
-                        let text = match fs::read_to_string(&path) {
-                            Ok(text) => text,
-                            Err(_) => {
-                                status_message.set("Import failed: file not readable".to_string());
+                        spawn(async move {
+                            let Some(path) =
+                                super::profiles_common::pick_import_file("Import profile", "Profile YAML")
+                                    .await
+                            else {
                                 return;
+                            };
+                            let text = match fs::read_to_string(&path) {
+                                Ok(text) => text,
+                                Err(_) => {
+                                    status_message.set("Import failed: file not readable".to_string());
+                                    return;
+                                }
+                            };
+                            match import_yaml(kind, &text) {
+                                Some(id) => {
+                                    selected.set(Some(id));
+                                    status_message.set("Profile imported and selected".to_string());
+                                }
+                                None => status_message.set("Import failed: invalid profile".to_string()),
                             }
-                        };
-                        match import_yaml(kind, &text) {
-                            Some(id) => {
-                                selected.set(Some(id));
-                                status_message.set("Profile imported and selected".to_string());
-                            }
-                            None => status_message.set("Import failed: invalid profile".to_string()),
-                        }
+                            });
                     },
                 }
             }

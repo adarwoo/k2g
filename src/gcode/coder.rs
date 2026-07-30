@@ -15,11 +15,13 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use gtl::rhai::{EvalAltResult, ImmutableString, Position};
 use gtl::{Gtl, GtlError, Scope, Template};
 use units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitSystem};
 
 use crate::gcode::primitive_vars::{PrimitiveVar, VarType};
 use crate::gcode::program::BodyError;
+use crate::gcode::step_data::StepValue;
 
 /// What the callable primitives emit, each rendered from its own profile template.
 ///
@@ -31,12 +33,18 @@ struct EmitCommands {
     metric: String,
     imperial: String,
     origin: String,
+    /// The `comment`/`message`/`pause` templates, in [`TEXT_CALLABLES`] order. These are
+    /// **not** pre-rendered: their text is the call site's, so they are rendered when
+    /// called. See [`Coder::build`].
+    text: [String; 3],
 }
 
-/// The program-layer templates a [`Coder`] pre-renders, plus the one value they read.
+/// The program-layer templates a [`Coder`] registers as callables, plus the one value they
+/// read.
 ///
 /// Grouped rather than passed as loose arguments because they arrive together, from the
-/// same step's CNC and fixture, and because the list has already grown once.
+/// same step's CNC and fixture, and because the list keeps growing.
+#[derive(Default)]
 pub struct ProgramPrimitives<'a> {
     /// The CNC's `set_unit` template — what `metric()`/`imperial()` emit.
     pub set_unit: &'a str,
@@ -46,7 +54,16 @@ pub struct ProgramPrimitives<'a> {
     /// `set_origin` normalises and validates it; passing it raw is what lets the
     /// template quote the original text back in an error.
     pub origin_reference: &'a str,
+    /// The operator callables, each taking the text passed at the call site:
+    /// `comment("…")`, `message("…")`, `pause("…")`.
+    pub comment: &'a str,
+    pub message: &'a str,
+    pub pause: &'a str,
 }
+
+/// The three operator callables, by the name a template calls them and the template each
+/// renders. Kept as one list so registering them is a loop rather than three near-copies.
+const TEXT_CALLABLES: [&str; 3] = ["comment", "message", "pause"];
 
 /// A `gtl` engine with the GCode dialect registered. Built once per generation run
 /// (on the worker thread) and reused across the program's primitives; the active
@@ -118,6 +135,11 @@ impl Coder {
             metric: render_unit(true)?,
             imperial: render_unit(false)?,
             origin,
+            text: [
+                primitives.comment.to_string(),
+                primitives.message.to_string(),
+                primitives.pause.to_string(),
+            ],
         }))
     }
 
@@ -161,6 +183,65 @@ impl Coder {
             // Already terminated by its own emit line, so raw — as for the unit words.
             writer.emit_raw(&origin);
         });
+
+        // The operator callables — `comment("…")`, `message("…")`, `pause("…")`.
+        //
+        // Unlike the three above, these cannot be pre-rendered: their `text` is whatever
+        // the call site passes. And they cannot render on *this* engine either, because
+        // `Gtl::run` clears the shared output buffer on entry — rendering `comment` from
+        // inside `program_begin` would discard everything `program_begin` had emitted so
+        // far. So they render on a **second engine** with its own buffer, and the result is
+        // pushed into this one.
+        //
+        // The sub-engine shares `unit_system`, so a length inside a comment formats in the
+        // program's current mode rather than reverting to millimetres. It does *not* get
+        // these callables registered on it, which makes recursion impossible by
+        // construction: `comment()` inside a comment template is function-not-found, not a
+        // hang.
+        // Built only when a profile actually has one of these — an engine costs ~330 µs
+        // and this Coder is rebuilt on every keystroke in the primitive editor, where all
+        // three are empty. The calls are still *registered* either way, so previewing a
+        // header that calls `comment(...)` behaves the same as one that calls
+        // `set_origin()`: it emits nothing rather than failing as an unknown function.
+        let sub = commands.text.iter().any(|t| !t.trim().is_empty()).then(|| {
+            let mut sub_gtl = Gtl::new();
+            crate::gcode::dialect::register(sub_gtl.engine_mut(), &unit_system);
+            Rc::new(sub_gtl)
+        });
+
+        for (name, source) in TEXT_CALLABLES.into_iter().zip(commands.text) {
+            let sub = sub.clone();
+            let writer = gtl.writer();
+            // Parsed on first call and kept: an operator callable is used a handful of
+            // times per program, but a template that comments every tool block would
+            // otherwise re-parse on each one.
+            let compiled: RefCell<Option<Rc<Template>>> = RefCell::new(None);
+            gtl.engine_mut().register_fn(
+                name,
+                move |text: ImmutableString| -> Result<(), Box<EvalAltResult>> {
+                    // No template, no sub-renderer, nothing to emit — the machine has no
+                    // word for this. Both conditions move together; see above.
+                    let (Some(sub), false) = (sub.as_ref(), source.trim().is_empty()) else {
+                        return Ok(());
+                    };
+                    let template = {
+                        let mut slot = compiled.borrow_mut();
+                        match slot.as_ref() {
+                            Some(template) => template.clone(),
+                            None => {
+                                let template = Rc::new(sub.compile(name, &source).map_err(to_rhai)?);
+                                *slot = Some(template.clone());
+                                template
+                            }
+                        }
+                    };
+                    let mut scope = Scope::new();
+                    scope.push("text", text.to_string());
+                    writer.emit_raw(&sub.run(&template, &mut scope).map_err(to_rhai)?);
+                    Ok(())
+                },
+            );
+        }
 
         // Everything the unit types can do in a script — formatting, comparison,
         // arithmetic, `max`/`min`/`abs`/`clamp`, and the `.mm`-style accessors — lives
@@ -242,6 +323,18 @@ impl Coder {
     }
 }
 
+/// Surfaces a sub-render failure to the *calling* template.
+///
+/// A callable renders on its own engine, so its error has to be handed back across the
+/// boundary as a Rhai error or the calling template would carry on as though the call had
+/// succeeded — emitting a program with a silently missing comment, or worse, ignoring a
+/// `throw` the profile author wrote as a precondition. `ErrorRuntime` is what a scripted
+/// `throw` produces, so the caller's failure reads as one; the [`GtlError`] `Display`
+/// already names the inner template, so the message says which one broke.
+fn to_rhai(error: GtlError) -> Box<EvalAltResult> {
+    Box::new(EvalAltResult::ErrorRuntime(error.to_string().into(), Position::NONE))
+}
+
 /// Turns a template failure into a [`BodyError`], keeping the message readable.
 ///
 /// A scripted `throw` carries the author's own operator-facing sentence, and
@@ -278,7 +371,7 @@ fn push_sample(scope: &mut Scope, primitive: &str, var: &PrimitiveVar) {
             scope.push(var.name.clone(), Length::from_mm(10.0));
         }
         VarType::Integer => {
-            scope.push(var.name.clone(), 1_i64);
+            scope.push(var.name.clone(), sample_integer(&var.name));
         }
         VarType::Feed => {
             scope.push(var.name.clone(), FeedRate::from_mm_per_min(300.0));
@@ -292,6 +385,134 @@ fn push_sample(scope: &mut Scope, primitive: &str, var: &PrimitiveVar) {
         VarType::Number => {
             scope.push(var.name.clone(), 1.0_f64);
         }
+        VarType::List => {
+            scope.push(var.name.clone(), crate::gcode::step_data::to_array(&sample_steps()));
+        }
+    }
+}
+
+/// A representative machining profile for previewing `steps`.
+///
+/// **This is where the preview's guarantee is weaker than it is elsewhere, and it is
+/// worth being plain about it.** For a scalar the sample scope holds exactly the names
+/// the primitive declares, so a reference to anything else fails in the preview for the
+/// same reason it would fail during generation. A list of objects has no such list of
+/// names to hold — its fields are `machining.yaml`'s, and the profile being previewed
+/// against does not exist yet. So the sample can only carry a *representative* shape,
+/// and a mistyped field previews as "function not found: fmt(())" rather than as
+/// "variable not found". Different message, same outcome: an error, before any program
+/// exists. `sample_steps_match_the_schema` pins the shape against the schema so the two
+/// cannot drift apart silently.
+///
+/// **Two** steps, not one, because the interesting thing a header can now say is which
+/// of several setups it is — a one-step sample would preview `{step_index + 1} of
+/// {steps.len()}` as "1 of 1" and tell the author nothing. `step_index` samples as 0
+/// (see [`sample_integer`]), so the previewed program is the first of the two.
+fn sample_steps() -> Vec<StepValue> {
+    let allowance = |relative: &str, max: f64| {
+        StepValue::Map(vec![
+            ("relative".into(), StepValue::Text(relative.into())),
+            ("max".into(), StepValue::Length(Length::from_mm(max))),
+        ])
+    };
+    let holes = |oblong: &str| {
+        StepValue::Map(vec![(
+            "holes".into(),
+            StepValue::Map(vec![
+                ("route_fallback".into(), StepValue::Bool(true)),
+                ("drill_first".into(), StepValue::Bool(true)),
+                ("pilot".into(), StepValue::Bool(false)),
+                ("oversize".into(), allowance("8%", 0.10)),
+                ("undersize".into(), allowance("6%", 0.08)),
+                ("oblong".into(), StepValue::Text(oblong.into())),
+            ]),
+        )])
+    };
+    let retention = |count: i64| {
+        StepValue::Map(vec![
+            ("mode".into(), StepValue::Text("tabs".into())),
+            ("count".into(), StepValue::Int(count)),
+            ("width".into(), StepValue::Length(Length::from_mm(2.0))),
+            ("mouse_bites".into(), StepValue::Bool(false)),
+        ])
+    };
+    let route_board = StepValue::Map(vec![
+        (
+            "outline".into(),
+            StepValue::Map(vec![
+                ("cut".into(), StepValue::Text("route".into())),
+                ("vgroove_depth".into(), StepValue::Text("80%".into())),
+                ("retention".into(), retention(4)),
+            ]),
+        ),
+        (
+            "cutouts".into(),
+            StepValue::Map(vec![
+                ("enabled".into(), StepValue::Bool(true)),
+                ("retention".into(), retention(2)),
+            ]),
+        ),
+        ("finishing".into(), StepValue::Length(Length::from_mm(0.1))),
+    ]);
+    let mill_board = StepValue::Map(vec![(
+        "finishing".into(),
+        StepValue::Map(vec![
+            ("clearance".into(), StepValue::Length(Length::from_mm(0.1))),
+            ("direction".into(), StepValue::Text("climb".into())),
+        ]),
+    )]);
+
+    // The ids are the shape a real step carries — a UUID the operator never reads — and
+    // the `_name` beside each is what a header would actually print. Both are sampled so
+    // a template written against either previews truthfully.
+    let step = |name: &str, side: &str, operations: &[&str], cnc: &str| {
+        StepValue::Map(vec![
+            ("name".into(), StepValue::Text(name.into())),
+            ("cnc".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bd8".into())),
+            ("fixture".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bd9".into())),
+            ("toolset".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bda".into())),
+            ("side_to_machine".into(), StepValue::Text(side.into())),
+            (
+                "operations".into(),
+                StepValue::List(
+                    operations.iter().map(|op| StepValue::Text((*op).into())).collect(),
+                ),
+            ),
+            ("drill_locating_pins".into(), StepValue::Map(vec![])),
+            ("drill_pth".into(), holes("drill_ends_then_route")),
+            ("drill_npth".into(), holes("drill_ends_then_route")),
+            ("route_board".into(), route_board.clone()),
+            ("mill_board".into(), mill_board.clone()),
+            ("cnc_name".into(), StepValue::Text(cnc.into())),
+            ("fixture_name".into(), StepValue::Text("Vacuum bed".into())),
+            ("toolset_name".into(), StepValue::Text("PCB rack".into())),
+        ])
+    };
+
+    vec![
+        step("Drill", "top", &["drill_pth", "drill_npth"], "Sample mill"),
+        step("Route outline", "top", &["route_board"], "Sample mill"),
+    ]
+}
+
+/// A representative sample for an integer variable.
+///
+/// `index`/`count` are the pair a modal template branches on, so a bare `1` for both would
+/// preview `index == 0` false *and* `index == count - 1` false — the middle case, which for
+/// the shipped modal `drill` template emits nothing at all. An author would see an empty
+/// preview for a correct template. First-of-three shows the branch that opens the cycle,
+/// which is the one worth seeing.
+///
+/// `step_index` is first-of-two for the same reason, against the two-step sample from
+/// [`sample_steps`]: at 0 a first-setup banner (`if step_index == 0`) *and* a footer
+/// naming what comes next (`if step_index + 1 < steps.len()`) both preview visibly. At
+/// the last step neither would, and a header that only ever previews as blank teaches
+/// its author nothing.
+fn sample_integer(name: &str) -> i64 {
+    match name {
+        "index" | "step_index" => 0,
+        "count" => 3,
+        _ => 1,
     }
 }
 
@@ -309,8 +530,8 @@ fn push_sample(scope: &mut Scope, primitive: &str, var: &PrimitiveVar) {
 /// cosmetic — nothing derived from it reaches a program.
 fn sample_string(primitive: &str, name: &str) -> String {
     match (primitive, name) {
-        ("line_number", "text") => "G1 X10 Y5 F600",
-        (_, "pcb_filename") => "board.kicad_pcb",
+        ("line_format", "text") => "G1 X10 Y5 F600",
+        (_, "filename") => "board.kicad_pcb",
         (_, "timestamp") => "2026-01-01 12:00:00",
         (_, "manual_message") => "(change tool)",
         // `G55`, not `G54`: every bundled profile accepts it, including the Bantam,
@@ -338,20 +559,16 @@ mod tests {
     /// A Coder built from a `set_unit` template alone — for the tests that are about the
     /// unit statement and have nothing to say about the origin.
     fn unit_only(set_unit: &str) -> Result<Coder, BodyError> {
-        Coder::with_program_primitives(&ProgramPrimitives {
-            set_unit,
-            set_origin: "",
-            origin_reference: "",
-        })
+        Coder::with_program_primitives(&ProgramPrimitives { set_unit, ..Default::default() })
     }
 
     /// A Coder built from a `set_origin` template and the reference to feed it — for the
     /// tests that are about the origin and have nothing to say about units.
     fn origin_only(set_origin: &str, origin_reference: &str) -> Result<Coder, BodyError> {
         Coder::with_program_primitives(&ProgramPrimitives {
-            set_unit: "",
             set_origin,
             origin_reference,
+            ..Default::default()
         })
     }
 
@@ -401,11 +618,11 @@ mod tests {
     fn renders_the_initialise_header() {
         let coder = unit_only(&crate::gcode::program::sample_set_unit_tpl()).unwrap();
         let mut scope = Scope::new();
-        scope.push("pcb_filename", "demo.kicad_pcb".to_string());
+        scope.push("filename", "demo.kicad_pcb".to_string());
         scope.push("timestamp", "2026-01-01 00:00:00".to_string());
         scope.push("z_safe", Length::from_mm(5.0));
 
-        let source = "`(k2g {pcb_filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}";
+        let source = "`(k2g {filename} - {timestamp})\nmetric();\n`G0 Z{z_safe}";
         let out = coder.render("initialise", source, &mut scope).unwrap();
 
         assert!(out.contains("(k2g demo.kicad_pcb - 2026-01-01 00:00:00)"));
@@ -606,9 +823,43 @@ mod tests {
     /// The two MASSO profiles differ only in their tool changer, so their origin handling
     /// must not drift apart — a fix applied to one and not the other is a silent
     /// inconsistency between two profiles the same operator is likely to use.
+    ///
+    /// Compared by **what they do**, not by their source text. The two templates are the
+    /// same machine's rule written by hand twice, so they legitimately differ in comment
+    /// wording, in where a long `throw` message wraps, and in whether the extended form is
+    /// emitted as one line or as a raw fragment plus its P-number — none of which an
+    /// operator can observe. What must never differ is which references each accepts and
+    /// what each emits for them, so that is what is asserted, over the whole range the
+    /// MASSO documents plus the forms an operator might type by hand.
+    ///
+    /// A byte comparison stood here before and had to go: it failed on a reworded comment,
+    /// which trains the reader to update the expectation without reading it — exactly the
+    /// habit that lets a real drift through.
     #[test]
     fn both_masso_profiles_select_the_origin_identically() {
-        assert_eq!(profile_set_origin(MASSO_ATC_YAML), profile_set_origin(MASSO_NO_ATC_YAML));
+        let atc = profile_set_origin(MASSO_ATC_YAML);
+        let no_atc = profile_set_origin(MASSO_NO_ATC_YAML);
+
+        for entered in [
+            // The plain bank, its ends, and one past each end.
+            "G53", "G54", "G59", "G60",
+            // The extended bank: both ends, one past, and the spacing/case an operator
+            // actually types.
+            "G54.1 P1", "G54.1 P100", "G54.1 P101", "g54.1p42", "  G54.1P7  ",
+            // The blank that must be refused rather than rendered empty.
+            "", "   ",
+            // Not an offset at all.
+            "M06",
+        ] {
+            match (origin_output(&atc, entered), origin_output(&no_atc, entered)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "'{entered}' must emit the same on both"),
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!(
+                    "'{entered}' is accepted by one MASSO profile and refused by the other: \
+                     ATC {a:?}, no-ATC {b:?}"
+                ),
+            }
+        }
     }
 
     /// A blank reference is the dangerous case: left unchecked the program runs against
@@ -730,17 +981,66 @@ mod tests {
         }
     }
 
+    /// A one-step job's header says so by saying nothing.
+    ///
+    /// The MASSO banner is assembled from emit-raw fragments around an `if steps.len() > 1`,
+    /// so the single-step case — much the commonest job — takes a different path through
+    /// the template from the one pinned above. Left untested it could emit "step 1 of 1",
+    /// a stray separator, or an unclosed comment, and the two-step pin would still pass.
+    #[test]
+    fn a_one_step_job_gets_a_header_with_no_step_clause() {
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(MASSO_ATC_YAML).expect("template parses");
+        let template = doc["primitives"]["program_begin"].as_str().expect("declared");
+
+        let coder = Coder::with_program_primitives(&ProgramPrimitives {
+            set_unit: &doc["primitives"]["set_unit"].as_str().expect("declared").to_string(),
+            set_origin: &doc["primitives"]["set_origin"].as_str().expect("declared").to_string(),
+            origin_reference: "G55",
+            ..Default::default()
+        })
+        .expect("the MASSO profile builds");
+
+        let mut scope = Scope::new();
+        scope.push("filename", "demo.kicad_pcb".to_string());
+        scope.push("timestamp", "2026-01-01 00:00:00".to_string());
+        scope.push("z_safe", Length::from_mm(20.0));
+        scope.push("origin_reference", "G55".to_string());
+        scope.push(
+            "steps",
+            crate::gcode::step_data::to_array(&[StepValue::Map(vec![(
+                "name".into(),
+                StepValue::Text("Drill PTH".into()),
+            )])]),
+        );
+        scope.push("step_index", 0_i64);
+
+        let header = coder.render("program_begin", template, &mut scope).expect("renders");
+        assert_eq!(
+            header.lines().next().unwrap_or_default(),
+            "(Created by kicad2gcode from 'demo' - 2026-01-01 00:00:00)",
+            "one step names the board and the time, and nothing about steps:\n{header}"
+        );
+    }
+
     /// Each shipped profile's **own `initialise`** renders with its **own `set_origin`** —
     /// the integration point the individual tests above each cover half of. A profile whose
     /// header forgot the call, or still mapped an ordinal, would pass every other test here
     /// and then emit a program with no origin selected at all.
     #[test]
     fn every_shipped_profile_header_selects_its_origin() {
-        // Every shipped `initialise` also calls `metric()`, so the real `set_unit` has to
-        // come along — this renders the profile as it actually ships, not a subset of it.
+        // Every shipped `program_begin` also calls `metric()`, so the real `set_unit` has
+        // to come along — this renders the profile as it actually ships, not a subset.
+        //
+        // A missing key **panics** rather than defaulting to empty: an empty template
+        // renders as an empty header, which would let a renamed-but-not-updated key pass
+        // half the assertions below by producing nothing at all to disagree with.
         let primitive = |yaml: &str, name: &str| -> String {
             let doc: serde_yaml::Value = serde_yaml::from_str(yaml).expect("template parses");
-            doc["primitives"][name].as_str().unwrap_or_default().to_string()
+            doc["primitives"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("the profile declares no '{name}' primitive"))
+                .to_string()
         };
 
         // `G55` is the one reference all four accept (the Bantam reserves G54).
@@ -754,17 +1054,33 @@ mod tests {
                 set_unit: &primitive(yaml, "set_unit"),
                 set_origin: &primitive(yaml, "set_origin"),
                 origin_reference: "G55",
+                ..Default::default()
             })
             .unwrap_or_else(|error| panic!("{name}: {}", error.message()));
 
+            // The whole program-layer scope, matching what `render_step_program` builds —
+            // two steps, and this program is the first of them, so a header that names
+            // its setup is exercised rather than merely tolerated.
+            let step = |step_name: &str| {
+                StepValue::Map(vec![
+                    ("name".into(), StepValue::Text(step_name.into())),
+                    ("side_to_machine".into(), StepValue::Text("top".into())),
+                    ("cnc_name".into(), StepValue::Text("MASSO G3".into())),
+                ])
+            };
             let mut scope = Scope::new();
-            scope.push("pcb_filename", "demo.kicad_pcb".to_string());
+            scope.push("filename", "demo.kicad_pcb".to_string());
             scope.push("timestamp", "2026-01-01 00:00:00".to_string());
             scope.push("z_safe", Length::from_mm(20.0));
             scope.push("origin_reference", "G55".to_string());
+            scope.push(
+                "steps",
+                crate::gcode::step_data::to_array(&[step("Drill PTH"), step("Route outline")]),
+            );
+            scope.push("step_index", 0_i64);
 
             let header = coder
-                .render("initialise", &primitive(yaml, "initialise"), &mut scope)
+                .render("program_begin", &primitive(yaml, "program_begin"), &mut scope)
                 .unwrap_or_else(|error| panic!("{name} header must render: {error}"));
 
             assert!(
@@ -773,14 +1089,20 @@ mod tests {
             );
 
             // One profile pinned exactly, so a stray blank line or a doubled origin shows
-            // up as a diff rather than passing the "contains G55" check above.
+            // up as a diff rather than passing the "contains G55" check above. The MASSO
+            // is the one that names its step, so the pin also covers the emit-raw run
+            // that assembles the banner from four separate fragments — the place a stray
+            // newline or a lost space would otherwise hide.
             if name == "masso_g3_with_atc" {
                 assert_eq!(
                     header,
-                    "(Created by kicad2gcode from 'demo.kicad_pcb' - 2026-01-01 00:00:00)\n\
-                     G17 G40 G49 G80 G90\n\
-                     G55\n\
+                    "(Created by kicad2gcode from 'demo' - step 1 of 2: Drill PTH - \
+                     2026-01-01 00:00:00)\n\
+                     (Target: MASSO G3 firmware 5.13)\n\
+                     G53 Z0\n\
+                     G17 G40 G80 G90\n\
                      G21\n\
+                     G55\n\
                      G0 Z20\n"
                 );
             }
@@ -804,6 +1126,172 @@ mod tests {
             let preview = coder.preview("set_origin", &template, &vars);
             assert!(preview.is_ok(), "{name} must preview cleanly, got: {preview:?}");
         }
+    }
+
+    // ---- runaway templates ---------------------------------------------------------
+
+    /// **The editor must not be hangable by a template.**
+    ///
+    /// `preview` runs on the UI thread and re-renders on every keystroke, so a template
+    /// with a loop is being executed *while it is half-written* — `while z > z_bottom {`
+    /// is a runaway for as long as it takes to type the body. Without the engine's
+    /// operation ceiling this call would never return and the application would be gone,
+    /// with no way back to the template that did it.
+    #[test]
+    fn a_runaway_template_cannot_hang_the_editor_preview() {
+        let coder = Coder::new();
+        let vars = crate::gcode::primitive_vars::variables_for("drill");
+        let started = std::time::Instant::now();
+
+        // The half-typed peck loop: the body that would decrease `z` is not written yet,
+        // so the condition can never become false. (`>=` rather than `>` because the
+        // preview samples every length as 10 mm, which would make `>` false at once — the
+        // shape under test is the loop that *does* start.)
+        let result =
+            coder.preview("drill", "let z = z_retract;\nwhile z >= z_bottom {\n    `G1 Z{z}\n}", &vars);
+
+        assert!(result.is_err(), "an endless loop must not preview as a program");
+        assert!(
+            result.unwrap_err().to_string().contains("did not finish"),
+            "and must say why, in terms the author can act on"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a keystroke must not stall: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The same ceiling applies during generation, and the failure names the primitive —
+    /// a board is thousands of renders, and "which template" is the only useful thing to
+    /// say about one that would not stop.
+    #[test]
+    fn a_runaway_primitive_fails_generation_against_its_own_name() {
+        let coder = Coder::new();
+        let error = crate::gcode::program::format_lines(&coder, "G21", "while true {\n    `x\n}");
+        match error {
+            Err(BodyError::Render { primitive, message }) => {
+                assert_eq!(primitive, "line_format");
+                assert!(message.contains("did not finish"), "{message}");
+            }
+            other => panic!("expected a named Render error, got {other:?}"),
+        }
+    }
+
+    // ---- the operator callables --------------------------------------------------
+
+    /// A Coder with the three operator callables wired to simple templates.
+    fn with_operator_callables() -> Coder {
+        Coder::with_program_primitives(&ProgramPrimitives {
+            comment: "`( {text} )",
+            message: "`MSG {text}",
+            pause: "`MSG {text}\n`M01",
+            ..Default::default()
+        })
+        .expect("plain templates build")
+    }
+
+    /// **The regression guard for the sub-renderer.** `comment("…")` renders a template
+    /// from inside another template, which [`gtl::Gtl::run`] cannot do on one engine —
+    /// it clears the shared output buffer on entry, so the enclosing template's lines
+    /// would vanish. This asserts they do not.
+    #[test]
+    fn a_callable_emits_at_the_call_site_without_losing_the_enclosing_output() {
+        let coder = with_operator_callables();
+        let out = coder
+            .render(
+                "program_begin",
+                "`G17 G90\ncomment(\"Outline pass\");\n`G0 Z5",
+                &mut Scope::new(),
+            )
+            .unwrap();
+        assert_eq!(out, "G17 G90\n( Outline pass )\nG0 Z5\n");
+    }
+
+    /// Each callable renders its own primitive, and a multi-line one keeps its shape.
+    #[test]
+    fn each_operator_callable_renders_its_own_primitive() {
+        let coder = with_operator_callables();
+        let out = coder
+            .render(
+                "t",
+                "comment(\"c\");\nmessage(\"m\");\npause(\"p\");",
+                &mut Scope::new(),
+            )
+            .unwrap();
+        assert_eq!(out, "( c )\nMSG m\nMSG p\nM01\n");
+    }
+
+    /// A machine with no word for one of these leaves the template empty; the call then
+    /// emits nothing at all rather than a blank line.
+    #[test]
+    fn an_empty_operator_template_emits_nothing() {
+        let coder = Coder::with_program_primitives(&ProgramPrimitives {
+            comment: "   ",
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(coder.render("t", "`A\ncomment(\"x\");\n`B", &mut Scope::new()).unwrap(), "A\nB\n");
+    }
+
+    /// The sub-engine shares the unit mode, so a length inside a comment formats the way
+    /// the surrounding program does. A separate engine with its own mode would silently
+    /// print millimetres into an inch program.
+    #[test]
+    fn a_callable_formats_lengths_in_the_programs_current_unit() {
+        let coder = Coder::with_program_primitives(&ProgramPrimitives {
+            set_unit: "`{if metric { \"G21\" } else { \"G20\" }}",
+            comment: "`( depth {d} )",
+            ..Default::default()
+        })
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("d", Length::from_mm(25.4));
+        let out = coder.render("t", "imperial();\ncomment(\"ignored\");", &mut scope);
+        // `d` is the caller's variable, not the callable's — the callable sees only
+        // `text` — so this proves the *mode* is shared, via a template of its own.
+        assert!(out.is_err(), "a callable's scope holds only `text`");
+
+        // With the length inside the caller instead, the shared mode shows up directly.
+        let mut scope = Scope::new();
+        scope.push("d", Length::from_mm(25.4));
+        let out = coder.render("t", "imperial();\n`Z{d}", &mut scope).unwrap();
+        assert_eq!(out, "G20\nZ1\n", "25.4 mm reads as 1 inch after imperial()");
+    }
+
+    /// A `throw` inside a callable's template must refuse the program, not be swallowed at
+    /// the engine boundary and leave the caller carrying on as though it had emitted.
+    #[test]
+    fn a_throw_inside_a_callable_refuses_the_program() {
+        let coder = Coder::with_program_primitives(&ProgramPrimitives {
+            comment: "throw \"comments are not supported on this controller\";",
+            ..Default::default()
+        })
+        .unwrap();
+        let error = coder.render("program_begin", "`A\ncomment(\"x\");", &mut Scope::new());
+        match error {
+            Err(err) => assert!(
+                err.to_string().contains("not supported"),
+                "the author's sentence must survive the engine boundary: {err}"
+            ),
+            Ok(out) => panic!("a throwing callable must not produce a program: {out:?}"),
+        }
+    }
+
+    /// Recursion is impossible by construction: the callables are registered on the main
+    /// engine only, so the sub-engine has never heard of them. This is what makes a
+    /// `comment` template that calls `comment()` an error rather than a hang.
+    #[test]
+    fn a_callable_cannot_call_itself() {
+        let coder = Coder::with_program_primitives(&ProgramPrimitives {
+            comment: "comment(\"again\");",
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            coder.render("t", "comment(\"x\");", &mut Scope::new()).is_err(),
+            "must be function-not-found, not an infinite loop"
+        );
     }
 
     // ---- the typed-value surface (see `crate::gcode::dialect`) -------------------
@@ -1123,37 +1611,117 @@ mod tests {
     #[test]
     fn preview_renders_declared_variables_and_rejects_undeclared_ones() {
         let coder = Coder::new();
-        let vars = crate::gcode::primitive_vars::variables_for("initialise");
+        let vars = crate::gcode::primitive_vars::variables_for("program_begin");
 
         // A template using only declared variables previews cleanly.
         let ok = coder
-            .preview("initialise", "`(from {pcb_filename})\nmetric();\n`G0 Z{z_safe}", &vars)
+            .preview("program_begin", "`(from {filename})\nmetric();\n`G0 Z{z_safe}", &vars)
             .expect("declared variables render");
         assert!(ok.contains("(from board.kicad_pcb)"), "string sample substituted");
         assert!(ok.contains("G0 Z10"), "length sample rendered as a bare number");
 
         // Referencing a variable this primitive does not declare fails — exactly
         // the `z_safe not found` class the editor is meant to catch early.
-        let err = coder.preview("initialise", "`G0 X{feedrate}", &vars);
+        let err = coder.preview("program_begin", "`G0 X{feedrate}", &vars);
         assert!(err.is_err(), "undeclared variable must fail preview");
     }
 
-    /// `line_number` gets a GCode line as its `text` sample, not a banner caption, so a
+    /// `line_format` gets a GCode line as its `text` sample, not a comment caption, so a
     /// template that branches on the line previews the case it will actually meet. The
     /// editor is where these templates get written; previewing the wrong branch would
     /// send the author looking for a bug that isn't there.
     #[test]
-    fn the_line_number_preview_samples_a_program_line() {
+    fn the_line_filter_preview_samples_a_program_line() {
         let coder = Coder::new();
-        let vars = crate::gcode::primitive_vars::variables_for("line_number");
+        let vars = crate::gcode::primitive_vars::variables_for("line_format");
 
         let numbered = coder
-            .preview("line_number", "if !text.starts_with(\"(\") {\n    `N{line * 10} `\n}", &vars)
-            .expect("line and text are both declared");
-        assert_eq!(numbered, "N10 ", "the sample line is code, so it is numbered");
+            .preview("line_format", "`N{(index + 1) * 10} {text}", &vars)
+            .expect("index and text are both declared");
+        assert_eq!(
+            numbered, "N10 G1 X10 Y5 F600\n",
+            "the sample is a real program line, and the filter emits the whole of it"
+        );
 
-        // `banner`'s caption sample is untouched by the split.
-        let caption = coder.preview("banner", "`( {text} )", &crate::gcode::primitive_vars::variables_for("banner"));
+        // `comment`'s caption sample is untouched by the split.
+        let caption = coder
+            .preview("comment", "`( {text} )", &crate::gcode::primitive_vars::variables_for("comment"));
         assert!(caption.unwrap().contains("Section"));
     }
+
+    /// The header's step list previews the way it generates: indexed, walked, counted.
+    ///
+    /// Two sample steps rather than one, so `{step_index + 1} of {steps.len()}` previews
+    /// as "1 of 2" — an author checking a multi-step header against a one-step sample
+    /// would see "1 of 1" and learn nothing about the thing they were writing.
+    #[test]
+    fn the_header_preview_indexes_and_walks_the_sample_steps() {
+        let coder = Coder::new();
+        let vars = crate::gcode::primitive_vars::variables_for("program_begin");
+
+        let out = coder
+            .preview(
+                "program_begin",
+                "metric();\n\
+                 `(step {step_index + 1} of {steps.len()}: {steps[step_index].name})\n\
+                 `(on {steps[step_index].cnc_name}, finish \
+                 {steps[step_index].route_board.finishing})\n\
+                 for s in steps {\n`(- {s.name})\n}",
+                &vars,
+            )
+            .expect("the declared step list previews");
+
+        assert!(out.contains("(step 1 of 2: Drill)"), "indexed by step_index:\n{out}");
+        assert!(out.contains("(on Sample mill, finish 0.1)"), "resolved name + unit:\n{out}");
+        assert!(out.contains("(- Drill)") && out.contains("(- Route outline)"), "walked:\n{out}");
+    }
+
+    /// The sample step must carry the same fields a real one does.
+    ///
+    /// This is the guard on the one place the preview is weaker than elsewhere: for a
+    /// scalar the sample scope holds exactly the declared names, so an undeclared
+    /// reference cannot preview. A step's fields are `machining.yaml`'s, and nothing but
+    /// this test stops the hand-written sample drifting from them — at which point the
+    /// editor would reject a header that generates perfectly well, or accept one that
+    /// does not.
+    #[test]
+    fn sample_steps_match_the_schema() {
+        const MACHINING_SCHEMA: &str = include_str!("../../schemas/machining.yaml");
+
+        let schema: serde_yaml::Value =
+            serde_yaml::from_str(MACHINING_SCHEMA).expect("machining.yaml parses");
+        let declared: Vec<String> = schema
+            .get("$defs")
+            .and_then(|v| v.get("step"))
+            .and_then(|v| v.get("properties"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("the step definition lists its properties")
+            .keys()
+            .filter_map(|key| Some(key.as_str()?.to_string()))
+            .collect();
+
+        let steps = sample_steps();
+        let StepValue::Map(fields) = &steps[0] else { panic!("a step samples as an object") };
+        let sampled: Vec<&str> = fields.iter().map(|(key, _)| key.as_str()).collect();
+
+        for name in &declared {
+            assert!(
+                sampled.contains(&name.as_str()),
+                "machining.yaml declares `{name}` on a step but the preview sample has no \
+                 such field, so `{{steps[0].{name}}}` fails in the editor and renders in \
+                 the program"
+            );
+        }
+        // …and nothing beyond the schema except the three names resolved beside the ids.
+        for name in sampled {
+            assert!(
+                declared.iter().any(|d| d == name)
+                    || ["cnc_name", "fixture_name", "toolset_name"].contains(&name),
+                "the sample carries `{name}`, which no real step has — a header written \
+                 against it would preview clean and then fail to render"
+            );
+        }
+    }
 }
+
+

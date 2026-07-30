@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use rfd::FileDialog;
 use std::fs;
 
 use units::user_format as unit_format;
@@ -61,34 +60,37 @@ fn CatalogManagementPanel(
                     button {
                         class: "btn btn-primary",
                         onclick: move |_| {
-                            let picked = FileDialog::new()
-                                .set_title("Import catalog")
-                                .add_filter("Catalog YAML", &["yaml", "yml"])
-                                .pick_file();
+                            spawn(async move {
+                                let picked = super::profiles_common::pick_import_file(
+                                    "Import catalog",
+                                    "Catalog YAML",
+                                )
+                                .await;
 
-                            let Some(path) = picked else {
-                                import_feedback.set("Catalog import canceled".to_string());
-                                return;
-                            };
-
-                            let text = match fs::read_to_string(&path) {
-                                Ok(text) => text,
-                                Err(_) => {
-                                    import_feedback
-                                        .set("Catalog import failed: file not readable".to_string());
+                                let Some(path) = picked else {
+                                    import_feedback.set("Catalog import canceled".to_string());
                                     return;
-                                }
-                            };
-                            let stem = path
-                                .file_stem()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("catalog")
-                                .to_string();
-                            state
-                                .with_mut(|s| match s.import_catalog_text(&stem, &text) {
-                                    Ok(name) => import_feedback.set(format!("Catalog '{name}' imported")),
-                                    Err(msg) => import_feedback.set(msg),
-                                });
+                                };
+
+                                let text = match fs::read_to_string(&path) {
+                                    Ok(text) => text,
+                                    Err(_) => {
+                                        import_feedback
+                                            .set("Catalog import failed: file not readable".to_string());
+                                        return;
+                                    }
+                                };
+                                let stem = path
+                                    .file_stem()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("catalog")
+                                    .to_string();
+                                state
+                                    .with_mut(|s| match s.import_catalog_text(&stem, &text) {
+                                        Ok(name) => import_feedback.set(format!("Catalog '{name}' imported")),
+                                        Err(msg) => import_feedback.set(msg),
+                                    });
+                            });
                         },
                         "Import catalog"
                     }

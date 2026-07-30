@@ -3568,16 +3568,39 @@ th {
     align-items: center;
     padding: 2px 4px;
     border-radius: 4px;
+    /* The whole row is the click target (it was a <label> before, and is now a div
+       carrying its own handler so it can read the shift key). */
+    cursor: pointer;
+    /* Load-bearing, not cosmetic: without it a shift-click drags out a browser text
+       selection across the list, which reads as the picker having broken. */
+    user-select: none;
 }
 
 .catalog-tool-row:hover {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
-.catalog-tool-row input {
+/* After :hover so a selected row stays legible under the cursor. Matches the stock
+   table's own selected rows. */
+.catalog-tool-row.selected {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+}
+
+.catalog-tool-row input,
+.catalog-tool-header input {
     width: 13px;
     height: 13px;
     margin: 0;
+}
+
+/* The row owns the click, so one landing on the box has to reach it. `disabled` would
+   grey the box out and swallow the event, and there is no `readonly` for a checkbox. */
+.catalog-tool-row input {
+    pointer-events: none;
+}
+
+.catalog-tool-header input {
+    cursor: pointer;
 }
 
 .catalog-tool-main {
@@ -4271,6 +4294,36 @@ summary {
     color: var(--accent);
 }
 
+/* How the primitive is invoked. A Callable is the one that needs to stand out — it
+   emits nothing until another template calls it, which is not otherwise visible. */
+.primitive-kind {
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: var(--surface-2);
+}
+
+.primitive-kind.is-callable {
+    border-color: var(--warning, #b8860b);
+    color: var(--warning, #b8860b);
+}
+
+.primitive-kind.is-filter {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.primitive-modal-hint {
+    margin: -4px 0 4px;
+    font-size: 12px;
+    color: var(--muted);
+}
+
 .primitive-modal-body {
     display: grid;
     grid-template-columns: minmax(0, 1.5fr) minmax(240px, 0.9fr);
@@ -4500,6 +4553,40 @@ mod tests {
                  an element carrying both classes would do nothing"
             );
         }
+    }
+
+    /// A selected catalog row must stay visible under the cursor.
+    ///
+    /// `.catalog-tool-row.selected` and `.catalog-tool-row:hover` both set `background`
+    /// and both count two components, so they tie on specificity and source order alone
+    /// decides. Declared the other way round, hovering a selected row would repaint it as
+    /// though it were not selected — and since the pointer is by definition on the row
+    /// being pointed at, that is the one moment its state matters most.
+    ///
+    /// The ordering is invisible in the sheet and reads as arbitrary, which is exactly
+    /// why it is pinned here rather than left to a comment.
+    #[test]
+    fn a_selected_catalog_row_is_declared_after_the_hover_it_ties_with() {
+        let rules = rules();
+        let index_of = |wanted: &str| {
+            rules
+                .iter()
+                .position(|(selector, body)| selector == wanted && body.contains("background"))
+                .unwrap_or_else(|| panic!("the sheet declares a `{wanted}` background rule"))
+        };
+
+        let hover = index_of(".catalog-tool-row:hover");
+        let selected = index_of(".catalog-tool-row.selected");
+        assert_eq!(
+            class_count(".catalog-tool-row.selected"),
+            class_count(".catalog-tool-row:hover"),
+            "if these stop tying, this test is measuring the wrong thing"
+        );
+        assert!(
+            selected > hover,
+            "the selected background must be declared after the hover it ties with, or a \
+             hovered row would lose its selected tint"
+        );
     }
 }
 

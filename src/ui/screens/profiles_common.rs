@@ -1,5 +1,75 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use crate::data::model::CascadeDeleteImpact;
+use dioxus::desktop::tao::window::Window;
 use dioxus::prelude::*;
+
+/// The application window, to own a native dialog.
+///
+/// # Never open a blocking dialog from an event handler
+///
+/// `rfd::FileDialog` / `rfd::MessageDialog` (the non-`Async` types) run the platform's own
+/// **modal message pump**. Called from inside a Dioxus event handler, that pump re-enters
+/// tao's event loop → `App::poll_vdom` → `VirtualDom::render_immediate`, while dioxus-core
+/// is still holding a borrow of the element arena for the event being dispatched. The
+/// result is `RefCell already borrowed`, and then a second panic as the first unwinds
+/// through the dialog component's props — an abort, mid-save.
+///
+/// It is not enough to avoid touching a signal beforehand. The removable-media watcher
+/// bumps the UI wake channel every couple of seconds
+/// ([`crate::runtime::removable`]), so `AppRoot` re-syncs and a render is pending
+/// regardless — any dialog held open long enough is exposed.
+///
+/// So: always the `Async*` types, always driven by `spawn`. rfd runs those on a thread of
+/// their own and wakes the future when they close, so the event loop is never inside a
+/// nested pump, and `spawn` returns immediately so dispatch finishes and drops its borrows
+/// before the dialog is even shown. The helpers below are the sanctioned way in;
+/// `no_blocking_native_dialogs_in_the_screens` fails the build's tests if a blocking one
+/// reappears.
+pub fn dialog_parent() -> Arc<Window> {
+    dioxus::desktop::window().window.clone()
+}
+
+/// A yes/no confirmation, owned by the application window.
+pub async fn confirm(title: &str, body: &str) -> bool {
+    rfd::AsyncMessageDialog::new()
+        .set_parent(&*dialog_parent())
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title(title)
+        .set_description(body)
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+        .await
+        == rfd::MessageDialogResult::Yes
+}
+
+/// "Where shall I read this from?" — `None` when cancelled.
+pub async fn pick_import_file(title: &str, filter_label: &str) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_parent(&*dialog_parent())
+        .set_title(title)
+        .add_filter(filter_label, &["yaml", "yml"])
+        .pick_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
+
+/// "Where shall I write this?" — `None` when cancelled.
+pub async fn pick_export_file(
+    title: &str,
+    filter_label: &str,
+    suggested_name: &str,
+) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_parent(&*dialog_parent())
+        .set_title(title)
+        .set_file_name(suggested_name)
+        .add_filter(filter_label, &["yaml", "yml"])
+        .save_file()
+        .await
+        .map(|handle| handle.path().to_path_buf())
+}
 
 pub fn format_impact_warning(prefix: &str, impact: &CascadeDeleteImpact) -> String {
     let mut lines = vec![prefix.to_string()];

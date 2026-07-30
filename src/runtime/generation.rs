@@ -15,7 +15,7 @@
 pub struct GenerationInput {
     pub process_profile_name: String,
     pub operations: Vec<String>,
-    pub pcb_filename: String,
+    pub filename: String,
     pub timestamp: String,
     // The resolved drill plan (one entry per machining step), the per-step program
     // context, and the tool→feed/speed lookup, all built on the main thread (the worker
@@ -26,6 +26,14 @@ pub struct GenerationInput {
     // and its work coordinate system all differ between steps of the same job.
     pub plan: crate::gcode::plan::MachiningPlan,
     pub steps: Vec<crate::gcode::program::ProgramRender>,
+    /// The machining profile's own `steps` array, in order, as the program templates read
+    /// it — every step's record, not just the one being rendered, so a header can say
+    /// "step 2 of 3". Aligned with `plan.steps[i]`, which is what `step_index` indexes.
+    ///
+    /// Held apart from `steps` above because the two are different things wearing similar
+    /// names: that one is the *machine's* render context (templates, retract height),
+    /// this one is the *operator's* record of what the step is for.
+    pub step_values: Vec<crate::gcode::step_data::StepValue>,
     pub tool_feeds: std::collections::BTreeMap<String, crate::gcode::program::ToolFeed>,
 }
 
@@ -197,6 +205,13 @@ fn run_generation(
     // One program per step (§9.2). Each renders through its own `Coder` from its own
     // CNC's templates, so a step cannot inherit the previous one's modal unit state or
     // its fixture's safe height — see `render_step_program`.
+    // Built once: it is the same for every step, and it is `step_index` that moves.
+    let program_ctx = crate::gcode::program::ProgramContext {
+        filename: &input.filename,
+        timestamp: &input.timestamp,
+        steps: &input.step_values,
+    };
+
     let mut steps: Vec<StepProgram> = Vec::with_capacity(input.plan.steps.len());
     for (index, step) in input.plan.steps.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
@@ -220,8 +235,7 @@ fn run_generation(
         let outcome = match crate::gcode::program::render_step_program(
             step,
             render,
-            &input.pcb_filename,
-            &input.timestamp,
+            &program_ctx,
             &input.tool_feeds,
         ) {
             Ok(text) => ProgramOutcome::Ready(Program {
@@ -403,11 +417,16 @@ mod tests {
     fn sample_program_render() -> crate::gcode::program::ProgramRender {
         crate::gcode::program::ProgramRender {
             cnc_name: "Genmitsu".to_string(),
-            initialise_tpl: crate::gcode::program::sample_initialise_tpl(),
-            conclude_tpl: crate::gcode::program::sample_conclude_tpl(),
-            line_number_tpl: String::new(),
+            program_begin_tpl: crate::gcode::program::sample_initialise_tpl(),
+            program_end_tpl: crate::gcode::program::sample_conclude_tpl(),
+            line_format_tpl: String::new(),
             set_unit_tpl: crate::gcode::program::sample_set_unit_tpl(),
             set_origin_tpl: crate::gcode::program::sample_set_origin_tpl(),
+            // The operator callables. Only reachable if a template calls them, and the
+            // sample header does not — so they change no existing expectation.
+            comment_tpl: "`( {text} )".to_string(),
+            message_tpl: "`MSG {text}".to_string(),
+            pause_tpl: "`MSG {text}\n`M01".to_string(),
             z_safe: units::Length::from_mm(5.0),
             origin_reference: "G54".to_string(),
             file_extension: "nc".to_string(),
@@ -426,17 +445,28 @@ mod tests {
         }
     }
 
+    /// A minimal step record — enough for a header to name itself.
+    fn sample_step_value(name: &str) -> crate::gcode::step_data::StepValue {
+        use crate::gcode::step_data::StepValue;
+        StepValue::Map(vec![
+            ("name".into(), StepValue::Text(name.to_string())),
+            ("side_to_machine".into(), StepValue::Text("top".into())),
+            ("cnc_name".into(), StepValue::Text("Sample mill".into())),
+        ])
+    }
+
     fn sample_input() -> GenerationInput {
         GenerationInput {
             process_profile_name: "Proto".to_string(),
             operations: vec!["Drill PTH".to_string(), "Route outline".to_string()],
-            pcb_filename: "demo.kicad_pcb".to_string(),
+            filename: "demo.kicad_pcb".to_string(),
             timestamp: "2026-01-01 00:00:00".to_string(),
             plan: crate::gcode::plan::MachiningPlan {
                 steps: vec![empty_step(0)],
                 note: None,
             },
             steps: vec![sample_program_render()],
+            step_values: vec![sample_step_value("Drill PTH")],
             tool_feeds: std::collections::BTreeMap::new(),
         }
     }
@@ -542,7 +572,7 @@ mod tests {
     #[test]
     fn line_numbers_are_applied_to_the_assembled_program_by_the_cnc_template() {
         let render = crate::gcode::program::ProgramRender {
-            line_number_tpl: "`N{line * 10} `".to_string(),
+            line_format_tpl: "`N{(index + 1) * 10} {text}".to_string(),
             ..sample_program_render()
         };
         let input = GenerationInput { steps: vec![render], ..sample_input() };
@@ -564,7 +594,7 @@ mod tests {
     #[test]
     fn line_numbering_restarts_for_every_step() {
         let numbered = || crate::gcode::program::ProgramRender {
-            line_number_tpl: "`N{line * 10} `".to_string(),
+            line_format_tpl: "`N{(index + 1) * 10} {text}".to_string(),
             ..sample_program_render()
         };
         let input = GenerationInput {
@@ -585,6 +615,103 @@ mod tests {
         }
     }
 
+    /// Each step's header reads **its own** record out of the shared `steps` array.
+    ///
+    /// The trap this closes is an off-by-one that would be invisible: every step gets the
+    /// same array, and only `step_index` distinguishes them, so a header wired to
+    /// `steps[0]` would render a plausible program naming the wrong setup. Two steps with
+    /// different names is the smallest case that can tell the difference.
+    #[test]
+    fn each_steps_header_names_itself_out_of_the_shared_step_list() {
+        let header = || crate::gcode::program::ProgramRender {
+            program_begin_tpl:
+                "`(step {step_index + 1} of {steps.len()}: {steps[step_index].name} on \
+                 {steps[step_index].cnc_name})"
+                    .to_string(),
+            ..sample_program_render()
+        };
+        let input = GenerationInput {
+            plan: crate::gcode::plan::MachiningPlan {
+                steps: vec![empty_step(0), empty_step(1)],
+                note: None,
+            },
+            steps: vec![header(), header()],
+            step_values: vec![sample_step_value("Drill PTH"), sample_step_value("Route outline")],
+            ..sample_input()
+        };
+        let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+
+        assert!(
+            text(&out, 0).contains("(step 1 of 2: Drill PTH on Sample mill)"),
+            "step 0:\n{}",
+            text(&out, 0)
+        );
+        assert!(
+            text(&out, 1).contains("(step 2 of 2: Route outline on Sample mill)"),
+            "step 1:\n{}",
+            text(&out, 1)
+        );
+    }
+
+    /// A measurement inside a step is still a measurement.
+    ///
+    /// This is the assertion that fails if the step tree ever degrades to plain JSON on
+    /// the way to the worker: `Node::to_value` renders a `0.1mm` as the *string*
+    /// `"0.1mm"`, which would print identically under `metric()` and so pass every test
+    /// but this one — and then emit millimetres into an inch program.
+    #[test]
+    fn a_measurement_inside_a_step_follows_the_programs_unit_mode() {
+        use crate::gcode::step_data::StepValue;
+
+        let step_values = vec![StepValue::Map(vec![(
+            "route_board".into(),
+            StepValue::Map(vec![("finishing".into(), StepValue::Length(Length::from_mm(25.4)))]),
+        )])];
+        let render = |unit: &str| crate::gcode::program::ProgramRender {
+            program_begin_tpl: format!(
+                "{unit}();\n`(finish {{steps[step_index].route_board.finishing}})"
+            ),
+            ..sample_program_render()
+        };
+
+        for (unit, expected) in [("metric", "(finish 25.4)"), ("imperial", "(finish 1)")] {
+            let input = GenerationInput {
+                steps: vec![render(unit)],
+                step_values: step_values.clone(),
+                ..sample_input()
+            };
+            let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+            assert!(
+                text(&out, 0).contains(expected),
+                "{unit}() should give {expected}:\n{}",
+                text(&out, 0)
+            );
+        }
+    }
+
+    /// A list has no printable form, and reaching past the end is an error rather than an
+    /// empty word in the middle of a G-code line. Both are the honest outcome — a header
+    /// that quietly dropped a value would produce a program nobody could tell was wrong —
+    /// and both are documented in the operator help, so they are pinned here.
+    #[test]
+    fn a_step_list_cannot_be_printed_whole_or_indexed_past_its_end() {
+        for template in ["`(steps: {steps})", "`(next: {steps[step_index + 1].name})"] {
+            let input = GenerationInput {
+                steps: vec![crate::gcode::program::ProgramRender {
+                    program_begin_tpl: template.to_string(),
+                    ..sample_program_render()
+                }],
+                ..sample_input()
+            };
+            let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+            assert!(
+                out.steps[0].failure().is_some(),
+                "`{template}` must fail rather than emit something:\n{:?}",
+                out.steps[0].program().map(|p| p.text.clone())
+            );
+        }
+    }
+
     /// The Coder carries the modal unit state `initialise` sets. Sharing one across steps
     /// would let step 1's `metric()` silently govern step 2's lengths — the exact
     /// cross-contamination the per-step model exists to prevent, and invisible in the
@@ -595,12 +722,12 @@ mod tests {
         // The two disagree observably: 25.4 mm is "1" in inches and "25.4" in mm, so a
         // shared Coder shows up as step 2 silently emitting step 1's units.
         let inches = crate::gcode::program::ProgramRender {
-            initialise_tpl: "imperial();\n`G0 Z{z_safe}".to_string(),
+            program_begin_tpl: "imperial();\n`G0 Z{z_safe}".to_string(),
             z_safe: units::Length::from_mm(25.4),
             ..sample_program_render()
         };
         let no_mode = crate::gcode::program::ProgramRender {
-            initialise_tpl: "`G0 Z{z_safe}".to_string(),
+            program_begin_tpl: "`G0 Z{z_safe}".to_string(),
             z_safe: units::Length::from_mm(25.4),
             ..sample_program_render()
         };
@@ -631,7 +758,7 @@ mod tests {
     #[test]
     fn each_step_uses_its_own_fixtures_height_and_work_offset() {
         let fixture = |z_safe: f64, origin: &str| crate::gcode::program::ProgramRender {
-            initialise_tpl: "`G0 Z{z_safe}\nset_origin();".to_string(),
+            program_begin_tpl: "`G0 Z{z_safe}\nset_origin();".to_string(),
             z_safe: units::Length::from_mm(z_safe),
             origin_reference: origin.to_string(),
             ..sample_program_render()

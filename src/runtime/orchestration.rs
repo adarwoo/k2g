@@ -34,6 +34,10 @@ impl AppCtx {
             STATUS_KEY_GENERATION_NOGO_REASONS.to_string(),
             readiness.nogo_reasons.join(" | "),
         );
+        // On screen from the first frame, not only once something is edited: an
+        // application that opens refusing to work owes the operator the reason
+        // immediately, not after they have gone looking for it.
+        app.set_readiness_errors(&readiness.nogo_reasons);
 
         Self {
             app,
@@ -122,6 +126,10 @@ impl AppCtx {
             STATUS_KEY_GENERATION_NOGO_REASONS.to_string(),
             readiness.nogo_reasons.join(" | "),
         );
+        // Republished on every mutation, so the banner tracks the gate as the operator
+        // works: each reason disappears the moment the thing it names is fixed, and the
+        // banner goes with the last of them.
+        self.app.set_readiness_errors(&readiness.nogo_reasons);
 
         if let Some(trigger) = detect_generation_trigger(
             previous_app,
@@ -231,14 +239,14 @@ impl AppCtx {
 
         crate::gcode::program::ProgramRender {
             cnc_name: machine.map(|m| m.name.clone()).unwrap_or_default(),
-            // The legacy `gcode_header`/`gcode_footer` fields carry the
-            // `initialise`/`conclude` primitives — see the crosswalk in
-            // `machine_profile_from_value`.
-            initialise_tpl: machine.map(|m| m.gcode_header.clone()).unwrap_or_default(),
-            conclude_tpl: machine.map(|m| m.gcode_footer.clone()).unwrap_or_default(),
-            line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
+            program_begin_tpl: machine.map(|m| m.program_begin_tpl.clone()).unwrap_or_default(),
+            program_end_tpl: machine.map(|m| m.program_end_tpl.clone()).unwrap_or_default(),
+            line_format_tpl: machine.map(|m| m.line_format_tpl.clone()).unwrap_or_default(),
             set_unit_tpl: machine.map(|m| m.set_unit_tpl.clone()).unwrap_or_default(),
             set_origin_tpl: machine.map(|m| m.set_origin_tpl.clone()).unwrap_or_default(),
+            comment_tpl: machine.map(|m| m.comment_tpl.clone()).unwrap_or_default(),
+            message_tpl: machine.map(|m| m.message_tpl.clone()).unwrap_or_default(),
+            pause_tpl: machine.map(|m| m.pause_tpl.clone()).unwrap_or_default(),
             // The fixture's safe travel height, clear of clamps and fixture hardware, per
             // the Z-model. A conservative 5 mm only when no fixture resolves — which the
             // reference check already flags.
@@ -257,28 +265,35 @@ impl AppCtx {
         use crate::gcode::feeds::{MachineLimits, SpindleRange};
         match machine {
             Some(m) => crate::gcode::program::StepRender {
-                drill_tpl: m.drill_next_hole.clone(),
-                change_tool_tpl: m.tool_change_command.clone(),
-                start_spindle_tpl: m.drill_cycle_start.clone(),
-                stop_spindle_tpl: m.drill_cycle_cancel.clone(),
-                rapid_move_tpl: m.drill_first_move.clone(),
-                linear_cut_tpl: m.drill_cycle_mode_series.clone(),
-                cut_arc_tpl: m.route_plunge_and_offset.clone(),
+                drill_tpl: m.drill_tpl.clone(),
+                tool_change_tpl: m.tool_change_tpl.clone(),
+                tool_measure_tpl: m.tool_measure_tpl.clone(),
+                spindle_start_tpl: m.spindle_start_tpl.clone(),
+                spindle_stop_tpl: m.spindle_stop_tpl.clone(),
+                move_rapid_tpl: m.move_rapid_tpl.clone(),
+                cut_linear_tpl: m.cut_linear_tpl.clone(),
+                cut_arc_tpl: m.cut_arc_tpl.clone(),
+                curve_tolerance: m.curve_tolerance,
                 limits: MachineLimits {
                     spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
                     max_feed_xy: m.max_feed_xy,
                     max_feed_z: m.max_feed_z,
                 },
                 is_atc: m.atc_slot_count > 0,
+                measures_tool_length: m.measures_tool_length,
             },
             None => crate::gcode::program::StepRender {
                 drill_tpl: String::new(),
-                change_tool_tpl: String::new(),
-                start_spindle_tpl: String::new(),
-                stop_spindle_tpl: String::new(),
-                rapid_move_tpl: String::new(),
-                linear_cut_tpl: String::new(),
+                tool_change_tpl: String::new(),
+                tool_measure_tpl: String::new(),
+                spindle_start_tpl: String::new(),
+                spindle_stop_tpl: String::new(),
+                move_rapid_tpl: String::new(),
+                cut_linear_tpl: String::new(),
                 cut_arc_tpl: String::new(),
+                // The schema's own default, so a step with no resolvable CNC fits curves
+                // the way a freshly created profile would rather than to some other number.
+                curve_tolerance: units::Length::from_mm(0.01),
                 limits: MachineLimits {
                     spindle: SpindleRange::new(
                         units::RotationalSpeed::from_rpm(1_000.0),
@@ -290,6 +305,7 @@ impl AppCtx {
                     max_feed_z: units::FeedRate::from_mm_per_min(5_000.0),
                 },
                 is_atc: false,
+                measures_tool_length: false,
             },
         }
     }
@@ -307,20 +323,32 @@ impl AppCtx {
             .map(|op| op.label().to_string())
             .collect();
 
-        let pcb_filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
+        let filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // The resolved drill plan plus one program context per step (`steps[i]` matches
         // `plan.steps[i]`) and the tool→feed/speed lookup. Built here on the main thread;
         // the worker only renders.
         let plan = machining_plan::plan_machining(self);
-        let steps = process
-            .and_then(|profile| Uuid::parse_str(&profile.id).ok())
+        let profile_id = process.and_then(|profile| Uuid::parse_str(&profile.id).ok());
+        let steps = profile_id
             .map(|profile_id| {
                 tooling::read_steps(profile_id)
                     .iter()
                     .map(|raw| self.build_program_render_ctx(raw))
                     .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // The same steps as the operator wrote them, for the program header to read.
+        // Enriched here rather than in the reader because only the running app knows what
+        // the bound ids are *called* — the datastore holds the binding, not the name.
+        let step_values = profile_id
+            .map(|profile_id| {
+                let mut values = tooling::read_step_values(profile_id);
+                for step in &mut values {
+                    self.name_step_bindings(step);
+                }
+                values
             })
             .unwrap_or_default();
         let tool_feeds = self
@@ -339,7 +367,42 @@ impl AppCtx {
             })
             .collect();
 
-        GenerationInput { process_profile_name, operations, pcb_filename, timestamp, plan, steps, tool_feeds }
+        GenerationInput {
+            process_profile_name,
+            operations,
+            filename,
+            timestamp,
+            plan,
+            steps,
+            step_values,
+            tool_feeds,
+        }
+    }
+
+    /// Adds `cnc_name`, `fixture_name` and `toolset_name` beside the ids a step binds.
+    ///
+    /// A step's `cnc` field is a UUID, which is the truth but is of no use in a header
+    /// comment. The resolved name sits beside it rather than replacing it, so the step a
+    /// template sees is still exactly the record `machining.yaml` describes, with the
+    /// lookup the operator would otherwise have to do by hand already done.
+    ///
+    /// An unresolvable binding — none chosen, or a profile since deleted — names itself
+    /// as the empty string, the same convention [`Self::build_program_render_ctx`] uses.
+    /// A missing *name* is not worth failing a program over; a missing *machine* already
+    /// fails it, loudly, when there is no template to render.
+    /// Each lookup mirrors [`Self::build_program_render_ctx`]'s: the ids compare as
+    /// `Uuid::to_string()` on both sides, because that is what the datastore reader emits
+    /// for a reference and what the profile list stores for an identity.
+    fn name_step_bindings(&self, step: &mut crate::gcode::step_data::StepValue) {
+        name_binding(step, "cnc", |id| {
+            self.app.machines.iter().find(|m| m.id == id).map(|m| m.name.clone())
+        });
+        name_binding(step, "fixture", |id| {
+            self.app.fixtures.iter().find(|f| f.id == id).map(|f| f.name.clone())
+        });
+        name_binding(step, "toolset", |id| {
+            self.app.toolsets.iter().find(|t| t.id == id).map(|t| t.name.clone())
+        });
     }
 
     pub fn ensure_catalogs_loaded(&mut self) {
@@ -561,7 +624,11 @@ fn evaluate_generation_readiness(
     };
 
     if !profile.pending_required_fields.is_empty() || !profile.usable {
-        nogo_reasons.push("Machining profile has missing required attributes".to_string());
+        nogo_reasons.push(incomplete_reason(
+            "Machining profile",
+            &profile.name,
+            &profile.pending_required_fields,
+        ));
     }
 
     match app
@@ -570,7 +637,11 @@ fn evaluate_generation_readiness(
         .find(|machine| machine.id == profile.cnc_profile_id)
     {
         Some(machine) if !machine.pending_required_fields.is_empty() || !machine.usable => {
-            nogo_reasons.push("Referenced CNC profile is incomplete".to_string());
+            nogo_reasons.push(incomplete_reason(
+                "CNC profile",
+                &machine.name,
+                &machine.pending_required_fields,
+            ));
         }
         None => {
             nogo_reasons.push("Referenced CNC profile is missing".to_string());
@@ -584,7 +655,11 @@ fn evaluate_generation_readiness(
         .find(|fixture| fixture.id == profile.fixture_profile_id)
     {
         Some(fixture) if !fixture.pending_required_fields.is_empty() || !fixture.usable => {
-            nogo_reasons.push("Referenced fixture profile is incomplete".to_string());
+            nogo_reasons.push(incomplete_reason(
+                "Fixture profile",
+                &fixture.name,
+                &fixture.pending_required_fields,
+            ));
         }
         None => {
             nogo_reasons.push("Referenced fixture profile is missing".to_string());
@@ -598,7 +673,11 @@ fn evaluate_generation_readiness(
         .find(|toolset| toolset.id == profile.toolset_profile_id)
     {
         Some(toolset) if !toolset.pending_required_fields.is_empty() || !toolset.usable => {
-            nogo_reasons.push("Referenced toolset profile is incomplete".to_string());
+            nogo_reasons.push(incomplete_reason(
+                "Toolset profile",
+                &toolset.name,
+                &toolset.pending_required_fields,
+            ));
         }
         None => {
             nogo_reasons.push("Referenced toolset profile is missing".to_string());
@@ -641,6 +720,40 @@ fn evaluate_generation_readiness(
     }
 }
 
+/// Names an incomplete profile **and the fields it is missing**.
+///
+/// "Referenced CNC profile is incomplete" was the whole of what an operator got: it did
+/// not say which profile, and it did not say what was absent, so the only way to act on it
+/// was to open every field of every profile and guess. It also hid a real bug for as long
+/// as it existed — the gate was refusing every job over seven fields that were all present
+/// under different names, and nothing on screen could have revealed that.
+///
+/// The field list is the profile's own `pending_required_fields`, i.e. dotted schema paths
+/// (`machine.spindle_rpm_min`). Not prose, but it points at exactly one field, which prose
+/// would not. Capped so a profile that is missing nearly everything — a hand-written or
+/// truncated file — still yields a diagnostic that fits on screen.
+fn incomplete_reason(kind: &str, name: &str, missing: &BTreeSet<String>) -> String {
+    const MAX_NAMED: usize = 6;
+
+    let named: Vec<&str> = missing.iter().take(MAX_NAMED).map(String::as_str).collect();
+    let label = if name.trim().is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind} '{name}'")
+    };
+    match (named.as_slice(), missing.len()) {
+        // `usable` is derived from the same set being empty, so this is only reachable if
+        // that ever stops being true. Still says which profile, which is the half that
+        // matters most.
+        ([], _) => format!("{label} is incomplete"),
+        (_, total) if total > MAX_NAMED => format!(
+            "{label} is missing {total} required fields, including {}",
+            named.join(", ")
+        ),
+        _ => format!("{label} is missing {}", named.join(", ")),
+    }
+}
+
 /// Whether a *configuration* error should hold the generation gate shut.
 ///
 /// Deliberately excludes [`GENERATION_ERROR_DOMAIN`]. Those entries are `is_error` too, but
@@ -648,10 +761,17 @@ fn evaluate_generation_readiness(
 /// failure permanent: the entry shuts the gate, the shut gate stops the next run, and only
 /// a run can replace the entry. The operator would correct the fixture and watch nothing
 /// happen. A failed last run is a reason to *want* the next one.
+///
+/// [`READINESS_ERROR_DOMAIN`] is excluded for a sharper version of the same reason: those
+/// entries *are* this function's own output, published so the operator can see them.
+/// Counting them would close the loop on itself — the gate shuts, publishes a reason,
+/// reads its own reason back as a blocking error, and stays shut no matter what is fixed.
 fn has_blocking_config_error(app: &AppState) -> bool {
-    app.errors
-        .iter()
-        .any(|error| error.is_error && error.domain != GENERATION_ERROR_DOMAIN)
+    app.errors.iter().any(|error| {
+        error.is_error
+            && error.domain != GENERATION_ERROR_DOMAIN
+            && error.domain != READINESS_ERROR_DOMAIN
+    })
 }
 
 fn detect_generation_trigger(
@@ -913,6 +1033,32 @@ fn job_config_fingerprint(config: &JobConfig) -> String {
     )
 }
 
+/// Puts `<field>_name` on a step beside the `<field>` it binds, resolving the id the
+/// step holds through `lookup`.
+///
+/// Free rather than inline so the rule is stated once for all three bindings, and so the
+/// part worth testing — the naming convention, and what an unresolved id becomes — needs
+/// no profile list to exercise.
+///
+/// An id that resolves to nothing names itself as the **empty string**, not as an absent
+/// field. The difference matters to a template: an absent field is Rhai's `()`, which
+/// cannot be interpolated, so a header that names its machine would fail outright on a
+/// step whose CNC has since been deleted. That is far too loud for a comment. A missing
+/// *machine* already fails the step, where it should, for having no templates to render.
+fn name_binding(
+    step: &mut crate::gcode::step_data::StepValue,
+    field: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) {
+    use crate::gcode::step_data::StepValue;
+
+    let name = {
+        let id = step.field(field).and_then(StepValue::as_text).unwrap_or_default();
+        lookup(id).unwrap_or_default()
+    };
+    step.set_field(&format!("{field}_name"), StepValue::Text(name));
+}
+
 fn selected_process_profile_from_app(app: &AppState) -> Option<&JobProfile> {
     let selected_id = app.selected_process_profile_id.as_ref()?;
     app.process_profiles
@@ -945,6 +1091,37 @@ mod orchestration_tests {
             kicad_status: String::new(),
             board_snapshot: None,
         })
+    }
+
+    /// A step's bindings are UUIDs; the header needs what they are called.
+    ///
+    /// Both halves are pinned. A **bound** id gains the name beside it, with the id left
+    /// exactly where it was — the step a template sees is still the record
+    /// `machining.yaml` describes, plus a lookup already done. An **unbound** or
+    /// dangling one gains an empty name rather than no field at all: an absent field is
+    /// Rhai's `()`, and a header naming its machine would then fail outright on a step
+    /// whose CNC had been deleted, which is far too loud a failure for a comment.
+    #[test]
+    fn a_steps_bindings_are_named_beside_the_ids_they_hold() {
+        use crate::gcode::step_data::StepValue;
+
+        let mut step = StepValue::Map(vec![
+            ("name".into(), StepValue::Text("Drill PTH".into())),
+            ("cnc".into(), StepValue::Text("019f-known".into())),
+            ("fixture".into(), StepValue::Text("019f-deleted".into())),
+        ]);
+
+        let known = |id: &str| (id == "019f-known").then(|| "MASSO G3".to_string());
+        name_binding(&mut step, "cnc", known);
+        name_binding(&mut step, "fixture", known);
+        // No `toolset` field at all — a step that binds none.
+        name_binding(&mut step, "toolset", known);
+
+        let text = |field: &str| step.field(field).and_then(StepValue::as_text).map(str::to_string);
+        assert_eq!(text("cnc_name"), Some("MASSO G3".to_string()));
+        assert_eq!(text("cnc"), Some("019f-known".to_string()), "the id is kept, not replaced");
+        assert_eq!(text("fixture_name"), Some(String::new()), "a dangling id names as empty");
+        assert_eq!(text("toolset_name"), Some(String::new()), "so does an absent binding");
     }
 
     /// Editing any step must schedule a regeneration.

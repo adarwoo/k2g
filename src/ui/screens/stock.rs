@@ -109,6 +109,14 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
 
     let mut show_catalog_picker = use_signal(|| false);
     let mut selected_catalog_tool_keys = use_signal(|| BTreeSet::<String>::new());
+    // One end of a shift-range in the catalog picker: the last tool clicked *without*
+    // shift, held as `(section key, tool key)`.
+    //
+    // The section travels with it so a range can only ever run inside the section that
+    // anchored it — see `catalog_click_range`. It moves on a plain click and stays put on
+    // a shift-click, so repeated shift-clicks grow and shrink one run from a fixed end
+    // rather than walking the anchor along behind the cursor.
+    let mut catalog_anchor = use_signal(|| None::<(String, String)>);
     let mut selected_stock_tool_ids = use_signal(|| BTreeSet::<String>::new());
     let mut show_delete_confirm = use_signal(|| false);
     let mut stock_feedback = use_signal(String::new);
@@ -270,6 +278,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                             class: "btn btn-primary",
                             onclick: move |_| {
                                 selected_catalog_tool_keys.set(BTreeSet::new());
+                                catalog_anchor.set(None);
                                 show_catalog_picker.set(true);
                             },
                             "Add tools from catalog"
@@ -296,7 +305,11 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                         div { class: "panel-header",
                             div {
                                 h3 { "Add tools from catalog" }
-                                p { "Select one or more tools from available catalogs." }
+                                p {
+                                    "Click a tool to select it. Shift-click to take the \
+                                     whole run between it and your last click, or use a \
+                                     section's header box to take the section."
+                                }
                             }
                         }
 
@@ -314,6 +327,29 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                     }
 
                                     for section in catalog.sections.iter() {
+                                        {
+                                        // This section's tool keys in display order — the
+                                        // run a shift-click slices out of. Behind an `Rc`
+                                        // because every row's handler needs to own a copy,
+                                        // and cloning the whole `Vec` per row would be
+                                        // quadratic in a section's length on every render.
+                                        let section_keys: std::rc::Rc<Vec<String>> =
+                                            std::rc::Rc::new(
+                                                section.tools.iter().map(|t| t.key.clone()).collect(),
+                                            );
+                                        let section_key = section.key.clone();
+                                        let section_selected = section_keys
+                                            .iter()
+                                            .filter(|key| {
+                                                selected_catalog_tool_keys.read().contains(key.as_str())
+                                            })
+                                            .count();
+                                        // Not tri-state: nothing in the theme styles an
+                                        // indeterminate box, so a part-selected section
+                                        // reads as unchecked and takes the rest on click.
+                                        let whole_section_selected = !section_keys.is_empty()
+                                            && section_selected == section_keys.len();
+                                        rsx! {
                                         details {
                                             key: "{section.key}",
                                             class: "catalog-node section-node",
@@ -323,6 +359,30 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
 
                                             div { class: "catalog-tool-list",
                                                 div { class: "catalog-tool-header",
+                                                    // Lands in the grid's first column,
+                                                    // which the header left empty over the
+                                                    // rows' checkboxes (its labels are
+                                                    // pinned to columns 2-4 in the theme).
+                                                    input {
+                                                        r#type: "checkbox",
+                                                        checked: whole_section_selected,
+                                                        oninput: {
+                                                            let section_keys = section_keys.clone();
+                                                            move |evt: FormEvent| {
+                                                                let checked = evt.checked();
+                                                                selected_catalog_tool_keys
+                                                                    .with_mut(|selected| {
+                                                                        for key in section_keys.iter() {
+                                                                            if checked {
+                                                                                selected.insert(key.clone());
+                                                                            } else {
+                                                                                selected.remove(key);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                            }
+                                                        },
+                                                    }
                                                     span { class: "catalog-tool-col-label",
                                                         "Label / SKU"
                                                     }
@@ -334,26 +394,85 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                     }
                                                 }
                                                 for tool in section.tools.iter() {
-                                                    label {
+                                                    // A `div` with its own click handler
+                                                    // rather than a `label` wrapping the
+                                                    // box: `FormEvent` carries no modifiers,
+                                                    // and a label's click both fires its own
+                                                    // handler and activates the checkbox, so
+                                                    // a shift-click would be handled twice.
+                                                    // The box below is now an indicator —
+                                                    // CSS passes clicks through it to here.
+                                                    div {
                                                         key: "{tool.key}",
-                                                        class: "catalog-tool-row",
+                                                        class: if selected_catalog_tool_keys.read().contains(&tool.key) {
+                                                            "catalog-tool-row selected"
+                                                        } else {
+                                                            "catalog-tool-row"
+                                                        },
+                                                        onclick: {
+                                                            let tool_key = tool.key.clone();
+                                                            let section_key = section_key.clone();
+                                                            let section_keys = section_keys.clone();
+                                                            move |evt: Event<MouseData>| {
+                                                                let shift = evt.modifiers().shift();
+                                                                let anchor = catalog_anchor.read().clone();
+                                                                // Only an anchor from *this*
+                                                                // section can start a run.
+                                                                let anchor_here = anchor
+                                                                    .as_ref()
+                                                                    .filter(|(sec, _)| sec == &section_key)
+                                                                    .map(|(_, key)| key.clone());
+                                                                let keys = catalog_click_range(
+                                                                    &section_keys,
+                                                                    anchor_here.as_deref(),
+                                                                    &tool_key,
+                                                                    shift,
+                                                                );
+                                                                // The clicked row decides
+                                                                // the whole run's fate, so
+                                                                // one gesture both fills a
+                                                                // range and empties one.
+                                                                let select = !selected_catalog_tool_keys
+                                                                    .read()
+                                                                    .contains(&tool_key);
+                                                                selected_catalog_tool_keys
+                                                                    .with_mut(|selected| {
+                                                                        for key in &keys {
+                                                                            if select {
+                                                                                selected.insert(key.clone());
+                                                                            } else {
+                                                                                selected.remove(key);
+                                                                            }
+                                                                        }
+                                                                    });
+                                                                // Re-anchor unless a run was
+                                                                // actually taken, so a shift
+                                                                // that had nothing to extend
+                                                                // still leaves an end to
+                                                                // extend from next time.
+                                                                if keys.len() == 1 {
+                                                                    catalog_anchor.set(Some((
+                                                                        section_key.clone(),
+                                                                        tool_key.clone(),
+                                                                    )));
+                                                                }
+                                                            }
+                                                        },
                                                         input {
                                                             r#type: "checkbox",
                                                             checked: selected_catalog_tool_keys.read().contains(&tool.key),
-                                                            oninput: {
-                                                                let tool_key = tool.key.clone();
-                                                                move |evt: FormEvent| {
-                                                                    let checked = evt.checked();
-                                                                    selected_catalog_tool_keys
-                                                                        .with_mut(|selected| {
-                                                                            if checked {
-                                                                                selected.insert(tool_key.clone());
-                                                                            } else {
-                                                                                selected.remove(&tool_key);
-                                                                            }
-                                                                        });
-                                                                }
-                                                            },
+                                                            // Out of the tab order along
+                                                            // with the handler: focused, it
+                                                            // would toggle on Space and then
+                                                            // be reverted by the next render,
+                                                            // since the row's click is the
+                                                            // only thing that writes the
+                                                            // selection. A control that
+                                                            // visibly does nothing is worse
+                                                            // than one that is not offered.
+                                                            // The section's header box stays
+                                                            // reachable and does work.
+                                                            tabindex: "-1",
                                                         }
                                                         span { class: "catalog-tool-label",
                                                             "{tool.display_name}"
@@ -367,6 +486,8 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                     }
                                                 }
                                             }
+                                        }
+                                        }
                                         }
                                     }
                                 }
@@ -391,6 +512,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                     let added = crate::ui::bindings::add_stock_from_catalog(&selected);
                                     stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
+                                    catalog_anchor.set(None);
                                     show_catalog_picker.set(false);
                                 },
                                 "Add Selected ({selected_catalog_count})"
@@ -740,5 +862,104 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
 
 fn catalog_tool_diameter(tool: &CatalogStockTool, unit_system: UserUnitSystem) -> String {
     unit_format::format_length_display(tool.diameter, unit_system)
+}
+
+/// The catalog tools one click acts on: the clicked tool alone, or the whole run between
+/// the anchor and it when shift is held.
+///
+/// `ordered` is **one section's** tool keys in display order, which is what confines a
+/// range to the section the operator can see. The catalog tree is built from `<details>`
+/// elements whose open state belongs to the DOM, so nothing here can tell an expanded
+/// section from a collapsed one; a range that could cross a section boundary would
+/// therefore be able to select tools with no way for the operator to notice before
+/// pressing Add.
+///
+/// Every degenerate case degrades to a plain click rather than guessing: shift held with
+/// no anchor yet, and an anchor that is not in `ordered` at all — it belongs to another
+/// section, or the catalog was reimported and its positional keys shifted under it.
+fn catalog_click_range(
+    ordered: &[String],
+    anchor: Option<&str>,
+    clicked: &str,
+    shift: bool,
+) -> Vec<String> {
+    let alone = || vec![clicked.to_string()];
+    if !shift {
+        return alone();
+    }
+    let Some(anchor) = anchor else { return alone() };
+
+    let find = |key: &str| ordered.iter().position(|candidate| candidate == key);
+    match (find(anchor), find(clicked)) {
+        // Inclusive of both ends, and ordered low-to-high so shift-clicking up the list
+        // gives the same run as shift-clicking down it.
+        (Some(from), Some(to)) => ordered[from.min(to)..=from.max(to)].to_vec(),
+        _ => alone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn section() -> Vec<String> {
+        ["t0", "t1", "t2", "t3", "t4"].iter().map(|k| k.to_string()).collect()
+    }
+
+    #[test]
+    fn without_shift_a_click_acts_on_its_own_tool() {
+        // Even with a perfectly good anchor sitting there — the modifier is the whole
+        // difference between toggling one tool and toggling twenty.
+        assert_eq!(catalog_click_range(&section(), Some("t0"), "t3", false), vec!["t3"]);
+    }
+
+    #[test]
+    fn shift_covers_the_run_between_the_anchor_and_the_click() {
+        assert_eq!(
+            catalog_click_range(&section(), Some("t1"), "t3", true),
+            vec!["t1", "t2", "t3"],
+            "both ends included"
+        );
+    }
+
+    /// Selecting up the list and down it must give the same run, or the gesture would
+    /// depend on which end the operator happened to click first.
+    #[test]
+    fn a_run_reads_the_same_in_both_directions() {
+        let (down, up) = (
+            catalog_click_range(&section(), Some("t1"), "t4", true),
+            catalog_click_range(&section(), Some("t4"), "t1", true),
+        );
+        assert_eq!(down, up);
+        assert_eq!(down, vec!["t1", "t2", "t3", "t4"]);
+    }
+
+    #[test]
+    fn an_anchor_on_the_clicked_tool_is_a_run_of_one() {
+        assert_eq!(catalog_click_range(&section(), Some("t2"), "t2", true), vec!["t2"]);
+    }
+
+    /// The three ways a range has no meaning. Each degrades to a plain click rather than
+    /// to nothing: a shift-click that silently did nothing reads as the list being broken.
+    #[test]
+    fn a_range_with_no_meaning_degrades_to_a_plain_click() {
+        // Shift held before anything has been clicked.
+        assert_eq!(catalog_click_range(&section(), None, "t2", true), vec!["t2"]);
+        // An anchor from another section — the case that keeps a run inside the section
+        // the operator can see.
+        assert_eq!(
+            catalog_click_range(&section(), Some("other::s1::t0"), "t2", true),
+            vec!["t2"]
+        );
+        // An anchor whose key no longer exists here, as after a catalog reimport shifts
+        // the positional keys under it.
+        assert_eq!(catalog_click_range(&section(), Some("t9"), "t2", true), vec!["t2"]);
+    }
+
+    #[test]
+    fn a_one_tool_section_has_nothing_to_range_over() {
+        let single = vec!["only".to_string()];
+        assert_eq!(catalog_click_range(&single, Some("only"), "only", true), vec!["only"]);
+    }
 }
 

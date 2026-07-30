@@ -70,7 +70,7 @@ into a single scope per primitive call:
 
 | Layer         | Set                          | Lifetime            | Examples |
 |---------------|------------------------------|---------------------|----------|
-| **Program** (job context + run metadata) | once, at `Coder::new` | whole generation | `toolset.size`, `fixture.backing_board_thickness`, `machine.max_feed_rate`, `machine.spindle_rpm_min`, `cnc.z_safe`, `pcb_filename`, `timestamp`, `scaling_x`, `scaling_y` |
+| **Program** (job context + run metadata) | once, at `Coder::new` | whole generation | `toolset.size`, `fixture.backing_board_thickness`, `machine.max_feed_rate`, `machine.spindle_rpm_min`, `cnc.z_safe`, `filename`, `timestamp`, `steps`, `step_index`, `scaling_x`, `scaling_y` |
 | **Operation** | per tool / operation         | one operation's steps | `tool_diameter`, `rpm`, `z_feed`, `xy_feed`, `z_bottom`, `z_retract`, `peck` |
 | **Call**      | per `expand()`               | one primitive call  | `x`, `y`, `z`, `s`, `i`, `j`, `clockwise`, `line`, `slot`, `message`, `text` |
 
@@ -102,8 +102,8 @@ Two conventions, split by role:
 
 - **Job context is namespaced.** Each source profile becomes a top-level
   namespace in scope — `machine.*`, `cnc.*`, `fixture.*`, `toolset.*`,
-  `machining.*` — with run-level values at the top level (`pcb_filename`,
-  `timestamp`, `scaling_x/y`). A template reads `{fixture.backing_board_thickness}`:
+  `machining.*` — with run-level values at the top level (`filename`,
+  `timestamp`, `steps`, `step_index`, `scaling_x/y`). A template reads `{fixture.backing_board_thickness}`:
   provenance is legible at the call site, and two profiles can both expose a
   `max_feed_rate` without colliding.
 - **Hot per-operation / per-call values stay flat and terse.** The values on
@@ -145,10 +145,10 @@ evolves as generation proceeds; both live on the engine, **not** in the script
 scope:
 
 - **Active unit mode** — set by `metric()` / `imperial()` (GTL §5). It mirrors
-  the machine's modal `G21`/`G20` state, so it must survive from `initialise`
+  the machine's modal `G21`/`G20` state, so it must survive from `program_begin`
   through every later primitive.
 - **Line-number counter** — the position of each program line, passed to the
-  `line_number` primitive as `line` (1-based, non-blank lines only), alongside
+  `line_format` primitive as `line` (1-based, non-blank lines only), alongside
   the line itself as `text`. The word, the increment and the separator are all
   the profile's template; the engine only counts. `text` extends that to the
   *decision*: a template that emits nothing for a line leaves it unnumbered,
@@ -299,7 +299,7 @@ let job = job_context! {
     toolset:   ns!{ size },
     machining: ns!{ peck },
     // run-level values sit at the top of the job context
-    pcb_filename, timestamp, scaling_x, scaling_y,
+    filename, timestamp, steps, step_index, scaling_x, scaling_y,
 };
 
 // Compiles + caches every primitive AST from the active CNC profile and captures
@@ -324,7 +324,7 @@ calls; the job context, unit mode, and `N` counter carry over (§2.1, §3.2).
   steps and the Coder iterates it, calling `expand` per step; `expand!` is the
   clean single-call unit for tests and direct use.
 - `metric()`/`imperial()` mutate the coder's program state (unit mode) and are
-  normally invoked from `initialise`; `enter_operation`/`expand` read it.
+  normally invoked from `program_begin`; `enter_operation`/`expand` read it.
 
 Snapshot tests drive `expand` with a fixed `PrimitivePlan` per CNC profile and
 compare against golden GCode (architecture: "Snapshot tests per CNC profile").
