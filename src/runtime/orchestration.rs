@@ -238,11 +238,14 @@ impl AppCtx {
             conclude_tpl: machine.map(|m| m.gcode_footer.clone()).unwrap_or_default(),
             line_number_tpl: machine.map(|m| m.line_number_tpl.clone()).unwrap_or_default(),
             set_unit_tpl: machine.map(|m| m.set_unit_tpl.clone()).unwrap_or_default(),
+            set_origin_tpl: machine.map(|m| m.set_origin_tpl.clone()).unwrap_or_default(),
             // The fixture's safe travel height, clear of clamps and fixture hardware, per
             // the Z-model. A conservative 5 mm only when no fixture resolves — which the
             // reference check already flags.
             z_safe: fixture.map(|f| f.z_safe).unwrap_or(Length::from_mm(5.0)),
-            work_coordinate_system: fixture.map(|f| f.work_coordinate_system).unwrap_or(1),
+            // Empty when no fixture resolves, which `set_origin` reports as an error —
+            // the right outcome, since there is no origin to guess at.
+            origin_reference: fixture.map(|f| f.origin_reference.clone()).unwrap_or_default(),
             file_extension: machine
                 .map(|m| m.output_file_extension.clone())
                 .unwrap_or_else(|| crate::runtime::GCODE_FILE_EXTENSION.to_string()),
@@ -628,7 +631,7 @@ fn evaluate_generation_readiness(
         }
     }
 
-    if app.errors.iter().any(|error| error.is_error) {
+    if has_blocking_config_error(app) {
         nogo_reasons.push("Blocking runtime errors present".to_string());
     }
 
@@ -636,6 +639,19 @@ fn evaluate_generation_readiness(
         is_ready: nogo_reasons.is_empty(),
         nogo_reasons,
     }
+}
+
+/// Whether a *configuration* error should hold the generation gate shut.
+///
+/// Deliberately excludes [`GENERATION_ERROR_DOMAIN`]. Those entries are `is_error` too, but
+/// they describe the **previous run's** outcome, and counting them here would make one
+/// failure permanent: the entry shuts the gate, the shut gate stops the next run, and only
+/// a run can replace the entry. The operator would correct the fixture and watch nothing
+/// happen. A failed last run is a reason to *want* the next one.
+fn has_blocking_config_error(app: &AppState) -> bool {
+    app.errors
+        .iter()
+        .any(|error| error.is_error && error.domain != GENERATION_ERROR_DOMAIN)
 }
 
 fn detect_generation_trigger(

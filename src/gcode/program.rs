@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use gtl::Scope;
 use units::{FeedRate, RotationalSpeed};
 
-use crate::gcode::coder::Coder;
+use crate::gcode::coder::{Coder, ProgramPrimitives};
 use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, MachineLimits, Motion};
 use crate::gcode::plan::{OpKind, StepPlan};
 use crate::gcode::routing::{self, RouteMove};
@@ -59,10 +59,14 @@ pub struct ProgramRender {
     /// The CNC's `set_unit` primitive — what `metric()`/`imperial()` emit. Empty for a
     /// machine with no unit statement.
     pub set_unit_tpl: String,
+    /// The CNC's `set_origin` primitive — what `set_origin()` emits, and what validates
+    /// [`Self::origin_reference`]. Empty for a machine that selects no origin.
+    pub set_origin_tpl: String,
     /// This step's fixture's safe travel height — the header and footer retract to it.
     pub z_safe: units::Length,
-    /// Which of the machine's stored zeros this step's fixture sits in, as an ordinal.
-    pub work_coordinate_system: u8,
+    /// Which of the machine's stored zeros this step's fixture sits in, named the way this
+    /// machine names it, exactly as the operator entered it.
+    pub origin_reference: String,
     /// The extension a saved program takes, from the CNC profile — so an Excellon step
     /// is not written as `.nc`.
     pub file_extension: String,
@@ -87,7 +91,14 @@ pub fn render_step_program(
     timestamp: &str,
     tool_feeds: &BTreeMap<String, ToolFeed>,
 ) -> Result<String, BodyError> {
-    let coder = Coder::with_unit_commands(&render.set_unit_tpl)?;
+    // Builds the Coder, which renders `set_unit` and `set_origin` up front — so a fixture
+    // whose origin reference this machine does not have fails here, before a single line
+    // of the program exists.
+    let coder = Coder::with_program_primitives(&ProgramPrimitives {
+        set_unit: &render.set_unit_tpl,
+        set_origin: &render.set_origin_tpl,
+        origin_reference: &render.origin_reference,
+    })?;
 
     // `initialise` and `conclude` are program-layer primitives and see the same values: a
     // footer typically retracts to `z_safe`, and either may echo the source file. A fresh
@@ -97,7 +108,7 @@ pub fn render_step_program(
         scope.push("pcb_filename", pcb_filename.to_string());
         scope.push("timestamp", timestamp.to_string());
         scope.push("z_safe", render.z_safe);
-        scope.push("work_coordinate_system", render.work_coordinate_system as i64);
+        scope.push("origin_reference", render.origin_reference.clone());
         scope
     };
 
@@ -450,6 +461,14 @@ pub(crate) fn sample_conclude_tpl() -> String {
 #[cfg(test)]
 pub(crate) fn sample_set_unit_tpl() -> String {
     "`{if metric { \"G21\" } else { \"G20\" }}".to_string()
+}
+
+/// See [`sample_initialise_tpl`]. A minimal `set_origin`: it validates nothing, because
+/// what a machine accepts is that machine's business and the tests that care about
+/// validation write their own template. This one only proves the value reaches the output.
+#[cfg(test)]
+pub(crate) fn sample_set_origin_tpl() -> String {
+    "`{origin_reference}".to_string()
 }
 
 #[cfg(test)]

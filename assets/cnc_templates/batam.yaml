@@ -6,8 +6,9 @@
 #  - The TinyG controller does not support canned cycles like G81. The drill
 #    primitive still emits G81 and must be expanded by the application when used.
 #  - G54 is reserved for the machine's own reference, so the first usable work
-#    coordinate system is G55. The fixture's `work_coordinate_system` ordinal is
-#    therefore mapped as G54 + n here, where most machines use G53 + n.
+#    coordinate system is G55. `set_origin` below therefore refuses G54 outright —
+#    a thing this machine could not express while the fixture held an ordinal and
+#    each profile mapped it arithmetically.
 #
 # Primitives use the GCode Template Language (see docs/gcode-template-language.md):
 # a backtick line emits GCode, other lines are Rhai script, and {expr} in an emit
@@ -33,11 +34,32 @@ primitives:
   # How this machine is told which unit system to use. Emitted by the metric() and
   # imperial() calls below; the application holds no G-code word of its own.
   set_unit: '`{if metric { "G21" } else { "G20" }}'
+  # Which stored zero the fixture sits in. G54 is the machine's own reference on a
+  # Bantam, so the usable offsets start at G55 — see the note at the top of this file.
+  set_origin: |
+    let key = origin_reference;
+    key.trim();
+    key.make_upper();
+    key.replace(" ", "");
+    if key.is_empty() {
+        throw "the fixture has no origin reference. Leaving it blank would run the " +
+              "job against whatever origin the controller happens to have active. " +
+              "Set it to one of: G55 G56 G57 G58 G59.";
+    }
+    let valid = [];
+    for n in 55..=59 { valid.push("G" + n); }
+    if !valid.contains(key) {
+        throw "'" + origin_reference + "' is not a valid origin reference for this " +
+              "machine. The Bantam reserves G54 for its own reference, so the usable " +
+              "work coordinate systems are G55 G56 G57 G58 G59. Extended offsets " +
+              "(G54.1 P...) are not available on TinyG.";
+    }
+    `{key}
   initialise: |
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
     `G17 G90 G40 G49 G80 G94
     metric();
-    `G{54 + work_coordinate_system}
+    set_origin();
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"
   linear_cut: "`G1 X{x} Y{y} Z{z} F{feedrate}"

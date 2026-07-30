@@ -240,10 +240,19 @@ pub fn DiagnosticsBanner(
     } else {
         "diag-banner diag-banner-warning"
     };
-    let status_text = match generation_state {
-        GenerationState::Running => "Generating…",
-        GenerationState::Failed => "Generation failed",
-        GenerationState::Idle => "Diagnostics available",
+    // A count alone ("1 errors, 0 warnings") says something is wrong but not what, so the
+    // operator has to click through to find out — and the commonest case by far is a single
+    // entry, where there is nothing to summarise. So one entry states itself; several fall
+    // back to the run status, which is the only honest thing to say about a mixed set.
+    let status_text = match (errors.as_slice(), generation_state) {
+        ([only], _) => only.details.clone().unwrap_or_else(|| only.message.clone()),
+        (_, GenerationState::Running) => "Generating…".to_string(),
+        (_, GenerationState::Failed) => "Generation failed".to_string(),
+        (_, GenerationState::Idle) => "Diagnostics available".to_string(),
+    };
+    let banner_title = match errors.as_slice() {
+        [only] => only.message.clone(),
+        _ => format!("{error_count} errors, {warning_count} warnings"),
     };
 
     rsx! {
@@ -252,9 +261,7 @@ pub fn DiagnosticsBanner(
                 div { class: "diag-banner-main",
                     span { class: "diag-banner-dot" }
                     div { class: "diag-banner-copy",
-                        div { class: "diag-banner-title",
-                            "{error_count} errors, {warning_count} warnings"
-                        }
+                        div { class: "diag-banner-title", "{banner_title}" }
                         div { class: "diag-banner-subtitle", "{status_text}" }
                     }
                 }

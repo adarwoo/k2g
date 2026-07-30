@@ -21,7 +21,6 @@ machine:
   scaling:
     x: 1.0
     y: 1.0
-  work_coordinate_systems: 6
   has_repeatable_home: true
   tool_length_measurement: auto_setter
 
@@ -29,9 +28,41 @@ primitives:
   # How this machine is told which unit system to use. Emitted by the metric() and
   # imperial() calls below; the application holds no G-code word of its own.
   set_unit: '`{if metric { "G21" } else { "G20" }}'
+  # Which stored zero the fixture sits in. The MASSO has the usual six plus the
+  # extended G54.1 P1..P100 bank, which is where most of its offsets live.
+  set_origin: |
+    let key = origin_reference;
+    key.trim();
+    key.make_upper();
+    key.replace(" ", "");          // "G54.1 P7" -> "G54.1P7"
+    if key.is_empty() {
+        throw "the fixture has no origin reference. Leaving it blank would run the " +
+              "job against whatever origin the controller happens to have active. " +
+              "Set it to G54-G59, or G54.1 P1 to G54.1 P100.";
+    }
+    let valid = [];
+    for n in 54..=59 { valid.push("G" + n); }
+    // --- extended offsets: MASSO 5.13+ only. -------------------
+    // Delete this loop when cloning for 5.12 or earlier.
+    for p in 1..=100 { valid.push("G54.1P" + p); }
+    // -----------------------------------------------------------
+    if !valid.contains(key) {
+        throw "'" + origin_reference + "' is not a valid origin reference for this " +
+              "machine. MASSO G3 accepts G54 to G59, and G54.1 P1 to G54.1 P100 on " +
+              "firmware 5.13 or later. Check the value in the fixture profile " +
+              "against the work offset shown on the MASSO F1 screen.";
+    }
+    // Re-space the extended form for readability in the output.
+    if key.starts_with("G54.1P") {
+        `G54.1 P`
+        `{key.sub_string(6)}
+    } else {
+        `{key}
+    }
   initialise: |
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
+    `G17 G40 G49 G80 G90
+    set_origin();
     metric();
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"

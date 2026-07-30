@@ -33,9 +33,11 @@ pub struct MachineProfile {
     /// in, emitted by a template's `metric()`/`imperial()` call. Empty for a machine
     /// that has no unit statement.
     pub set_unit_tpl: String,
-    /// How many stored zero points the controller holds — the count a fixture's
-    /// `work_coordinate_system` indexes into.
-    pub work_coordinate_systems: u8,
+    /// The `set_origin` primitive — how this machine is told which stored zero to work
+    /// from, emitted by a template's `set_origin()` call. It also *validates* the
+    /// fixture's origin reference, since which offsets exist is a machine fact. Empty for
+    /// a machine that selects no origin.
+    pub set_origin_tpl: String,
     pub gcode_header: String,
     pub gcode_footer: String,
     pub drill_first_move: String,
@@ -70,7 +72,7 @@ impl Default for MachineProfile {
             scaling_y: 1.0,
             line_number_tpl: String::new(),
             set_unit_tpl: String::new(),
-            work_coordinate_systems: 1,
+            set_origin_tpl: String::new(),
             gcode_header: "".to_string(),
             gcode_footer: "".to_string(),
             drill_first_move: "".to_string(),
@@ -112,10 +114,12 @@ pub struct FixtureProfile {
     /// words so the crosswalk stays a copy; `BoardOrigin::from_edges` interprets them.
     pub origin_x0: String,
     pub origin_y0: String,
-    /// Which of the machine's stored zero points this fixture occupies, from 1. An
-    /// ordinal: the CNC profile's `initialise` template names it (`G53 + n` on most
-    /// controllers, `G54 + n` on a Bantam, whose G54 is reserved).
-    pub work_coordinate_system: u8,
+    /// Which of the machine's stored zero points this fixture occupies, named the way the
+    /// target machine names it (`G55`, or `G54.1 P7` on a MASSO). Held exactly as the
+    /// operator entered it — normalising and validating it is the CNC profile's
+    /// `set_origin` primitive's job, because which offsets exist is a machine fact.
+    /// Empty means unset, which `set_origin` reports as an error rather than guessing.
+    pub origin_reference: String,
     pub pending_required_fields: BTreeSet<String>,
     pub usable: bool,
 }

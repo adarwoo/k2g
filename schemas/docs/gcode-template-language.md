@@ -145,6 +145,23 @@ as itself).
   exactly mirroring the machine's own modal state. A drilling primitive does not
   re-set units; it inherits whatever `initialise` established.
 
+`set_origin()` is the third call of this shape, and the one that also **validates**:
+
+- It emits the profile's `set_origin` primitive, which receives the step fixture's
+  `origin_reference` — the machine's own name for a stored zero (`G55`, `G54.1 P7`),
+  exactly as the operator entered it.
+- Which offsets a controller *has* is a machine fact, so the primitive decides: it
+  normalises the reference and `throw`s when the machine cannot honour it. That
+  refusal is deliberate and total — an unvalidated reference leaves the program
+  running against whatever origin happens to be active, which is a board cut in the
+  wrong place with nothing reported.
+- Unlike the unit mode, it sets no state. It emits one statement and is done.
+
+All three are rendered **once, at Coder construction**, before any output exists —
+so a broken template or a rejected origin refuses the program rather than truncating
+it. That is also why the calls exist at all: `Gtl::run` clears the shared output
+buffer, so a primitive cannot render another primitive in place.
+
 This is the mechanism behind principle #1: the same call that tells the machine
 the unit tells the formatter the unit, so the two can never desync. Splitting them —
 letting a template emit its own unit word and set the mode separately — would allow

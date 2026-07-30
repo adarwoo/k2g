@@ -47,7 +47,7 @@ pub fn FixtureProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                 // Beside `origin` because both answer "where is zero" — that one for
                 // the board's corner, this one for which of the machine's stored zeros
                 // the fixture sits in.
-                "/work_coordinate_system",
+                "/origin_reference",
                 // Shown even though bottom-side machining is not built yet: it is a
                 // fact about the fixture's registration that only the operator knows,
                 // and it is better recorded now than guessed later.

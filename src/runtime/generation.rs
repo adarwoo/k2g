@@ -320,9 +320,33 @@ fn publish_success(output: GenerationOutput) {
         } else {
             GenerationState::Failed
         };
+        // Standing diagnostics, one per step that produced nothing — replacing the previous
+        // run's, so a step that now succeeds clears its own entry. A partial run reports
+        // them too: "3 of 4 steps ready" is still a job the operator cannot run.
+        ctx.app.set_generation_errors(step_failures(&output.steps));
         ctx.app.programs = output.steps;
         ctx.app.log_event(output.summary);
     });
+}
+
+/// The standing diagnostic for each step that produced no program.
+///
+/// The headline names the step, because a multi-step job's operator needs to know *which*
+/// setup is broken before the message means anything; the detail is the renderer's own
+/// sentence, which for a rejected origin reference is the profile author's wording.
+fn step_failures(steps: &[StepProgram]) -> Vec<(String, Option<String>)> {
+    steps
+        .iter()
+        .filter_map(|step| {
+            let failure = step.failure()?;
+            let headline = if steps.len() == 1 {
+                "No program was generated".to_string()
+            } else {
+                format!("No program for step {} ('{}')", step.index + 1, step.name)
+            };
+            Some((headline, Some(failure.to_string())))
+        })
+        .collect()
 }
 
 /// Commit a failure: clear all derived outputs (a live tool must never show a
@@ -336,6 +360,12 @@ fn publish_failure(message: &str) {
     with_ctx_mut(|ctx| {
         ctx.app.generation_state = GenerationState::Failed;
         ctx.app.programs.clear();
+        // Standing, not just a toast: the run is over, there is no program, and nothing
+        // else on screen would say why once the notification faded.
+        ctx.app.set_generation_errors(vec![(
+            "Generation failed".to_string(),
+            Some(message.clone()),
+        )]);
         ctx.app.log_event(format!("Generation failed: {message}"));
     });
 }
@@ -362,6 +392,12 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
+    /// An `AppState` with nothing loaded — enough to exercise the diagnostics list, which
+    /// is the only part of it these tests touch.
+    fn bare_app() -> AppState {
+        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None })
+    }
+
     /// One step's program context, from the shared template fixtures. Production sources
     /// these from the step's own CNC and fixture (`build_program_render_ctx`).
     fn sample_program_render() -> crate::gcode::program::ProgramRender {
@@ -371,8 +407,9 @@ mod tests {
             conclude_tpl: crate::gcode::program::sample_conclude_tpl(),
             line_number_tpl: String::new(),
             set_unit_tpl: crate::gcode::program::sample_set_unit_tpl(),
+            set_origin_tpl: crate::gcode::program::sample_set_origin_tpl(),
             z_safe: units::Length::from_mm(5.0),
-            work_coordinate_system: 1,
+            origin_reference: "G54".to_string(),
             file_extension: "nc".to_string(),
             body: crate::gcode::program::sample_step_render(true),
         }
@@ -585,14 +622,18 @@ mod tests {
     }
 
     /// A step's header retracts to *its own* fixture's safe height and zeroes into *its
-    /// own* work coordinate system. Both used to come from the job-level projection, so
-    /// this test fails against the pre-per-step code.
+    /// own* machine origin. Both used to come from the job-level projection, so this test
+    /// fails against the pre-per-step code.
+    ///
+    /// The origin half is the sharper of the two now: `set_origin` is rendered **once, at
+    /// Coder construction**, so a Coder shared between steps would bake step 1's origin
+    /// into step 2's program. This asserts that it does not.
     #[test]
     fn each_step_uses_its_own_fixtures_height_and_work_offset() {
-        let fixture = |z_safe: f64, wcs: u8| crate::gcode::program::ProgramRender {
-            initialise_tpl: "`G0 Z{z_safe}\n`WCS{work_coordinate_system}".to_string(),
+        let fixture = |z_safe: f64, origin: &str| crate::gcode::program::ProgramRender {
+            initialise_tpl: "`G0 Z{z_safe}\nset_origin();".to_string(),
             z_safe: units::Length::from_mm(z_safe),
-            work_coordinate_system: wcs,
+            origin_reference: origin.to_string(),
             ..sample_program_render()
         };
         let input = GenerationInput {
@@ -600,16 +641,17 @@ mod tests {
                 steps: vec![empty_step(0), empty_step(1)],
                 note: None,
             },
-            steps: vec![fixture(5.0, 1), fixture(22.0, 3)],
+            steps: vec![fixture(5.0, "G54"), fixture(22.0, "G56")],
             ..sample_input()
         };
         let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
-        assert!(text(&out, 0).contains("G0 Z5") && text(&out, 0).contains("WCS1"));
+        assert!(text(&out, 0).contains("G0 Z5") && text(&out, 0).contains("G54"));
         assert!(
-            text(&out, 1).contains("G0 Z22") && text(&out, 1).contains("WCS3"),
+            text(&out, 1).contains("G0 Z22") && text(&out, 1).contains("G56"),
             "step 2 must use its own fixture, not step 1's:\n{}",
             text(&out, 1)
         );
+        assert!(!text(&out, 1).contains("G54"), "step 1's origin must not leak into step 2");
     }
 
     /// One bad step must not cost the operator the programs for the others — they are
@@ -655,6 +697,92 @@ mod tests {
         assert!(out.steps[0].failure().is_some(), "the broken step failed");
         assert!(out.steps[1].program().is_some(), "the sound step still generated");
         assert!(out.summary.contains("1 of 2"), "summary counts them: {}", out.summary);
+
+        // A partly-failed run is still a run the operator cannot execute, so the failure
+        // must stand in the banner and name which step it was — not just pass by as a toast.
+        let failures = step_failures(&out.steps);
+        assert_eq!(failures.len(), 1, "one standing diagnostic, for the one failed step");
+        assert!(
+            failures[0].0.contains("step 1"),
+            "the headline must name the step: {}",
+            failures[0].0
+        );
+        assert!(failures[0].1.is_some(), "and carry the renderer's own reason as the detail");
+    }
+
+    /// A failed generation is a **standing** condition, not a passing notification: with
+    /// `programs` cleared, the banner is the only thing left on screen that can say why
+    /// there is no G-code. This is the regression guard for that — the failure used to be
+    /// reported by `log_event` alone, so it faded after a few seconds and left an empty Code
+    /// view with no explanation.
+    #[test]
+    fn a_failed_step_becomes_a_standing_diagnostic_that_clears_on_success() {
+        let failed = |reason: &str| StepProgram {
+            index: 0,
+            name: "Drill top".to_string(),
+            cnc_name: "Masso".to_string(),
+            outcome: ProgramOutcome::Failed(reason.to_string()),
+        };
+
+        // The case reported from the field: an origin reference the machine does not have.
+        let reason = "primitive 'set_origin': 'XX' is not a valid origin reference for this machine.";
+        let failures = step_failures(&[failed(reason)]);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].1.as_deref(), Some(reason), "the detail is the author's sentence");
+
+        // A single-step job does not count steps at it — there is only one.
+        assert_eq!(failures[0].0, "No program was generated");
+
+        // Applied to the ctx it lands in `errors`, which is what the banner renders from;
+        // a later good run replaces the domain and the banner goes away by itself.
+        let mut state = bare_app();
+        state.set_generation_errors(failures);
+        assert_eq!(state.errors.len(), 1, "the failure stands in the diagnostics");
+        assert!(state.errors[0].is_error);
+        assert_eq!(state.errors[0].domain, GENERATION_ERROR_DOMAIN);
+
+        state.set_generation_errors(Vec::new());
+        assert!(state.errors.is_empty(), "a run with no failures clears the banner");
+    }
+
+    /// A standing generation error must not shut the gate that would clear it.
+    ///
+    /// The entry is `is_error`, and the readiness gate refuses to run while any such error
+    /// is present — so counting this one would make a single failure permanent: the error
+    /// stops the next run, and only a run can replace the error. The operator would correct
+    /// the fixture and watch nothing happen, forever. A config error still blocks.
+    #[test]
+    fn a_standing_generation_error_does_not_block_the_run_that_would_clear_it() {
+        let mut state = bare_app();
+        state.set_generation_errors(vec![("No program was generated".to_string(), None)]);
+        assert!(state.errors[0].is_error, "precondition: the entry is a blocking-shaped error");
+        assert!(
+            !has_blocking_config_error(&state),
+            "the previous run's own failure must not be a reason to refuse the next run"
+        );
+
+        // An error from anywhere else still does block.
+        state.push_runtime_error_quiet("current-job-ref", None, "missing fixture".into(), None);
+        assert!(has_blocking_config_error(&state), "a configuration error is still blocking");
+
+        // And the generation entry clearing does not clear the configuration one.
+        state.set_generation_errors(Vec::new());
+        assert!(has_blocking_config_error(&state), "domains are independent");
+    }
+
+    /// Entries pushed within the same millisecond must not collide on `id` — a multi-step
+    /// failure pushes several at once, and duplicate keys make the UI list misbehave.
+    #[test]
+    fn several_failures_from_one_run_get_distinct_ids() {
+        let mut state = bare_app();
+        state.set_generation_errors(vec![
+            ("a".to_string(), None),
+            ("b".to_string(), None),
+            ("c".to_string(), None),
+        ]);
+        let ids: std::collections::BTreeSet<&str> =
+            state.errors.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "three entries, three ids: {ids:?}");
     }
 
     /// A planned step with no CNC to render through says so. Skipping it would leave a

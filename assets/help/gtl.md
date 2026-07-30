@@ -91,6 +91,59 @@ A CNC coordinate system is *modal* — once the program says `G21` (mm) or `G20`
 Need a specific unit regardless of mode? Use an explicit accessor, which gives a
 plain number: `{z_safe.mm}`, `{z_safe.inch}`, `{z_feedrate.mm_per_min}`.
 
+## Selecting the work origin
+
+The fixture says which of the machine's stored zeros it sits in — its **Machine
+Origin Reference**, written the way your controller writes it (`G55`, or
+`G54.1 P7` on a MASSO). Emit it by calling **`set_origin()`**, usually in
+`initialise`:
+
+```
+`G17 G40 G49 G80 G90
+set_origin();
+`G0 Z{z_safe}
+```
+
+What that call emits is the **`set_origin`** field — and unlike the other
+primitives, its job is not only to emit but to **check**. Which offsets exist is a
+fact about your controller, so your profile is the only thing that can say. The
+field gets `origin_reference` (the raw text the operator typed) and is expected to
+`throw` when it is not an offset this machine has:
+
+```
+let key = origin_reference;
+key.trim();
+key.make_upper();
+key.replace(" ", "");
+if key.is_empty() {
+    throw "the fixture has no origin reference. Set it to one of: G54 G55 G56 G57 G58 G59.";
+}
+let valid = [];
+for n in 54..=59 { valid.push("G" + n); }
+if !valid.contains(key) {
+    throw "'" + origin_reference + "' is not a valid origin reference for this machine.";
+}
+`{key}
+```
+
+A `throw` here refuses the whole program — nothing is written. That is deliberate,
+and it is worth being strict about: an offset the controller does not have leaves
+the job running against **whatever origin happens to be active**, which cuts the
+board somewhere you did not intend and reports nothing. Quote
+`origin_reference` in the message so the operator sees what they actually typed.
+
+Two things to know:
+
+- `set_origin` is rendered **once, before any G-code exists**, so a rejection is
+  reported as "this program cannot be generated" rather than half a file.
+- For the same reason, the primitive editor's preview of `initialise` shows no
+  origin line — the preview has no fixture to read. Preview the `set_origin` field
+  itself to check it.
+
+`origin_reference` is also in scope directly in `initialise` and `conclude`, for a
+template that needs the raw text. Do not use both it and `set_origin()`, or the
+origin is emitted twice.
+
 ## Comparing values with units
 
 Values keep their unit type, so comparisons and maths are unit-correct: `10mm` and

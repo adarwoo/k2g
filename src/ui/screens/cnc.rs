@@ -87,15 +87,18 @@ fn cnc_field_groups() -> Vec<FieldGroup> {
         group("Axis scaling", &["/machine/scaling/x", "/machine/scaling/y"]),
         group(
             "Zeroing & tool length",
-            &[
-                "/machine/has_repeatable_home",
-                "/machine/work_coordinate_systems",
-                "/machine/tool_length_measurement",
-            ],
+            &["/machine/has_repeatable_home", "/machine/tool_length_measurement"],
         ),
+        // `set_origin` belongs with the lifecycle rather than beside the zeroing
+        // capabilities above: it is a template the header calls, not a machine fact.
         group(
             "Program lifecycle",
-            &["/primitives/initialise", "/primitives/set_unit", "/primitives/conclude"],
+            &[
+                "/primitives/initialise",
+                "/primitives/set_unit",
+                "/primitives/set_origin",
+                "/primitives/conclude",
+            ],
         ),
         group(
             "Motion / spindle / drilling",

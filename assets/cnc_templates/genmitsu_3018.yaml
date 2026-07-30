@@ -28,9 +28,29 @@ primitives:
   # How this machine is told which unit system to use. Emitted by the metric() and
   # imperial() calls below; the application holds no G-code word of its own.
   set_unit: '`{if metric { "G21" } else { "G20" }}'
+  # Which stored zero the fixture sits in. GRBL has exactly six and no extended bank.
+  set_origin: |
+    let key = origin_reference;
+    key.trim();
+    key.make_upper();
+    key.replace(" ", "");
+    if key.is_empty() {
+        throw "the fixture has no origin reference. Leaving it blank would run the " +
+              "job against whatever origin the controller happens to have active. " +
+              "Set it to one of: G54 G55 G56 G57 G58 G59.";
+    }
+    let valid = [];
+    for n in 54..=59 { valid.push("G" + n); }
+    if !valid.contains(key) {
+        throw "'" + origin_reference + "' is not a valid origin reference for this " +
+              "machine. GRBL supports six work coordinate systems: G54 G55 G56 G57 " +
+              "G58 G59. Extended offsets (G54.1 P...) are not available on GRBL.";
+    }
+    `{key}
   initialise: |
     `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
-    `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
+    `G17 G40 G49 G80 G90
+    set_origin();
     metric();
     `G0 Z{z_safe}
   rapid_move: "`G0 X{x} Y{y} Z{z}"

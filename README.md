@@ -49,8 +49,8 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
   can edit — see the [GCode template language](schemas/docs/gcode-template-language.md).
   No GCode is hardcoded in the application, so an unusual controller is a profile, not a
   patch.
-- **Fixture profiles** hold the physical setup: work coordinate system, which board
-  corner is X0/Y0, backing board, retract and safe heights.
+- **Fixture profiles** hold the physical setup: which of the machine's stored zeros the
+  fixture sits in, which board corner is X0/Y0, backing board, retract and safe heights.
 - **Toolset profiles** hold what is loaded in the rack.
 - **Machining profiles** are an ordered list of steps, each binding one CNC, one fixture
   and one toolset.

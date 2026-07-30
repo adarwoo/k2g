@@ -244,32 +244,13 @@ properties:
         type: boolean
         default: false
 
-      # -----------------------------------------------------------------------
-      # work_coordinate_systems
-      # -----------------------------------------------------------------------
-      # How many zero points this controller can store — the count a fixture's
-      # `work_coordinate_system` indexes into.
-      #
-      # A bare GRBL box has one; a Fanuc-style controller has six before it needs
-      # the G59.x extensions. The planner refuses a step whose fixture asks for
-      # more than the machine has, which is the only way to catch a fixture and a
-      # machine that disagree: neither profile knows about the other, and it is
-      # the step that binds them.
-      #
-      # Only meaningful alongside `has_repeatable_home` — stored zeros are worth
-      # nothing on a machine that cannot return to them.
-      #
-      # Valid examples:
-      #   work_coordinate_systems: 1
-      #   work_coordinate_systems: 6
-      #
-      work_coordinate_systems:
-        description: >
-          Number of work coordinate systems (stored zero points) the controller
-          holds. A fixture selects one of these by ordinal.
-        type: integer
-        minimum: 1
-        default: 6
+      # (`work_coordinate_systems` — a count of stored zero points — was retired
+      # here. It existed so the planner could refuse a fixture whose *ordinal*
+      # exceeded the machine's count, and a fixture no longer holds an ordinal: it
+      # names its origin in the machine's own words (`fixture.yaml#/origin_reference`)
+      # and the `set_origin` primitive below decides what this controller accepts.
+      # A count cannot express `G54.1 P1..P100`, and two places defining validity is
+      # how they drift. Retired keys are dropped on load — see `normalize_cnc_value`.)
 
       # -----------------------------------------------------------------------
       # tool_length_measurement
@@ -379,11 +360,12 @@ properties:
           - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
-          - { name: work_coordinate_system, type: integer, description: "Which of the machine's stored zero points the step's fixture occupies, counting from 1. An ordinal — this template decides what to call it. Conventionally G53 + n, i.e. 1 is G54." }
+          - { name: origin_reference, type: string, description: "How the step fixture's zero is identified on this machine, as the operator entered it (e.g. 'G54', 'G54.1 P7'). Normally emitted by calling set_origin(), which validates it first; this raw value is here for a template that needs it verbatim. Do not do both, or the origin is emitted twice." }
         default: |
           `(Created by kicad2gcode from '{pcb_filename}' - {timestamp})
           `(Reset all back to safe defaults)
-          `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
+          `G17 G40 G49 G80 G90
+          set_origin();
           metric();
           `G10 P0
           `(Establish the Z-Safe)
@@ -536,6 +518,53 @@ properties:
           `{manual_message}
           `T{slot} M06
 
+      # Selects the machine's work origin — the stored zero the step's fixture sits in.
+      #
+      # Called as `set_origin();` from `initialise` (or `conclude`), NOT rendered in
+      # place: like metric()/imperial() it is a registered function, and what it emits
+      # is this template, rendered once before any G-code exists. So a `throw` here
+      # refuses the whole program rather than truncating one halfway through.
+      #
+      # This primitive owns the answer to "which origins does this controller have?",
+      # because that is a machine fact and only the CNC profile knows it. The fixture
+      # supplies `origin_reference` as the operator typed it; this normalises it (trim,
+      # upper-case, strip spaces) and rejects anything the machine cannot honour. An
+      # unchecked reference is the dangerous case: an offset the controller does not
+      # have leaves the job running against whatever origin is currently active, which
+      # cuts the board in the wrong place and reports nothing.
+      #
+      # The default below is the conservative six — every G-code controller has those.
+      # A machine with more (a MASSO's `G54.1 P1..P100`) or fewer (a Bantam, whose G54
+      # is reserved for its own reference) says so in its own profile.
+      #
+      set_origin:
+        description: >-
+          Validates and emits the work-origin selection for this machine. Called as
+          set_origin() from initialise; throws to refuse generation when the fixture's
+          origin reference is blank or is not an offset this controller has.
+        type: string
+        x-variables:
+          - { name: origin_reference, type: string, description: "The step fixture's Machine Origin Reference, exactly as the operator entered it — unnormalised, so this template can report the original text in an error." }
+        default: |
+          let key = origin_reference;
+          key.trim();
+          key.make_upper();
+          key.replace(" ", "");
+          if key.is_empty() {
+              throw "the fixture has no origin reference. Leaving it blank would run " +
+                    "the job against whatever origin the controller happens to have " +
+                    "active. Set it to one of: G54 G55 G56 G57 G58 G59.";
+          }
+          let valid = [];
+          for n in 54..=59 { valid.push("G" + n); }
+          if !valid.contains(key) {
+              throw "'" + origin_reference + "' is not a valid origin reference for " +
+                    "this machine. This controller has six work coordinate systems: " +
+                    "G54 G55 G56 G57 G58 G59. Extended offsets (G54.1 P...) are not " +
+                    "available.";
+          }
+          `{key}
+
       # Program finalization block.
       #
       conclude:
@@ -548,7 +577,7 @@ properties:
           - { name: pcb_filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
-          - { name: work_coordinate_system, type: integer, description: "The step fixture's stored zero point, counting from 1 — for a footer that reselects it before parking." }
+          - { name: origin_reference, type: string, description: "How the step fixture's zero is identified on this machine — for a footer that reselects it before parking. Prefer calling set_origin(), which validates it first." }
         default: |
           `(end of file)
           `G0 Z{z_safe}

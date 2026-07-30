@@ -219,6 +219,9 @@ Primitive set:
 - `cut_bezier` — native on some CNCs (e.g. Siemens G3.4); resolved to arc approximation on others
 - `change_tool`
 - `conclude`
+- `set_unit` — what `metric()`/`imperial()` emit
+- `set_origin` — what `set_origin()` emits, and what validates the fixture's Machine
+  Origin Reference against the offsets this controller has
 
 ### Entity model (as built)
 

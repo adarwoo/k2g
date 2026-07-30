@@ -345,6 +345,15 @@ unit-type math and accessors — is **registered by the Coder** on the engine
   controller, an `INCH`/`METRIC` header for Excellon, nothing at all for a machine
   fixed to one system). The two effects are one call so the emitted word and the
   formatter can never disagree.
+- **Origin selection:** `set_origin()` emits the profile's `set_origin` primitive,
+  which is handed the step fixture's `origin_reference` (`G55`, `G54.1 P7`, …) and
+  **validates it**, throwing when the machine has no such offset. Validity is a
+  machine fact, so the profile owns it — a count on the CNC profile could never have
+  expressed a MASSO's `G54.1 P1..P100`. Refusing outright is the point: an offset the
+  controller lacks would otherwise leave the job on whatever origin is active.
+  All three of these are pre-rendered at Coder construction, because `Gtl::run` clears
+  the output buffer and so a primitive cannot render another primitive in place — which
+  also means a rejection lands before any GCode exists.
 - **Math:** `min`, `max`, `abs`, `clamp` over numbers and unit types.
 - **Formatting:** `fmt(v)` (internal; the emit-time type-driven formatter, GTL
   §4) and the `.mm/.inch/...` accessors. `fmt` is a thin type-dispatch over

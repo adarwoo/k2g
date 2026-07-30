@@ -218,21 +218,12 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     };
     let atc_slots = cnc.atc_slot_count as usize;
 
-    // Neither profile knows about the other, so this is the only place a fixture set up
-    // in the machine's fourth zero point can be caught against a controller that stores
-    // one. Left unchecked it renders as a `G57` the machine does not have, which is a
-    // program that runs somewhere unintended rather than one that fails.
-    if fixture.work_coordinate_system > cnc.work_coordinate_systems {
-        notes.push(format!(
-            "Fixture '{}' is set up in work coordinate system {}, but '{}' stores only \
-             {}. Re-teach the fixture into one the machine has, or correct the machine's \
-             count.",
-            fixture.name,
-            fixture.work_coordinate_system,
-            cnc.name,
-            cnc.work_coordinate_systems,
-        ));
-    }
+    // A fixture set up in an origin this controller does not have was once caught here, by
+    // comparing the fixture's *ordinal* against a count on the CNC profile. Both are gone:
+    // the fixture now names its origin the way the machine does, and the machine's
+    // `set_origin` primitive is the single authority on which names it accepts — a count
+    // could never have expressed a MASSO's `G54.1 P1..P100`. The check happens when the
+    // program is generated, and refuses it outright rather than warning.
 
     let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);

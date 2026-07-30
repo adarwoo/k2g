@@ -257,7 +257,8 @@ The CNC schema defines a number of GCode primitives. These can be edited like co
 Fixture profiles describe how the PCB is physically held and aligned on the machine.
 They are persistent configuration assets and are not tied to a single board.
 Fixture profiles may influence generated output, but they do so through CNC profile abstractions.
-For example, a fixture requests a work offset intent from the CNC profile; it does not directly emit machine-specific GCode.
+For example, a fixture names the work origin it is set up in (its Machine Origin Reference, e.g. `G55`) but emits nothing itself: the CNC profile's `set_origin` primitive is what validates that name against the offsets the controller actually has, and what emits it.
+The one deliberate exception to "fixtures hold no machine-specific text" is that reference itself — it is the machine's own word, because the alternative (an ordinal the CNC profile mapped arithmetically) could not express controllers whose offsets are not a contiguous run, and left an out-of-range value silently selecting the wrong origin.
 
 The fixture profile is based on the fixture schema.
 
@@ -374,6 +375,8 @@ Required primitive attributes:
 
 Optional primitive attributes:
 
+- `primitives.set_unit` -> what `metric()`/`imperial()` emit; empty for a machine fixed to one unit system
+- `primitives.set_origin` -> what `set_origin()` emits, **and** what validates the step fixture's Machine Origin Reference. Receives it as `origin_reference` and is expected to `throw` when this controller has no such offset — generation then refuses, because an offset the machine lacks leaves the job running against whatever origin is currently active
 - `primitives.pause` -> optional pause/message insertion point
 - `primitives.banner` -> optional comment/banner insertion point
 - `primitives.line_number` -> optional per-line `N` prefix; absent/empty means the program is not numbered. Receives the line being numbered as `text`, so a profile may skip lines (its comments, say) by emitting nothing for them

@@ -142,9 +142,13 @@ mod tests {
     fn reads_the_documented_variables_for_a_primitive() {
         let vars = variables_for("initialise");
         let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec!["pcb_filename", "timestamp", "z_safe", "work_coordinate_system"]);
+        assert_eq!(names, vec!["pcb_filename", "timestamp", "z_safe", "origin_reference"]);
         assert_eq!(vars[2].var_type, VarType::Length);
-        assert_eq!(vars[3].var_type, VarType::Integer, "the WCS is an ordinal, not a length");
+        assert_eq!(
+            vars[3].var_type,
+            VarType::String,
+            "the origin reference is the machine's own word for an offset, not a number"
+        );
         assert!(!vars[2].description.is_empty(), "descriptions are carried through");
     }
 
@@ -161,7 +165,7 @@ mod tests {
         // shares `initialise`'s program-layer scope. Generation must provide these.
         let vars = variables_for("conclude");
         let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec!["pcb_filename", "timestamp", "z_safe", "work_coordinate_system"]);
+        assert_eq!(names, vec!["pcb_filename", "timestamp", "z_safe", "origin_reference"]);
     }
 
     #[test]

@@ -105,46 +105,53 @@ properties:
   # which is a CNC-profile capability (`has_repeatable_home`), not a fixture toggle.
 
   # ---------------------------------------------------------------------------
-  # work_coordinate_system
+  # origin_reference
   # ---------------------------------------------------------------------------
-  # WHICH of the machine's stored zero points this fixture is set up in.
+  # WHICH of the machine's stored zero points this fixture is set up in, named the
+  # way the target machine names it.
   #
   # A fixture is clamped somewhere on the bed and its origin taught to the
   # controller once; a machine holds several such origins and the program selects
-  # one. This says which — as an ORDINAL, not as a command. `1` is the machine's
-  # first work coordinate system, `2` the second, and so on.
+  # one. This says which, in the controller's own words — `G55`, or `G54.1 P7` on a
+  # MASSO with the extended offsets.
   #
-  # It is deliberately NOT `G54`/`G55`. Only the CNC profile speaks a dialect, and
-  # it maps the ordinal in its `initialise` template:
+  # This was once an ORDINAL (`work_coordinate_system: 3`) that each CNC profile
+  # mapped arithmetically as `G53 + n`. Two things killed that:
   #
-  #   `G17 G{53 + work_coordinate_system} G40 G49 G80 G90
+  #   - the arithmetic cannot reach `G54.1 P1..P100`, which is where a MASSO keeps
+  #     most of its offsets; and
+  #   - nothing validated the result, so an ordinal the machine did not have
+  #     rendered as a G-word it did not have, and the job then ran against
+  #     whatever origin the controller happened to have active. A board cut in the
+  #     wrong place, with no error anywhere.
   #
-  # Keeping it an ordinal is also what lets a controller run past the easy six —
-  # Fanuc continues G59.1, G59.2 — which a fixed G54..G59 list never could:
-  #
-  #   `{if work_coordinate_system <= 6 { "G" + (53 + work_coordinate_system) }
-  #      else { "G59." + (work_coordinate_system - 6) }}
+  # Validity is a property of the controller, so the CNC profile decides it: its
+  # `set_origin` primitive checks this value against the offsets that machine
+  # actually has and refuses to generate otherwise. Nothing here constrains the
+  # syntax, because nothing here knows the dialect.
   #
   # NOT the same thing as `origin` below. `origin` is which corner of the BOARD is
   # X0/Y0; this is which of the MACHINE's zeros the board is measured from.
   #
   # Only meaningful on a machine that homes repeatably (the CNC profile's
   # `has_repeatable_home`): without that the operator re-establishes the work zero
-  # every job, so there is only ever the current one. The planner warns when the
-  # step's CNC cannot honour the value.
+  # every job, so there is only ever the current one.
+  #
+  # Empty by default, and deliberately so: there is no origin that is safe to guess
+  # on the operator's behalf, and `set_origin` reports a blank one as an error.
   #
   # Valid examples:
-  #   work_coordinate_system: 1
-  #   work_coordinate_system: 3
+  #   origin_reference: "G54"
+  #   origin_reference: "G55"
+  #   origin_reference: "G54.1 P7"
   #
-  work_coordinate_system:
+  origin_reference:
+    title: Machine Origin Reference
     description: >-
-      Which of the machine's stored work coordinate systems this fixture occupies,
-      counting from 1. An ordinal, not a GCode word — the CNC profile's initialise
-      template turns it into whatever its dialect uses.
-    type: integer
-    minimum: 1
-    default: 1
+      Describes how this fixture's zero is identified on the target machine; for
+      GCode controllers this is normally G54, G55, and so on
+    type: string
+    default: ""
 
   # ---------------------------------------------------------------------------
   # board_flip_axis
@@ -186,7 +193,7 @@ properties:
   # zeroed on a left or right edge and Y on a front or back one, so the enums now
   # say so and the impossible values are corrected on load.
   #
-  # Not to be confused with `work_coordinate_system` above: that picks which of the
+  # Not to be confused with `origin_reference` above: that picks which of the
   # machine's stored zeros to use, this picks where on the board that zero lands.
   origin:
     description: Board work-origin corner — which edge is X0 and which is Y0.

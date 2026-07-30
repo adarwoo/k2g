@@ -206,8 +206,10 @@ machining + CNC + board bounds) and is a pure function of them.
 - **fixture origin** — where the board sits and which corner is X0/Y0 (the fixture
   `origin` x0/y0 = Left/Right/Front/Back).
 - **CNC scaling** — per-axis calibration (`machine.scaling.x/y`).
-- *(the work-coordinate-system origin — G54/G55 — is set in `initialise`; the Placement
-  produces coordinates **relative to** that WCS.)*
+- *(the machine origin — G54/G55, or a MASSO's G54.1 P7 — is selected in `initialise` by
+  `set_origin()`, from the fixture's `origin_reference`; the Placement produces coordinates
+  **relative to** it. The CNC's `set_origin` primitive also validates that reference, and
+  refuses to generate when the machine has no such offset.)*
 
 **Z** — the datum is fixed: **Z0 is always the top of the PCB.** There is no
 `z0_reference` toggle; what varies by machine is only *how* that zero is established

@@ -3,9 +3,10 @@
 //! GCode by registering the GCode surface on the engine and running each template
 //! against a scope of resolved values.
 //!
-//! Two things are registered here: the modal unit switches, `metric()`/`imperial()`,
-//! which need the engine's output writer as well as the mode; and — delegated to
-//! [`crate::gcode::dialect`] — everything the `units` types can do inside a script.
+//! Two things are registered here: the **callable primitives** — `metric()`,
+//! `imperial()` and `set_origin()` — which need the engine's output writer, and (for the
+//! first two) the unit mode; and — delegated to [`crate::gcode::dialect`] — everything
+//! the `units` types can do inside a script.
 //!
 //! What is *not* here yet is the scope model of docs/gcode-engine.md §2: a template
 //! sees only the variables its call site hand-pushes, with no namespaced job context.
@@ -20,14 +21,31 @@ use units::{Angle, FeedRate, Length, RotationalSpeed, UserUnitSystem};
 use crate::gcode::primitive_vars::{PrimitiveVar, VarType};
 use crate::gcode::program::BodyError;
 
-/// What `metric()` and `imperial()` emit, rendered from the profile's `set_unit`
-/// primitive. Empty by default, which is a machine with no unit statement — and the
-/// only honest default, since the application has no business knowing that a G-code
-/// machine spells this `G21`.
+/// What the callable primitives emit, each rendered from its own profile template.
+///
+/// Empty by default — a machine with no unit statement and no origin selection. That is
+/// the only honest default: the application has no business knowing that a G-code machine
+/// spells these `G21` and `G54`.
 #[derive(Default)]
-struct UnitCommands {
+struct EmitCommands {
     metric: String,
     imperial: String,
+    origin: String,
+}
+
+/// The program-layer templates a [`Coder`] pre-renders, plus the one value they read.
+///
+/// Grouped rather than passed as loose arguments because they arrive together, from the
+/// same step's CNC and fixture, and because the list has already grown once.
+pub struct ProgramPrimitives<'a> {
+    /// The CNC's `set_unit` template — what `metric()`/`imperial()` emit.
+    pub set_unit: &'a str,
+    /// The CNC's `set_origin` template — what `set_origin()` emits.
+    pub set_origin: &'a str,
+    /// The step fixture's Machine Origin Reference, exactly as the operator entered it.
+    /// `set_origin` normalises and validates it; passing it raw is what lets the
+    /// template quote the original text back in an error.
+    pub origin_reference: &'a str,
 }
 
 /// A `gtl` engine with the GCode dialect registered. Built once per generation run
@@ -45,52 +63,71 @@ pub struct Coder {
 }
 
 impl Coder {
-    /// A Coder whose `metric()`/`imperial()` set the formatting mode but **emit
-    /// nothing**, for callers that render primitives outside a program — the editor's
-    /// preview, and the tests that are not about the unit statement.
+    /// A Coder whose callable primitives take effect but **emit nothing**, for callers
+    /// that render primitives outside a program — the editor's preview, and the tests
+    /// that are not about the unit statement or the origin.
     ///
-    /// Generation uses [`Coder::with_unit_commands`], because what those calls emit is
-    /// the profile's to say.
+    /// Generation uses [`Coder::with_program_primitives`], because what those calls emit
+    /// is the profile's to say.
     pub fn new() -> Self {
-        Self::build(UnitCommands::default())
+        Self::build(EmitCommands::default())
     }
 
-    /// A Coder whose `metric()`/`imperial()` emit the profile's `set_unit` primitive.
+    /// A Coder whose `metric()`/`imperial()`/`set_origin()` emit the profile's own
+    /// primitives.
     ///
-    /// The primitive is rendered **here, once for each unit**, and the two results are
-    /// held for the calls to emit. Rendering it on demand instead would mean running a
-    /// template from inside a registered function, and [`gtl::Gtl::run`] clears the
+    /// Each is rendered **here, once** (twice for `set_unit`, one result per unit) and the
+    /// results held for the calls to emit. Rendering on demand instead would mean running
+    /// a template from inside a registered function, and [`gtl::Gtl::run`] clears the
     /// shared output buffer on entry — the enclosing template's emitted lines would
-    /// vanish. Rendering up front also means a broken `set_unit` is reported before any
-    /// GCode is produced rather than halfway through a program.
+    /// vanish. Rendering up front also means a broken template, or a `set_origin` that
+    /// rejects the fixture's origin reference, is reported before any GCode exists rather
+    /// than halfway through a program.
     ///
-    /// An empty template is a machine with no unit statement: the calls then only set
-    /// the formatting mode, which is what a fixed-unit controller wants.
-    pub fn with_unit_commands(set_unit_tpl: &str) -> Result<Self, BodyError> {
-        // Rendered by a throwaway Coder: `self` cannot render its own `set_unit` before
-        // it exists, and this one is identical in every respect that matters to it.
+    /// An empty template means the machine has nothing to say: `metric()` then only sets
+    /// the formatting mode (what a fixed-unit controller wants) and `set_origin()` emits
+    /// nothing.
+    pub fn with_program_primitives(primitives: &ProgramPrimitives) -> Result<Self, BodyError> {
+        // Rendered by a throwaway Coder: `self` cannot render its own primitives before
+        // it exists, and this one is identical in every respect that matters to them.
         let renderer = Self::new();
-        let render_for = |metric: bool| -> Result<String, BodyError> {
-            if set_unit_tpl.trim().is_empty() {
+
+        let render_unit = |metric: bool| -> Result<String, BodyError> {
+            if primitives.set_unit.trim().is_empty() {
                 return Ok(String::new());
             }
             let mut scope = Scope::new();
             scope.push("metric", metric);
             scope.push("unit", if metric { "metric" } else { "imperial" }.to_string());
-            renderer.render("set_unit", set_unit_tpl, &mut scope).map_err(|error| {
-                BodyError::Render { primitive: "set_unit".to_string(), message: error.to_string() }
-            })
+            renderer
+                .render("set_unit", primitives.set_unit, &mut scope)
+                .map_err(|error| render_error("set_unit", error))
         };
 
-        Ok(Self::build(UnitCommands { metric: render_for(true)?, imperial: render_for(false)? }))
+        let origin = if primitives.set_origin.trim().is_empty() {
+            String::new()
+        } else {
+            let mut scope = Scope::new();
+            scope.push("origin_reference", primitives.origin_reference.to_string());
+            renderer
+                .render("set_origin", primitives.set_origin, &mut scope)
+                .map_err(|error| render_error("set_origin", error))?
+        };
+
+        Ok(Self::build(EmitCommands {
+            metric: render_unit(true)?,
+            imperial: render_unit(false)?,
+            origin,
+        }))
     }
 
     /// Registers the GCode surface:
     /// - `metric()` / `imperial()` — set how every later value formats, and emit
     ///   `commands`, which came from the profile.
+    /// - `set_origin()` — emits the profile's validated origin selection.
     /// - the typed-value surface for `Length`, `FeedRate`, `RotationalSpeed` and
     ///   `Angle` — see [`crate::gcode::dialect`].
-    fn build(commands: UnitCommands) -> Self {
+    fn build(commands: EmitCommands) -> Self {
         let mut gtl = Gtl::new();
 
         // The active machine unit, shared by metric()/imperial() and the Length
@@ -115,6 +152,15 @@ impl Coder {
                 writer.emit_raw(&command);
             });
         }
+
+        // The origin selection. No mode to set — unlike the unit, which changes how
+        // every later value formats, this emits one statement and is done.
+        let writer = gtl.writer();
+        let origin = commands.origin;
+        gtl.engine_mut().register_fn("set_origin", move || {
+            // Already terminated by its own emit line, so raw — as for the unit words.
+            writer.emit_raw(&origin);
+        });
 
         // Everything the unit types can do in a script — formatting, comparison,
         // arithmetic, `max`/`min`/`abs`/`clamp`, and the `.mm`-style accessors — lives
@@ -196,6 +242,21 @@ impl Coder {
     }
 }
 
+/// Turns a template failure into a [`BodyError`], keeping the message readable.
+///
+/// A scripted `throw` carries the author's own operator-facing sentence, and
+/// [`BodyError::message`] already prefixes `primitive '<name>': ` — so the value is taken
+/// bare. Passing `GtlError::Thrown` through `to_string()` instead would name the primitive
+/// a second time (`primitive 'set_origin': set_origin: thrown: …`). Parse and runtime
+/// errors keep their full rendering, because that is what carries the line number.
+fn render_error(primitive: &str, error: GtlError) -> BodyError {
+    let message = match error {
+        GtlError::Thrown { value, .. } => value,
+        other => other.to_string(),
+    };
+    BodyError::Render { primitive: primitive.to_string(), message }
+}
+
 /// Pushes one representative sample value for `var` into `scope`, **typed as generation
 /// types it** — a feed as a `FeedRate`, not as the bare number it prints as.
 ///
@@ -252,6 +313,11 @@ fn sample_string(primitive: &str, name: &str) -> String {
         (_, "pcb_filename") => "board.kicad_pcb",
         (_, "timestamp") => "2026-01-01 12:00:00",
         (_, "manual_message") => "(change tool)",
+        // `G55`, not `G54`: every bundled profile accepts it, including the Bantam,
+        // which reserves G54 for the machine's own reference. A sample that some
+        // machine's `set_origin` legitimately rejects would preview a valid template
+        // as an error.
+        (_, "origin_reference") => "G55",
         (_, "message") => "Paused",
         (_, "text") => "Section",
         _ => "sample",
@@ -269,12 +335,71 @@ impl Default for Coder {
 mod tests {
     use super::*;
 
+    /// A Coder built from a `set_unit` template alone — for the tests that are about the
+    /// unit statement and have nothing to say about the origin.
+    fn unit_only(set_unit: &str) -> Result<Coder, BodyError> {
+        Coder::with_program_primitives(&ProgramPrimitives {
+            set_unit,
+            set_origin: "",
+            origin_reference: "",
+        })
+    }
+
+    /// A Coder built from a `set_origin` template and the reference to feed it — for the
+    /// tests that are about the origin and have nothing to say about units.
+    fn origin_only(set_origin: &str, origin_reference: &str) -> Result<Coder, BodyError> {
+        Coder::with_program_primitives(&ProgramPrimitives {
+            set_unit: "",
+            set_origin,
+            origin_reference,
+        })
+    }
+
+    // The `set_origin` templates under test are pulled out of the files that actually
+    // ship, not retyped here. A copy would let a fix to a shipped profile pass a test
+    // asserting the old behaviour — and these templates are the *only* thing standing
+    // between a mistyped origin and a board cut in the wrong place.
+    const CNC_SCHEMA_YAML: &str = include_str!("../../schemas/cnc.yaml");
+    const MASSO_ATC_YAML: &str = include_str!("../../assets/cnc_templates/masso_g3_with_atc.yaml");
+    const MASSO_NO_ATC_YAML: &str = include_str!("../../assets/cnc_templates/masso_g3_no_atc.yaml");
+    const GENMITSU_YAML: &str = include_str!("../../assets/cnc_templates/genmitsu_3018.yaml");
+    const BATAM_YAML: &str = include_str!("../../assets/cnc_templates/batam.yaml");
+
+    /// The `set_origin` template from a bundled CNC profile.
+    fn profile_set_origin(yaml: &str) -> String {
+        let doc: serde_yaml::Value = serde_yaml::from_str(yaml).expect("template parses");
+        doc["primitives"]["set_origin"]
+            .as_str()
+            .expect("the profile declares set_origin")
+            .to_string()
+    }
+
+    /// The `set_origin` **schema default** — what a profile written before this primitive
+    /// existed gets injected on load, and so what most machines will actually run.
+    fn schema_default_set_origin() -> String {
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(CNC_SCHEMA_YAML).expect("the CNC schema parses");
+        doc["properties"]["primitives"]["properties"]["set_origin"]["default"]
+            .as_str()
+            .expect("set_origin carries a default")
+            .to_string()
+    }
+
+    /// Renders `set_origin` for `reference`, as generation would: the whole Coder is built,
+    /// so a rejected reference surfaces exactly as it does in a real run.
+    fn origin_output(template: &str, reference: &str) -> Result<String, BodyError> {
+        let coder = origin_only(template, reference)?;
+        coder
+            .render("t", "set_origin();", &mut Scope::new())
+            .map_err(|error| render_error("t", error))
+    }
+
     /// The `initialise` primitive renders with the program-layer values, and
     /// `metric()` emits the profile's word for it and fixes the length unit for
     /// `{z_safe}`.
     #[test]
     fn renders_the_initialise_header() {
-        let coder = Coder::with_unit_commands(&crate::gcode::program::sample_set_unit_tpl()).unwrap();
+        let coder = unit_only(&crate::gcode::program::sample_set_unit_tpl()).unwrap();
         let mut scope = Scope::new();
         scope.push("pcb_filename", "demo.kicad_pcb".to_string());
         scope.push("timestamp", "2026-01-01 00:00:00".to_string());
@@ -293,7 +418,7 @@ mod tests {
     /// cannot end up in inch mode carrying millimetre numbers.
     #[test]
     fn imperial_emits_the_profiles_word_and_switches_the_length_unit() {
-        let coder = Coder::with_unit_commands(&crate::gcode::program::sample_set_unit_tpl()).unwrap();
+        let coder = unit_only(&crate::gcode::program::sample_set_unit_tpl()).unwrap();
         let mut scope = Scope::new();
         scope.push("z_safe", Length::from_mm(25.4));
         let out = coder.render("t", "imperial();\n`G0 Z{z_safe}", &mut scope).unwrap();
@@ -379,8 +504,7 @@ mod tests {
     /// gets its unit statement, and the engine never learns what it means.
     #[test]
     fn a_machine_that_is_not_gcode_states_its_units_its_own_way() {
-        let coder = Coder::with_unit_commands("`{if metric { \"METRIC,TZ\" } else { \"INCH,TZ\" }}")
-            .unwrap();
+        let coder = unit_only("`{if metric { \"METRIC,TZ\" } else { \"INCH,TZ\" }}").unwrap();
         let out = coder.render("t", "metric();\n`T01C0.8", &mut Scope::new()).unwrap();
         assert_eq!(out, "METRIC,TZ\nT01C0.8\n", "an Excellon header, from the profile alone");
     }
@@ -390,7 +514,7 @@ mod tests {
     /// blank line.
     #[test]
     fn an_empty_unit_primitive_emits_nothing() {
-        let coder = Coder::with_unit_commands("   ").unwrap();
+        let coder = unit_only("   ").unwrap();
         let mut scope = Scope::new();
         scope.push("z", Length::from_mm(25.4));
         assert_eq!(coder.render("t", "imperial();\n`Z{z}", &mut scope).unwrap(), "Z1\n");
@@ -400,10 +524,285 @@ mod tests {
     /// against the primitive that could not render — not as a mystery halfway through.
     #[test]
     fn a_broken_unit_primitive_is_named() {
-        match Coder::with_unit_commands("`{nope}") {
+        match unit_only("`{nope}") {
             Err(BodyError::Render { primitive, .. }) => assert_eq!(primitive, "set_unit"),
             Err(other) => panic!("expected a Render error, got {other:?}"),
             Ok(_) => panic!("a set_unit naming an unknown value must not build a Coder"),
+        }
+    }
+
+    // ---- set_origin: the machine origin selection --------------------------------
+
+    /// `set_origin()` emits where the call sits, not at the top — the whole reason it is a
+    /// registered function rather than a separately-rendered primitive. If the pre-render
+    /// leaked into the enclosing template's buffer, the origin would land in the wrong
+    /// place (or the surrounding lines would vanish).
+    #[test]
+    fn an_initialise_calling_set_origin_emits_the_reference_in_place() {
+        let coder = origin_only("`{origin_reference}", "G56").unwrap();
+        let mut scope = Scope::new();
+        scope.push("z_safe", Length::from_mm(5.0));
+        let out = coder
+            .render("initialise", "`G17 G40 G49 G80 G90\nset_origin();\n`G0 Z{z_safe}", &mut scope)
+            .unwrap();
+        assert_eq!(out, "G17 G40 G49 G80 G90\nG56\nG0 Z5\n");
+    }
+
+    /// A machine that selects no origin leaves the primitive empty; the call then emits
+    /// nothing at all, not even a blank line.
+    #[test]
+    fn an_empty_origin_primitive_emits_nothing() {
+        let coder = origin_only("   ", "G54").unwrap();
+        assert_eq!(coder.render("t", "`A\nset_origin();\n`B", &mut Scope::new()).unwrap(), "A\nB\n");
+    }
+
+    /// The schema default — what a profile written before `set_origin` existed runs once
+    /// the default is injected — accepts every offset a plain G-code controller has.
+    #[test]
+    fn the_schema_default_accepts_the_six_standard_offsets() {
+        let template = schema_default_set_origin();
+        for reference in ["G54", "G55", "G56", "G57", "G58", "G59"] {
+            assert_eq!(
+                origin_output(&template, reference).unwrap(),
+                format!("{reference}\n"),
+                "{reference} is one of the six"
+            );
+        }
+    }
+
+    /// Normalisation, on the shipped default: the operator's spacing and case are theirs
+    /// to get wrong.
+    #[test]
+    fn an_origin_reference_is_trimmed_and_upper_cased() {
+        let template = schema_default_set_origin();
+        for entered in ["  G55", "g55  ", " g55 ", "G 5 5"] {
+            assert_eq!(
+                origin_output(&template, entered).unwrap(),
+                "G55\n",
+                "'{entered}' is the operator writing G55"
+            );
+        }
+    }
+
+    /// The MASSO's extended bank, which is the case the old ordinal could not express at
+    /// all. The space is stripped for matching and put back for the output, so `sub_string(6)`
+    /// has to land on the P-number at both one and three digits.
+    #[test]
+    fn the_masso_form_accepts_and_respaces_the_extended_offsets() {
+        let template = profile_set_origin(MASSO_ATC_YAML);
+        for (entered, expected) in [
+            ("G54.1 P1", "G54.1 P1\n"),
+            ("G54.1 P7", "G54.1 P7\n"),
+            ("g54.1p100", "G54.1 P100\n"),
+            ("G54.1P42", "G54.1 P42\n"),
+            // The plain six still work on the same machine.
+            ("G54", "G54\n"),
+            ("G59", "G59\n"),
+        ] {
+            assert_eq!(origin_output(&template, entered).unwrap(), expected, "entered '{entered}'");
+        }
+    }
+
+    /// The two MASSO profiles differ only in their tool changer, so their origin handling
+    /// must not drift apart — a fix applied to one and not the other is a silent
+    /// inconsistency between two profiles the same operator is likely to use.
+    #[test]
+    fn both_masso_profiles_select_the_origin_identically() {
+        assert_eq!(profile_set_origin(MASSO_ATC_YAML), profile_set_origin(MASSO_NO_ATC_YAML));
+    }
+
+    /// A blank reference is the dangerous case: left unchecked the program runs against
+    /// whatever origin the controller happens to have active. Every shipped profile must
+    /// refuse it — asserted as an `Err`, never as an empty render, because an empty render
+    /// *is* the bug.
+    #[test]
+    fn a_blank_origin_reference_refuses_to_generate() {
+        for (name, template) in [
+            ("schema default", schema_default_set_origin()),
+            ("masso", profile_set_origin(MASSO_ATC_YAML)),
+            ("genmitsu", profile_set_origin(GENMITSU_YAML)),
+            ("batam", profile_set_origin(BATAM_YAML)),
+        ] {
+            for blank in ["", "   "] {
+                let error = origin_output(&template, blank)
+                    .expect_err(&format!("{name} must refuse a blank origin reference"));
+                assert!(
+                    error.message().contains("no origin reference"),
+                    "{name} must say what is wrong, got: {}",
+                    error.message()
+                );
+            }
+        }
+    }
+
+    /// An offset the machine does not have, on every shipped profile. The message must
+    /// quote what the operator actually typed — which is why the template is handed the
+    /// raw value rather than a normalised one.
+    #[test]
+    fn an_offset_the_machine_does_not_have_refuses_to_generate() {
+        for (name, template) in [
+            ("schema default", schema_default_set_origin()),
+            ("masso", profile_set_origin(MASSO_ATC_YAML)),
+            ("genmitsu", profile_set_origin(GENMITSU_YAML)),
+            ("batam", profile_set_origin(BATAM_YAML)),
+        ] {
+            for bad in ["G60", "G53", "X54", "54", "G5", "G54.2 P1"] {
+                let error = origin_output(&template, bad)
+                    .expect_err(&format!("{name} must refuse '{bad}'"));
+                assert!(
+                    error.message().contains(bad),
+                    "{name} must quote what was entered ('{bad}'), got: {}",
+                    error.message()
+                );
+            }
+        }
+    }
+
+    /// The extended bank is bounded at both ends, and only exists on the machine that has
+    /// it — a GRBL box asked for `G54.1 P1` must say so rather than emit a word it cannot
+    /// honour.
+    #[test]
+    fn the_extended_bank_is_bounded_and_machine_specific() {
+        let masso = profile_set_origin(MASSO_ATC_YAML);
+        for out_of_range in ["G54.1 P0", "G54.1 P101", "G54.1 P200"] {
+            assert!(
+                origin_output(&masso, out_of_range).is_err(),
+                "the MASSO bank stops at P100, so '{out_of_range}' is out of range"
+            );
+        }
+
+        for (name, template) in [
+            ("genmitsu", profile_set_origin(GENMITSU_YAML)),
+            ("batam", profile_set_origin(BATAM_YAML)),
+            ("schema default", schema_default_set_origin()),
+        ] {
+            assert!(
+                origin_output(&template, "G54.1 P1").is_err(),
+                "{name} has no extended bank and must refuse G54.1 P1"
+            );
+        }
+    }
+
+    /// The Bantam reserves G54 for the machine's own reference, so its first usable offset
+    /// is G55. Expressing that was impossible while the fixture held an ordinal and each
+    /// profile mapped it arithmetically — it is the case that justifies the whole change.
+    #[test]
+    fn the_bantam_reserves_g54_for_the_machine() {
+        let batam = profile_set_origin(BATAM_YAML);
+        let error = origin_output(&batam, "G54").expect_err("G54 is the machine's own reference");
+        assert!(
+            error.message().contains("reserves G54"),
+            "the refusal must say why, got: {}",
+            error.message()
+        );
+        assert_eq!(origin_output(&batam, "G55").unwrap(), "G55\n", "G55 is the first usable one");
+    }
+
+    /// The operator sees the author's sentence once, prefixed by the primitive that raised
+    /// it — not `primitive 'set_origin': set_origin: thrown: …`, which is what passing a
+    /// `Thrown` through `Display` produces.
+    #[test]
+    fn a_thrown_origin_is_reported_once_not_three_times() {
+        // `Coder` is not `Debug`, so the Ok arm cannot be unwrapped into a panic message.
+        let Err(error) = origin_only("throw \"nope\";", "G54") else {
+            panic!("a set_origin that throws must not build a Coder");
+        };
+        match &error {
+            BodyError::Render { primitive, message } => {
+                assert_eq!(primitive, "set_origin");
+                assert_eq!(message, "nope", "the thrown value, bare");
+            }
+            other => panic!("expected a Render error, got {other:?}"),
+        }
+        assert_eq!(error.message(), "primitive 'set_origin': nope");
+    }
+
+    /// A `set_origin` with a real fault (not a `throw`) keeps its line number, which is
+    /// what the author needs and what the thrown path has no room for.
+    #[test]
+    fn a_broken_origin_primitive_keeps_its_line_number() {
+        match origin_only("`A\n`{nope}", "G54").map(|_| ()) {
+            Err(BodyError::Render { primitive, message }) => {
+                assert_eq!(primitive, "set_origin");
+                assert!(message.contains(":2"), "the fault is on line 2, got: {message}");
+            }
+            other => panic!("expected a Render error naming the line, got {other:?}"),
+        }
+    }
+
+    /// Each shipped profile's **own `initialise`** renders with its **own `set_origin`** —
+    /// the integration point the individual tests above each cover half of. A profile whose
+    /// header forgot the call, or still mapped an ordinal, would pass every other test here
+    /// and then emit a program with no origin selected at all.
+    #[test]
+    fn every_shipped_profile_header_selects_its_origin() {
+        // Every shipped `initialise` also calls `metric()`, so the real `set_unit` has to
+        // come along — this renders the profile as it actually ships, not a subset of it.
+        let primitive = |yaml: &str, name: &str| -> String {
+            let doc: serde_yaml::Value = serde_yaml::from_str(yaml).expect("template parses");
+            doc["primitives"][name].as_str().unwrap_or_default().to_string()
+        };
+
+        // `G55` is the one reference all four accept (the Bantam reserves G54).
+        for (name, yaml) in [
+            ("masso_g3_with_atc", MASSO_ATC_YAML),
+            ("masso_g3_no_atc", MASSO_NO_ATC_YAML),
+            ("genmitsu_3018", GENMITSU_YAML),
+            ("batam", BATAM_YAML),
+        ] {
+            let coder = Coder::with_program_primitives(&ProgramPrimitives {
+                set_unit: &primitive(yaml, "set_unit"),
+                set_origin: &primitive(yaml, "set_origin"),
+                origin_reference: "G55",
+            })
+            .unwrap_or_else(|error| panic!("{name}: {}", error.message()));
+
+            let mut scope = Scope::new();
+            scope.push("pcb_filename", "demo.kicad_pcb".to_string());
+            scope.push("timestamp", "2026-01-01 00:00:00".to_string());
+            scope.push("z_safe", Length::from_mm(20.0));
+            scope.push("origin_reference", "G55".to_string());
+
+            let header = coder
+                .render("initialise", &primitive(yaml, "initialise"), &mut scope)
+                .unwrap_or_else(|error| panic!("{name} header must render: {error}"));
+
+            assert!(
+                header.lines().any(|line| line.trim() == "G55"),
+                "{name}'s header must select the fixture's origin on a line of its own:\n{header}"
+            );
+
+            // One profile pinned exactly, so a stray blank line or a doubled origin shows
+            // up as a diff rather than passing the "contains G55" check above.
+            if name == "masso_g3_with_atc" {
+                assert_eq!(
+                    header,
+                    "(Created by kicad2gcode from 'demo.kicad_pcb' - 2026-01-01 00:00:00)\n\
+                     G17 G40 G49 G80 G90\n\
+                     G55\n\
+                     G21\n\
+                     G0 Z20\n"
+                );
+            }
+        }
+    }
+
+    /// The editor's validate/preview must accept every shipped `set_origin`. It renders
+    /// against the sample scope, so the sample reference has to be one that *no* bundled
+    /// profile rejects — otherwise a valid template previews as an error.
+    #[test]
+    fn set_origin_previews_with_a_sample_reference() {
+        let coder = Coder::new();
+        let vars = crate::gcode::primitive_vars::variables_for("set_origin");
+        assert!(!vars.is_empty(), "set_origin declares its variable in the schema");
+        for (name, template) in [
+            ("schema default", schema_default_set_origin()),
+            ("masso", profile_set_origin(MASSO_ATC_YAML)),
+            ("genmitsu", profile_set_origin(GENMITSU_YAML)),
+            ("batam", profile_set_origin(BATAM_YAML)),
+        ] {
+            let preview = coder.preview("set_origin", &template, &vars);
+            assert!(preview.is_ok(), "{name} must preview cleanly, got: {preview:?}");
         }
     }
 

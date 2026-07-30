@@ -1062,9 +1062,16 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
         }
     }
 
+    // The stored zero-point count is gone: a fixture no longer holds an ordinal to index
+    // into it, and `set_origin` decides what this controller accepts. Dropped quietly —
+    // a count carried no operator decision that could be lost with it.
+    if let Some(machine) = value.get_mut("machine").and_then(Value::as_object_mut) {
+        machine.remove("work_coordinate_systems");
+    }
+
     // `initialise` naming a work coordinate system outright overrides whatever the step's
     // fixture says it is set up in — the one thing a fixture most needs to be able to
-    // say. `work_coordinate_system` arrives as an ordinal for the template to map.
+    // say. `set_origin()` emits the fixture's own reference, validated.
     //
     // Only a whole-word `G54` is looked for, because that was this application's own
     // shipped default. A profile naming a different system (a Bantam's `G55`, say) is
@@ -1073,9 +1080,9 @@ fn normalize_cnc_value(value: &mut Value, path: &Path) {
         if contains_word(template, "G54") {
             warn!(
                 "[{file}] primitives.initialise selects G54 outright, ignoring the \
-                 fixture's work coordinate system. The ordinal is in scope as \
-                 `work_coordinate_system` — map it in the template so a fixture set up \
-                 in another offset is honoured."
+                 fixture's Machine Origin Reference. Call `set_origin();` there instead — \
+                 it emits the fixture's own offset and refuses one this machine does not \
+                 have."
             );
         }
     }
@@ -1140,10 +1147,12 @@ const RETIRED_FIXTURE_KEYS: &[&str] =
 
 /// Brings a fixture file onto the current schema.
 ///
-/// Two repairs, both of which `additionalProperties: false` and the tightened `origin`
+/// Three repairs, all of which `additionalProperties: false` and the tightened `origin`
 /// enums would otherwise turn into a rejected profile on load:
 ///
 /// - The [retired blocks](RETIRED_FIXTURE_KEYS) are dropped.
+/// - `work_coordinate_system` (an integer ordinal) is dropped in favour of
+///   `origin_reference` — see [`retire_work_coordinate_system`].
 /// - `origin.x0`/`origin.y0` both used to accept all four of `left|right|front|back`,
 ///   which allowed `x0: front` and even `x0: left` with `y0: left` — combinations with
 ///   no meaning. X can only be zeroed on a left or right edge and Y on a front or back
@@ -1161,6 +1170,8 @@ fn normalize_fixture_value(value: &mut Value, path: &Path) {
         }
     }
 
+    retire_work_coordinate_system(obj, &file);
+
     let Some(origin) = obj.get_mut("origin").and_then(Value::as_object_mut) else {
         return;
     };
@@ -1173,6 +1184,37 @@ fn normalize_fixture_value(value: &mut Value, path: &Path) {
             origin.insert(axis.to_string(), Value::from(fallback));
         }
     }
+}
+
+/// Drops the retired `work_coordinate_system` ordinal, leaving `origin_reference` unset.
+///
+/// The ordinal is **not** converted. It looks convertible — most profiles mapped it as
+/// `G53 + n`, so `3` "is" `G56` — but a Bantam maps `G54 + n` because its G54 is reserved,
+/// so the same `3` is `G57` there. Writing the common answer into the one profile it is
+/// wrong for would put the job in the wrong place on the bed, silently, which is the exact
+/// failure this whole field change exists to remove. So the value is reported, not moved:
+/// `set_origin` refuses to generate against a blank reference and says so in the operator's
+/// own words.
+///
+/// The suggestion in the warning is explicitly labelled an assumption for the same reason.
+fn retire_work_coordinate_system(obj: &mut serde_json::Map<String, Value>, file: &str) {
+    let Some(retired) = obj.remove("work_coordinate_system") else {
+        return;
+    };
+    // Only a sane ordinal earns a suggestion; anything else is reported bare.
+    let suggestion = retired
+        .as_u64()
+        .filter(|n| (1..=6).contains(n))
+        .map(|n| format!(" On most controllers that was 'G{}', but a machine that reserves \
+                          low offsets (a Bantam reserves G54) numbers them differently — \
+                          check the work offset on the machine itself.", 53 + n))
+        .unwrap_or_default();
+
+    warn!(
+        "[{file}] dropped the retired 'work_coordinate_system: {retired}'. Set this \
+         fixture's Machine Origin Reference to the offset the machine actually uses; \
+         generation refuses to run while it is blank.{suggestion}"
+    );
 }
 
 /// Adapts [`normalize_machining_value`] to the [`load_normalized`] signature; machining
@@ -2336,6 +2378,67 @@ mod tests {
         let mut bare = serde_json::json!({ "name": "Tape" });
         normalize_fixture_value(&mut bare, Path::new("tape.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "Tape" }));
+    }
+
+    /// A fixture written when the machine origin was an ordinal still loads: the retired
+    /// key is dropped (`additionalProperties: false` would otherwise reject the profile)
+    /// and `origin_reference` is left **unset**.
+    ///
+    /// Deliberately not converted. `3` maps to `G56` on most controllers but `G57` on a
+    /// Bantam, whose G54 is reserved — and this migration cannot see which machine the
+    /// fixture is used with, because a fixture does not reference a CNC. Writing the common
+    /// answer would put the job in the wrong place on the one profile it is wrong for,
+    /// silently, which is the failure the whole field change exists to remove. `set_origin`
+    /// refuses to generate against a blank reference and says so.
+    #[test]
+    fn a_fixture_holding_the_retired_ordinal_loads_with_no_origin_reference() {
+        let mut value = serde_json::json!({
+            "name": "Pin jig",
+            "work_coordinate_system": 3,
+            "z_safe": "20mm",
+        });
+        normalize_fixture_value(&mut value, Path::new("jig.yaml"));
+
+        assert!(
+            value.get("work_coordinate_system").is_none(),
+            "the retired ordinal must not survive into validation"
+        );
+        assert!(
+            value.get("origin_reference").is_none(),
+            "nothing is invented for it — the schema default (empty) applies, and \
+             set_origin reports that"
+        );
+        assert_eq!(value.get("z_safe").and_then(Value::as_str), Some("20mm"), "the rest is untouched");
+
+        // An out-of-range or non-numeric ordinal is dropped just the same — there is no
+        // value it could be converted to, and rejecting the profile over a field that no
+        // longer exists would be worse.
+        for odd in [serde_json::json!(99), serde_json::json!("three"), serde_json::json!(null)] {
+            let mut value = serde_json::json!({ "work_coordinate_system": odd });
+            normalize_fixture_value(&mut value, Path::new("jig.yaml"));
+            assert!(value.get("work_coordinate_system").is_none(), "dropped whatever it held");
+        }
+    }
+
+    /// The CNC's stored-zero *count* is retired with the fixture ordinal that indexed into
+    /// it. Same reason it must be dropped rather than merely ignored: the schema no longer
+    /// declares it, and `additionalProperties: false` rejects what it does not declare.
+    #[test]
+    fn a_cnc_profile_holding_the_retired_offset_count_still_loads() {
+        let mut value = serde_json::json!({
+            "machine": { "work_coordinate_systems": 6, "atc_slot_count": 8 },
+        });
+        normalize_cnc_value(&mut value, Path::new("machine.yaml"));
+
+        assert!(
+            value.pointer("/machine/work_coordinate_systems").is_none(),
+            "the retired count must not survive into validation"
+        );
+        assert_eq!(
+            value.pointer("/machine/atc_slot_count").and_then(Value::as_u64),
+            Some(8),
+            "the rest of the machine block is untouched"
+        );
     }
 
     /// The detection behind the `G54` warning is whole-word, so a profile is not nagged

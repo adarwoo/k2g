@@ -5,6 +5,12 @@ struct RuntimeIssueDraft {
     details: Option<String>,
 }
 
+/// The diagnostics domain generation failures live in.
+///
+/// One domain for the whole run, so each publish replaces the previous run's entries
+/// wholesale — which is what makes the banner clear itself the moment a run succeeds.
+pub const GENERATION_ERROR_DOMAIN: &str = "generation";
+
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(boot: &UiLaunchData) -> Self {
@@ -313,16 +319,34 @@ impl AppState {
         message: String,
         details: Option<String>,
     ) {
+        self.push_runtime_error_quiet(domain, owner_tag, message.clone(), details);
+        self.log_event(message);
+    }
+
+    /// Records a diagnostic **without** also raising a toast for it.
+    ///
+    /// Separated from [`Self::push_runtime_error_owned`] for callers that already say their
+    /// piece once: a generation run reports a single summary, and one toast per failed step
+    /// on top of it would bury that summary under the detail it is summarising.
+    fn push_runtime_error_quiet(
+        &mut self,
+        domain: &str,
+        owner_tag: Option<String>,
+        message: String,
+        details: Option<String>,
+    ) {
         let created_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
             .unwrap_or(0);
         self.errors.push(AppError {
-            id: format!("err-{}", created_ms),
+            // Suffixed with the position so several entries pushed in the same millisecond
+            // — every failed step of one run — keep distinct ids for the UI's keying.
+            id: format!("err-{}-{}", created_ms, self.errors.len()),
             domain: domain.to_string(),
             owner_tag,
             is_error: true,
-            message: message.clone(),
+            message,
             details,
         });
         const MAX_ERRORS: usize = 200;
@@ -330,11 +354,27 @@ impl AppState {
             let drop_count = self.errors.len() - MAX_ERRORS;
             self.errors.drain(0..drop_count);
         }
-        self.log_event(message);
     }
 
     fn clear_runtime_errors(&mut self, domain: &str) {
         self.errors.retain(|error| error.domain != domain);
+    }
+
+    /// Replaces the standing generation diagnostics with `failures` (`(headline, detail)`).
+    ///
+    /// Generation failure used to be reported *only* by `log_event` — a toast that fades
+    /// after a few seconds. But a failed run is a **standing condition**: it stays wrong
+    /// until the operator changes something, and `programs` has been cleared, so nothing
+    /// else on screen says why there is no G-code. An operator who looked away for ten
+    /// seconds was left with an empty Code view and no explanation.
+    ///
+    /// Being a domain replace, this also *clears* itself: pass an empty list on a good run
+    /// and the banner goes away without anyone having to remember to dismiss it.
+    pub fn set_generation_errors(&mut self, failures: Vec<(String, Option<String>)>) {
+        self.clear_runtime_errors(GENERATION_ERROR_DOMAIN);
+        for (message, details) in failures {
+            self.push_runtime_error_quiet(GENERATION_ERROR_DOMAIN, None, message, details);
+        }
     }
 
     fn profile_owner_tag(kind: &str, id: &str) -> String {
@@ -1157,11 +1197,11 @@ fn machine_profile_to_value(machine: &MachineProfile) -> Value {
                 "x": machine.scaling_x,
                 "y": machine.scaling_y,
             },
-            "work_coordinate_systems": machine.work_coordinate_systems,
         },
         "primitives": {
             "line_number": machine.line_number_tpl,
             "set_unit": machine.set_unit_tpl,
+            "set_origin": machine.set_origin_tpl,
             "initialise": machine.gcode_header,
             "rapid_move": machine.drill_first_move,
             "linear_cut": machine.drill_cycle_mode_series,
@@ -1335,11 +1375,6 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
         atc_slot_count,
         scaling_x,
         scaling_y,
-        work_coordinate_systems: value
-            .pointer("/machine/work_coordinate_systems")
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .clamp(1, u8::MAX as u64) as u8,
         line_number_tpl: value
             .pointer("/primitives/line_number")
             .and_then(Value::as_str)
@@ -1347,6 +1382,11 @@ fn machine_profile_from_value(value: &Value) -> Option<MachineProfile> {
             .to_string(),
         set_unit_tpl: value
             .pointer("/primitives/set_unit")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        set_origin_tpl: value
+            .pointer("/primitives/set_origin")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
@@ -1469,7 +1509,7 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
         "breakthrough": fixture.breakthrough.to_string(),
         "z_retract": fixture.z_retract.to_string(),
         "z_safe": fixture.z_safe.to_string(),
-        "work_coordinate_system": fixture.work_coordinate_system,
+        "origin_reference": fixture.origin_reference,
     })
 }
 
@@ -1523,13 +1563,15 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
             .and_then(Value::as_str)
             .unwrap_or("front")
             .to_string(),
-        // Ordinal, not a length. 1 is the schema default and the only value a
-        // single-WCS machine can honour.
-        work_coordinate_system: value
-            .get("work_coordinate_system")
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .clamp(1, u8::MAX as u64) as u8,
+        // Carried through exactly as entered — trimming or upper-casing it here would
+        // take the decision away from the CNC profile's `set_origin`, which needs the
+        // original text to quote back when it rejects one. Empty is a legitimate state
+        // (unset), and `set_origin` is what refuses to generate against it.
+        origin_reference: value
+            .get("origin_reference")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         pending_required_fields: pending_required_fields.clone(),
         usable: pending_required_fields.is_empty(),
     })
