@@ -531,6 +531,9 @@ fn sample_integer(name: &str) -> i64 {
 fn sample_string(primitive: &str, name: &str) -> String {
     match (primitive, name) {
         ("line_format", "text") => "G1 X10 Y5 F600",
+        // The real one, not a placeholder: the preview is meant to render what a real
+        // run would, and this is the one sample value that is knowable exactly.
+        (_, "k2g_version") => env!("CARGO_PKG_VERSION"),
         (_, "filename") => "board.kicad_pcb",
         (_, "timestamp") => "2026-01-01 12:00:00",
         (_, "manual_message") => "(change tool)",
@@ -994,8 +997,8 @@ mod tests {
         let template = doc["primitives"]["program_begin"].as_str().expect("declared");
 
         let coder = Coder::with_program_primitives(&ProgramPrimitives {
-            set_unit: &doc["primitives"]["set_unit"].as_str().expect("declared").to_string(),
-            set_origin: &doc["primitives"]["set_origin"].as_str().expect("declared").to_string(),
+            set_unit: doc["primitives"]["set_unit"].as_str().expect("declared"),
+            set_origin: doc["primitives"]["set_origin"].as_str().expect("declared"),
             origin_reference: "G55",
             ..Default::default()
         })
@@ -1018,7 +1021,7 @@ mod tests {
         let header = coder.render("program_begin", template, &mut scope).expect("renders");
         assert_eq!(
             header.lines().next().unwrap_or_default(),
-            "(Created by kicad2gcode from 'demo' - 2026-01-01 00:00:00)",
+            "(Created by K2G from 'demo' - 2026-01-01 00:00:00)",
             "one step names the board and the time, and nothing about steps:\n{header}"
         );
     }
@@ -1096,7 +1099,7 @@ mod tests {
             if name == "masso_g3_with_atc" {
                 assert_eq!(
                     header,
-                    "(Created by kicad2gcode from 'demo' - step 1 of 2: Drill PTH - \
+                    "(Created by K2G from 'demo' - step 1 of 2: Drill PTH - \
                      2026-01-01 00:00:00)\n\
                      (Target: MASSO G3 firmware 5.13)\n\
                      G53 Z0\n\

@@ -418,6 +418,7 @@ properties:
         # emit/fmt()/metric() surface. Read by the primitive editor's reference panel
         # and its validate/preview (the generation scopes are built to match).
         x-variables:
+          - { name: k2g_version, type: string, description: "The version of k2g that produced this program (e.g. \"0.9.0\"). Worth printing in a header: a board that comes back months later can then be traced to the build that machined it." }
           - { name: filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }
@@ -425,7 +426,7 @@ properties:
           - { name: steps, type: list, description: "Every step of the machining profile, in order - not just this one, so a header can say 'step 2 of 3'. Each entry holds the step's own settings (name, side_to_machine, operations, drill_pth, route_board, ...) plus cnc_name / fixture_name / toolset_name beside the ids it binds. Index it with step_index; steps.len() counts them. A list has no printed form - reach a field: steps[step_index].name." }
           - { name: step_index, type: integer, description: "Which step of the machining profile this program is. 0 is the first, so an operator-facing count reads {step_index + 1} of {steps.len()}." }
         default: |
-          `(Created by kicad2gcode from '{filename}' - {timestamp})
+          `(Created by kicad2gcode {k2g_version} from '{filename}' - {timestamp})
           `(Reset all back to safe defaults)
           `G17 G40 G49 G80 G90
           set_origin();
@@ -443,6 +444,7 @@ properties:
         # to `z_safe` and may echo the source file / timestamp. Generation builds
         # the footer scope to match this list (see src/gcode/program.rs).
         x-variables:
+          - { name: k2g_version, type: string, description: "The version of k2g that produced this program (e.g. \"0.9.0\"). Worth printing in a header: a board that comes back months later can then be traced to the build that machined it." }
           - { name: filename, type: string, description: "Source KiCad PCB file name." }
           - { name: timestamp, type: string, description: "Program generation time (local clock)." }
           - { name: z_safe, type: length, description: "Safe Z height to retract to, clear of the work and fixtures." }

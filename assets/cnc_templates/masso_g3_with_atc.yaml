@@ -55,7 +55,7 @@ primitives:
   program_begin: |
     let board = filename;
     board.replace(".kicad_pcb", "");
-    `(Created by kicad2gcode from '{board}'`
+    `(Created by K2G from '{board}'`
     if steps.len() > 1 {
        if steps[step_index].name != "" {
            ` - step {step_index + 1} of {steps.len()}: {steps[step_index].name}`
@@ -140,7 +140,6 @@ primitives:
   spindle_start: |
     `S{rpm}
     `M03
-    `G4 P2.0
 
   spindle_stop: "`M05"
 

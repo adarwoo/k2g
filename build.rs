@@ -16,8 +16,70 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/icons/icon.png");
 
+    warn_on_version_drift();
+
     #[cfg(windows)]
     windows_icon::embed();
+}
+
+/// Warns when `Cargo.toml`'s version has fallen behind the newest release tag.
+///
+/// The version in `Cargo.toml` is the single source of truth — it is what the About
+/// screen shows, what a G-code header prints as `k2g_version`, and what Windows reads
+/// out of the executable's file properties. Git tags cannot supply any of those:
+/// `winresource` seeds the version block from `CARGO_PKG_*`, and a source tarball or a
+/// shallow CI clone has no tags to read at all.
+///
+/// Which leaves one failure mode, and it is the one that actually happened: the tags
+/// advanced to `v0.9.0-typed-values` while `Cargo.toml` sat at `0.1.0` through nine
+/// releases, so every build reported a version nine releases stale and nothing said so.
+/// This is that missing signal.
+///
+/// Compared against the **nearest tag reachable from HEAD**, not the newest tag in the
+/// repository: that is the release this build descends from, which is the thing the
+/// version should agree with. Only the numeric part is compared, so the descriptive
+/// suffix this project's tags carry (`v0.9.0-typed-values`) is free to say whatever it
+/// likes.
+///
+/// Silent when there is no git, no tags, or an unparsable one — a build from a tarball
+/// is not a mistake, and this file never fails a build over metadata (see the module
+/// docs).
+fn warn_on_version_drift() {
+    // Re-run when HEAD moves or a tag is written, or the answer goes stale the moment
+    // the next tag lands.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
+
+    let Ok(output) = std::process::Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .output()
+    else {
+        return; // no git on PATH
+    };
+    if !output.status.success() {
+        return; // not a repository, or no tags yet
+    }
+    let Ok(tag) = String::from_utf8(output.stdout) else { return };
+    let tag = tag.trim();
+
+    // `v0.9.0-typed-values` -> `0.9.0`. Anything that does not look like a three-part
+    // version is someone else's tagging scheme, and not this check's business.
+    let numeric = tag.trim_start_matches('v').split('-').next().unwrap_or_default();
+    let is_semver = numeric.split('.').count() == 3
+        && numeric.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    if !is_semver {
+        return;
+    }
+
+    let declared = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    if numeric != declared {
+        println!(
+            "cargo:warning=k2g version drift — Cargo.toml says {declared}, but the \
+             nearest release tag is {tag}. The About screen, the `k2g_version` in every \
+             G-code header and the executable's file properties all report {declared}. \
+             Set `version = \"{numeric}\"` in Cargo.toml, or tag this release."
+        );
+    }
 }
 
 #[cfg(windows)]

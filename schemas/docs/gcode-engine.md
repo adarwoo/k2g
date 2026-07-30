@@ -70,7 +70,7 @@ into a single scope per primitive call:
 
 | Layer         | Set                          | Lifetime            | Examples |
 |---------------|------------------------------|---------------------|----------|
-| **Program** (job context + run metadata) | once, at `Coder::new` | whole generation | `toolset.size`, `fixture.backing_board_thickness`, `machine.max_feed_rate`, `machine.spindle_rpm_min`, `cnc.z_safe`, `filename`, `timestamp`, `steps`, `step_index`, `scaling_x`, `scaling_y` |
+| **Program** (job context + run metadata) | once, at `Coder::new` | whole generation | `toolset.size`, `fixture.backing_board_thickness`, `machine.max_feed_rate`, `machine.spindle_rpm_min`, `cnc.z_safe`, `k2g_version`, `filename`, `timestamp`, `steps`, `step_index`, `scaling_x`, `scaling_y` |
 | **Operation** | per tool / operation         | one operation's steps | `tool_diameter`, `rpm`, `z_feed`, `xy_feed`, `z_bottom`, `z_retract`, `peck` |
 | **Call**      | per `expand()`               | one primitive call  | `x`, `y`, `z`, `s`, `i`, `j`, `clockwise`, `line`, `slot`, `message`, `text` |
 
@@ -102,7 +102,7 @@ Two conventions, split by role:
 
 - **Job context is namespaced.** Each source profile becomes a top-level
   namespace in scope — `machine.*`, `cnc.*`, `fixture.*`, `toolset.*`,
-  `machining.*` — with run-level values at the top level (`filename`,
+  `machining.*` — with run-level values at the top level (`k2g_version`, `filename`,
   `timestamp`, `steps`, `step_index`, `scaling_x/y`). A template reads `{fixture.backing_board_thickness}`:
   provenance is legible at the call site, and two profiles can both expose a
   `max_feed_rate` without colliding.
@@ -299,7 +299,7 @@ let job = job_context! {
     toolset:   ns!{ size },
     machining: ns!{ peck },
     // run-level values sit at the top of the job context
-    filename, timestamp, steps, step_index, scaling_x, scaling_y,
+    k2g_version, filename, timestamp, steps, step_index, scaling_x, scaling_y,
 };
 
 // Compiles + caches every primitive AST from the active CNC profile and captures

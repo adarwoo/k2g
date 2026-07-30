@@ -615,6 +615,44 @@ mod tests {
         }
     }
 
+    /// The build's version reaches the program, and is the real one.
+    ///
+    /// The point of `k2g_version` is tracing a board back to the build that machined it,
+    /// so a placeholder or a stale constant would defeat it entirely. Asserted against
+    /// `CARGO_PKG_VERSION` itself rather than a literal, because a literal here would be
+    /// one more thing to remember at release time — which is the failure this whole
+    /// mechanism exists to end (`build.rs` warns when Cargo.toml falls behind the tags).
+    #[test]
+    fn the_header_can_print_the_version_that_generated_it() {
+        let input = GenerationInput {
+            steps: vec![crate::gcode::program::ProgramRender {
+                program_begin_tpl: "`(k2g {k2g_version})".to_string(),
+                ..sample_program_render()
+            }],
+            ..sample_input()
+        };
+        let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+
+        let expected = format!("(k2g {})", env!("CARGO_PKG_VERSION"));
+        assert!(text(&out, 0).contains(&expected), "expected {expected}:
+{}", text(&out, 0));
+    }
+
+    /// It is in the footer's scope too. The two share one closure, so this is really a
+    /// guard on that staying true — a footer is a natural place to stamp the version.
+    #[test]
+    fn the_version_is_available_to_the_footer_as_well() {
+        let input = GenerationInput {
+            steps: vec![crate::gcode::program::ProgramRender {
+                program_end_tpl: "`(end k2g {k2g_version})".to_string(),
+                ..sample_program_render()
+            }],
+            ..sample_input()
+        };
+        let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+        assert!(text(&out, 0).contains(&format!("(end k2g {})", env!("CARGO_PKG_VERSION"))));
+    }
+
     /// Each step's header reads **its own** record out of the shared `steps` array.
     ///
     /// The trap this closes is an off-by-one that would be invisible: every step gets the

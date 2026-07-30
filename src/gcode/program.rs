@@ -149,8 +149,13 @@ pub fn render_step_program(
     // `step_index` is the plan's own step number, which is the enumeration of the
     // profile's `/steps` array — so `steps[step_index]` is this step's record and no
     // second index has to be kept in step with the first.
+    // Read straight from the crate rather than threaded through [`ProgramContext`]: it
+    // describes the *build*, not the job, and is fixed at compile time. `Cargo.toml` is
+    // the single source of truth for it, and `build.rs` warns when that falls behind the
+    // newest release tag.
     let program_scope = || {
         let mut scope = Scope::new();
+        scope.push("k2g_version", env!("CARGO_PKG_VERSION").to_string());
         scope.push("filename", ctx.filename.to_string());
         scope.push("timestamp", ctx.timestamp.to_string());
         scope.push("z_safe", render.z_safe);

@@ -354,22 +354,30 @@ mod tests {
         let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["filename", "timestamp", "z_safe", "origin_reference", "steps", "step_index"]
+            vec![
+                "k2g_version",
+                "filename",
+                "timestamp",
+                "z_safe",
+                "origin_reference",
+                "steps",
+                "step_index"
+            ]
         );
-        assert_eq!(vars[2].var_type, VarType::Length);
+        assert_eq!(vars[3].var_type, VarType::Length);
         assert_eq!(
-            vars[3].var_type,
+            vars[4].var_type,
             VarType::String,
             "the origin reference is the machine's own word for an offset, not a number"
         );
         assert_eq!(
-            vars[4].var_type,
+            vars[5].var_type,
             VarType::List,
             "`steps` is indexed, not printed — a `string` here would have the preview \
              push text where generation pushes an array, and only the preview would agree"
         );
-        assert_eq!(vars[5].var_type, VarType::Integer);
-        assert!(!vars[2].description.is_empty(), "descriptions are carried through");
+        assert_eq!(vars[6].var_type, VarType::Integer);
+        assert!(!vars[3].description.is_empty(), "descriptions are carried through");
     }
 
     #[test]
@@ -387,7 +395,15 @@ mod tests {
         let names: Vec<&str> = vars.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["filename", "timestamp", "z_safe", "origin_reference", "steps", "step_index"]
+            vec![
+                "k2g_version",
+                "filename",
+                "timestamp",
+                "z_safe",
+                "origin_reference",
+                "steps",
+                "step_index"
+            ]
         );
     }
 
