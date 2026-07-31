@@ -20,10 +20,10 @@ $defs:
   # drill NPTH, many route the edge; locating pins and milling are the exceptions.
   # The UI shows them in this order and persists the enabled set in it.
   #
-  # ONE CLAIM PER BOARD SIDE. Every key here except `drill_locating_pins` may appear
-  # in at most one step per side: each removes material the board has once, so a
+  # ONE CLAIM PER BOARD FACE. Every key here except `drill_locating_pins` may appear
+  # in at most one step per face: each removes material the board has once, so a
   # second step claiming it repeats the cut rather than adding work. The rule is per
-  # *side* — milling the component side then the solder side is two real jobs — and
+  # *face* — milling the front then the back is two real jobs — and
   # `drill_locating_pins` is exempt because pins register the board against a fixture,
   # so re-fixturing legitimately drills another set.
   #
@@ -304,11 +304,32 @@ $defs:
         $ref: "id.yaml#/$defs/uuid_v7"
         x-ref: "toolset.yaml"
 
-      side_to_machine:
-        description: Which side of the board this step machines.
+      # ---------------------------------------------------------------------
+      # board_face — which face of the PCB this step cuts.
+      #
+      # `front` is the component side, `back` the solder side. Named for the
+      # board and not for the machine, because "top" and "bottom" were doing
+      # two jobs at once: which face of the PCB, and which way up it sits on
+      # the bed. Those come apart the moment a step machines the back — the
+      # board is turned over, so the PCB's *bottom* is what faces up. The bed's
+      # own directions are `near`/`far` and `left`/`right` (fixture.yaml
+      # `origin`), and no word is now shared between the two.
+      #
+      # Was `side_to_machine: top | bottom` (schema_version 3, pre-2026-07-31).
+      # Both the key and the values are migrated on load — see
+      # `normalize_step_value` in src/data/mod.rs. A CNC template reading
+      # `steps[step_index].side_to_machine` must become `.board_face`, and its
+      # values `"front"`/`"back"`.
+      # ---------------------------------------------------------------------
+      board_face:
+        title: Board face to machine
+        description: >-
+          Which face of the PCB this step cuts: the front (component side) or
+          the back (solder side). A back-face step machines the board turned
+          over, so it needs locating pins drilled before it.
         type: string
-        enum: [top, bottom]
-        default: top
+        enum: [front, back]
+        default: front
 
       operations:
         description: Primitives run in this step, in order.
@@ -318,9 +339,37 @@ $defs:
         minItems: 1
         default: [drill_pth]
 
+      # Registration pins. Two holes drilled through the board and on into the
+      # backboard, on the fixture's flip mirror line, so the board can be turned
+      # over and land back in the same place. The pins themselves are stock —
+      # nothing here describes them beyond the diameter, because nothing else
+      # about them is the program's business.
       drill_locating_pins:
         type: object
-        default: {}
+        default:
+          pin_diameter: 3.2mm
+        properties:
+          # A fixed catalogue, not a free length, so `enum` rather than a
+          # `units.yaml#/$defs/size` `$ref`. Two reasons, and the first is the
+          # binding one: `classify` in crates/datastore/src/parse.rs tests `$ref`
+          # *before* `enum`, so a size ref would render as a free-text unit box and
+          # the enum would never be seen — the operator could type any diameter at
+          # all. And a pin is bought, not machined: these are the sizes drill blanks
+          # and dowel pins actually come in.
+          #
+          # The cost is that the value does not follow the program's unit mode the
+          # way a `size` would. That is bearable here because the list is fixed and
+          # already names the inch size the way an operator would ask for it.
+          pin_diameter:
+            title: Pin diameter
+            description: >-
+              Diameter of the registration pins, and so of the holes drilled for
+              them. 3.2 mm is the default because it takes a 1/8" shank with about
+              25 um of play; 3.175 mm IS 1/8", for a pin ground to size.
+            type: string
+            default: 3.2mm
+            enum: ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"]
+        required: [pin_diameter]
         additionalProperties: false
 
       drill_pth:

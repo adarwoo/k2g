@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
 use crate::data::model::{
-    conflicting_operations, operation_once_per_side, step_reference, MachiningOperation,
+    conflicting_operations, operation_once_per_face, step_reference, MachiningOperation,
     OperationConflict, UserUnitSystem, MACHINING_OPERATIONS,
 };
 use units::user_format as unit_format;
@@ -505,6 +505,16 @@ pub fn set_operations(id: Uuid, step: usize, operations: &[String]) {
     bump_render();
 }
 
+/// Sets a step's board face to the front, and re-renders.
+///
+/// The one face a step can be *put* onto rather than asked about: a step that drills
+/// locating pins machines the front by definition, since the pins are what the board is
+/// later turned over against.
+pub fn set_step_face_front(id: Uuid, step: usize) {
+    with_appdata_mut(|data| data.set_str(id, &format!("/steps/{step}/board_face"), "front"));
+    bump_render();
+}
+
 /// The number of steps in machining profile `id` (subscribes to store mutations).
 pub fn use_step_count(id: Uuid) -> usize {
     subscribe();
@@ -570,11 +580,11 @@ fn step_operation_claims(id: Uuid) -> Vec<(String, bool, Vec<String>)> {
                     // ordinal is what the editor shows beside it.
                     _ => format!("Step {}", i + 1),
                 };
-                let bottom = matches!(
+                let back = matches!(
                     doc.root
-                        .get_pointer(&format!("/steps/{i}/side_to_machine"))
+                        .get_pointer(&format!("/steps/{i}/board_face"))
                         .map(|node| &node.value),
-                    Some(NodeValue::Str(side)) if side == "bottom"
+                    Some(NodeValue::Str(face)) if face == "back"
                 );
                 let operations = match doc
                     .root
@@ -590,7 +600,7 @@ fn step_operation_claims(id: Uuid) -> Vec<(String, bool, Vec<String>)> {
                         .collect(),
                     _ => Vec::new(),
                 };
-                (name, bottom, operations)
+                (name, back, operations)
             })
             .collect()
     })
@@ -617,7 +627,7 @@ pub fn use_conflicting_operations(id: Uuid) -> Vec<OperationConflict> {
 /// because "you cannot tick this" without saying why is indistinguishable from a bug.
 /// `None` for a repeatable operation, for `step` itself, and for the other side.
 fn operation_owner(id: Uuid, step: usize, key: &str) -> Option<(usize, String)> {
-    if !operation_once_per_side(key) {
+    if !operation_once_per_face(key) {
         return None;
     }
     let claims = step_operation_claims(id);
@@ -761,6 +771,14 @@ fn OperationToggle(
                         .map(|op| op.key.to_string())
                         .collect();
                     set_operations(id, step, &ordered);
+                    // Enabling locating pins settles the step's board face: pins are what
+                    // lets the board be turned over, so they are drilled before it ever is.
+                    // Written rather than merely hidden, because the *document* is what the
+                    // planner and the readiness gate read — a step left saying "back" with
+                    // no control to change it would be unfixable from the editor.
+                    if evt.checked() && op_key == "drill_locating_pins" {
+                        set_step_face_front(id, step);
+                    }
                 },
             }
             span { "{label}" }
@@ -1270,7 +1288,15 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
     // spans a whole wide column) with the inline revert affordance beside it.
     // Multiline editors (CNC GTL templates, wrapped strings) take the full width;
     // checkboxes keep their natural size.
-    let control_class = if matches!(&field.kind, FieldKind::Enum(_)) {
+    // A profile's own name is the exception to the width cap. It is free text the operator
+    // writes rather than a value with a natural size, and the names people actually use —
+    // "Genmitsu 3018 PRO, 300W spindle" — ran off the end of a box sized for a diameter.
+    // Matched on the pointer because that is what makes it *the name*; every other string
+    // field on the screen is still capped.
+    let is_profile_name = ptr == "/name";
+    let control_class = if is_profile_name {
+        "field-control field-control-name"
+    } else if matches!(&field.kind, FieldKind::Enum(_)) {
         "field-control"
     } else if matches!(&field.value, NodeValue::Bool(_)) {
         "field-control field-control-check"

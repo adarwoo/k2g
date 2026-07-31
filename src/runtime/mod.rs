@@ -17,7 +17,7 @@ use crate::data::model::stock::{stock_value_from_tools, tools_from_stock_value};
 use crate::data::model::{
     CascadeDeleteImpact, CatalogStockCatalog, CatalogStockSection, CatalogStockTool,
     FixtureProfile, JobConfig, JobProfile, MachineProfile,
-    ProductionOperation, Side, Tool, ToolPreference, ToolStatus, ToolsetGenerationPolicy,
+    BoardFace, ProductionOperation, Tool, ToolPreference, ToolStatus, ToolsetGenerationPolicy,
     ToolsetProfile, UserUnitSystem,
 };
 // Navigation/shell state lives under the UI layer; the runtime references it

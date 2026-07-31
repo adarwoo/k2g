@@ -450,7 +450,7 @@ mod tests {
         use crate::gcode::step_data::StepValue;
         StepValue::Map(vec![
             ("name".into(), StepValue::Text(name.to_string())),
-            ("side_to_machine".into(), StepValue::Text("top".into())),
+            ("board_face".into(), StepValue::Text("front".into())),
             ("cnc_name".into(), StepValue::Text("Sample mill".into())),
         ])
     }
@@ -817,6 +817,47 @@ mod tests {
             text(&out, 1)
         );
         assert!(!text(&out, 1).contains("G54"), "step 1's origin must not leak into step 2");
+    }
+
+    /// A two-sided job: the back-face program asks the operator to confirm the board was
+    /// turned over, and the front-face one does not.
+    ///
+    /// End to end through `render_step_program`, not just the body renderer, because the
+    /// prompt reaches the program through the machine's own `pause` primitive — a path that
+    /// runs from `StepRender` through the Coder's callable registration and out into the
+    /// numbered text. And it is load-bearing: two symmetric pins of one diameter accept the
+    /// board unflipped, and turned 180°, exactly as readily as the right way up, so no
+    /// geometry k2g has can reject a wrong remount. The question is the whole guard.
+    #[test]
+    fn only_the_back_face_program_asks_the_operator_to_confirm_the_flip() {
+        let face = |prompt: Option<&str>| crate::gcode::program::ProgramRender {
+            body: crate::gcode::program::StepRender {
+                opening_prompt: prompt.map(str::to_string),
+                ..crate::gcode::program::sample_step_render(true)
+            },
+            ..sample_program_render()
+        };
+        let input = GenerationInput {
+            plan: crate::gcode::plan::MachiningPlan {
+                steps: vec![empty_step(0), empty_step(1)],
+                note: None,
+            },
+            steps: vec![face(None), face(Some("Board back face up?"))],
+            ..sample_input()
+        };
+
+        let out = run_generation(&input, &Arc::new(AtomicBool::new(false))).ok().unwrap();
+        assert!(
+            !text(&out, 0).contains("Board back face up?"),
+            "the front face has nothing to confirm — a prompt on every program is one every \
+             operator learns to click through:\n{}",
+            text(&out, 0)
+        );
+        let back = text(&out, 1);
+        assert!(
+            back.contains("MSG Board back face up?") && back.contains("M01"),
+            "the machine's own pause primitive carries it:\n{back}"
+        );
     }
 
     /// One bad step must not cost the operator the programs for the others — they are

@@ -12,6 +12,7 @@ pub mod dialect;
 pub mod feeds;
 pub mod oblong;
 pub mod outline;
+pub mod pins;
 pub mod placement;
 pub mod plan;
 pub mod planner;

@@ -7,7 +7,6 @@ use dioxus::prelude::*;
 use units::Length;
 
 use crate::runtime::AppCtx;
-use crate::data::model::*;
 use units::user_format as unit_format;
 
 /// The job-configuration sidebar. Reads the active job snapshot and writes edits
@@ -52,18 +51,14 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                     .join(", ");
                 if ops.is_empty() { "—".to_string() } else { ops }
             };
-            let side = if active_profile.side == Side::Bottom {
-                "Bottom (solder side)".to_string()
-            } else {
-                "Top (component side)".to_string()
-            };
+            let board_face = active_profile.board_face.label().to_string();
 
             let mut rows: Vec<(&'static str, String)> = vec![
                 ("Machining profile", active_profile.name.clone()),
                 ("CNC", cnc_name),
                 ("Fixture", fixture_name),
                 ("Toolset", toolset_name),
-                ("Side", side),
+                ("Board face", board_face),
                 ("Operations", operations),
             ];
             rows.push((

@@ -471,7 +471,17 @@ mod tests {
     use super::*;
 
     fn placement_identity() -> Placement {
-        Placement::new(None, 0.0, Default::default(), 1.0, 1.0, Length::from_mm(2.0), Length::from_mm(5.0))
+        Placement::new(&crate::gcode::placement::PlacementSpec {
+            bounds: None,
+            orientation_deg: 0.0,
+            origin: Default::default(),
+            margin: Default::default(),
+            flip: None,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            z_retract: Length::from_mm(2.0),
+            z_safe: Length::from_mm(5.0),
+        })
     }
 
     fn target(source: &str, x: f64, y: f64, tool: &str, dia: f64) -> DrillTarget {

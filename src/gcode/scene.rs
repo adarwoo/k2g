@@ -162,6 +162,43 @@ pub struct BoardSolid {
     /// of pegs sitting in the board.
     pub openings: Vec<Vec<[f64; 2]>>,
     pub thickness_mm: f64,
+    /// The board is in the fixture back-face up, because this step machines its back.
+    ///
+    /// Decides **which way round the two coloured faces go**, not whether they are drawn:
+    /// the board's back is always the red one and its front always the green one, and this
+    /// says which of them the spindle is looking at. A back-face step has the board turned
+    /// over, so red faces up.
+    ///
+    /// Worth colouring at all because the artwork is *mirrored* for such a step —
+    /// correctly, since that is how the board physically sits — and a mirrored board is
+    /// indistinguishable from a right-way-round one unless you already know which you are
+    /// looking at. Getting that wrong is a scrapped board.
+    pub back_face_up: bool,
+}
+
+/// The setup the board sits in: the work zero, the stop the board is registered against,
+/// and the locating pins.
+///
+/// None of this is cut — it is the *frame* the program is written in, drawn so an operator
+/// can see it. The gap between the bracket and the board is the room the origin made for
+/// the pins, and is the one thing about a pinned job's coordinate frame that is otherwise
+/// invisible: the numbers in the program look entirely ordinary either way.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct FixtureMark {
+    /// Length of each bracket arm, in machine millimetres.
+    pub arm_mm: f64,
+    /// Which way the arms run from the origin, as `+1`/`-1` per axis: away from the stop
+    /// and along the work. With the zero on the board's right-hand edge the work is at
+    /// negative X, and so is the arm.
+    pub dir_x: f64,
+    pub dir_y: f64,
+    /// The pin holes as `[x, y, diameter]` in machine millimetres. Empty when the job has
+    /// no locating pins.
+    ///
+    /// Not [`BoardSolid::openings`]: these are holes in the *blank and the backboard*, not
+    /// in the board, and drawing them as board openings would put two holes through a
+    /// workpiece that does not have them.
+    pub pins: Vec<[f64; 3]>,
 }
 
 impl BoardSolid {

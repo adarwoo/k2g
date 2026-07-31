@@ -172,11 +172,17 @@ pub(crate) struct StepRaw {
     pub(crate) toolset_id: Option<Uuid>,
     pub(crate) drill: DrillConfigRaw,
     pub(crate) route_board: EdgeConfigRaw,
-    /// `side_to_machine == "bottom"`. Read per step rather than taken from the
-    /// profile projection (which only carries `steps[0]`), because a later step may
-    /// be the bottom-side one. Today this exists to *refuse* such a step — see the
-    /// readiness gate in `orchestration`.
-    pub(crate) machines_bottom: bool,
+    /// `board_face == "back"`. Read per step rather than taken from the profile
+    /// projection (which only carries `steps[0]`), because a later step may be the
+    /// back-face one — which is exactly the step whose geometry the placement has to
+    /// mirror.
+    pub(crate) machines_back: bool,
+    /// The registration pin this step drills for, when it drills locating pins at all.
+    ///
+    /// `None` means the step does not drill pins — *not* "drills pins of unknown size".
+    /// The distinction matters: the job's coordinate frame grows around the pins, and
+    /// only a step that actually has them may grow it.
+    pub(crate) pin_diameter: Option<Length>,
 }
 
 /// What a step machines, asked of its enabled `operations`.
@@ -204,8 +210,10 @@ impl StepRaw {
         self.enabled("route_board") || self.enabled("mill_board")
     }
 
-    /// Locating pins. Planned nowhere yet — the board model carries no locating-pin
-    /// geometry — so today this only decides whether the step says so in a note.
+    /// Registration pins: two holes on the fixture's flip line, drilled through the
+    /// board and on into the backboard so it can be turned over and land back where it
+    /// was. The one operation whose geometry comes from the *fixture* rather than from
+    /// the board — KiCad has nothing to say about it.
     pub(crate) fn drills_locating_pins(&self) -> bool {
         self.enabled("drill_locating_pins")
     }
@@ -701,18 +709,40 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                 };
                 let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}"));
 
+                // Only when the step actually drills pins. The per-operation config
+                // objects are materialised by the loader whether or not their operation
+                // is enabled, so reading this unconditionally would give every step a pin
+                // diameter — and the job's coordinate frame would then grow around pins
+                // that nothing drills.
+                let pin_diameter = operations
+                    .iter()
+                    .any(|op| op == "drill_locating_pins")
+                    .then(|| {
+                        node_pin_diameter(
+                            root,
+                            &format!("/steps/{i}/drill_locating_pins/pin_diameter"),
+                        )
+                    })
+                    .flatten();
+
                 StepRaw {
-                    name: node_str(root, &format!("/steps/{i}/name"))
-                        .filter(|s| !s.trim().is_empty())
-                        .unwrap_or_else(|| format!("Step {}", i + 1)),
+                    // The name as it is *shown*, not as it is stored: a step the operator
+                    // has not named is called after what it does. Resolved here, once, so
+                    // the step chips, the plan's notes, the readiness messages and the
+                    // saved file names all agree — see `step_display_name`.
+                    name: crate::data::model::step_display_name(
+                        &node_str(root, &format!("/steps/{i}/name")).unwrap_or_default(),
+                        &operations,
+                    ),
                     operations,
                     cnc_id: node_ref(root, &format!("/steps/{i}/cnc")),
                     fixture_id: node_ref(root, &format!("/steps/{i}/fixture")),
                     toolset_id: node_ref(root, &format!("/steps/{i}/toolset")),
                     drill,
                     route_board,
-                    machines_bottom: node_str(root, &format!("/steps/{i}/side_to_machine"))
-                        .is_some_and(|side| side.eq_ignore_ascii_case("bottom")),
+                    machines_back: node_str(root, &format!("/steps/{i}/board_face"))
+                        .is_some_and(|face| face.eq_ignore_ascii_case("back")),
+                    pin_diameter,
                 }
             })
             .collect()
@@ -871,32 +901,92 @@ pub(crate) fn missing_bindings(raw: &StepRaw) -> Option<String> {
         .then(|| format!("This step has no {} profile selected.", missing.join(", no ")))
 }
 
-/// Names the steps set to machine the bottom side, or `None` when they all machine the
-/// top. The readiness gate turns this into a no-go reason.
+/// Everything wrong with how a profile arranges its locating-pin step, one operator-facing
+/// sentence each. Empty when the arrangement is sound.
 ///
-/// Takes the steps rather than a profile id so the decision is separable from reading
-/// the document — and so it can be tested, which the global-store path cannot be.
+/// This replaced a blanket refusal of every back-face step, which existed only because
+/// nothing mirrored the geometry. The mirror is real now, so what has to be checked is no
+/// longer "is any step on the back" but "can the board actually get there":
 ///
-/// Every step is checked, not the profile's projected `side`: that projection carries
-/// `steps[0]` only, and a bottom-side *second* step is exactly what it would miss.
-pub(crate) fn bottom_side_steps_reason(steps: &[StepRaw]) -> Option<String> {
-    let names: Vec<String> = steps
-        .iter()
-        .filter(|step| step.machines_bottom)
-        .map(|step| format!("'{}'", step.name))
-        .collect();
+/// 1. **Pins come first.** They are drilled into a board that is still in its original
+///    setup; drilling them after something else has already cut the board means
+///    registering it against holes made after the fact, which registers nothing.
+/// 2. **Pins are a front-face operation.** Drilling registration from the back means the
+///    board was already turned over — before it had anything to be turned over *against*.
+/// 3. **A face change needs pins.** Two steps on opposite faces with no pins between them
+///    is a board lifted off the fixture and put back by eye. The program that follows is
+///    exact to a micron and lands wherever the operator happened to put it.
+///
+/// The last is the only one the machining editor cannot prevent (it hides the face control
+/// on a pins step and pins the first slot), so the other two are reachable mainly through
+/// a hand-edited or imported profile — which is precisely what a readiness gate is for.
+///
+/// Takes the steps rather than a profile id so the decision is separable from reading the
+/// document — and so it can be tested, which the global-store path cannot be. Every step is
+/// checked, not the profile's projected face: that projection carries `steps[0]` only, and
+/// a back-face *second* step is exactly what it would miss.
+pub(crate) fn locating_pin_faults(steps: &[StepRaw]) -> Vec<String> {
+    let mut faults = Vec::new();
 
-    (!names.is_empty()).then(|| {
-        format!(
-            "Bottom-side machining is not implemented yet — {} {} set to machine the \
-             bottom side, which would emit a top-side (mirrored) program",
-            if names.len() == 1 { "step" } else { "steps" },
-            names.join(", "),
-        )
-    })
+    let first_pins = steps.iter().position(StepRaw::drills_locating_pins);
+
+    for (index, step) in steps.iter().enumerate() {
+        if !step.drills_locating_pins() {
+            continue;
+        }
+        if index > 0 {
+            faults.push(format!(
+                "{} drills locating pins but is not the first step. Registration has to be \
+                 drilled before anything else cuts the board — move it to the top.",
+                crate::data::model::step_reference(index, &step.name),
+            ));
+        }
+        if step.machines_back {
+            faults.push(format!(
+                "{} drills locating pins on the back face. Pins are what lets the board be \
+                 turned over, so they are drilled on the front — set its board face to front.",
+                crate::data::model::step_reference(index, &step.name),
+            ));
+        }
+    }
+
+    // The first two steps that disagree about which face they machine. Only the first pair
+    // is reported: they all share one cause, and listing every later step as well would
+    // bury the fix.
+    if let Some((a, b)) = first_face_change(steps) {
+        // Before the step that turns the board over — not merely present. Pins drilled at
+        // or after the change have not registered the board the earlier steps were cut in.
+        // Strictly before `b`, and *not* before `a`: `a` is step 1, which the pins step
+        // itself normally is, and requiring them to precede themselves would fault every
+        // correctly-built profile.
+        let registered = first_pins.is_some_and(|at| at < b);
+        if !registered {
+            faults.push(format!(
+                "steps {} and {} machine different faces but no locating-pins step precedes \
+                 them — add one first",
+                a + 1,
+                b + 1,
+            ));
+        }
+    }
+
+    faults
 }
 
-/// Describes any operation two steps both claim on the same board side, or `None` when
+/// The first two steps that machine opposite faces, as `(earlier, later)` indexes.
+///
+/// The *first* step is one end of the pair rather than the immediately preceding step,
+/// because the board is turned over once: a front/front/back profile changes face between
+/// steps 1 and 3, and naming steps 2 and 3 would point at the wrong boundary.
+fn first_face_change(steps: &[StepRaw]) -> Option<(usize, usize)> {
+    let first = steps.first()?;
+    steps
+        .iter()
+        .position(|step| step.machines_back != first.machines_back)
+        .map(|at| (0, at))
+}
+
+/// Describes any operation two steps both claim on the same board face, or `None` when
 /// every step's work is its own. The readiness gate turns this into a no-go reason.
 ///
 /// The machining editor disables the checkbox that would create such a profile, so this
@@ -906,12 +996,12 @@ pub(crate) fn bottom_side_steps_reason(steps: &[StepRaw]) -> Option<String> {
 /// second one into a board that the first has already released from its tabs.
 ///
 /// Takes the steps rather than a profile id for the same reason
-/// [`bottom_side_steps_reason`] does: so the decision is testable without the store.
+/// [`locating_pin_faults`] does: so the decision is testable without the store.
 pub(crate) fn duplicate_operations_reason(steps: &[StepRaw]) -> Option<String> {
     let conflicts = crate::data::model::conflicting_operations(
         steps
             .iter()
-            .map(|step| (step.name.as_str(), step.machines_bottom, step.operations.as_slice())),
+            .map(|step| (step.name.as_str(), step.machines_back, step.operations.as_slice())),
     );
 
     (!conflicts.is_empty()).then(|| {
@@ -971,11 +1061,34 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     for width in &routers.unroutable_widths {
         warnings.push(unroutable_slot_warning(ctx, *width));
     }
-    if has_locating {
-        warnings.push("Locating pins are not yet planned (no board metadata for locating holes).".into());
+    // The locating-pin tool, resolved exactly as the Machining plan resolves it, so the
+    // rack this tab shows is the rack that plan loads. Never a nearest-size drill — see
+    // `pick_pin_tool`.
+    let pin_tool = raw
+        .pin_diameter
+        .filter(|_| has_locating)
+        .and_then(|diameter| match pick_pin_tool(&ctx.tools, toolset, diameter) {
+            Some(tool) => Some(tool),
+            None => {
+                warnings.push(format!(
+                    "No {} drill in stock for the locating pins, and no router narrow enough \
+                     to mill one. A registration hole is never made to a nearly-right size, \
+                     so the step cannot run — stock a {} drill.",
+                    fmt_len(ctx, diameter),
+                    fmt_len(ctx, diameter),
+                ));
+                None
+            }
+        });
+    if let Some(PinTool::Router { .. }) = pin_tool.as_ref() {
+        warnings.push(
+            "No exact-size drill for the locating pins, so their holes are milled to size \
+             with a router. Correct, but slower than drilling them."
+                .into(),
+        );
     }
 
-    if groups.is_empty() && !has_route {
+    if groups.is_empty() && !has_route && pin_tool.is_none() {
         return StepOutcome::Empty;
     }
 
@@ -990,7 +1103,16 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
         weights: Weights::default(),
     };
     let setup = build_setup(ctx, raw.fixture_id);
-    let rack = build_rack_spec(toolset, atc_slots, &routers.mandatory_ids());
+    // The pin tool joins the routers as mandatory: it is chosen outside the assigner, so
+    // nothing else would reserve it a slot. Kept identical to the Machining plan's
+    // `mandatory`, or the two views would number the rack differently.
+    let mut mandatory = routers.mandatory_ids();
+    if let Some(tool) = pin_tool.as_ref() {
+        mandatory.push(tool.id().to_string());
+        mandatory.sort();
+        mandatory.dedup();
+    }
+    let rack = build_rack_spec(toolset, atc_slots, &mandatory);
 
     match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
         Ok(assignment) => {
@@ -1352,6 +1474,84 @@ fn pick_slot_router(
         .filter(|t| micron(t.diameter) <= limit_um)
         .max_by_key(|t| micron(t.diameter))
         .map(|t| t.id.clone())
+}
+
+/// How a locating-pin hole gets made.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum PinTool {
+    /// A drill of **exactly** the pin diameter.
+    Drill { id: String, diameter: Length },
+    /// No exact drill exists, so the hole is milled to size by spiralling a router.
+    Router { id: String, diameter: Length },
+}
+
+impl PinTool {
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            PinTool::Drill { id, .. } | PinTool::Router { id, .. } => id,
+        }
+    }
+}
+
+/// The tool that makes a locating-pin hole of `diameter`.
+///
+/// **A registration hole is never made to a nearly-right size.** Everywhere else in k2g a
+/// drill within the step's oversize/undersize allowance is a perfectly good substitute,
+/// because a component lead does not care about 40 µm. A pin does: the whole point of the
+/// hole is that the board returns to exactly where it was, and a hole 0.1 mm over lets it
+/// return to anywhere within 0.1 mm. So the allowance machinery is deliberately not
+/// consulted here.
+///
+/// The order is therefore *exact drill*, then *router*, then nothing:
+///
+/// 1. a drill of exactly the pin diameter (to 1 µm, the assigner's own precision),
+///    preferring one already fixed in the toolset since it costs no slot;
+/// 2. else the largest router that fits, which spirals the hole to exact size — a
+///    different way of being exact, not a substitution;
+/// 3. else `None`, and the caller refuses the step. Better no program than a board with
+///    registration holes that do not register.
+pub(crate) fn pick_pin_tool(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    diameter: Length,
+) -> Option<PinTool> {
+    let wanted_um = micron(diameter);
+    // `Drillbit` specifically, not merely "not a router". [`ToolKind::from_kind_label`]
+    // falls through to `Endmill` for anything it does not recognise, so "not a router"
+    // would silently accept a V-bit, an engraver, or a tool whose kind string is a typo —
+    // none of which produce the straight-walled hole a pin has to seat in.
+    let exact = |tool: &&Tool| {
+        matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Drillbit)
+            && micron(tool.diameter) == wanted_um
+    };
+
+    // Fixed in the toolset first, for the same reason the outline router is: it is already
+    // in the rack, so choosing it costs no slot.
+    let fixed_exact = toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_ref())
+        .filter_map(|id| tools.iter().find(|t| &t.id == id))
+        .find(|t| exact(t));
+    let drill = fixed_exact.or_else(|| {
+        tools
+            .iter()
+            .filter(|t| t.status == crate::data::model::ToolStatus::InStock)
+            .find(exact)
+    });
+    if let Some(tool) = drill {
+        return Some(PinTool::Drill { id: tool.id.clone(), diameter: tool.diameter });
+    }
+
+    // Milled to size instead. Largest that fits, as for a slot: stiffest, fewest passes.
+    pick_slot_router(tools, toolset, diameter).map(|id| PinTool::Router {
+        diameter: tools
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.diameter)
+            .unwrap_or(diameter),
+        id,
+    })
 }
 
 /// Which router each of a step's routed features needs.
@@ -1765,6 +1965,21 @@ fn node_length(root: &Node, ptr: &str) -> Option<Length> {
     }
 }
 
+/// Reads the locating-pin diameter, which is stored as one of a fixed set of **strings**
+/// (`"3.2mm"`) rather than as a unit-bearing node.
+///
+/// It is an `enum` in the schema and not a `units.yaml` `$ref`, so that the editor offers
+/// the pin sizes that exist rather than a box to type any diameter into — see the comment
+/// on `pin_diameter` in `schemas/machining.yaml`. The cost lands here: the value arrives
+/// as text and has to be parsed. [`node_length`] is still tried, so a profile whose
+/// diameter was somehow stored typed is read rather than silently dropped.
+fn node_pin_diameter(root: &Node, ptr: &str) -> Option<Length> {
+    match &root.get_pointer(ptr)?.value {
+        NodeValue::Str(s) => Length::from_string(s, Some(units::LengthUnit::Mm)).ok(),
+        _ => node_length(root, ptr),
+    }
+}
+
 /// Reads a `percent` value (stored untyped, usually `"8%"`) as a fraction (`0.08`).
 fn node_percent_fraction(root: &Node, ptr: &str) -> Option<f64> {
     match &root.get_pointer(ptr)?.value {
@@ -2139,8 +2354,85 @@ mod tests {
         assert_eq!(plan.mandatory_ids(), vec!["big".to_string(), "small".to_string()]);
     }
 
-    /// Builds a step that machines `side`, with everything else irrelevant to the test.
-    fn step_on(name: &str, machines_bottom: bool) -> StepRaw {
+    /// A stock drill of `diameter_mm`, everything else as [`router`] has it.
+    ///
+    /// The kind label matters: `ToolKind::from_kind_label` falls through to `Endmill` for
+    /// anything it does not recognise, so a plausible-looking `"Drill bit"` would make this
+    /// a *router* and quietly invert every test below.
+    fn drill_bit(id: &str, diameter_mm: f64) -> Tool {
+        Tool {
+            kind: "drill".to_string(),
+            name: format!("Drill {diameter_mm}mm"),
+            composite_name: format!("Drill {diameter_mm}mm"),
+            point_angle: units::Angle::from_degrees(118.0),
+            ..router(id, diameter_mm)
+        }
+    }
+
+    /// **The rule locating pins exist for.** Everywhere else a drill within the step's
+    /// allowance is a fine substitute — a component lead does not care about 40 µm. A pin
+    /// does: the hole's whole job is that the board returns to exactly where it was, and a
+    /// hole 0.1 mm over lets it return to anywhere within 0.1 mm.
+    #[test]
+    fn a_pin_hole_is_never_drilled_to_a_nearly_right_size() {
+        let near_misses = vec![drill_bit("under", 3.1), drill_bit("over", 3.3)];
+        assert_eq!(
+            pick_pin_tool(&near_misses, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
+            None,
+            "0.1mm out is out — no drill, and no router in stock either"
+        );
+
+        let mut with_exact = near_misses.clone();
+        with_exact.push(drill_bit("exact", 3.2));
+        assert_eq!(
+            pick_pin_tool(&with_exact, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
+            Some(PinTool::Drill { id: "exact".into(), diameter: Length::from_mm(3.2) }),
+            "the exact drill is taken, never the near miss"
+        );
+    }
+
+    /// With no exact drill, the hole is *milled* to size — which is exact by a different
+    /// route, not a substitution. The largest cutter that fits, as for a slot.
+    #[test]
+    fn without_an_exact_drill_the_pin_hole_is_milled_to_size() {
+        let tools = vec![drill_bit("wrong", 3.0), router("small", 1.0), router("big", 2.0)];
+        assert_eq!(
+            pick_pin_tool(&tools, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
+            Some(PinTool::Router { id: "big".into(), diameter: Length::from_mm(2.0) }),
+            "largest that fits: stiffest, fewest passes"
+        );
+
+        // A router wider than the pin cannot make the hole at all.
+        let too_wide = vec![router("huge", 4.0)];
+        assert_eq!(
+            pick_pin_tool(&too_wide, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
+            None
+        );
+    }
+
+    /// A drill already pinned in the toolset costs no rack slot, so it wins over an
+    /// equally exact one that would need loading.
+    #[test]
+    fn a_fixed_exact_drill_beats_an_equally_exact_loose_one() {
+        let tools = vec![drill_bit("loose", 3.2), drill_bit("fixed", 3.2)];
+        assert_eq!(
+            pick_pin_tool(&tools, &toolset_with_fixed(&["fixed"]), Length::from_mm(3.2)),
+            Some(PinTool::Drill { id: "fixed".into(), diameter: Length::from_mm(3.2) })
+        );
+    }
+
+    /// A drill that is out of stock cannot make the hole, however exact it is.
+    #[test]
+    fn an_out_of_stock_drill_is_not_a_pin_tool() {
+        let tools = vec![Tool {
+            status: crate::data::model::ToolStatus::OutOfStock,
+            ..drill_bit("exact", 3.2)
+        }];
+        assert_eq!(pick_pin_tool(&tools, &toolset_with_fixed(&[]), Length::from_mm(3.2)), None);
+    }
+
+    /// Builds a step that machines a face, with everything else irrelevant to the test.
+    fn step_on(name: &str, machines_back: bool) -> StepRaw {
         StepRaw {
             name: name.into(),
             operations: vec!["drill_pth".into()],
@@ -2149,47 +2441,113 @@ mod tests {
             toolset_id: Some(uuid::Uuid::now_v7()),
             drill: Default::default(),
             route_board: Default::default(),
-            machines_bottom,
+            machines_back,
+            pin_diameter: None,
         }
     }
 
-    /// A bottom-side step must stop generation.
-    ///
-    /// Nothing mirrors geometry, so such a step emits the *top-side* program — a
-    /// mirrored board, produced silently while the UI confirms "Bottom". There is no
-    /// degraded-but-usable output to warn about, so the gate has to refuse.
-    #[test]
-    fn a_bottom_side_step_is_refused_because_nothing_mirrors_the_geometry() {
-        assert_eq!(bottom_side_steps_reason(&[]), None, "no steps, nothing to refuse");
-        assert_eq!(
-            bottom_side_steps_reason(&[step_on("Drill", false), step_on("Cut out", false)]),
-            None,
-            "an all-top profile generates"
-        );
-
-        let reason = bottom_side_steps_reason(&[step_on("Solder side", true)])
-            .expect("a bottom-side step must be refused");
-        assert!(reason.contains("'Solder side'"), "names the step: {reason}");
-        assert!(reason.contains("step "), "singular for one step: {reason}");
+    /// A step that drills locating pins, on the face given.
+    fn pin_step(name: &str, machines_back: bool) -> StepRaw {
+        StepRaw {
+            operations: vec!["drill_locating_pins".into()],
+            pin_diameter: Some(Length::from_mm(3.2)),
+            ..step_on(name, machines_back)
+        }
     }
 
-    /// The check reads every step, not the profile's `steps[0]` projection — a
-    /// bottom-side *later* step is precisely what that projection cannot see.
+    /// A profile that machines one face throughout needs no pins at all — which is the
+    /// overwhelmingly common job, and must stay frictionless.
     #[test]
-    fn a_bottom_side_step_is_caught_wherever_it_sits_in_the_profile() {
-        let reason = bottom_side_steps_reason(&[
-            step_on("Top drill", false),
-            step_on("Flip and drill", true),
-            step_on("Cut out", false),
-        ])
-        .expect("a bottom-side second step must be refused");
-        assert!(reason.contains("'Flip and drill'"), "names the offending step: {reason}");
-        assert!(!reason.contains("'Top drill'"), "does not name innocent steps: {reason}");
+    fn a_single_sided_job_needs_no_locating_pins() {
+        assert!(locating_pin_faults(&[]).is_empty(), "no steps, nothing to fault");
+        assert!(
+            locating_pin_faults(&[step_on("Drill", false), step_on("Cut out", false)]).is_empty(),
+            "an all-front profile generates"
+        );
+        assert!(
+            locating_pin_faults(&[step_on("A", true), step_on("B", true)]).is_empty(),
+            "and so does an all-back one — the board is mounted that way, not turned over"
+        );
+    }
 
-        let both = bottom_side_steps_reason(&[step_on("A", true), step_on("B", true)])
-            .expect("two bottom-side steps must be refused");
-        assert!(both.contains("steps "), "plural for two: {both}");
-        assert!(both.contains("'A', 'B'"), "names both: {both}");
+    /// **The rule this whole feature exists to enforce.** Two steps on opposite faces with
+    /// nothing registering the board between them is a board lifted off the fixture and put
+    /// back by eye — and the program that follows is exact to a micron and lands wherever
+    /// the operator happened to put it.
+    #[test]
+    fn changing_faces_without_pins_is_refused() {
+        let faults =
+            locating_pin_faults(&[step_on("Drill front", false), step_on("Drill back", true)]);
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert!(
+            faults[0].contains("steps 1 and 2 machine different faces"),
+            "names the pair: {}",
+            faults[0]
+        );
+        assert!(faults[0].contains("add one first"), "says what to do: {}", faults[0]);
+
+        assert!(
+            locating_pin_faults(&[
+                pin_step("Pins", false),
+                step_on("Drill front", false),
+                step_on("Drill back", true),
+            ])
+            .is_empty(),
+            "with pins drilled first, the same profile is fine"
+        );
+    }
+
+    /// The pair named is the *boundary* — where the board is turned over — not merely two
+    /// adjacent steps. A front/front/back profile changes face between steps 1 and 3.
+    #[test]
+    fn the_reported_pair_is_where_the_board_turns_over() {
+        let faults = locating_pin_faults(&[
+            step_on("Drill", false),
+            step_on("Route", false),
+            step_on("Back face", true),
+        ]);
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert!(faults[0].contains("steps 1 and 3"), "{}", faults[0]);
+    }
+
+    /// Pins drilled *after* something else has already cut the board register it against
+    /// holes made after the fact, which registers nothing. They have to come first.
+    #[test]
+    fn pins_must_be_the_first_step() {
+        let faults = locating_pin_faults(&[step_on("Drill", false), pin_step("Pins", false)]);
+        assert!(
+            faults.iter().any(|f| f.contains("step 2 'Pins'") && f.contains("not the first step")),
+            "{faults:?}"
+        );
+    }
+
+    /// Pins on the back mean the board was already turned over — before it had anything to
+    /// be turned over against. Only reachable by hand-editing, because the editor hides the
+    /// face control on a pins step.
+    #[test]
+    fn pins_may_not_be_drilled_from_the_back() {
+        let faults = locating_pin_faults(&[pin_step("Pins", true)]);
+        assert!(
+            faults
+                .iter()
+                .any(|f| f.contains("back face") && f.contains("set its board face to front")),
+            "{faults:?}"
+        );
+    }
+
+    /// A pin step that comes *after* the face change has not registered the steps that
+    /// were cut before it, so its presence is not enough — its position is the point.
+    #[test]
+    fn pins_after_the_face_change_do_not_register_what_came_before() {
+        let faults = locating_pin_faults(&[
+            step_on("Drill front", false),
+            pin_step("Pins", true),
+            step_on("Drill back", true),
+        ]);
+        assert!(
+            faults.iter().any(|f| f.contains("machine different faces")),
+            "the face change is still unregistered: {faults:?}"
+        );
     }
 
     /// Two steps cutting the same feature on the same side must stop generation.
@@ -2224,19 +2582,19 @@ mod tests {
         assert!(reason.contains("'Drill'") && reason.contains("'Drill again'"), "names both steps: {reason}");
     }
 
-    /// Milling the component side and then the solder side is the two-sided workflow,
-    /// not a mistake — the rule counts the sides apart.
+    /// Milling the front and then the back is the two-sided workflow, not a mistake —
+    /// the rule counts the faces apart.
     #[test]
-    fn the_same_operation_on_opposite_sides_is_allowed_through() {
-        let step_doing = |name: &str, bottom: bool, ops: &[&str]| StepRaw {
+    fn the_same_operation_on_opposite_faces_is_allowed_through() {
+        let step_doing = |name: &str, back: bool, ops: &[&str]| StepRaw {
             operations: ops.iter().map(|op| op.to_string()).collect(),
-            ..step_on(name, bottom)
+            ..step_on(name, back)
         };
 
         assert_eq!(
             duplicate_operations_reason(&[
-                step_doing("Mill component side", false, &["mill_board"]),
-                step_doing("Mill solder side", true, &["mill_board"]),
+                step_doing("Mill the front", false, &["mill_board"]),
+                step_doing("Mill the back", true, &["mill_board"]),
             ]),
             None,
         );
@@ -2255,7 +2613,8 @@ mod tests {
             toolset_id: toolset.then(uuid::Uuid::now_v7),
             drill: Default::default(),
             route_board: Default::default(),
-            machines_bottom: false,
+            machines_back: false,
+            pin_diameter: None,
         };
         assert_eq!(missing_bindings(&step(true, true, true)), None, "all three set");
         assert_eq!(

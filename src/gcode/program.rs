@@ -52,6 +52,18 @@ pub struct StepRender {
     /// (`machine.tool_length_measurement == manual`). A machine with an automatic setter
     /// measures at M06, so emitting a block for it would be a second, redundant cycle.
     pub measures_tool_length: bool,
+    /// An operator prompt emitted **before the first tool block**, if any.
+    ///
+    /// Set for a back-face step, and it is the only guard that exists against the board
+    /// being remounted the wrong way up: locating pins are symmetric and the same
+    /// diameter, so the board drops onto them just as happily unflipped or turned 180°.
+    /// Nothing in the geometry can reject that — only the operator can, and only if they
+    /// are asked.
+    ///
+    /// Emitted through the machine's own `pause` primitive, so a controller with no word
+    /// for a pause emits nothing at all. The planner warns when that is the case, because
+    /// a missing guard is worth knowing about before the board is in the fixture.
+    pub opening_prompt: Option<String>,
 }
 
 /// Everything one step needs to render a **complete, standalone program**: the
@@ -230,6 +242,14 @@ pub fn render_step_body(
     tool_feeds: &BTreeMap<String, ToolFeed>,
 ) -> Result<String, BodyError> {
     let mut out = String::new();
+
+    // Before anything moves, and before the first tool change, so the operator is asked
+    // while the spindle is still parked and the board is still in their hands.
+    if let Some(prompt) = render.opening_prompt.as_deref() {
+        let mut scope = Scope::new();
+        scope.push("prompt", prompt.to_string());
+        out.push_str(&render_one(coder, "pause", OPENING_PROMPT_TPL, &mut scope)?);
+    }
 
     for block in &step.blocks {
         let (name, feed, speed) = match tool_feeds.get(&block.tool_id) {
@@ -522,6 +542,15 @@ fn render_route_move(
 }
 
 /// Renders one primitive, tagging any engine error with the primitive name.
+/// The whole template for [`StepRender::opening_prompt`]: one script line calling the
+/// machine's own `pause` primitive with the text.
+///
+/// A template rather than a direct call because `pause` is a **GTL callable** — it exists
+/// on the engine, for profiles to invoke, and has no Rust-side entry point. Rendering a
+/// one-line template is how Rust reaches it, and it keeps the prompt subject to whatever
+/// the profile's `pause` actually emits (`M0`, `M00 (msg)`, nothing at all).
+const OPENING_PROMPT_TPL: &str = "pause(prompt)\n";
+
 fn render_one(coder: &Coder, name: &str, tpl: &str, scope: &mut Scope) -> Result<String, BodyError> {
     coder
         .render(name, tpl, scope)
@@ -600,6 +629,8 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
         // output unchanged by its arrival.
         tool_measure_tpl: String::new(),
         measures_tool_length: false,
+        // Front-face by default, so no prompt. The tests about the back-face prompt set it.
+        opening_prompt: None,
         spindle_start_tpl: "`S{rpm}\n`M03".to_string(),
         spindle_stop_tpl: "`M05".to_string(),
         move_rapid_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
@@ -824,6 +855,59 @@ mod tests {
         )
         .unwrap();
         assert!(body.contains("(load tool T1: 1.0mm drill)"), "manual prompt present:\n{body}");
+    }
+
+    /// A back-face program asks the operator to confirm the board was turned over,
+    /// **before the first tool change** — while the spindle is parked and the board is
+    /// still in their hands, not after a tool has been loaded to cut it.
+    ///
+    /// This prompt is load-bearing. Two symmetric pins of one diameter accept the board
+    /// unflipped, and turned 180°, exactly as readily as the right way up; no geometry k2g
+    /// has can tell those apart, so the question is the whole guard.
+    #[test]
+    fn a_back_face_program_opens_by_asking_whether_the_board_was_turned_over() {
+        let coder = Coder::with_program_primitives(&crate::gcode::coder::ProgramPrimitives {
+            set_unit: "",
+            set_origin: "",
+            origin_reference: "",
+            comment: "`({text})",
+            message: "`M117 {text}",
+            pause: "`M00 ({text})",
+        })
+        .expect("primitives compile");
+
+        let render = StepRender {
+            opening_prompt: Some("Board back face up?".to_string()),
+            ..render_ctx(true)
+        };
+        let body = render_step_body(
+            &coder,
+            &one_block_step(),
+            &render,
+            &feeds_for(Some(600.0), Some(12_000.0)),
+        )
+        .expect("body renders");
+
+        let prompt = body
+            .find("M00 (Board back face up?)")
+            .unwrap_or_else(|| panic!("the prompt is emitted:\n{body}"));
+        let first_change = body.find("M06").expect("the step still changes tools");
+        assert!(prompt < first_change, "asked before anything is loaded:\n{body}");
+    }
+
+    /// A front-face step has nothing to confirm, so it emits nothing — the prompt must not
+    /// become a line every program carries and every operator learns to click through.
+    #[test]
+    fn a_front_face_program_has_no_opening_prompt() {
+        let coder = Coder::new();
+        let body = render_step_body(
+            &coder,
+            &one_block_step(),
+            &render_ctx(true),
+            &feeds_for(Some(600.0), Some(12_000.0)),
+        )
+        .expect("body renders");
+        assert!(!body.contains("face up"), "no prompt on a front-face step:\n{body}");
     }
 
     #[test]

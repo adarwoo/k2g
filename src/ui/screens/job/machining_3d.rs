@@ -32,10 +32,11 @@ use crate::runtime::AppCtx;
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
 const CANVAS_ID: &str = "k2g-machining-3d";
 
-/// The scene script. Three placeholders are substituted before it is evaluated:
+/// The scene script. Four placeholders are substituted before it is evaluated:
 /// `CANVAS_ID_PLACEHOLDER`, `TRACES_PLACEHOLDER` (the serialised
-/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list) and `BOARD_PLACEHOLDER` (the
-/// serialised [`BoardSolid`](crate::gcode::scene::BoardSolid)).
+/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list), `BOARD_PLACEHOLDER` (the
+/// serialised [`BoardSolid`](crate::gcode::scene::BoardSolid)) and `FIXTURE_PLACEHOLDER`
+/// (the [`FixtureMark`](crate::gcode::scene::FixtureMark): work origin, stop and pins).
 ///
 /// The palette used to be substituted too, and the script picked a colour by the trace's
 /// position in the list. It no longer is: each trace carries its own `colour`, assigned
@@ -65,11 +66,12 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 
   const board = BOARD_PLACEHOLDER;
   const traces = TRACES_PLACEHOLDER;
+  const fixture = FIXTURE_PLACEHOLDER;
 
   // Already running on this canvas: hand the new plan to the renderer that is up and
   // return. Everything below this line is one-per-canvas and must not run twice.
   if (canvas.__k2g_draw) {
-    try { canvas.__k2g_draw(board, traces); dioxus.send(""); }
+    try { canvas.__k2g_draw(board, traces, fixture); dioxus.send(""); }
     catch (err) { dioxus.send(String((err && err.stack) || err)); }
     return;
   }
@@ -153,6 +155,81 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       // which is what puts the toolpaths' plunges *into* the material.
       slab.position.z = -board.thickness_mm;
       content.add(slab);
+
+      // The two faces, in the board's own colours: the **back** is always red and the
+      // **front** always green, whichever way up the board happens to be lying.
+      //
+      // Which one the spindle sees is what `back_face_up` says, so a front-face step shows
+      // green with red underneath, and a back-face step shows red with green underneath.
+      // That is not decoration: the artwork is mirrored for a back-face step (correctly,
+      // since the board is physically turned over), and a mirrored board is
+      // indistinguishable from a right-way-round one unless you already know which face
+      // you are looking at. Colouring both means the answer is on screen from any angle.
+      const face = function (colour, z) {
+        const mesh = new T.Mesh(
+          new T.ShapeGeometry(shape),
+          new T.MeshLambertMaterial({
+            color: colour,
+            side: T.DoubleSide,
+            transparent: true,
+            opacity: 0.85,
+            // Off, so the toolpaths that plunge through this face are not occluded by it —
+            // the same reason the slab itself does not write depth.
+            depthWrite: false,
+          })
+        );
+        // Held a hair clear of the slab. Coplanar faces z-fight, and the flicker reads as
+        // a rendering fault rather than as the deliberate marking it is.
+        mesh.position.z = z;
+        content.add(mesh);
+      };
+      const BACK = 0xc0392b, FRONT = 0x1f6f43;
+      const up = 0.02, down = -board.thickness_mm - 0.02;
+      face(board.back_face_up ? BACK : FRONT, up);
+      face(board.back_face_up ? FRONT : BACK, down);
+    }
+
+    // The setup around the work: the zero, the stop the board registers against, and the
+    // locating pins. None of it is cut — it is the *frame* the program is written in, and
+    // the gap it shows between the bracket and the board is the room the origin made for
+    // the pins. That gap is the one thing about a pinned job's coordinates that is
+    // otherwise invisible: the numbers in the program look entirely ordinary either way.
+    function addFixture(fixture) {
+      if (!fixture) return;
+
+      const line = function (points, colour, width) {
+        const flat = [];
+        points.forEach(function (p) { flat.push(p[0], p[1], p[2]); });
+        const geometry = new T.LineGeometry();
+        geometry.setPositions(flat);
+        const material = new T.LineMaterial({ color: colour, linewidth: width, worldUnits: false });
+        materials.push(material);
+        content.add(new T.Line2(geometry, material));
+      };
+
+      // The L-bracket, drawn at Z0 (the board's top) so it sits in the plane the
+      // coordinates are quoted in.
+      const arm = fixture.arm_mm || 10;
+      line([[arm * fixture.dir_x, 0, 0], [0, 0, 0], [0, arm * fixture.dir_y, 0]], 0x8fa3bf, 3.0);
+
+      // The work zero itself: a short cross, so it is findable when the bracket runs off
+      // the edge of a close-in view.
+      const tick = arm / 4;
+      line([[-tick, 0, 0], [tick, 0, 0]], 0xff5c5c, 2.5);
+      line([[0, -tick, 0], [0, tick, 0]], 0xff5c5c, 2.5);
+
+      // The pin holes, as rings at Z0. Rings and not board openings: they are holes in the
+      // blank and the backboard, not in the board, and adding them to the workpiece would
+      // put two holes through a PCB that does not have them.
+      (fixture.pins || []).forEach(function (pin) {
+        const radius = pin[2] / 2;
+        const points = [];
+        for (let n = 0; n <= 24; n++) {
+          const angle = (Math.PI * 2 * n) / 24;
+          points.push([pin[0] + radius * Math.cos(angle), pin[1] + radius * Math.sin(angle), 0]);
+        }
+        line(points, 0x8fa3bf, 2.5);
+      });
     }
 
     // The toolpaths, from the payload Rust built. One Line2 per (tool, run) — the
@@ -243,16 +320,17 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // The whole of what a plan change changes. Kept on the canvas because that is the
     // only handle a later `eval` — which runs in page scope, with no reference to this
     // closure — can find it by.
-    canvas.__k2g_draw = function (board, traces) {
+    canvas.__k2g_draw = function (board, traces, fixture) {
       clearContent();
       addBoard(board);
+      addFixture(fixture);
       addTraces(traces);
       resize();          // the new fat-line materials have no resolution until this runs
       frameScene();
     };
 
     new ResizeObserver(resize).observe(canvas);
-    canvas.__k2g_draw(board, traces);
+    canvas.__k2g_draw(board, traces, fixture);
 
     // Frames the canvas has been out of the document for. The canvas is destroyed when
     // the Job view switches tab or the dock closes, and this loop would otherwise keep a
@@ -308,6 +386,8 @@ struct ScenePayload {
     traces: String,
     /// The serialised [`BoardSolid`](crate::gcode::scene::BoardSolid), or `null`.
     board: String,
+    /// The serialised [`FixtureMark`](crate::gcode::scene::FixtureMark), or `null`.
+    fixture: String,
     tool_count: usize,
     point_count: usize,
     /// Every tool of the step, hidden ones included — the legend is what switches them
@@ -381,11 +461,16 @@ impl ScenePayload {
         let shown: Vec<&scene::ToolTrace> =
             all.iter().filter(|trace| !hidden.contains(&trace.tool_id)).collect();
         let board = machining_plan::board_solid(ctx, step);
+        // Not filtered by the legend: the origin, the stop and the pins are the frame the
+        // program is written in, not one tool's work, so switching a tool off must not take
+        // the coordinate system with it.
+        let fixture = machining_plan::fixture_scene(ctx, step);
         Self {
             point_count: shown.iter().map(|t| t.point_count()).sum(),
             tool_count: shown.len(),
             traces: serde_json::to_string(&shown).unwrap_or_else(|_| "[]".to_string()),
             board: serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string()),
+            fixture: serde_json::to_string(&fixture).unwrap_or_else(|_| "null".to_string()),
             legend,
         }
     }
@@ -428,7 +513,7 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     use_effect(move || {
         let payload = payload();
         spawn(async move {
-            let ScenePayload { traces, board, tool_count, point_count, .. } = payload;
+            let ScenePayload { traces, board, fixture, tool_count, point_count, .. } = payload;
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
             // prevent. Both ends are logged so a hang in between is distinguishable
@@ -439,7 +524,8 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
             let script = BOOTSTRAP_SCRIPT
                 .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
                 .replace("TRACES_PLACEHOLDER", &traces)
-                .replace("BOARD_PLACEHOLDER", &board);
+                .replace("BOARD_PLACEHOLDER", &board)
+                .replace("FIXTURE_PLACEHOLDER", &fixture);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
                     log::info!("3D machining view: drawn");

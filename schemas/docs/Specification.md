@@ -774,7 +774,7 @@ The distinction between temporary and persistent profiles only affects profile d
   - Drill NPTH
   - Route board
   - Mill board
-- Side selection: Component, Solder
+- Board face selection: Front (component side), Back (solder side)
   - Note: By default, the PCB is laid on the CNC bed in the same orientation as displayed in KiCad. The actual coordinate system origin (X0, Y0) is defined by the CNC profile.
 - Board rotation:
   - Auto

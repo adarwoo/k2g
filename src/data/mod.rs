@@ -533,9 +533,9 @@ impl AppData {
             let claimed: Vec<&str> = steps
                 .iter()
                 .filter(|step| {
-                    // Absent means top, which is the schema default for a step that has
-                    // never had the field written.
-                    step.get("side_to_machine").and_then(Value::as_str).unwrap_or("top") != "bottom"
+                    // Absent means the front face, which is the schema default for a step
+                    // that has never had the field written.
+                    step.get("board_face").and_then(Value::as_str).unwrap_or("front") != "back"
                 })
                 .filter_map(|step| step.get("operations").and_then(Value::as_array))
                 .flatten()
@@ -544,13 +544,19 @@ impl AppData {
 
             let operation = MACHINING_OPERATIONS
                 .iter()
-                .find(|op| !op.once_per_side || !claimed.contains(&op.key))
+                .find(|op| !op.once_per_face || !claimed.contains(&op.key))
                 // Unreachable while any operation is repeatable, but a step must carry
                 // at least one (`minItems: 1`), and a step the gate then complains about
                 // is better than one the schema rejects.
                 .map_or(MACHINING_OPERATIONS[0].key, |op| op.key);
 
-            steps.push(serde_json::json!({ "name": "Machining step", "operations": [operation] }));
+            // The placeholder name, which `step_display_name` reads as "not named yet" and
+            // replaces with one built from the step's operations until the operator types
+            // their own.
+            steps.push(serde_json::json!({
+                "name": crate::data::model::UNNAMED_STEP,
+                "operations": [operation],
+            }));
         })
     }
 
@@ -1300,8 +1306,25 @@ fn normalize_fixture_value(value: &mut Value, path: &Path) {
     let Some(origin) = obj.get_mut("origin").and_then(Value::as_object_mut) else {
         return;
     };
+
+    // `y0: front | back` → `near | far`, silently: the value means exactly what it always
+    // did, only the word changed, so there is nothing for the operator to act on. It moved
+    // because the machining profile now calls the PCB's own faces `front` and `back`, and
+    // one word meaning "the operator's side of the bed" in one file and "the component
+    // side of the board" in another is how a board comes off the machine mirrored.
+    if let Some(current) = origin.get("y0").and_then(Value::as_str) {
+        let renamed = match current {
+            "front" => Some("near"),
+            "back" => Some("far"),
+            _ => None,
+        };
+        if let Some(renamed) = renamed {
+            origin.insert("y0".to_string(), Value::from(renamed));
+        }
+    }
+
     for (axis, allowed, fallback) in
-        [("x0", ["left", "right"], "left"), ("y0", ["front", "back"], "front")]
+        [("x0", ["left", "right"], "left"), ("y0", ["near", "far"], "near")]
     {
         let current = origin.get(axis).and_then(Value::as_str).unwrap_or(fallback);
         if !allowed.contains(&current) {
@@ -1354,6 +1377,7 @@ const STEP_KEYS: &[&str] = &[
     "fixture",
     "toolset",
     "side_to_machine",
+    "board_face",
     "operations",
     "routing",
     "drill_locating_pins",
@@ -1470,6 +1494,39 @@ fn normalize_route_board_value(step: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// `side_to_machine: top | bottom` → `board_face: front | back`.
+///
+/// Both the key and its values move, because "top" and "bottom" were doing two jobs at
+/// once: which face of the PCB a step cuts, and which way up the board sits on the bed.
+/// Those come apart the moment a step machines the back — the board is turned over, so the
+/// PCB's *bottom* is what faces up — and a word that means both is a word that will
+/// eventually be read as the wrong one. The bed keeps its own directions
+/// (`near`/`far`, `left`/`right`); the board now has `front`/`back` to itself.
+///
+/// Anything unrecognised becomes `front`, which is where a step with no value at all
+/// starts: the schema default, and the only face that can be machined without registration.
+///
+/// **Visible to CNC templates.** A profile reading `steps[step_index].side_to_machine` must
+/// become `.board_face`, and compare against `"front"`/`"back"`. None of the bundled
+/// templates read it; a hand-written one might.
+fn rename_side_to_board_face(obj: &mut serde_json::Map<String, Value>) {
+    let Some(old) = obj.remove("side_to_machine") else {
+        return;
+    };
+    // A step that already carries the new key keeps it — re-running the migration over a
+    // migrated document must not resurrect the old value.
+    if obj.contains_key("board_face") {
+        return;
+    }
+    let face = match old.as_str() {
+        Some(side) if side.eq_ignore_ascii_case("bottom") || side.eq_ignore_ascii_case("back") => {
+            "back"
+        }
+        _ => "front",
+    };
+    obj.insert("board_face".into(), Value::from(face));
+}
+
 /// Operation config objects are left in place (always materialized by the
 /// loader); only their `enabled` flag is stripped.
 fn normalize_step_value(step: &mut Value) {
@@ -1490,6 +1547,8 @@ fn normalize_step_value(step: &mut Value) {
     // still carries the block, and `additionalProperties: false` would reject it on
     // load, so it is dropped here.
     obj.remove("routing");
+
+    rename_side_to_board_face(obj);
 
     normalize_route_board_value(obj);
 
@@ -1956,6 +2015,41 @@ mod tests {
             vec!["drill_locating_pins".to_string()],
             "pins are repeatable, so they stay available"
         );
+    }
+
+    /// The pin diameter is offered as a **fixed list**, and is materialised on every step
+    /// with the 3.2 mm default already chosen.
+    ///
+    /// The list is a bare `enum` and deliberately *not* a `units.yaml#/$defs/size` `$ref`,
+    /// because `classify` tests `$ref` before `enum` — a ref would render as a free-text
+    /// unit box and let any diameter through, which is the one thing a registration hole
+    /// must not allow. This asserts the classification, not merely the value: the two
+    /// differ only in the widget, so nothing else would catch the ref creeping back.
+    #[test]
+    fn the_pin_diameter_is_a_fixed_list_with_a_default_already_chosen() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+        let doc = data.get(id).expect("the profile exists");
+        let node = doc
+            .root
+            .get_pointer("/steps/0/drill_locating_pins/pin_diameter")
+            .expect("materialised on every step, whether or not pins are enabled");
+
+        assert_eq!(
+            node.value,
+            NodeValue::Str("3.2mm".to_string()),
+            "3.2mm takes a 1/8\" shank with about 25um of play"
+        );
+        match &node.meta.kind {
+            datastore::FieldKind::Enum(options) => assert_eq!(
+                options,
+                &["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"],
+                "the sizes pin stock actually comes in"
+            ),
+            other => panic!("must be a fixed list, not {other:?} — a free-text box would let \
+                             any diameter through"),
+        }
     }
 
     #[test]
@@ -2479,7 +2573,7 @@ mod tests {
     ///
     /// `origin` was also loosened: both axes accepted all four edge names, so `x0: front`
     /// validated and meant nothing. X can only be zeroed on a left or right edge and Y on
-    /// a front or back one — and a value outside that is the schema's old fault, so it is
+    /// a near or far one — and a value outside that is the schema's old fault, so it is
     /// corrected rather than made to reject the profile.
     #[test]
     fn a_fixture_with_the_retired_blocks_and_a_nonsense_origin_still_loads() {
@@ -2497,19 +2591,73 @@ mod tests {
             assert!(value.get(*key).is_none(), "'{key}' must not survive into validation");
         }
         assert_eq!(value.pointer("/origin/x0").and_then(Value::as_str), Some("left"));
-        assert_eq!(value.pointer("/origin/y0").and_then(Value::as_str), Some("front"));
+        assert_eq!(value.pointer("/origin/y0").and_then(Value::as_str), Some("near"));
         assert_eq!(value.get("name").and_then(Value::as_str), Some("Vice"), "the rest is untouched");
 
         // A fixture that already says something sensible keeps saying it.
-        let mut kept = serde_json::json!({ "origin": { "x0": "right", "y0": "back" } });
+        let mut kept = serde_json::json!({ "origin": { "x0": "right", "y0": "far" } });
         normalize_fixture_value(&mut kept, Path::new("vice.yaml"));
         assert_eq!(kept.pointer("/origin/x0").and_then(Value::as_str), Some("right"));
-        assert_eq!(kept.pointer("/origin/y0").and_then(Value::as_str), Some("back"));
+        assert_eq!(kept.pointer("/origin/y0").and_then(Value::as_str), Some("far"));
 
         // And one with no origin block at all must not panic.
         let mut bare = serde_json::json!({ "name": "Tape" });
         normalize_fixture_value(&mut bare, Path::new("tape.yaml"));
         assert_eq!(bare, serde_json::json!({ "name": "Tape" }));
+    }
+
+    /// The bed's Y directions were renamed `front`/`back` → `near`/`far` when the machining
+    /// profile started calling the PCB's own faces front and back. The **value** did not
+    /// change, only the word, so an existing fixture must keep pointing at the same corner
+    /// of the same bed — silently, with nothing for the operator to do.
+    ///
+    /// Getting this wrong moves the work origin to the opposite end of the table, and the
+    /// program that results looks entirely ordinary.
+    #[test]
+    fn a_fixture_written_with_front_and_back_keeps_its_corner() {
+        for (was, now) in [("front", "near"), ("back", "far")] {
+            let mut value = serde_json::json!({ "origin": { "x0": "left", "y0": was } });
+            normalize_fixture_value(&mut value, Path::new("vice.yaml"));
+            assert_eq!(
+                value.pointer("/origin/y0").and_then(Value::as_str),
+                Some(now),
+                "'{was}' names the same edge as '{now}'"
+            );
+        }
+    }
+
+    /// `side_to_machine: top | bottom` → `board_face: front | back`, key and values
+    /// together, so an existing profile still machines the face it always did.
+    ///
+    /// Both words moved because "top"/"bottom" meant two things at once — which face of
+    /// the PCB, and which way up it lies on the bed — and those part company the moment a
+    /// step machines the back.
+    #[test]
+    fn a_step_written_with_side_to_machine_keeps_the_face_it_named() {
+        for (was, now) in [("top", "front"), ("bottom", "back")] {
+            let mut step = serde_json::json!({ "name": "S", "side_to_machine": was });
+            normalize_step_value(&mut step);
+            assert_eq!(step.get("side_to_machine"), None, "the old key does not survive");
+            assert_eq!(
+                step.pointer("/board_face").and_then(Value::as_str),
+                Some(now),
+                "'{was}' is the '{now}' face"
+            );
+        }
+
+        // A step that never said anything gets the schema default rather than a guess.
+        let mut bare = serde_json::json!({ "name": "S" });
+        normalize_step_value(&mut bare);
+        assert_eq!(bare.get("board_face"), None, "absent stays absent — the schema defaults it");
+
+        // Re-running the migration over a migrated step must not resurrect anything.
+        let mut migrated = serde_json::json!({ "board_face": "back", "side_to_machine": "top" });
+        normalize_step_value(&mut migrated);
+        assert_eq!(
+            migrated.pointer("/board_face").and_then(Value::as_str),
+            Some("back"),
+            "the new key wins over a stale old one"
+        );
     }
 
     /// A fixture written when the machine origin was an ordinal still loads: the retired

@@ -1559,6 +1559,11 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
         "z_retract": fixture.z_retract.to_string(),
         "z_safe": fixture.z_safe.to_string(),
         "origin_reference": fixture.origin_reference,
+        // In the fingerprint because generation depends on it: it decides which axis a
+        // bottom-side step mirrors about, so changing it moves every hole on the solder
+        // side. Absent from here, the operator would fix a mirrored board by correcting
+        // the axis and watch nothing regenerate.
+        "board_flip_axis": fixture.board_flip_axis,
     })
 }
 
@@ -1612,6 +1617,13 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
             .and_then(Value::as_str)
             .unwrap_or("front")
             .to_string(),
+        // `y` — the page turn — is what the schema assumes for a profile written before
+        // this field existed, so it is also the fallback here.
+        board_flip_axis: value
+            .get("board_flip_axis")
+            .and_then(Value::as_str)
+            .unwrap_or("y")
+            .to_string(),
         // Carried through exactly as entered — trimming or upper-casing it here would
         // take the decision away from the CNC profile's `set_origin`, which needs the
         // original text to quote back when it rejects one. Empty is a legitimate state
@@ -1642,7 +1654,7 @@ fn process_profile_to_value(profile: &JobProfile) -> Value {
         "schema_version": 2,
         "id": profile.id,
         "name": profile.name,
-        "side_to_machine": profile.side.as_str(),
+        "board_face": profile.board_face.as_str(),
         "cnc": profile.cnc_profile_id,
         "fixture": profile.fixture_profile_id,
         "toolset": profile.toolset_profile_id,
@@ -1714,13 +1726,20 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         .map(ToString::to_string)
         .unwrap_or_else(|| "Unnamed machining profile".to_string());
 
-    let side = match value
-        .get("side_to_machine")
+    // `side_to_machine: top | bottom` was renamed to `board_face: front | back`; the
+    // loader migrates stored documents, but this crosswalk also sees values built in
+    // memory, so it reads both spellings rather than silently defaulting an old one to
+    // the front.
+    let board_face = match value
+        .get("board_face")
+        .or_else(|| value.get("side_to_machine"))
         .and_then(Value::as_str)
-        .unwrap_or("top")
+        .unwrap_or("front")
     {
-        "bottom" => Side::Bottom,
-        _ => Side::Top,
+        face if face.eq_ignore_ascii_case("back") || face.eq_ignore_ascii_case("bottom") => {
+            BoardFace::Back
+        }
+        _ => BoardFace::Front,
     };
 
     let cnc_profile_id = value
@@ -1820,7 +1839,7 @@ fn process_profile_from_value(value: &Value) -> Option<JobProfile> {
         cnc_profile_id,
         fixture_profile_id,
         toolset_profile_id,
-        side,
+        board_face,
         default_operations,
         operation_setups,
         pending_required_fields: pending_required_fields.clone(),

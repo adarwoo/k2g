@@ -465,20 +465,30 @@ fn sample_steps() -> Vec<StepValue> {
     // The ids are the shape a real step carries — a UUID the operator never reads — and
     // the `_name` beside each is what a header would actually print. Both are sampled so
     // a template written against either previews truthfully.
-    let step = |name: &str, side: &str, operations: &[&str], cnc: &str| {
+    let step = |name: &str, face: &str, operations: &[&str], cnc: &str| {
         StepValue::Map(vec![
             ("name".into(), StepValue::Text(name.into())),
             ("cnc".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bd8".into())),
             ("fixture".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bd9".into())),
             ("toolset".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bda".into())),
-            ("side_to_machine".into(), StepValue::Text(side.into())),
+            ("board_face".into(), StepValue::Text(face.into())),
             (
                 "operations".into(),
                 StepValue::List(
                     operations.iter().map(|op| StepValue::Text((*op).into())).collect(),
                 ),
             ),
-            ("drill_locating_pins".into(), StepValue::Map(vec![])),
+            (
+                "drill_locating_pins".into(),
+                StepValue::Map(vec![(
+                    "pin_diameter".into(),
+                    // Text, not a Length: the schema offers a fixed list of pin sizes as
+                    // an `enum`, so it is stored and read as the string the operator
+                    // picked. A template printing it gets "3.2mm" verbatim rather than a
+                    // value that follows the program's unit mode.
+                    StepValue::Text("3.2mm".into()),
+                )]),
+            ),
             ("drill_pth".into(), holes("drill_ends_then_route")),
             ("drill_npth".into(), holes("drill_ends_then_route")),
             ("route_board".into(), route_board.clone()),
@@ -490,8 +500,8 @@ fn sample_steps() -> Vec<StepValue> {
     };
 
     vec![
-        step("Drill", "top", &["drill_pth", "drill_npth"], "Sample mill"),
-        step("Route outline", "top", &["route_board"], "Sample mill"),
+        step("Drill", "front", &["drill_pth", "drill_npth"], "Sample mill"),
+        step("Route outline", "front", &["route_board"], "Sample mill"),
     ]
 }
 
@@ -1067,7 +1077,7 @@ mod tests {
             let step = |step_name: &str| {
                 StepValue::Map(vec![
                     ("name".into(), StepValue::Text(step_name.into())),
-                    ("side_to_machine".into(), StepValue::Text("top".into())),
+                    ("board_face".into(), StepValue::Text("front".into())),
                     ("cnc_name".into(), StepValue::Text("MASSO G3".into())),
                 ])
             };

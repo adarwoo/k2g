@@ -7,37 +7,101 @@
 //!
 //! **Scope.** Both phases are planned. Round PTH/NPTH holes (and vias) become ordered
 //! point-drill ops or spiral-routed pockets; oblong slots become drill chains, router
-//! passes or both, per the step's strategy; and the board outline becomes offset cut
-//! spans with retaining tabs left between them.
+//! passes or both, per the step's strategy; the board outline becomes offset cut spans
+//! with retaining tabs left between them; and a step may machine either face of the board.
 //!
-//! Three things are deliberately still notes rather than ops: **locating pins** (the
-//! board carries no metadata for them), **scoring / V-grooving** (partial-depth cuts need
-//! a depth model and a V-bit the tool stock does not describe), and **arc-preserving
-//! outline offsets** — the outline is offset as a polyline today, so a curved edge is cut
-//! as chords rather than as `G2`/`G3` (op-planner §3, §9.6). None of these produces a
-//! wrong program; each produces a less complete or less elegant one, and says so.
+//! Two things are deliberately still notes rather than ops: **scoring / V-grooving**
+//! (partial-depth cuts need a depth model and a V-bit the tool stock does not describe)
+//! and **arc-preserving outline offsets** — the outline is offset as a polyline today, so
+//! a curved edge is cut as chords rather than as `G2`/`G3` (op-planner §3, §9.6). Neither
+//! produces a wrong program; each produces a less complete or less elegant one, and says
+//! so.
 //!
-//! Heights (`z_retract`/`z_safe`) use provisional defaults until the fixture model
-//! carries them.
+//! ## One frame for the whole job
+//!
+//! Locating pins are the one operation whose geometry comes from the **fixture** rather
+//! than from the board, and they are what makes double-sided work possible: two holes on
+//! the fixture's flip line, drilled through the board and into the backboard, so it can be
+//! turned over and land back where it was.
+//!
+//! They also grow the job's coordinate frame, because they sit outside the board — and
+//! that growth is decided **once, here**, from the profile's locating-pins step, and given
+//! to every step and to the 3D workpiece ([`JobFrame`]). Never per step: the operator
+//! drills one set of pins and every program of the job has to be written against the same
+//! zero, or the second setup cuts somewhere the first did not.
 
 use uuid::Uuid;
 
-use units::Length;
+use units::{Length, UserUnitDisplay};
 
-use crate::data::model::TabContour;
+use crate::data::model::{FixtureProfile, TabContour};
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
-use crate::gcode::placement::{BoardOrigin, Placement};
+use crate::gcode::placement::{BoardFlip, BoardOrigin, Margin, Placement, PlacementSpec};
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
 use crate::gcode::planner::{
     plan_drilling, plan_outline, plan_routing, DrillTarget, OutlineSpan, RouteShape, RouteTarget,
 };
-use crate::gcode::{oblong, outline, scene};
+use crate::gcode::{oblong, outline, pins, scene};
 use crate::runtime::tooling::{
-    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, plan_routers, read_steps,
-    HoleGroup, RouterPlan, StepRaw,
+    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_pin_tool,
+    plan_routers, read_steps, HoleGroup, PinTool, RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
+
+/// The coordinate frame every program of one job is written in.
+///
+/// Derived once per job (see the module note) so the steps cannot disagree about where the
+/// zero is. Without locating pins it is entirely inert — a default [`Margin`] and no pin
+/// diameter — and the transform is bit-for-bit the one k2g produced before any of this
+/// existed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct JobFrame {
+    /// Room the origin makes for the pins. Zero when the job has none.
+    pub margin: Margin,
+    /// The pin diameter, when the job drills pins at all.
+    pub pin_diameter: Option<Length>,
+    /// Which axis the board turns about, from the fixture. Meaningful for the pins even on
+    /// an all-front job, because it decides which pair of sides they sit on.
+    pub flip_axis: BoardFlip,
+}
+
+/// The job's shared frame, from the profile's steps and the fixture holding the board.
+///
+/// The pin diameter is taken from **the first step that drills pins**, which the readiness
+/// gate has already established is step 1 if it exists at all
+/// ([`locating_pin_faults`](crate::runtime::tooling::locating_pin_faults)). Taking the
+/// first rather than, say, the largest is the honest reading of "the pins this job is
+/// registered by": a second pin step re-fixtures against the same holes.
+///
+/// The flip axis comes from the fixture rather than from the step because it is a fact
+/// about where the registration *is*, which the fixture owns.
+fn job_frame(steps: &[StepRaw], fixture: Option<&FixtureProfile>) -> JobFrame {
+    let flip_axis = fixture
+        .map(|f| BoardFlip::from_axis(&f.board_flip_axis))
+        .unwrap_or(BoardFlip::AboutY);
+    let pin_diameter = steps
+        .iter()
+        .find(|step| step.drills_locating_pins())
+        .and_then(|step| step.pin_diameter);
+
+    JobFrame {
+        margin: pin_diameter.map(|d| pins::margin(d, flip_axis)).unwrap_or_default(),
+        pin_diameter,
+        flip_axis,
+    }
+}
+
+/// The fixture a job's frame is measured in: the one the **first** step is set up in.
+///
+/// A profile whose steps name different fixtures is a profile whose steps cannot share a
+/// zero, which is a different problem from this one; taking the first keeps the frame a
+/// single value rather than silently picking whichever fixture happened to be looked up
+/// last.
+fn frame_fixture<'a>(ctx: &'a AppCtx, steps: &[StepRaw]) -> Option<&'a FixtureProfile> {
+    let id = steps.first()?.fixture_id?;
+    ctx.fixtures.iter().find(|f| f.id == id.to_string())
+}
 
 /// Builds the machining plan for the current context: one [`StepPlan`] per machining
 /// step of the selected profile, each with its ordered drill-phase tool blocks.
@@ -63,11 +127,14 @@ pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
 
     // The job's board orientation is applied by the Placement (board → machine).
     let orientation = with_appdata(|data| data.job_board_orientation()) as f64;
+    // Derived from the whole profile, before any step is planned, and identical for all of
+    // them — see the module note.
+    let frame = job_frame(&raw_steps, frame_fixture(ctx, &raw_steps));
 
     let steps = raw_steps
-        .into_iter()
+        .iter()
         .enumerate()
-        .map(|(index, raw)| plan_step(ctx, index, &raw, orientation))
+        .map(|(index, raw)| plan_step(ctx, index, raw, orientation, &frame))
         .collect();
 
     MachiningPlan { steps, note: None }
@@ -93,34 +160,44 @@ pub fn board_solid(ctx: &AppCtx, step: usize) -> Option<scene::BoardSolid> {
     }
 
     let orientation = with_appdata(|data| data.job_board_orientation()) as f64;
-    let raw = ctx
+    let all_steps: Vec<StepRaw> = ctx
         .selected_process_profile_id
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
         .map(read_steps)
-        .and_then(|steps| steps.into_iter().nth(step));
+        .unwrap_or_default();
+    let raw = all_steps.get(step);
     let cnc = raw
-        .as_ref()
         .and_then(|raw| raw.cnc_id)
         .and_then(|id| ctx.machines.iter().find(|m| m.id == id.to_string()));
     let fixture = raw
-        .as_ref()
         .and_then(|raw| raw.fixture_id)
         .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
 
+    // The same frame the toolpaths are planned in — derived from the whole profile, not
+    // from this step — so the workpiece and the paths drawn over it cannot disagree about
+    // where the zero is.
+    let frame = job_frame(&all_steps, frame_fixture(ctx, &all_steps));
+
     // Z here is irrelevant — a solid is placed in XY only — so the retract/safe heights
     // are nominal rather than resolved from a fixture.
-    let placement = Placement::new(
-        board.bounding_box.as_ref(),
-        orientation,
-        fixture
+    let placement = Placement::new(&PlacementSpec {
+        bounds: board.bounding_box.as_ref(),
+        orientation_deg: orientation,
+        origin: fixture
             .map(|f| BoardOrigin::from_edges(&f.origin_x0, &f.origin_y0))
             .unwrap_or_default(),
-        cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
-        cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
-        Length::from_mm(0.0),
-        Length::from_mm(0.0),
-    );
+        margin: frame.margin,
+        // Turned over exactly when this step machines the bottom, which is what mirrors
+        // the artwork so it is drawn as the operator will physically see it.
+        flip: raw
+            .is_some_and(|raw| raw.machines_back)
+            .then_some(frame.flip_axis),
+        scale_x: cnc.map(|m| m.scaling_x as f64).unwrap_or(1.0),
+        scale_y: cnc.map(|m| m.scaling_y as f64).unwrap_or(1.0),
+        z_retract: Length::from_mm(0.0),
+        z_safe: Length::from_mm(0.0),
+    });
     let place = |&(x, y): &(i64, i64)| {
         let point = placement.xy(&pcb::BoardPoint {
             x: Length::from_mm(x as f64 / 1e6),
@@ -143,6 +220,10 @@ pub fn board_solid(ctx: &AppCtx, step: usize) -> Option<scene::BoardSolid> {
             .map(|c| c.points.iter().map(place).collect())
             .collect(),
         thickness_mm: board.thickness.map(|t| t.as_mm()).unwrap_or(DEFAULT_THICKNESS_MM),
+        // Which way up the board is lying, so the renderer knows which of its two faces
+        // the spindle is looking at. The back is drawn red and the front green either way;
+        // this only says which one is on top.
+        back_face_up: raw.is_some_and(|raw| raw.machines_back),
     };
 
     // Drilled holes, at their finished size — the board as it will come off the machine,
@@ -159,6 +240,71 @@ pub fn board_solid(ctx: &AppCtx, step: usize) -> Option<scene::BoardSolid> {
     Some(solid)
 }
 
+/// The setup around the workpiece: where the work zero is, which way the fixture's stop
+/// faces, and where the locating pins go.
+///
+/// Drawn from the same [`JobFrame`] and the same [`Placement`] as the board and the
+/// toolpaths, so "the board floats away from the bracket" is a true statement about the
+/// program rather than a drawing convention. With pins that gap is exactly the margin the
+/// origin made for them — which is the one thing about this frame an operator cannot
+/// otherwise see.
+///
+/// `None` when there is no board, because every part of it is measured from one.
+pub fn fixture_scene(ctx: &AppCtx, step: usize) -> Option<scene::FixtureMark> {
+    let board = ctx.board.as_ref()?;
+    let bounds = board.bounding_box.as_ref()?;
+
+    let orientation = with_appdata(|data| data.job_board_orientation()) as f64;
+    let all_steps: Vec<StepRaw> = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .map(read_steps)
+        .unwrap_or_default();
+    let raw = all_steps.get(step);
+    let fixture = frame_fixture(ctx, &all_steps);
+    let frame = job_frame(&all_steps, fixture);
+    let origin = fixture
+        .map(|f| BoardOrigin::from_edges(&f.origin_x0, &f.origin_y0))
+        .unwrap_or_default();
+
+    let placement = Placement::new(&PlacementSpec {
+        bounds: Some(bounds),
+        orientation_deg: orientation,
+        origin,
+        margin: frame.margin,
+        flip: raw
+            .is_some_and(|raw| raw.machines_back)
+            .then_some(frame.flip_axis),
+        scale_x: 1.0,
+        scale_y: 1.0,
+        z_retract: Length::from_mm(0.0),
+        z_safe: Length::from_mm(0.0),
+    });
+
+    let rect = placement.board_rect_mm();
+    // Long enough to read as a stop rather than a tick, short enough not to dominate a
+    // small board: a quarter of the board's larger side.
+    let arm_mm = ((rect.max_x - rect.min_x).max(rect.max_y - rect.min_y) / 4.0).max(5.0);
+
+    Some(scene::FixtureMark {
+        arm_mm,
+        // The arms run along the work, i.e. away from the stop the board is pushed into.
+        // With `x0: right` the board is at negative X, so the arm goes that way too.
+        dir_x: if origin.x_at_right { -1.0 } else { 1.0 },
+        dir_y: if origin.y_at_far { -1.0 } else { 1.0 },
+        pins: frame
+            .pin_diameter
+            .map(|diameter| {
+                pins::centres(rect, frame.flip_axis, diameter)
+                    .iter()
+                    .map(|p| [p.x.as_mm(), p.y.as_mm(), diameter.as_mm()])
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
 /// Board thickness assumed when the KiCad stackup does not report one. 1.6 mm is the
 /// overwhelmingly common PCB, and this only affects how the workpiece is *drawn*.
 const DEFAULT_THICKNESS_MM: f64 = 1.6;
@@ -168,8 +314,14 @@ fn note(message: &str) -> MachiningPlan {
     MachiningPlan { steps: vec![], note: Some(message.to_string()) }
 }
 
-/// Plans one step's drill phase.
-fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> StepPlan {
+/// Plans one step's drill phase, in the job's shared coordinate `frame`.
+fn plan_step(
+    ctx: &AppCtx,
+    index: usize,
+    raw: &StepRaw,
+    orientation: f64,
+    frame: &JobFrame,
+) -> StepPlan {
     let name = raw.name.clone();
     let mut notes: Vec<String> = Vec::new();
 
@@ -186,22 +338,10 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
         return failed(index, name, vec![reason]);
     }
 
-    // Refused, not annotated. Nothing mirrors geometry for a bottom-side step, so every
-    // block this would plan — and the drill map drawn from it — describes the top side.
-    // Showing a plausible plan under a step labelled "Bottom" is the failure mode the
-    // readiness gate exists to prevent, so the view must not draw one either.
-    if raw.machines_bottom {
-        return failed(
-            index,
-            name,
-            vec![
-                "This step is set to machine the bottom side, which is not implemented \
-                 yet: no geometry is mirrored, so the program would be the top-side one. \
-                 Set the step to the top side to plan it."
-                    .into(),
-            ],
-        );
-    }
+    // A back-face step used to be refused here, because nothing mirrored its geometry and
+    // the plan it produced would silently have described the top side. The mirror now lives
+    // in the `Placement` built below, applied from the fixture's own flip axis, so a
+    // back-face step plans like any other.
     let (Some(cnc_id), Some(fixture_id), Some(toolset_id)) =
         (raw.cnc_id, raw.fixture_id, raw.toolset_id)
     else {
@@ -237,10 +377,52 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     let routers =
         plan_routers(&ctx.tools, toolset, &groups, has_route, has_oblongs && oblong.routes());
 
-    if groups.is_empty() && !has_route {
-        if has_locating {
-            notes.push("Locating pins are not yet planned.".into());
-        }
+    // The pin hole's tool, resolved before the assigner runs and deliberately outside it —
+    // see `pick_pin_tool`. Refused rather than substituted: a registration hole that is
+    // nearly the right size does not register.
+    //
+    // The diameter is the **job frame's**, not this step's own. The two can only ever be
+    // the same — a profile with a second locating-pins step is a readiness fault, since
+    // pins must be the first step — and taking the frame's is what *guarantees* it: the
+    // pin centres below are measured out with this diameter, and the origin made room for
+    // exactly that. Reading the step's would let the two drift and put a pin hole outside
+    // the frame that was opened for it.
+    let pin_diameter = has_locating.then_some(frame.pin_diameter).flatten();
+    if has_locating && pin_diameter.is_none() {
+        // The schema materialises a diameter on every step, so this is a hand-edited or
+        // truncated profile. Refused rather than quietly planning a step that drills no
+        // pins: the steps after it are about to be cut against registration that does not
+        // exist.
+        return failed(
+            index,
+            name,
+            vec!["This step drills locating pins but no pin diameter is set. Choose one in \
+                  the machining profile."
+                .into()],
+        );
+    }
+    let pin_tool = match pin_diameter {
+        Some(diameter) => match pick_pin_tool(&ctx.tools, toolset, diameter) {
+            Some(tool) => Some(tool),
+            None => {
+                return failed(
+                    index,
+                    name,
+                    vec![format!(
+                        "No tool can make the {} locating-pin holes: there is no drill of \
+                         exactly that diameter in stock, and no router narrow enough to mill \
+                         one. A registration hole is never drilled to a nearly-right size, so \
+                         this step cannot be planned — stock a {} drill.",
+                        fmt_len(ctx, diameter),
+                        fmt_len(ctx, diameter),
+                    )],
+                );
+            }
+        },
+        None => None,
+    };
+
+    if groups.is_empty() && !has_route && pin_tool.is_none() {
         return StepPlan { index, name, blocks: vec![], notes };
     }
 
@@ -256,7 +438,16 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
     };
     // Shared with the Tooling tab so the two views agree on tool feasibility.
     let setup = build_setup(ctx, raw.fixture_id);
-    let rack = build_rack_spec(toolset, atc_slots, &routers.mandatory_ids());
+    // The pin tool joins the routers as mandatory: it is chosen outside the assigner, so
+    // nothing else would reserve it a slot, and a step that cannot load it cannot register
+    // the board.
+    let mut mandatory = routers.mandatory_ids();
+    if let Some(tool) = pin_tool.as_ref() {
+        mandatory.push(tool.id().to_string());
+        mandatory.sort();
+        mandatory.dedup();
+    }
+    let rack = build_rack_spec(toolset, atc_slots, &mandatory);
 
     let assignment = match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
         Ok(assignment) => assignment,
@@ -362,16 +553,65 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
 
     // Place ops in machine space and order each phase: drilling first (board rigid),
     // then the route-hole phase (op-planner §4).
-    let placement = Placement::new(
-        ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
-        orientation,
-        BoardOrigin::from_edges(&fixture.origin_x0, &fixture.origin_y0),
-        cnc.scaling_x as f64,
-        cnc.scaling_y as f64,
-        fixture.z_retract,
-        fixture.z_safe,
-    );
+    let placement = Placement::new(&PlacementSpec {
+        bounds: ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
+        orientation_deg: orientation,
+        origin: BoardOrigin::from_edges(&fixture.origin_x0, &fixture.origin_y0),
+        // The job's margin, not this step's: every program is written against the one zero
+        // the operator set up against.
+        margin: frame.margin,
+        // The board is physically turned over for a back-face step, so its geometry
+        // mirrors about the line the pins sit on. Everything downstream places through
+        // this, so nothing else has to know which side is being cut.
+        flip: raw.machines_back.then_some(frame.flip_axis),
+        scale_x: cnc.scaling_x as f64,
+        scale_y: cnc.scaling_y as f64,
+        z_retract: fixture.z_retract,
+        z_safe: fixture.z_safe,
+    });
     let start = Point::new(Length::from_mm(0.0), Length::from_mm(0.0));
+
+    // The locating pins. Measured from the *placed* board and then unplaced, the way the
+    // outline's mouse-bite centres are, because they are fixture geometry rather than
+    // board geometry — KiCad has nothing to say about where they go.
+    if let (Some(tool), Some(diameter)) = (pin_tool.as_ref(), pin_diameter) {
+        let z_bottom = pin_plunge(&setup);
+        if let Some(shortfall) = shallow_pin_engagement(&setup) {
+            notes.push(format!(
+                "Locating pins engage only {} into the backboard, which is not enough to \
+                 hold the board square — use a thicker backboard or reduce the bed \
+                 clearance.",
+                fmt_len(ctx, shortfall),
+            ));
+        }
+        for (n, centre) in pins::centres(placement.board_rect_mm(), frame.flip_axis, diameter)
+            .into_iter()
+            .enumerate()
+        {
+            let at = placement.unplace(&centre);
+            match tool {
+                PinTool::Drill { id, diameter: bit } => drill_targets.push(DrillTarget {
+                    source: format!("pin.{n}"),
+                    at,
+                    tool_id: id.clone(),
+                    diameter: *bit,
+                    z_bottom,
+                    // One run, so the two pins are drilled one after the other rather than
+                    // being scattered through the tour with the board's own holes between
+                    // them. They are the datum: they want making together.
+                    chain: Some("pin".to_string()),
+                }),
+                PinTool::Router { id, diameter: cutter } => route_targets.push(RouteTarget {
+                    source: format!("pin.{n}"),
+                    at,
+                    tool_id: id.clone(),
+                    tool_diameter: *cutter,
+                    shape: RouteShape::Hole { hole_diameter: diameter },
+                    z_bottom,
+                }),
+            }
+        }
+    }
 
     // The board outline. Planned before the blocks are built because its mouse bites are
     // *drilled*, and they have to join the drill phase — the board must still be whole
@@ -429,6 +669,22 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
         }
     }
 
+    // The back-face program opens with a "Back face up?" prompt, and that
+    // prompt is the *only* thing standing between a wrongly remounted board and a cut one:
+    // two symmetric pins of one diameter accept the board unflipped or turned 180° just as
+    // readily as the right way up. A controller with no `pause` primitive emits nothing for
+    // it, so the guard silently is not there — which is worth saying out loud, before the
+    // board is in the fixture rather than after.
+    if raw.machines_back && cnc.pause_tpl.trim().is_empty() {
+        notes.push(format!(
+            "'{}' has no pause primitive, so this back-face program cannot ask the \
+             operator to confirm the board was turned over. The locating pins are \
+             symmetric and will accept it either way round — check it by eye before \
+             running.",
+            cnc.name,
+        ));
+    }
+
     // Record what this step's plan does not yet cover.
     if unmilled_slots > 0 {
         notes.push(format!(
@@ -450,9 +706,6 @@ fn plan_step(ctx: &AppCtx, index: usize, raw: &StepRaw, orientation: f64) -> Ste
             "{} slot width(s) are narrower than any available router — see the Tooling tab.",
             routers.unroutable_widths.len()
         ));
-    }
-    if has_locating {
-        notes.push("Locating pins are not yet planned.".into());
     }
     for diagnostic in &assignment.diagnostics {
         notes.push(diagnostic.message.clone());
@@ -670,6 +923,43 @@ fn mouse_bite_drill(
         .filter(|t| slots.contains_key(&t.id) && !t.kind.eq_ignore_ascii_case("router"))
         .min_by_key(|t| t.diameter.as_um().round() as i64)
         .map(|t| (t.id.clone(), t.diameter, assigner::router_plunge(&setup)))
+}
+
+/// How deep a locating-pin hole goes: **through** the board and on into the backboard, by
+/// the whole of the space below the board that the fixture says is usable.
+///
+/// Deliberately not routed through [`assigner::assign`]'s Z-feasibility check, which would
+/// reject this by construction. That check exists to stop a tool reaching the machine bed,
+/// and it measures the room left below the board — the very room a pin hole is *supposed*
+/// to consume. A pin that only engages the board is not registration: the board pivots on
+/// it. What keeps the bed safe here is that the engagement stops at the fixture's own
+/// `bed_clearance`, which is where [`build_setup`] has already subtracted it.
+///
+/// (`Setup::bed_clearance` is that remaining space, not the clearance itself — see
+/// [`build_setup`].)
+fn pin_plunge(setup: &assigner::Setup) -> Length {
+    Length::from_mm(setup.board_thickness.as_mm() + setup.bed_clearance.as_mm())
+}
+
+/// The least a pin may engage the backboard before it stops holding the board square.
+const MIN_PIN_ENGAGEMENT_MM: f64 = 1.0;
+
+/// The achieved engagement when it is too shallow to rely on, or `None` when it is fine.
+///
+/// A warning and not a refusal: a shallow pin still registers a board that is held down by
+/// something else, and the operator is the one who can see how their backboard is set up.
+/// Refusing here would block a job that works.
+///
+/// Note this is the depth the *tip* reaches, which is what the fixed rule specifies. A
+/// drill's point is conical, so the full-diameter part of the hole — the part the pin
+/// actually seats in — is shorter than this by the point length (~1 mm for a 118° ⌀3.2).
+fn shallow_pin_engagement(setup: &assigner::Setup) -> Option<Length> {
+    (setup.bed_clearance.as_mm() < MIN_PIN_ENGAGEMENT_MM).then_some(setup.bed_clearance)
+}
+
+/// Formats a length in the operator's preferred unit.
+fn fmt_len(ctx: &AppCtx, length: Length) -> String {
+    length.unit_display(ctx.unit_system).user
 }
 
 /// A step that could not be planned — no blocks, the reasons surfaced as notes.

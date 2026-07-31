@@ -1,4 +1,4 @@
-//! The machining operations a step can run, and which of them a board side may
+//! The machining operations a step can run, and which of them a board face may
 //! receive only once.
 //!
 //! This mirrors the `operation_key` enum in `schemas/machining.yaml` and is the one
@@ -8,24 +8,32 @@
 //! which refuses a hand-edited profile that claims one twice.
 
 /// One machining operation: its schema key, the operator-facing label, and whether a
-/// board side may receive it more than once.
+/// board face may receive it more than once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MachiningOperation {
     /// The `operation_key` value persisted in the profile.
     pub key: &'static str,
     /// How the operation is named to the operator, in the UI and in messages.
     pub label: &'static str,
-    /// Whether at most one step per board side may run it.
+    /// The same thing in as few characters as still identify it, for places that name
+    /// several operations at once — a step chip, a folded card's heading.
+    ///
+    /// Not derived from [`Self::label`] by truncation: "Drill plated holes (PTH)" and
+    /// "Drill non-plated holes (NPTH)" share their first nineteen characters, so any
+    /// automatic shortening makes exactly the two operations an operator most needs to
+    /// tell apart indistinguishable.
+    pub short_label: &'static str,
+    /// Whether at most one step per board face may run it.
     ///
     /// True for everything that removes the board's own defining material: those
     /// features exist once, so cutting them in two steps means cutting them twice —
     /// the second pass runs a tool through air it has already cleared, or worse,
     /// re-drills a hole that has moved with the fixture.
     ///
-    /// *Per side*, not per profile, because a side is a separate setup with its own
-    /// geometry: milling the component side and then the solder side is two distinct
-    /// jobs that happen to share a key.
-    pub once_per_side: bool,
+    /// *Per face*, not per profile, because a face is a separate setup with its own
+    /// geometry: milling the front and then the back is two distinct jobs that happen
+    /// to share a key.
+    pub once_per_face: bool,
 }
 
 /// The operations, in schema order.
@@ -44,27 +52,32 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
     MachiningOperation {
         key: "drill_pth",
         label: "Drill plated holes (PTH)",
-        once_per_side: true,
+        short_label: "PTH",
+        once_per_face: true,
     },
     MachiningOperation {
         key: "drill_npth",
         label: "Drill non-plated holes (NPTH)",
-        once_per_side: true,
+        short_label: "NPTH",
+        once_per_face: true,
     },
     MachiningOperation {
         key: "route_board",
         label: "Route board edge",
-        once_per_side: true,
+        short_label: "Route",
+        once_per_face: true,
     },
     MachiningOperation {
         key: "drill_locating_pins",
         label: "Drill locating pins",
-        once_per_side: false,
+        short_label: "Pins",
+        once_per_face: false,
     },
     MachiningOperation {
         key: "mill_board",
         label: "Mill board",
-        once_per_side: true,
+        short_label: "Mill",
+        once_per_face: true,
     },
 ];
 
@@ -83,9 +96,58 @@ pub fn operation_label(key: &str) -> &str {
     machining_operation(key).map(|op| op.label).unwrap_or(key)
 }
 
-/// Whether `key` may appear in only one step per board side.
-pub fn operation_once_per_side(key: &str) -> bool {
-    machining_operation(key).is_some_and(|op| op.once_per_side)
+/// Whether `key` may appear in only one step per board face.
+pub fn operation_once_per_face(key: &str) -> bool {
+    machining_operation(key).is_some_and(|op| op.once_per_face)
+}
+
+/// The name a freshly added step carries until the operator gives it one of their own.
+///
+/// Written into the document by `AppData::add_step` and treated by
+/// [`step_display_name`] as "not named yet".
+pub const UNNAMED_STEP: &str = "Machining step";
+
+/// What to call a step: the operator's own name, or — while they have not given it one —
+/// a name built from what the step actually does.
+///
+/// "Machining step", "Machining step", "Machining step" is what a profile grown with
+/// "+ Add step" looks like, and it tells the operator nothing about which is which at
+/// exactly the moment they are trying to find one. The operations *are* the distinguishing
+/// fact, so they are what the name says until something better is supplied.
+///
+/// Deliberately **not** persisted: writing the derived name into the document would make
+/// the step look named, and it would then stop tracking the operations it describes — tick
+/// "Route board edge" on a step called "PTH" and the name is a lie the operator did not
+/// tell. Derived on read, it always matches.
+///
+/// The test for "not named yet" is the literal [`UNNAMED_STEP`] default (or blank), not the
+/// node's `default_applied` flag: `add_step` writes the name explicitly, so the flag is
+/// false from the moment a step is created.
+pub fn step_display_name(name: &str, operations: &[String]) -> String {
+    let trimmed = name.trim();
+    if !trimmed.is_empty() && trimmed != UNNAMED_STEP {
+        return trimmed.to_string();
+    }
+
+    // Schema order, not the order they happen to be stored in, so two steps with the same
+    // operations always read the same way round.
+    let parts: Vec<&str> = MACHINING_OPERATIONS
+        .iter()
+        .filter(|op| operations.iter().any(|key| key == op.key))
+        .map(|op| op.short_label)
+        .collect();
+
+    // An unknown key (a profile from a later build) still deserves to be named after
+    // something. Fall back to the keys themselves rather than to a blank chip.
+    if parts.is_empty() {
+        let unknown: Vec<&str> = operations.iter().map(String::as_str).collect();
+        return if unknown.is_empty() {
+            UNNAMED_STEP.to_string()
+        } else {
+            unknown.join(" + ")
+        };
+    }
+    parts.join(" + ")
 }
 
 /// How a step is referred to in a message: by the ordinal the editor shows as its
@@ -101,13 +163,13 @@ pub fn step_reference(index: usize, name: &str) -> String {
     }
 }
 
-/// One operation claimed by more than one step on the same board side.
+/// One operation claimed by more than one step on the same board face.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OperationConflict {
     /// The operation's schema key.
     pub key: String,
-    /// Whether the clash is on the bottom side.
-    pub bottom: bool,
+    /// Whether the clash is on the back face.
+    pub back: bool,
     /// Every step claiming it as `(index, name)`, in step order.
     pub steps: Vec<(usize, String)>,
 }
@@ -116,44 +178,44 @@ impl OperationConflict {
     /// The conflict as one operator-facing sentence.
     pub fn message(&self) -> String {
         format!(
-            "{} is set in {} on the {} side; only one step may cut it.",
+            "{} is set in {} on the {} face; only one step may cut it.",
             operation_label(&self.key),
             self.steps
                 .iter()
                 .map(|(index, name)| step_reference(*index, name))
                 .collect::<Vec<_>>()
                 .join(" and "),
-            if self.bottom { "bottom" } else { "top" },
+            if self.back { "back" } else { "front" },
         )
     }
 }
 
-/// Every once-per-side operation claimed by two or more of `steps` on the same side.
+/// Every once-per-face operation claimed by two or more of `steps` on the same face.
 ///
-/// Takes `(step name, machines bottom, operations)` rather than any richer step type so
+/// Takes `(step name, machines the back, operations)` rather than any richer step type so
 /// it stays a pure function over the only three facts it needs, testable without a
 /// datastore. Conflicts come back in operation order, each listing its steps in step
 /// order, so the message reads the way the editor is laid out.
 pub fn conflicting_operations<'a>(
     steps: impl IntoIterator<Item = (&'a str, bool, &'a [String])>,
 ) -> Vec<OperationConflict> {
-    // (key, side) -> claiming steps. Collected in one pass so the sides stay
-    // independent: the same key on opposite sides is two separate tallies, never one.
+    // (key, face) -> claiming steps. Collected in one pass so the faces stay
+    // independent: the same key on opposite faces is two separate tallies, never one.
     let mut claims: Vec<((&str, bool), Vec<(usize, String)>)> = Vec::new();
 
     // The iteration order is step order, so the position here *is* the step index the
     // editor shows — no index needs threading in from the caller.
-    for (index, (name, bottom, operations)) in steps.into_iter().enumerate() {
+    for (index, (name, back, operations)) in steps.into_iter().enumerate() {
         for key in operations {
-            if !operation_once_per_side(key) {
+            if !operation_once_per_face(key) {
                 continue;
             }
             match claims
                 .iter_mut()
-                .find(|(k, _)| *k == (key.as_str(), bottom))
+                .find(|(k, _)| *k == (key.as_str(), back))
             {
                 Some((_, claimants)) => claimants.push((index, name.to_string())),
-                None => claims.push(((key, bottom), vec![(index, name.to_string())])),
+                None => claims.push(((key, back), vec![(index, name.to_string())])),
             }
         }
     }
@@ -163,9 +225,9 @@ pub fn conflicting_operations<'a>(
     let mut conflicts: Vec<OperationConflict> = claims
         .into_iter()
         .filter(|(_, claimants)| claimants.len() > 1)
-        .map(|((key, bottom), steps)| OperationConflict {
+        .map(|((key, back), steps)| OperationConflict {
             key: key.to_string(),
-            bottom,
+            back,
             steps,
         })
         .collect();
@@ -212,7 +274,7 @@ mod tests {
 
     /// The point of the rule: a feature the board has once is cut once.
     #[test]
-    fn one_side_may_not_claim_the_same_operation_twice() {
+    fn one_face_may_not_claim_the_same_operation_twice() {
         let conflicts = conflicting_operations([
             ("Drill", false, ops(&["drill_pth"]).as_slice()),
             (
@@ -228,7 +290,7 @@ mod tests {
             conflicts[0].steps,
             vec![(0, "Drill".to_string()), (1, "Cut out".to_string())]
         );
-        assert!(!conflicts[0].bottom);
+        assert!(!conflicts[0].back);
     }
 
     /// Steps need not have distinct names — a profile grown with "+ Add step" calls
@@ -246,6 +308,41 @@ mod tests {
         assert!(message.contains("step 2 'Machining step'"), "{message}");
     }
 
+    /// A profile grown with "+ Add step" is three cards all called "Machining step", which
+    /// says nothing about which is which at exactly the moment the operator is looking for
+    /// one. Until they name it themselves, the step is called after what it does.
+    #[test]
+    fn an_unnamed_step_is_named_after_what_it_does() {
+        assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["drill_pth"])), "PTH");
+        assert_eq!(step_display_name("", &ops(&["route_board"])), "Route");
+        assert_eq!(
+            step_display_name("   ", &ops(&["drill_locating_pins", "drill_pth", "drill_npth"])),
+            "PTH + NPTH + Pins",
+            "schema order, not the order they were ticked"
+        );
+    }
+
+    /// The operator's own name always wins, and is never overwritten by the derivation —
+    /// otherwise naming a step would appear to work and then silently undo itself the next
+    /// time an operation was ticked.
+    #[test]
+    fn a_name_the_operator_typed_is_left_alone() {
+        assert_eq!(step_display_name("Flip and drill", &ops(&["drill_pth"])), "Flip and drill");
+        assert_eq!(step_display_name("  Cut out  ", &ops(&[])), "Cut out", "trimmed, not replaced");
+    }
+
+    /// A step whose operations this build does not know still gets a name from them rather
+    /// than a blank chip — an old k2g opening a newer profile must still be navigable.
+    #[test]
+    fn an_unknown_operation_still_names_its_step() {
+        assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["engrave"])), "engrave");
+        assert_eq!(
+            step_display_name(UNNAMED_STEP, &ops(&[])),
+            UNNAMED_STEP,
+            "and a step with no operations at all keeps the placeholder"
+        );
+    }
+
     /// An unnamed step still has to be referrable.
     #[test]
     fn a_step_with_no_name_is_referred_to_by_its_ordinal_alone() {
@@ -254,31 +351,31 @@ mod tests {
         assert_eq!(step_reference(1, "Cut out"), "step 2 'Cut out'");
     }
 
-    /// The reason the rule is per side rather than per profile: two sides are two
+    /// The reason the rule is per face rather than per profile: two faces are two
     /// setups, and milling each one is two different jobs.
     #[test]
-    fn the_two_board_sides_are_counted_separately() {
+    fn the_two_board_faces_are_counted_separately() {
         let conflicts = conflicting_operations([
             (
-                "Mill component side",
+                "Mill the front",
                 false,
                 ops(&["mill_board"]).as_slice(),
             ),
-            ("Mill solder side", true, ops(&["mill_board"]).as_slice()),
+            ("Mill the back", true, ops(&["mill_board"]).as_slice()),
         ]);
         assert!(
             conflicts.is_empty(),
-            "one mill per side is the intended workflow"
+            "one mill per face is the intended workflow"
         );
 
         let conflicts = conflicting_operations([
             ("Rough", true, ops(&["mill_board"]).as_slice()),
             ("Finish", true, ops(&["mill_board"]).as_slice()),
         ]);
-        assert_eq!(conflicts.len(), 1, "but milling the same side twice is not");
+        assert_eq!(conflicts.len(), 1, "but milling the same face twice is not");
         assert!(
-            conflicts[0].bottom,
-            "and the message must name the side it happened on"
+            conflicts[0].back,
+            "and the message must name the face it happened on"
         );
     }
 
@@ -321,16 +418,16 @@ mod tests {
     }
 
     #[test]
-    fn the_message_names_the_operation_the_steps_and_the_side() {
+    fn the_message_names_the_operation_the_steps_and_the_face() {
         let conflict = OperationConflict {
             key: "route_board".to_string(),
-            bottom: false,
+            back: false,
             steps: vec![(0, "Drill".to_string()), (1, "Cut out".to_string())],
         };
         assert_eq!(
             conflict.message(),
-            "Route board edge is set in step 1 'Drill' and step 2 'Cut out' on the top side; \
-             only one step may cut it."
+            "Route board edge is set in step 1 'Drill' and step 2 'Cut out' on the front \
+             face; only one step may cut it."
         );
     }
 }

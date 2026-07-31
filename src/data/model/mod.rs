@@ -15,10 +15,10 @@ pub mod tool_core;
 // unit-display layer); re-exported here so runtime/UI keep one import path.
 pub use units::UserUnitSystem;
 pub use catalog::{CatalogStockCatalog, CatalogStockSection, CatalogStockTool};
-pub use job::{EdgeTab, JobConfig, ProductionOperation, Side, TabContour};
+pub use job::{BoardFace, EdgeTab, JobConfig, ProductionOperation, TabContour};
 pub use operations::{
-    conflicting_operations, operation_once_per_side, step_reference, MachiningOperation,
-    OperationConflict, MACHINING_OPERATIONS,
+    conflicting_operations, operation_once_per_face, step_display_name, step_reference,
+    MachiningOperation, OperationConflict, MACHINING_OPERATIONS, UNNAMED_STEP,
 };
 pub use profiles::{
     CascadeDeleteImpact, FixtureProfile, JobProfile, MachineProfile, ToolsetGenerationPolicy,

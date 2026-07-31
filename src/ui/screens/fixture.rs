@@ -48,9 +48,10 @@ pub fn FixtureProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                 // the board's corner, this one for which of the machine's stored zeros
                 // the fixture sits in.
                 "/origin_reference",
-                // Shown even though bottom-side machining is not built yet: it is a
-                // fact about the fixture's registration that only the operator knows,
-                // and it is better recorded now than guessed later.
+                // Which axis a bottom-side step mirrors about, and where the locating
+                // pins go. Only the operator knows it — it follows from where the
+                // registration physically is — and getting it wrong mirrors the solder
+                // side along the wrong axis.
                 "/board_flip_axis",
                 "/backboard_thickness",
                 "/bed_clearance",

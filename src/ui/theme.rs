@@ -2029,6 +2029,15 @@ p {
     width: 100%;
 }
 
+/* A profile's own name. Free text the operator writes, not a value with a natural
+   size, so it takes the column rather than the 30% every other field is capped to —
+   the names people actually use ran off the end of the smaller box. Still bounded, so
+   it does not stretch to the far side of a wide window. */
+.field-control-name {
+    width: 100%;
+    max-width: 44rem;
+}
+
 .field-control-wide {
     width: 100%;
     max-width: none;

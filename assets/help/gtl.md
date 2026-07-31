@@ -323,11 +323,11 @@ first. So a header can name itself:
 
 ```
 `(Step {step_index + 1} of {steps.len()}: {steps[step_index].name})
-`(Machine: {steps[step_index].cnc_name}, side: {steps[step_index].side_to_machine})
+`(Machine: {steps[step_index].cnc_name}, face: {steps[step_index].board_face})
 ```
 
 Each entry in `steps` is the step exactly as you set it up on the Machining screen, so
-its fields are that screen's fields: `name`, `side_to_machine`, `operations`, and the
+its fields are that screen's fields: `name`, `board_face`, `operations`, and the
 settings blocks `drill_pth`, `drill_npth`, `route_board` and `mill_board`. Reach into
 them with a dot, as deep as you like:
 

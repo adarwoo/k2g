@@ -99,7 +99,7 @@ properties:
     default: clamps
     description: Supported board holding method.
 
-  # The board work origin (which corner is X0/Y0) is defined by `origin`, below.
+  # The bed origin (which corner is X0/Y0) is defined by `origin`, below.
   # There is deliberately no "Z origin reference" field: Z0 is ALWAYS the top of
   # the PCB. What differs between machines is only *how* that zero is established,
   # which is a CNC-profile capability (`has_repeatable_home`), not a fixture toggle.
@@ -156,10 +156,10 @@ properties:
   # ---------------------------------------------------------------------------
   # board_flip_axis
   # ---------------------------------------------------------------------------
-  # How the board turns over for a bottom-side step. This is a property of the
+  # How the board turns over for a back-face step. This is a property of the
   # FIXTURE, not of the job or the machining profile: it is decided entirely by
   # where the registration is — two pins on a left-to-right line let the board be
-  # turned like a page (about Y), pins on a front-to-back line tumble it (about X).
+  # turned like a page (about Y), pins on a near-to-far line tumble it (about X).
   #
   # Getting it wrong produces a mirrored board, so there is no default that is
   # safe for every fixture; `y` is the common case (page turn) and is what the
@@ -167,10 +167,10 @@ properties:
   #
   board_flip_axis:
     description: >-
-      Which axis the board is turned about when a machining step works the
-      bottom side. 'y' turns it left-to-right like a page (mirroring X, front
-      edge stays at the front); 'x' tumbles it front-to-back (mirroring Y, left
-      edge stays on the left). Ignored by top-side steps.
+      Which axis the board is turned about when a machining step works the back
+      face. 'y' turns it left-to-right like a page (mirroring X, the near edge
+      stays near); 'x' tumbles it near-to-far (mirroring Y, the left edge stays
+      on the left). Ignored by front-face steps.
     type: string
     default: y
     enum: [x, y]
@@ -188,19 +188,31 @@ properties:
   # `x0: right` the board therefore occupies negative X, which is exactly what you
   # want when the fixture references off a right-hand stop.
   #
-  # Both fields were once `[left, right, front, back]`, which allowed `x0: front`
-  # and `x0: left` with `y0: left` — combinations that mean nothing. X can only be
-  # zeroed on a left or right edge and Y on a front or back one, so the enums now
-  # say so and the impossible values are corrected on load.
+  # THE WORDS ARE THE BED'S, NOT THE BOARD'S. `near` is the edge closest to the
+  # operator, `far` the one across the bed; `left` and `right` are as seen standing
+  # at the machine. Y was once `front`/`back`, which read perfectly well until the
+  # machining profile started calling the PCB's own faces `front` and `back` — and
+  # then "front" meant the operator's side of the bed in one file and the component
+  # side of the PCB in another. Two different things must not share a word when
+  # confusing them mirrors a board. Old files are migrated on load
+  # (`normalize_fixture_value` in src/data/mod.rs).
+  #
+  # Both fields also once accepted all four of `left|right|front|back`, which allowed
+  # `x0: front` and even `x0: left` with `y0: left` — combinations that mean nothing.
+  # X can only be zeroed on a left or right edge, Y on a near or far one, so the enums
+  # say so and impossible values are corrected on load.
   #
   # Not to be confused with `origin_reference` above: that picks which of the
   # machine's stored zeros to use, this picks where on the board that zero lands.
   origin:
-    description: Board work-origin corner — which edge is X0 and which is Y0.
+    title: Bed origin corner
+    description: >-
+      Which corner of the bed the board is registered into, and so where X0/Y0
+      lands. Named in the bed's directions as the operator stands at it.
     type: object
     default:
       x0: left
-      y0: front
+      y0: near
     properties:
 
       # Valid examples:
@@ -208,20 +220,24 @@ properties:
       #   x0: right
       #
       x0:
-        description: Which edge of the board is X zero.
+        title: X zero edge
+        description: Which side of the bed is X zero, as seen from the operator.
         type: string
         enum: [left, right]
         default: left
 
       # Valid examples:
-      #   y0: front
-      #   y0: back
+      #   y0: near
+      #   y0: far
       #
       y0:
-        description: Which edge of the board is Y zero.
+        title: Y zero edge
+        description: >-
+          Which end of the bed is Y zero — `near` is the operator's side, `far`
+          is across the bed.
         type: string
-        enum: [front, back]
-        default: front
+        enum: [near, far]
+        default: near
 
     required: [x0, y0]
     additionalProperties: false

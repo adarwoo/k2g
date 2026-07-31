@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use units::{FeedRate, Length, RotationalSpeed};
 
-use super::job::{ProductionOperation, Side};
+use super::job::{BoardFace, ProductionOperation};
 use super::state::RackSlot;
 
 /// CNC profile persisted with the CNC schema.
@@ -130,11 +130,22 @@ pub struct FixtureProfile {
     pub z_retract: Length,
     /// Safe travel height for rapids, clear of clamps and fixture hardware (`z_safe`).
     pub z_safe: Length,
-    /// Which board edge is X0 (`left`/`right`) and which is Y0 (`front`/`back`) — the
-    /// corner the board is registered against in this fixture. Kept as the schema's own
-    /// words so the crosswalk stays a copy; `BoardOrigin::from_edges` interprets them.
+    /// Which bed edge is X0 (`left`/`right`) and which is Y0 (`near`/`far`, near being
+    /// the operator's side) — the corner the board is registered into in this fixture.
+    ///
+    /// The **bed's** directions, deliberately not the board's: the board's own faces are
+    /// `front`/`back` ([`BoardFace`]), and one word meaning both is how a board comes off
+    /// the machine mirrored. Kept as the schema's own words so the crosswalk stays a copy;
+    /// `BoardOrigin::from_edges` interprets them.
     pub origin_x0: String,
     pub origin_y0: String,
+    /// Which axis the board is turned about for a back-face step (`x`/`y`), in the
+    /// schema's own words — `BoardFlip::from_axis` interprets them.
+    ///
+    /// A property of the fixture and of nothing else: it is decided entirely by where the
+    /// registration is. Pins on a left-to-right line let the board be turned like a page
+    /// (about Y, mirroring X); pins on a near-to-far line tumble it (about X).
+    pub board_flip_axis: String,
     /// Which of the machine's stored zero points this fixture occupies, named the way the
     /// target machine names it (`G55`, or `G54.1 P7` on a MASSO). Held exactly as the
     /// operator entered it — normalising and validating it is the CNC profile's
@@ -154,7 +165,7 @@ pub struct JobProfile {
     pub cnc_profile_id: String,
     pub fixture_profile_id: String,
     pub toolset_profile_id: String,
-    pub side: Side,
+    pub board_face: BoardFace,
     pub default_operations: Vec<ProductionOperation>,
     pub operation_setups: BTreeMap<String, Value>,
     pub pending_required_fields: BTreeSet<String>,

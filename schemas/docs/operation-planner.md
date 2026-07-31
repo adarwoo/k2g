@@ -68,7 +68,7 @@ still owns a whole path internally.
 - **JobInstance for this step** — the effective (defaults + overrides) step config:
   which `operations` are enabled, `drill_pth`/`drill_npth` `holes` settings (incl. the
   `oblong` strategy and `pilot`), `route_board` edge/finishing, `routing`
-  `side_to_machine`, board orientation.
+  `board_face`, board orientation.
 - **ToolAssignment** (`src/gcode/assigner.rs`) — per-hole `tool_id` (+ optional
   `pilot_tool_id`, `strategy`, `z_bottom`/`z_retract`), and the `rack` (slot → tool).
   Feeds/speeds/rpm and geometry (point angle, flute) come from the tool's stock/catalog
@@ -102,17 +102,17 @@ The oblong `major` axis + hole centre come from the board hole (`drill_x`/`drill
 the strategy from the step config; the drill tool from the assignment; the slot router
 from the rack's mandatory router.
 
-### 3.1 One side, one claim
+### 3.1 One face, one claim
 
 Every operation above except `drill_locating_pins` may be claimed by **at most one step
-per board side**. They each remove material the board has *once*, so a second step
+per board face**. They each remove material the board has *once*, so a second step
 claiming the same one does not add work — it repeats it, driving a tool back through
 holes that are already there, into a board the first step may have released from its
 tabs.
 
-The rule is **per side, not per profile**: a side is its own setup with its own
-geometry, so milling the component side and then the solder side is two distinct jobs
-that happen to share a key.
+The rule is **per face, not per profile**: a face is its own setup with its own
+geometry, so milling the front and then the back is two distinct jobs that happen to
+share a key.
 
 `drill_locating_pins` is exempt because it registers the board against a *fixture*
 rather than cutting a feature of the board: a job that re-fixtures genuinely drills a
@@ -124,6 +124,10 @@ editor disables an operation another step has claimed (naming that step), and
 `tooling::duplicate_operations_reason` makes it a readiness no-go for a profile that was
 hand-edited or imported. The table of which operations are constrained is
 `data::model::operations`, mirroring the `operation_key` enum.
+
+`drill_locating_pins` carries rules of its own — where in the sequence it may appear, and
+which face it machines — because it is what makes a two-sided job possible at all. See
+§6.1.
 
 > **Routed paths keep KiCad's move types — they are not flattened to G1.** KiCad gives
 > an *unordered* set of edge moves (line, arc, bezier). Stitching's job is to **re-order
@@ -204,8 +208,18 @@ machining + CNC + board bounds) and is a pure function of them.
 **XY** — a composed affine `board → machine`:
 - **orientation** — the step's board rotation (`board_orientation`).
 - **fixture origin** — where the board sits and which corner is X0/Y0 (the fixture
-  `origin` x0/y0 = Left/Right/Front/Back).
+  `origin` x0/y0 = Left/Right/Near/Far, in the **bed's** directions — `near` is the
+  operator's side. Deliberately not the board's `front`/`back`, which name the PCB's two
+  faces.)
+- **pin margin** — extra room the origin makes for work that is not the board. Today only
+  the locating pins (§6.1). Zero for a job without them, which is what keeps such a job's
+  output identical to one generated before margins existed. Deliberately **not** the routed
+  channel: the cutter centre runs one radius outside the edge, so a routed job has always
+  cut into negative coordinates, and folding that in here would move every existing routed
+  program.
 - **CNC scaling** — per-axis calibration (`machine.scaling.x/y`).
+- **board flip** — for a step whose `board_face` is `back`, a final mirror about the
+  board's own centre line, on the axis the fixture's `board_flip_axis` names (§6.1).
 - *(the machine origin — G54/G55, or a MASSO's G54.1 P7 — is selected in `program_begin` by
   `set_origin()`, from the fixture's `origin_reference`; the Placement produces coordinates
   **relative to** it. The CNC's `set_origin` primitive also validates that reference, and
@@ -231,6 +245,52 @@ Because ops are placed in machine space, the §4 TSP minimises **physical** trav
 > Build this **before** routing gets real: CNC offsets, per-axis scaling, fixture
 > stack-up and board rotation compound quickly, and centralising them here keeps that
 > complexity out of every op and out of the templates.
+
+### 6.1 Locating pins and the two-sided frame
+
+A board machined on both sides has to be lifted out of the fixture, turned over and put
+back **exactly** where it was. Two registration pins are what make that possible: holes
+drilled through the board and on into the backboard while it is still in its original
+setup, so the turned-over board drops back onto the same two points.
+
+**Where they go** is a fixed rule with one setting — the pin diameter. They sit **on the
+fixture's flip mirror line**, centred on the board's bounding box, one pin each side, one
+diameter clear of it. A page turn (`board_flip_axis: y`, mirroring X) puts them above and
+below; a tumble (`x`) puts them left and right. That placement is the whole scheme: because
+each pin lies *on* the mirror line, the flip maps it onto itself, so the holes drilled in
+setup 1 are the holes the pins occupy in setup 2. `gcode::pins` owns the geometry and is a
+pure function of the placed board rectangle.
+
+**The frame is the job's, not the step's.** The margin (1.5 × diameter on the two pin
+sides) and the flip axis are derived once, from the profile's locating-pins step, and given
+to every step and to the 3D workpiece. Per step, two programs of one job could be written
+against different zeros — and the operator sets up against one.
+
+**Depth** is through the board plus the whole usable space below it
+(`backboard_thickness − bed_clearance`). This deliberately bypasses the §2½ Z-feasibility
+check, which exists to keep a tool off the bed by rationing exactly that space: a pin that
+engages only the board is not registration, because the board pivots on it. Engagement
+under 1 mm is a note, not a refusal.
+
+**Tooling** never substitutes. Elsewhere a drill inside the step's oversize/undersize
+allowance is a fine stand-in; a registration hole 0.1 mm over lets the board return to
+anywhere within 0.1 mm. So: an exact-diameter drill, else a router spiralling the hole to
+exact size, else the step fails.
+
+**Ordering rules** (enforced by `tooling::locating_pin_faults` as readiness no-gos, since
+they constrain steps against each other and no per-step schema can express them):
+
+1. a locating-pins step is the **first** step — registration drilled after something else
+   has cut the board registers nothing;
+2. it machines the **front** — pins are what lets the board be turned over, so they
+   precede the turn;
+3. steps on **different faces** require a pins step before the one that changes face.
+
+**And a prompt.** Every back-face program opens with `pause("Board back face up?")`.
+Two symmetric pins of one diameter accept the board unflipped, and turned 180°, exactly as
+readily as the right way up; no geometry k2g has can tell those apart, so the question is
+the entire guard. A controller with no `pause` primitive emits nothing for it, and the
+planner says so.
 
 ---
 

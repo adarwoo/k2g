@@ -356,6 +356,7 @@ fn StepCard(
     // One component with conditional chrome rather than two: duplicating the field list
     // for the single-step case is how the two would drift apart.
     let multi = step_count > 1;
+    let drills_pins = enabled_ops.iter().any(|op| op == "drill_locating_pins");
 
     // Folding is a statement about a step among steps, like the heading and the reorder
     // controls. A lone step has no collapse control, so it must never render folded —
@@ -370,10 +371,17 @@ fn StepCard(
     // Shown beside the number only when folded: expanded, the name field is the first
     // thing under the header and repeating it is noise; folded, "Step 2" over a closed
     // card says nothing about which setup it is.
-    let step_name = use_field(id, &format!("/steps/{index}/name"))
-        .map(|field| field.display)
-        .filter(|name| !name.trim().is_empty());
-    let folded_name = is_folded.then_some(step_name).flatten();
+    //
+    // The *displayed* name, so a step the operator has not named reads as what it does
+    // ("PTH + NPTH") rather than as the placeholder every step starts with. The name
+    // *field* below still shows the stored value — it has to, or it could not be typed in.
+    let step_name = crate::data::model::step_display_name(
+        &use_field(id, &format!("/steps/{index}/name"))
+            .map(|field| field.display)
+            .unwrap_or_default(),
+        &enabled_ops,
+    );
+    let folded_name = is_folded.then_some(step_name);
 
     rsx! {
         div { class: if multi { "schema-section step-card" } else { "schema-section" },
@@ -449,18 +457,25 @@ fn StepCard(
 
                 OperationsEditor { id, step: index }
 
-                SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
+                // A locating-pins step has no face to choose. Pins are what *lets* the
+                // board be turned over, so they are drilled before it ever is — on the
+                // front, by definition. The control is absent rather than disabled: a
+                // greyed-out dropdown invites the operator to look for the thing that
+                // would ungrey it, and there is nothing.
+                if drills_pins {
+                    p { class: "field-hint",
+                        "Machines the front face — locating pins are drilled before the board is turned over."
+                    }
+                } else {
+                    SchemaField { id, ptr: format!("/steps/{index}/board_face") }
+                }
 
                 // Configuration sections for the currently enabled operations.
                 for op in machining_operations().iter() {
                     if enabled_ops.iter().any(|enabled| enabled == op.key) {
                         div { class: "schema-section",
                             h4 { class: "section-title", "{op.label}" }
-                            if op.key == "drill_locating_pins" {
-                                p { class: "field-hint", "No additional options." }
-                            } else {
-                                SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
-                            }
+                            SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
                         }
                     }
                 }

@@ -257,12 +257,20 @@ impl AppCtx {
             file_extension: machine
                 .map(|m| m.output_file_extension.clone())
                 .unwrap_or_else(|| crate::runtime::GCODE_FILE_EXTENSION.to_string()),
-            body: Self::build_step_render_ctx(machine),
+            body: Self::build_step_render_ctx(machine, raw),
         }
     }
 
-    fn build_step_render_ctx(machine: Option<&MachineProfile>) -> crate::gcode::program::StepRender {
+    fn build_step_render_ctx(
+        machine: Option<&MachineProfile>,
+        raw: &crate::runtime::tooling::StepRaw,
+    ) -> crate::gcode::program::StepRender {
         use crate::gcode::feeds::{MachineLimits, SpindleRange};
+        // Asked of the operator at the top of every back-face program. Symmetric pins of
+        // one diameter accept the board unflipped and 180°-rotated just as readily as the
+        // right way up, so nothing in the geometry can reject a wrong remount — the prompt
+        // is the guard. See `StepRender::opening_prompt`.
+        let opening_prompt = raw.machines_back.then(|| BACK_FACE_PROMPT.to_string());
         match machine {
             Some(m) => crate::gcode::program::StepRender {
                 drill_tpl: m.drill_tpl.clone(),
@@ -281,6 +289,7 @@ impl AppCtx {
                 },
                 is_atc: m.atc_slot_count > 0,
                 measures_tool_length: m.measures_tool_length,
+                opening_prompt,
             },
             None => crate::gcode::program::StepRender {
                 drill_tpl: String::new(),
@@ -306,6 +315,7 @@ impl AppCtx {
                 },
                 is_atc: false,
                 measures_tool_length: false,
+                opening_prompt,
             },
         }
     }
@@ -513,6 +523,13 @@ impl GenerationTriggerCause {
     }
 }
 
+/// What a back-face program asks before it does anything.
+///
+/// Phrased as a question the operator has to answer "yes" to, not as an instruction —
+/// "Turn the board over" reads as something already done by the time the program runs,
+/// while a question is answered by looking at the fixture.
+const BACK_FACE_PROMPT: &str = "Board back face up?";
+
 struct GenerationReadiness {
     is_ready: bool,
     nogo_reasons: Vec<String>,
@@ -685,23 +702,23 @@ fn evaluate_generation_readiness(
         _ => {}
     }
 
-    // A bottom-side step is refused outright.
+    // Profile-shape rules — the ones that constrain steps *against each other*, which no
+    // per-step schema can express.
     //
-    // `side_to_machine` is settable per step and is reported back in the job sidebar,
-    // but nothing in the generator reads it: no geometry is mirrored, so a bottom-side
-    // step emits *the top-side program*. That is not a missing feature the operator can
-    // work around — it is a confidently wrong answer that scraps the board, and the UI
-    // confirms the wrong thing while producing it.
+    // A back-face step used to be refused outright here, because nothing mirrored the
+    // geometry and such a step would have emitted the front-face program: a confidently
+    // wrong answer that scraps the board while the UI confirms "Back". The mirror exists
+    // now (`gcode::placement::BoardFlip`, from the fixture's `board_flip_axis`), so what
+    // replaces it is narrower and sharper — the board may be machined on either face, but
+    // only if it has been given something to be turned over against.
     //
-    // So this blocks rather than warns. There is no correct output to fall back to, and
-    // a warning on a program that looks entirely plausible is not a safeguard. Lift it
-    // when the mirror (and the fixture's `board_flip_axis`) are actually applied.
+    // These block rather than warn, for the reason the old one did: there is no degraded
+    // output to fall back to. A board cut on the second face without registration is not a
+    // worse board, it is a wrong one, and the program looks entirely plausible.
     if crate::data::appdata_ready() {
         if let Ok(profile_id) = Uuid::parse_str(&profile.id) {
             let steps = crate::runtime::tooling::read_steps(profile_id);
-            if let Some(reason) = crate::runtime::tooling::bottom_side_steps_reason(&steps) {
-                nogo_reasons.push(reason);
-            }
+            nogo_reasons.extend(crate::runtime::tooling::locating_pin_faults(&steps));
             // Two steps cutting the same feature on the same side. The editor cannot
             // produce this, so reaching here means the profile arrived another way.
             if let Some(reason) = crate::runtime::tooling::duplicate_operations_reason(&steps) {

@@ -84,18 +84,32 @@ impl EdgeTab {
     }
 }
 
-/// Job side selection.
+/// Which face of the PCB a job's first step cuts.
+///
+/// `Front` is the component side, `Back` the solder side — named for the **board**, not
+/// for the machine. "Top" and "bottom" meant both at once, and they part company the
+/// moment a step machines the back: the board is turned over, so the PCB's bottom is what
+/// faces up. The bed keeps its own words (`near`/`far`, `left`/`right`).
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    Top,
-    Bottom,
+pub enum BoardFace {
+    Front,
+    Back,
 }
 
-impl Side {
+impl BoardFace {
+    /// The schema's own word for it (`machining.yaml#/$defs/step/board_face`).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Top => "top",
-            Self::Bottom => "bottom",
+            Self::Front => "front",
+            Self::Back => "back",
+        }
+    }
+
+    /// How it is named to the operator.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Front => "Front",
+            Self::Back => "Back",
         }
     }
 }
