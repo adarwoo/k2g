@@ -20,6 +20,8 @@
 //! page traps its own errors (`ERROR_TRAP` in `crate::ui`) and this module drains them
 //! into the Logs screen after every draw.
 
+use std::collections::BTreeSet;
+
 use dioxus::prelude::*;
 
 use crate::gcode::scene;
@@ -30,10 +32,15 @@ use crate::runtime::AppCtx;
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
 const CANVAS_ID: &str = "k2g-machining-3d";
 
-/// The scene script. Four placeholders are substituted before it is evaluated:
+/// The scene script. Three placeholders are substituted before it is evaluated:
 /// `CANVAS_ID_PLACEHOLDER`, `TRACES_PLACEHOLDER` (the serialised
-/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list), `BOARD_PLACEHOLDER` (the
-/// serialised [`BoardSolid`](crate::gcode::scene::BoardSolid)) and `PALETTE_PLACEHOLDER`.
+/// [`ToolTrace`](crate::gcode::scene::ToolTrace) list) and `BOARD_PLACEHOLDER` (the
+/// serialised [`BoardSolid`](crate::gcode::scene::BoardSolid)).
+///
+/// The palette used to be substituted too, and the script picked a colour by the trace's
+/// position in the list. It no longer is: each trace carries its own `colour`, assigned
+/// in [`trace_step`](crate::gcode::scene::trace_step), so hiding a tool cannot recolour
+/// the ones after it.
 ///
 /// Substitution rather than `dioxus.send` from the Rust side because the payload is
 /// needed *before* the first frame, and a script that has its data inlined cannot race
@@ -51,7 +58,6 @@ const CANVAS_ID: &str = "k2g-machining-3d";
 /// headless Edge, so it can be checked without launching the app.
 const BOOTSTRAP_SCRIPT: &str = r#"
 (function () {
-  const PALETTE = PALETTE_PLACEHOLDER;
   const T = window.K2G_THREE;
   if (!T) { dioxus.send("three.js global K2G_THREE is missing — the head script did not run"); return; }
   const canvas = document.getElementById("CANVAS_ID_PLACEHOLDER");
@@ -153,8 +159,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // extraction merges consecutive moves of the same kind, so this is a handful of
     // objects per tool rather than one per move.
     function addTraces(traces) {
-      (traces || []).forEach(function (trace, index) {
-        const colour = PALETTE[index % PALETTE.length];
+      (traces || []).forEach(function (trace) {
         trace.moves.forEach(function (run) {
           const flat = [];
           run.points.forEach(function (p) { flat.push(p.x, p.y, p.z); });
@@ -162,18 +167,29 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 
           const geometry = new T.LineGeometry();
           geometry.setPositions(flat);
-          // Rapids read as scaffolding, cuts as the work — thin and dim against thick
-          // and saturated. The convention every backplot worth using shares.
+          // Both kinds carry the tool's colour, so the legend identifies every line on
+          // screen. What separates them is the dash: a rapid is the tool travelling, a
+          // solid run is the tool cutting. Colour alone used to do this job — rapids were
+          // grey — but on a drilling step the cuts are only the short vertical plunges and
+          // every transit between holes is a rapid, so the picture was almost entirely
+          // grey and told you nothing about which tool was where.
           const rapid = run.kind === "rapid";
           const material = new T.LineMaterial({
-            color: rapid ? 0x55606f : colour,
-            linewidth: rapid ? 1 : 2.5,
+            color: trace.colour,
+            linewidth: rapid ? 1.5 : 3.5,
+            dashed: rapid,
+            dashSize: 1.2,
+            gapSize: 1.2,
             transparent: rapid,
-            opacity: rapid ? 0.4 : 1.0,
+            opacity: rapid ? 0.6 : 1.0,
             worldUnits: false,
           });
           materials.push(material);
-          content.add(new T.Line2(geometry, material));
+          const line = new T.Line2(geometry, material);
+          // Dashes come out of the line's own distance attribute, and without this the
+          // material's `dashed` flag renders a solid line and reports nothing.
+          if (rapid) line.computeLineDistances();
+          content.add(line);
         });
       });
     }
@@ -294,6 +310,41 @@ struct ScenePayload {
     board: String,
     tool_count: usize,
     point_count: usize,
+    /// Every tool of the step, hidden ones included — the legend is what switches them
+    /// back on. Part of the payload so the memo that suppresses no-op redraws suppresses
+    /// no-op legend rebuilds with it.
+    legend: Vec<LegendRow>,
+}
+
+/// One tool in the legend beside the canvas.
+///
+/// Built from the same [`ToolTrace`](crate::gcode::scene::ToolTrace) list the renderer is
+/// handed, so the swatch cannot show a colour the lines do not use.
+#[derive(Clone, PartialEq)]
+struct LegendRow {
+    /// The tool's stock id — what the hidden set is keyed by, and what survives a step's
+    /// blocks being reordered when a position would not.
+    tool_id: String,
+    /// `#rrggbb`, for the swatch.
+    swatch: String,
+    /// `T1 · 0.8mm drill ⌀0.80`, or the raw id when the tool is no longer in stock.
+    label: String,
+    hidden: bool,
+}
+
+/// Names a trace's tool the way the Machining summary does, so the two read as one job.
+///
+/// Falls back to the raw id rather than to "unknown": a tool removed from stock after a
+/// plan was made still has lines on screen, and a legend that cannot name them must still
+/// let them be switched off.
+fn legend_label(tools: &[crate::data::model::Tool], trace: &scene::ToolTrace) -> String {
+    let slot = trace.slot.map(|n| format!("T{n}")).unwrap_or_else(|| "—".to_string());
+    let name = tools
+        .iter()
+        .find(|tool| tool.id == trace.tool_id)
+        .map(|tool| tool.display_name())
+        .unwrap_or_else(|| trace.tool_id.clone());
+    format!("{slot} · {name} ⌀{:.2}", trace.diameter_mm)
 }
 
 impl ScenePayload {
@@ -304,15 +355,38 @@ impl ScenePayload {
     /// feature stays small.
     /// One step, not the whole plan: a step is a physical setup, and compositing two
     /// setups' toolpaths into one scene would draw motions that never coexist.
-    fn build(ctx: &AppCtx, step: usize) -> Self {
+    ///
+    /// `hidden` names tools to leave out. Filtering **here** rather than in the script is
+    /// what keeps the JavaScript free of a visibility API: the redraw path already
+    /// rebuilds the scene wholesale, and `frameScene`'s hysteresis already exists so that
+    /// dropping geometry does not snap the camera back. The colour survives the filter
+    /// because it was fixed to the trace when it was built, not by counting position in
+    /// this list.
+    fn build(ctx: &AppCtx, step: usize, hidden: &BTreeSet<String>) -> Self {
         let plan = plan_machining(ctx);
-        let traces = plan.steps.get(step).map(scene::trace_step).unwrap_or_default();
+        let all = plan.steps.get(step).map(scene::trace_step).unwrap_or_default();
+
+        // The legend lists every tool of the step, hidden ones included — it is the only
+        // way back to one that has been switched off.
+        let legend: Vec<LegendRow> = all
+            .iter()
+            .map(|trace| LegendRow {
+                swatch: format!("#{:06x}", trace.colour),
+                label: legend_label(&ctx.tools, trace),
+                hidden: hidden.contains(&trace.tool_id),
+                tool_id: trace.tool_id.clone(),
+            })
+            .collect();
+
+        let shown: Vec<&scene::ToolTrace> =
+            all.iter().filter(|trace| !hidden.contains(&trace.tool_id)).collect();
         let board = machining_plan::board_solid(ctx, step);
         Self {
-            point_count: traces.iter().map(|t| t.point_count()).sum(),
-            tool_count: traces.len(),
-            traces: serde_json::to_string(&traces).unwrap_or_else(|_| "[]".to_string()),
+            point_count: shown.iter().map(|t| t.point_count()).sum(),
+            tool_count: shown.len(),
+            traces: serde_json::to_string(&shown).unwrap_or_else(|_| "[]".to_string()),
             board: serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string()),
+            legend,
         }
     }
 }
@@ -328,11 +402,20 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     // fixture, stock and board come off `state`; the machining profile — the operation
     // toggles, the per-operation settings — is a schema-driven AppData edit that only
     // announces itself through the store revision.
+    // Tools switched off in the legend, by stock id.
+    //
+    // Keyed by id and not by position: a step's blocks are ordered by the planner, and a
+    // profile edit can reorder them. An index would then carry the hidden flag onto
+    // whichever tool inherited the position.
+    let mut hidden = use_signal(BTreeSet::<String>::new);
+
     let payload = use_memo(move || {
         let _ = crate::ui::bindings::data_revision();
         let snapshot = state.read().clone();
         let step = snapshot.selected_step;
-        ScenePayload::build(&snapshot, step)
+        // Read inside the memo so ticking a box rebuilds the payload; read outside, the
+        // toggle would restyle the legend and never reach the canvas.
+        ScenePayload::build(&snapshot, step, &hidden.read())
     });
 
     // `use_effect` runs after the node exists, which is the whole point — the script
@@ -345,7 +428,7 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     use_effect(move || {
         let payload = payload();
         spawn(async move {
-            let ScenePayload { traces, board, tool_count, point_count } = payload;
+            let ScenePayload { traces, board, tool_count, point_count, .. } = payload;
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
             // prevent. Both ends are logged so a hang in between is distinguishable
@@ -353,12 +436,9 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
             log::info!(
                 "3D machining view: drawing {tool_count} tool(s), {point_count} point(s)"
             );
-            let palette =
-                serde_json::to_string(&scene::TOOL_PALETTE).unwrap_or_else(|_| "[]".to_string());
             let script = BOOTSTRAP_SCRIPT
                 .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
                 .replace("TRACES_PLACEHOLDER", &traces)
-                .replace("PALETTE_PLACEHOLDER", &palette)
                 .replace("BOARD_PLACEHOLDER", &board);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
@@ -371,13 +451,55 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
         });
     });
 
+    let legend = payload().legend;
+
     rsx! {
-        div { class: "machining-3d",
-            // Sits behind the canvas. If the canvas never paints, this is what shows —
-            // so an empty box always says which half broke instead of looking like a
-            // styling mistake.
-            div { class: "machining-3d-placeholder", "3D toolpath — starting renderer…" }
-            canvas { id: CANVAS_ID, class: "machining-3d-canvas" }
+        div { class: "machining-3d-layout",
+            // The canvas keeps `.machining-3d` as its **direct parent**: the script finds
+            // the "starting renderer…" placeholder through `canvas.parentElement`, so the
+            // legend goes beside this div rather than inside it.
+            div { class: "machining-3d",
+                // Sits behind the canvas. If the canvas never paints, this is what shows —
+                // so an empty box always says which half broke instead of looking like a
+                // styling mistake.
+                div { class: "machining-3d-placeholder", "3D toolpath — starting renderer…" }
+                canvas { id: CANVAS_ID, class: "machining-3d-canvas" }
+            }
+
+            if !legend.is_empty() {
+                aside { class: "machining-3d-legend",
+                    div { class: "machining-3d-legend-title", "Tools" }
+                    for row in legend.iter() {
+                        label {
+                            key: "{row.tool_id}",
+                            class: if row.hidden { "machining-3d-legend-row is-hidden" } else { "machining-3d-legend-row" },
+                            input {
+                                r#type: "checkbox",
+                                checked: !row.hidden,
+                                oninput: {
+                                    let tool_id = row.tool_id.clone();
+                                    move |evt: FormEvent| {
+                                        let shown = evt.checked();
+                                        hidden
+                                            .with_mut(|off| {
+                                                if shown {
+                                                    off.remove(&tool_id);
+                                                } else {
+                                                    off.insert(tool_id.clone());
+                                                }
+                                            });
+                                    }
+                                },
+                            }
+                            span {
+                                class: "machining-3d-legend-swatch",
+                                style: "background: {row.swatch}",
+                            }
+                            span { class: "machining-3d-legend-label", "{row.label}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -395,5 +517,75 @@ async fn report_page_errors() {
             }
         }
         Err(err) => log::debug!("could not drain WebView errors: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod legend_tests {
+    use super::*;
+    use crate::data::model::Tool;
+
+    fn trace(tool_id: &str, slot: Option<u8>) -> scene::ToolTrace {
+        scene::ToolTrace {
+            tool_id: tool_id.to_string(),
+            colour: 0x4ea3ff,
+            slot,
+            diameter_mm: 0.8,
+            change_at: None,
+            moves: vec![],
+        }
+    }
+
+    /// A stock tool. Only `id` and `name` matter here — the rest is filler, because
+    /// `legend_label` reads nothing else.
+    fn stock(id: &str, name: &str) -> Tool {
+        Tool {
+            id: id.to_string(),
+            composite_name: name.to_string(),
+            name: name.to_string(),
+            kind: "Drill bit".to_string(),
+            diameter: units::Length::from_mm(0.8),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(118.0),
+            catalog_point_angle: None,
+            flute_length: None,
+            feed_rate: None,
+            catalog_feed_rate: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: crate::data::model::ToolStatus::InStock,
+            preference: crate::data::model::ToolPreference::Neutral,
+            source_catalog: String::new(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    /// The legend names a tool the way the Machining summary does, so the two read as
+    /// one job rather than as two lists that happen to be about the same step.
+    #[test]
+    fn a_tool_in_stock_is_named_with_its_slot_and_diameter() {
+        let tools = vec![stock("t1", "0.8mm carbide drill")];
+        assert_eq!(
+            legend_label(&tools, &trace("t1", Some(3))),
+            "T3 · 0.8mm carbide drill ⌀0.80"
+        );
+    }
+
+    /// A tool that has left stock since the plan was made still has lines on screen. The
+    /// row must survive so they can be switched off — a legend that silently omitted it
+    /// would leave paths nobody could account for or hide.
+    #[test]
+    fn a_tool_no_longer_in_stock_falls_back_to_its_id() {
+        let label = legend_label(&[], &trace("019f-deleted", Some(1)));
+        assert_eq!(label, "T1 · 019f-deleted ⌀0.80");
+    }
+
+    /// A manual-change machine assigns no rack slot; the row still needs a left-hand
+    /// column so the names line up down the panel.
+    #[test]
+    fn a_tool_with_no_rack_slot_still_lines_up() {
+        let tools = vec![stock("t1", "1mm router")];
+        assert_eq!(legend_label(&tools, &trace("t1", None)), "— · 1mm router ⌀0.80");
     }
 }

@@ -62,10 +62,11 @@ pub const TOOL_PALETTE: [u32; 8] = [
 
 /// The colour for the `index`-th tool block.
 ///
-/// The renderer indexes [`TOOL_PALETTE`] itself (it is handed the whole list), so this
-/// exists for the Rust-side consumers that will want the same answer — a legend beside
-/// the canvas, and colour chips in the Tooling tab's rack.
-#[allow(dead_code)]
+/// Assigned **here**, once, and carried on the trace ([`ToolTrace::colour`]) — the
+/// renderer no longer picks it. That is what lets a trace be filtered out of the payload
+/// without recolouring the ones after it: an index into the palette on the JavaScript
+/// side would shift the moment anything were hidden, and the legend beside the canvas
+/// would start naming the wrong colours.
 pub fn tool_colour(index: usize) -> u32 {
     TOOL_PALETTE[index % TOOL_PALETTE.len()]
 }
@@ -116,6 +117,9 @@ pub struct Polyline {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ToolTrace {
     pub tool_id: String,
+    /// This tool's colour, from [`TOOL_PALETTE`] by block order — the same value the
+    /// legend shows, so the two cannot disagree.
+    pub colour: u32,
     /// Rack slot, when the assignment placed the tool on one.
     pub slot: Option<u8>,
     pub diameter_mm: f64,
@@ -189,11 +193,15 @@ impl BoardSolid {
 /// machines, in different fixtures, with the board turned over between them. Drawing
 /// their toolpaths in one scene would compose motions that never coexist.
 pub fn trace_step(step: &StepPlan) -> Vec<ToolTrace> {
-    step.blocks.iter().map(trace_block).collect()
+    step.blocks.iter().enumerate().map(|(index, block)| trace_block(block, index)).collect()
 }
 
 /// Walks one block's ops into runs of motion.
-fn trace_block(block: &ToolBlock) -> ToolTrace {
+///
+/// `index` is the block's place in the **step**, which is what picks the colour. Taken as
+/// an argument rather than derived later so the colour is fixed to the tool at the moment
+/// the trace is built, before anything downstream can filter the list.
+fn trace_block(block: &ToolBlock, index: usize) -> ToolTrace {
     let mut moves: Vec<Polyline> = Vec::new();
     // Where the tool is now. `None` until the first op — there is no line to draw from
     // an unknown position.
@@ -216,6 +224,7 @@ fn trace_block(block: &ToolBlock) -> ToolTrace {
 
     ToolTrace {
         tool_id: block.tool_id.clone(),
+        colour: tool_colour(index),
         slot: block.slot,
         diameter_mm: block.diameter.as_mm(),
         change_at: moves.first().and_then(|run| run.points.first().copied()),
@@ -424,6 +433,65 @@ mod tests {
 
     fn step_of(blocks: Vec<ToolBlock>) -> StepPlan {
         StepPlan { index: 0, name: "s".into(), blocks, notes: vec![] }
+    }
+
+    /// A named block, so a step can hold several distinguishable tools.
+    fn named_block(tool_id: &str, diameter: f64) -> ToolBlock {
+        ToolBlock {
+            tool_id: tool_id.into(),
+            ..block(diameter, vec![op(OpKind::Drill, pt(5.0, 5.0), pt(5.0, 5.0))])
+        }
+    }
+
+    /// Tools take palette colours in block order, and the palette wraps rather than
+    /// running out — a step with nine tools must still colour the ninth.
+    #[test]
+    fn tools_are_coloured_in_block_order_and_the_palette_wraps() {
+        let blocks: Vec<ToolBlock> =
+            (0..9).map(|n| named_block(&format!("t{n}"), 1.0)).collect();
+        let traces = trace_step(&step_of(blocks));
+
+        for (index, trace) in traces.iter().enumerate() {
+            assert_eq!(trace.colour, TOOL_PALETTE[index % TOOL_PALETTE.len()], "trace {index}");
+        }
+        assert_eq!(traces[8].colour, traces[0].colour, "the ninth tool reuses the first colour");
+    }
+
+    /// **The reason the colour lives on the trace at all.**
+    ///
+    /// The 3D view lets a tool be switched off, which drops its trace from the payload.
+    /// While the renderer chose colours by position in that list, hiding one tool
+    /// silently recoloured every tool after it — and the legend beside the canvas, which
+    /// names the colours, would have been describing the previous arrangement. Nothing
+    /// about that is visible in a screenshot unless you already know what colour a tool
+    /// was before you hid another.
+    #[test]
+    fn hiding_a_tool_does_not_recolour_the_others() {
+        let traces = trace_step(&step_of(vec![
+            named_block("drill", 0.8),
+            named_block("router", 1.0),
+            named_block("vbit", 0.2),
+        ]));
+        let before: Vec<u32> = traces.iter().map(|t| t.colour).collect();
+
+        // What the payload builder does when the first tool is unticked.
+        let shown: Vec<&ToolTrace> = traces.iter().filter(|t| t.tool_id != "drill").collect();
+
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0].colour, before[1], "the router keeps the colour it had");
+        assert_eq!(shown[1].colour, before[2], "and so does the v-bit");
+    }
+
+    /// The colour is a property of the trace, so it survives being serialised to the
+    /// renderer — which is the only path it travels.
+    #[test]
+    fn the_colour_reaches_the_renderer_payload() {
+        let traces = trace_step(&step_of(vec![named_block("drill", 0.8)]));
+        let json = serde_json::to_string(&traces).expect("traces serialise");
+        assert!(
+            json.contains(&format!("\"colour\":{}", TOOL_PALETTE[0])),
+            "the first tool's colour must be in the payload:\n{json}"
+        );
     }
 
     /// A drill op is a point in the plan — the cycle is inside the primitive — so the

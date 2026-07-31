@@ -2929,6 +2929,101 @@ th {
  * display. So the element must have a definite height here, which is why this is not
  * simply `height: 100%`.
  */
+/* Canvas and tool legend side by side, the way the Board view carries its drill legend
+   (`.board-preview-layout`). The canvas keeps its own box so the script can still reach
+   the placeholder through `canvas.parentElement`. */
+.machining-3d-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 260px;
+    gap: 12px;
+    width: 100%;
+    align-items: stretch;
+    /* The parent is a flex column and the canvas has no intrinsic height, so without
+       this the whole row would collapse. */
+    flex: 0 0 auto;
+    margin-bottom: 12px;
+}
+
+.machining-3d-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    /* Matches the canvas so a long tool list scrolls rather than stretching the row. */
+    height: clamp(280px, 52vh, 720px);
+    overflow: auto;
+    padding: 10px;
+    border: 1px solid var(--border);
+    background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
+}
+
+.machining-3d-legend-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+    color: var(--text-subtle);
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+.machining-3d-legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    min-width: 0;
+    /* Shift-dragging a label selects text across the list, which reads as the panel
+       misbehaving rather than as a selection. */
+    user-select: none;
+}
+
+.machining-3d-legend-row:hover {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* Switched off: the row dims, but the swatch keeps its colour at full strength — it is
+   the key to the lines, and a faded key is harder to match than a bright one. */
+.machining-3d-legend-row.is-hidden .machining-3d-legend-label {
+    opacity: 0.45;
+    text-decoration: line-through;
+}
+
+.machining-3d-legend-row input {
+    width: 13px;
+    height: 13px;
+    margin: 0;
+    flex: 0 0 auto;
+}
+
+.machining-3d-legend-swatch {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    border-radius: 3px;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+}
+
+.machining-3d-legend-label {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+    .machining-3d-layout {
+        grid-template-columns: 1fr;
+    }
+
+    /* Stacked, the legend is a short scrolling strip rather than a full-height column. */
+    .machining-3d-legend {
+        height: auto;
+        max-height: 180px;
+    }
+}
+
 .machining-3d {
     position: relative;
     width: 100%;
@@ -2936,7 +3031,8 @@ th {
     /* The panel is a flex column, so without this the box is free to collapse to its
        content — and a canvas has no intrinsic height. */
     flex: 0 0 auto;
-    margin-bottom: 12px;
+    /* The bottom margin moved to `.machining-3d-layout`: kept here it would stack with
+       the wrapper's and open a 24px gap under the row. */
     border: 1px solid var(--border);
     border-radius: 0;
     background: color-mix(in srgb, var(--bg-elev) 82%, transparent);
