@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use std::collections::BTreeSet;
 use std::fs;
 use uuid::Uuid;
 
@@ -9,7 +10,8 @@ use crate::data::Profile;
 use crate::ui::bindings::{
     add_step, clone_named, create_named, data_revision, export_yaml, import_yaml,
     machining_operations, move_step, refresh_legacy_machining, remove_profile_result, remove_step,
-    use_conflicting_operations, use_operations, use_profiles, use_step_count, BindingPicker,
+    use_conflicting_operations, use_field, use_operations, use_profiles, use_step_count,
+    BindingPicker,
     OperationsEditor, SchemaField, SchemaForm,
 };
 
@@ -225,6 +227,18 @@ fn MachiningDetail(id: Uuid) -> Element {
     let step_count = use_step_count(id);
     let conflicts = use_conflicting_operations(id);
 
+    // Which steps are folded shut, by index.
+    //
+    // Held here rather than per card because collapsing is not always the card's own
+    // doing: adding a step folds the one before it, and removing or reordering has to
+    // carry the state with the steps that moved. A step has no identity of its own in
+    // the document — it is an array entry — so the index is the only handle there is,
+    // and every structural edit remaps this set to match (see [`StepCard`]).
+    //
+    // Deliberately not persisted: it is a view of the moment, and a profile reopened
+    // later should show its steps, not the shape of an editing session from last week.
+    let mut collapsed = use_signal(BTreeSet::<usize>::new);
+
     rsx! {
         div { class: "panel stock-detail-panel cnc-profile-details-panel profile-editor-shell",
             div { class: "profile-editor-scroll",
@@ -252,13 +266,25 @@ fn MachiningDetail(id: Uuid) -> Element {
                     }
 
                     for index in 0..step_count {
-                        StepCard { key: "{index}", id, index, step_count }
+                        StepCard { key: "{index}", id, index, step_count, collapsed }
                     }
 
                     button {
                         r#type: "button",
                         class: "add-step-btn",
-                        onclick: move |_| add_step(id),
+                        onclick: move |_| {
+                            // Fold the step that was last, so the new card lands where the
+                            // operator is looking. A profile is built by adding a step and
+                            // filling it in, and by the fourth one the form to fill in was
+                            // below a screenful of finished work.
+                            //
+                            // Only the immediately preceding step: the ones above it are
+                            // left as the operator chose to leave them.
+                            if step_count > 0 {
+                                collapsed.write().insert(step_count - 1);
+                            }
+                            add_step(id);
+                        },
                         "+ Add step"
                     }
                 }
@@ -267,15 +293,87 @@ fn MachiningDetail(id: Uuid) -> Element {
     }
 }
 
+/// Where each folded index lands when the step at `from` is spliced in at `to`.
+///
+/// Folded state is keyed by index because a step has no identity of its own — it is an
+/// entry in an array. So every structural edit has to remap it, or the flags stay behind
+/// on the *positions* and the wrong cards come back folded. `move_step` is a splice
+/// (remove then insert), not a swap, so this mirrors that exactly rather than assuming
+/// the adjacent case the buttons happen to use.
+fn remap_indexes(folded: &BTreeSet<usize>, from: usize, to: usize) -> BTreeSet<usize> {
+    if from == to {
+        return folded.clone();
+    }
+    folded
+        .iter()
+        .map(|&at| {
+            if at == from {
+                to
+            } else if from < at && at <= to {
+                at - 1
+            } else if to <= at && at < from {
+                at + 1
+            } else {
+                at
+            }
+        })
+        .collect()
+}
+
+/// The folded set with `removed` dropped and the gap behind it closed.
+///
+/// Without the shift, deleting step 2 would leave step 3's flag on what is now step 3's
+/// successor — a card folding itself for no reason the operator can see.
+fn drop_index(folded: &BTreeSet<usize>, removed: usize) -> BTreeSet<usize> {
+    folded
+        .iter()
+        .filter(|&&at| at != removed)
+        .map(|&at| if at > removed { at - 1 } else { at })
+        .collect()
+}
+
+/// [`remap_indexes`], applied to the signal the cards share.
+fn remap_folded(mut collapsed: Signal<BTreeSet<usize>>, from: usize, to: usize) {
+    collapsed.with_mut(|folded| *folded = remap_indexes(folded, from, to));
+}
+
+/// [`drop_index`], applied to the signal the cards share.
+fn drop_folded(mut collapsed: Signal<BTreeSet<usize>>, removed: usize) {
+    collapsed.with_mut(|folded| *folded = drop_index(folded, removed));
+}
+
 /// One machining step card: identity + reference bindings + operation set, then
 /// schema-generated configuration for routing and each enabled operation, plus
 /// reorder/remove controls.
 #[component]
-fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
+fn StepCard(
+    id: Uuid,
+    index: usize,
+    step_count: usize,
+    collapsed: Signal<BTreeSet<usize>>,
+) -> Element {
     let enabled_ops = use_operations(id, index);
     // One component with conditional chrome rather than two: duplicating the field list
     // for the single-step case is how the two would drift apart.
     let multi = step_count > 1;
+
+    // Folding is a statement about a step among steps, like the heading and the reorder
+    // controls. A lone step has no collapse control, so it must never render folded —
+    // there would be nothing to click to get it back.
+    let is_folded = multi && collapsed.read().contains(&index);
+
+    // Read unconditionally, used only when folded. `use_field` allocates no hook slot
+    // today — it subscribes by reading a global signal — so a conditional call happens to
+    // be safe, but reading it as one invites the reader to conclude that hooks may be
+    // called conditionally here, which is exactly the belief that breaks the next one.
+    //
+    // Shown beside the number only when folded: expanded, the name field is the first
+    // thing under the header and repeating it is noise; folded, "Step 2" over a closed
+    // card says nothing about which setup it is.
+    let step_name = use_field(id, &format!("/steps/{index}/name"))
+        .map(|field| field.display)
+        .filter(|name| !name.trim().is_empty());
+    let folded_name = is_folded.then_some(step_name).flatten();
 
     rsx! {
         div { class: if multi { "schema-section step-card" } else { "schema-section" },
@@ -284,58 +382,149 @@ fn StepCard(id: Uuid, index: usize, step_count: usize) -> Element {
             // already disabled), so they are absent rather than greyed.
             if multi {
                 div { class: "step-card-header",
-                    h4 { class: "section-title", "Step {index + 1}" }
+                    div { class: "step-card-title",
+                        button {
+                            r#type: "button",
+                            class: "icon-btn",
+                            title: if is_folded { "Expand step" } else { "Collapse step" },
+                            "aria-expanded": if is_folded { "false" } else { "true" },
+                            onclick: move |_| {
+                                collapsed
+                                    .with_mut(|folded| {
+                                        if !folded.remove(&index) {
+                                            folded.insert(index);
+                                        }
+                                    });
+                            },
+                            if is_folded { "▸" } else { "▾" }
+                        }
+                        h4 { class: "section-title", "Step {index + 1}" }
+                        if let Some(name) = folded_name {
+                            span { class: "step-card-folded-name", "{name}" }
+                        }
+                    }
                     div { class: "step-card-actions",
                         button {
                             r#type: "button", class: "icon-btn", disabled: index == 0,
                             title: "Move step up",
-                            onclick: move |_| move_step(id, index, index.saturating_sub(1)),
+                            onclick: move |_| {
+                                remap_folded(collapsed, index, index.saturating_sub(1));
+                                move_step(id, index, index.saturating_sub(1));
+                            },
                             "↑"
                         }
                         button {
                             r#type: "button", class: "icon-btn", disabled: index + 1 >= step_count,
                             title: "Move step down",
-                            onclick: move |_| move_step(id, index, index + 1),
+                            onclick: move |_| {
+                                remap_folded(collapsed, index, index + 1);
+                                move_step(id, index, index + 1);
+                            },
                             "↓"
                         }
                         button {
                             r#type: "button", class: "icon-btn icon-btn-danger", disabled: step_count <= 1,
                             title: "Remove step",
-                            onclick: move |_| remove_step(id, index),
+                            onclick: move |_| {
+                                drop_folded(collapsed, index);
+                                remove_step(id, index);
+                            },
                             "✕"
                         }
                     }
                 }
             }
 
-            // A step's name distinguishes it from its siblings; with no siblings there is
-            // nothing to distinguish. Still stored, so adding a second step later starts
-            // from whatever this one was called.
-            if multi {
-                SchemaField { id, ptr: format!("/steps/{index}/name") }
-            }
+            if !is_folded {
+                // A step's name distinguishes it from its siblings; with no siblings there
+                // is nothing to distinguish. Still stored, so adding a second step later
+                // starts from whatever this one was called.
+                if multi {
+                    SchemaField { id, ptr: format!("/steps/{index}/name") }
+                }
 
-            BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
-            BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
-            BindingPicker { id, step: index, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
+                BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
+                BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
+                BindingPicker { id, step: index, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
 
-            OperationsEditor { id, step: index }
+                OperationsEditor { id, step: index }
 
-            SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
+                SchemaField { id, ptr: format!("/steps/{index}/side_to_machine") }
 
-            // Configuration sections for the currently enabled operations.
-            for op in machining_operations().iter() {
-                if enabled_ops.iter().any(|enabled| enabled == op.key) {
-                    div { class: "schema-section",
-                        h4 { class: "section-title", "{op.label}" }
-                        if op.key == "drill_locating_pins" {
-                            p { class: "field-hint", "No additional options." }
-                        } else {
-                            SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                // Configuration sections for the currently enabled operations.
+                for op in machining_operations().iter() {
+                    if enabled_ops.iter().any(|enabled| enabled == op.key) {
+                        div { class: "schema-section",
+                            h4 { class: "section-title", "{op.label}" }
+                            if op.key == "drill_locating_pins" {
+                                p { class: "field-hint", "No additional options." }
+                            } else {
+                                SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                            }
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    /// Drive the remaps through a plain set, the way the signal wrappers do.
+    ///
+    /// The signal versions are one-line adaptors over these rules; testing the rules is
+    /// what matters, because getting them wrong is invisible — the wrong card folds, and
+    /// the operator concludes the button is flaky rather than that the state is off by one.
+    fn moved(folded: &[usize], from: usize, to: usize) -> Vec<usize> {
+        let mut set: BTreeSet<usize> = folded.iter().copied().collect();
+        set = remap_indexes(&set, from, to);
+        set.into_iter().collect()
+    }
+
+    fn removed(folded: &[usize], at: usize) -> Vec<usize> {
+        let set: BTreeSet<usize> = folded.iter().copied().collect();
+        drop_index(&set, at).into_iter().collect()
+    }
+
+    /// A folded step keeps its fold when it is the one that moved.
+    #[test]
+    fn the_moved_step_carries_its_fold() {
+        assert_eq!(moved(&[0], 0, 1), [1], "moved down");
+        assert_eq!(moved(&[2], 2, 1), [1], "moved up");
+    }
+
+    /// The step displaced by the move shifts the other way, because `move_step` is a
+    /// splice: removing from `from` and inserting at `to` slides everything between.
+    #[test]
+    fn the_displaced_steps_shift_the_other_way() {
+        // 0 folded, step 0 moves down past it -> the old 1 becomes 0.
+        assert_eq!(moved(&[1], 0, 1), [0]);
+        // 0 folded, step 2 moves up to the top -> everything below slides down one.
+        assert_eq!(moved(&[0, 1], 2, 0), [1, 2]);
+    }
+
+    /// Steps outside the moved span are untouched.
+    #[test]
+    fn steps_beyond_the_move_are_left_alone() {
+        assert_eq!(moved(&[4], 0, 1), [4]);
+        assert_eq!(moved(&[0], 2, 3), [0]);
+    }
+
+    /// A no-op move must not disturb anything.
+    #[test]
+    fn moving_a_step_onto_itself_changes_nothing() {
+        assert_eq!(moved(&[0, 2], 1, 1), [0, 2]);
+    }
+
+    /// Removing a step drops its fold and closes the gap, so the cards below do not
+    /// inherit a fold from the step that used to be above them.
+    #[test]
+    fn removing_a_step_drops_its_fold_and_closes_the_gap() {
+        assert_eq!(removed(&[0, 2], 1), [0, 1], "2 slides down to 1");
+        assert_eq!(removed(&[1], 1), [] as [usize; 0], "its own fold goes with it");
+        assert_eq!(removed(&[0], 2), [0], "a removal below changes nothing above");
     }
 }

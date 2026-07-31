@@ -2151,6 +2151,41 @@ p {
     gap: 4px;
 }
 
+/* The fold toggle, the step number and (when folded) its name, as one group — so the
+   header's `space-between` still has exactly two things to push apart. */
+.step-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    /* Without this the name below refuses to shrink and pushes the actions off the
+       card: a flex item's default `min-width: auto` is its content. */
+    min-width: 0;
+}
+
+/* `.schema-section > .section-title` no longer reaches the step heading — it is a child
+   of `.step-card-title` now, not of the section. Same treatment, less the bottom margin,
+   which in a centred flex row only lifts the text off the baseline. */
+.step-card-title > .section-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.75;
+    white-space: nowrap;
+}
+
+/* The operator's own name for the step, shown only while it is folded. Lighter than the
+   heading because "Step 2" is the label and the name is the detail, and truncated rather
+   than wrapped so a long name cannot make a closed card taller than an open one's header. */
+.step-card-folded-name {
+    font-size: 12px;
+    opacity: 0.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .icon-btn {
     border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
     background: transparent;
