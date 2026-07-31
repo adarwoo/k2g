@@ -545,7 +545,10 @@ mod tests {
             "t1".to_string(),
             ToolFeed {
                 name: "1mm drill".to_string(),
-                feed: Some(FeedRate::from_mm_per_min(600.0)),
+                feeds: crate::gcode::feeds::RatedFeeds::new(
+                    Some(FeedRate::from_mm_per_min(600.0)),
+                    None,
+                ),
                 speed: Some(RotationalSpeed::from_rpm(12_000.0)),
             },
         );

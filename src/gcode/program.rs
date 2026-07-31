@@ -19,7 +19,7 @@ use units::{FeedRate, RotationalSpeed};
 
 use crate::gcode::arcfit;
 use crate::gcode::coder::{Coder, ProgramPrimitives};
-use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, MachineLimits, Motion};
+use crate::gcode::feeds::{self, FeedsError, FeedsSpeeds, MachineLimits, RatedFeeds};
 use crate::gcode::plan::{OpKind, Point, StepPlan};
 use crate::gcode::routing::{self, RouteMove};
 use crate::gcode::step_data::StepValue;
@@ -202,11 +202,14 @@ pub fn render_step_program(
 }
 
 /// A stock tool's identity + rated running values, looked up by tool id when a block
-/// is rendered. The rated pair is required — a `None` becomes a [`BodyError::Feeds`].
+/// is rendered. A rated speed and at least one feed are required — otherwise it becomes a
+/// [`BodyError::Feeds`].
 #[derive(Clone)]
 pub struct ToolFeed {
     pub name: String,
-    pub feed: Option<FeedRate>,
+    /// The tool's two rated feeds: lateral and plunge. Two, not one, because a drill
+    /// cycle is entirely plunge and a routing pass is mostly not.
+    pub feeds: RatedFeeds,
     pub speed: Option<RotationalSpeed>,
 }
 
@@ -252,20 +255,15 @@ pub fn render_step_body(
     }
 
     for block in &step.blocks {
-        let (name, feed, speed) = match tool_feeds.get(&block.tool_id) {
-            Some(tf) => (tf.name.clone(), tf.feed, tf.speed),
-            None => (block.tool_id.clone(), None, None),
+        let (name, tool_feeds_rated, speed) = match tool_feeds.get(&block.tool_id) {
+            Some(tf) => (tf.name.clone(), tf.feeds, tf.speed),
+            None => (block.tool_id.clone(), RatedFeeds::default(), None),
         };
-        // The block commands its spindle speed once, so the solve has to account for every
-        // move it will make: a block that drills is bound by Z alone, while anything that
-        // routes feeds laterally too. `any` rather than `all` because the binding
-        // constraint is the most restrictive one present.
-        let motion = if block.ops.iter().any(|op| !matches!(op.kind, OpKind::Drill)) {
-            Motion::Routing
-        } else {
-            Motion::Drilling
-        };
-        let fs = feeds::resolve(feed, speed, render.limits, motion)
+        // Both feeds are resolved once for the block, because the block commands its
+        // spindle speed once and both are defined against it. Which of the two a given
+        // move emits is the move's business, not the block's — there is no longer a
+        // per-block "is this drilling or routing?" question to get wrong.
+        let fs = feeds::resolve(tool_feeds_rated, speed, render.limits)
             .map_err(|e| BodyError::Feeds { tool: name.clone(), message: feeds_error_text(e) })?;
         let slot = block.slot.unwrap_or(0) as i64;
 
@@ -314,7 +312,7 @@ pub fn render_step_body(
                     scope.push("y", op.entry.y);
                     scope.push("z_bottom", op.z.z_bottom);
                     scope.push("z_retract", op.z.z_retract);
-                    scope.push("z_feedrate", fs.feed);
+                    scope.push("z_feedrate", fs.z);
                     scope.push("index", drill_index as i64);
                     scope.push("count", drill_count as i64);
                     drill_index += 1;
@@ -485,8 +483,8 @@ fn degrade_moves(moves: Vec<RouteMove>, from: Point, render: &StepRender) -> Vec
 ///
 /// **Each feed move carries its own `F`.** A `G1` with no feed word runs at whatever is
 /// modal — after a drill block that is the *drill's* plunge feed, which is not a feed a
-/// router should see. `Plunge` is derated by [`routing::PLUNGE_FEED_FRACTION`], since a
-/// tool's one rated feed is its lateral feed.
+/// router should see. A `Plunge` carries the tool's rated **z_feed** and a `Cut` its rated
+/// **table_feed**: they are different moves and the catalogue rates them apart.
 fn render_route_move(
     coder: &Coder,
     render: &StepRender,
@@ -519,13 +517,11 @@ fn render_route_move(
             s.push("z", z);
             render_one(coder, "rapid_move", &render.move_rapid_tpl, &mut s)
         }
-        RouteMove::Plunge { x, y, z } => {
-            let plunge = FeedRate::from_mm_per_min(
-                fs.feed.as_mm_per_min() * routing::PLUNGE_FEED_FRACTION,
-            );
-            linear(coder, render, (x, y, z), plunge, fs)
-        }
-        RouteMove::Cut { x, y, z } => linear(coder, render, (x, y, z), fs.feed, fs),
+        // The tool's own rated plunge feed, not a fraction of its lateral one. The
+        // fraction survives only as the fallback inside `feeds::resolve`, for a catalogue
+        // that states no plunge rating at all.
+        RouteMove::Plunge { x, y, z } => linear(coder, render, (x, y, z), fs.z, fs),
+        RouteMove::Cut { x, y, z } => linear(coder, render, (x, y, z), fs.table, fs),
         RouteMove::Arc { x, y, i, j, ccw } => {
             let mut s = Scope::new();
             // The direction, not the word for it: which G-code names a clockwise arc is
@@ -535,7 +531,7 @@ fn render_route_move(
             s.push("y", y);
             s.push("i", i);
             s.push("j", j);
-            s.push("xy_feedrate", fs.feed);
+            s.push("xy_feedrate", fs.table);
             render_one(coder, "cut_arc", &render.cut_arc_tpl, &mut s)
         }
     }
@@ -801,7 +797,7 @@ mod tests {
             "t1".to_string(),
             ToolFeed {
                 name: "1.0mm drill".to_string(),
-                feed: feed.map(FeedRate::from_mm_per_min),
+                feeds: RatedFeeds::new(feed.map(FeedRate::from_mm_per_min), None),
                 speed: speed.map(RotationalSpeed::from_rpm),
             },
         );
@@ -893,6 +889,104 @@ mod tests {
             .unwrap_or_else(|| panic!("the prompt is emitted:\n{body}"));
         let first_change = body.find("M06").expect("the step still changes tools");
         assert!(prompt < first_change, "asked before anything is loaded:\n{body}");
+    }
+
+    /// **A tool's two rated feeds reach the two kinds of move they belong to.**
+    ///
+    /// `table_feed` is the lateral cutting rate and `z_feed` the plunge rate; a catalogue
+    /// states both because they are different moves. k2g used to carry one — the lateral
+    /// one — and derive the plunge as a fixed third of it, which threw away a number the
+    /// catalogue had already given and got it wrong whenever the two were not in that
+    /// ratio.
+    #[test]
+    fn a_cut_takes_the_lateral_feed_and_a_plunge_takes_the_rated_plunge_feed() {
+        let mut tf = BTreeMap::new();
+        tf.insert(
+            "r1".to_string(),
+            ToolFeed {
+                name: "1mm router".to_string(),
+                // Rated apart, and NOT in the 1:3 ratio the old fallback assumed — so a
+                // derived plunge would give 366.67 and be visibly wrong.
+                feeds: RatedFeeds::new(
+                    Some(FeedRate::from_mm_per_min(1_100.0)),
+                    Some(FeedRate::from_mm_per_min(400.0)),
+                ),
+                // Inside the sample machine's spindle range, so nothing is scaled and the
+                // test is about the split alone. That both feeds scale together under a
+                // spindle clamp is `feeds.rs`'s to prove.
+                speed: Some(RotationalSpeed::from_rpm(12_000.0)),
+            },
+        );
+
+        let coder = Coder::new();
+        let step = StepPlan {
+            index: 0,
+            name: "Route".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(2),
+                diameter: Length::from_mm(1.0),
+                ops: vec![AtomicOp {
+                    phase: Phase::Route,
+                    kind: OpKind::RouteContour {
+                        path: vec![
+                            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                            Point::new(Length::from_mm(10.0), Length::from_mm(0.0)),
+                        ],
+                    },
+                    tool_id: "r1".to_string(),
+                    entry: Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                    exit: Point::new(Length::from_mm(10.0), Length::from_mm(0.0)),
+                    z: ZProfile {
+                        z_bottom: Length::from_mm(-2.1),
+                        z_retract: Length::from_mm(5.0),
+                        z_feed: None,
+                    },
+                    primitive: "route_contour",
+                    source: "outer#0.span0".to_string(),
+                }],
+                travel_mm: 0.0,
+            }],
+            notes: vec![],
+        };
+
+        let body = render_step_body(&coder, &step, &render_ctx(true), &tf).expect("renders");
+        assert!(
+            body.contains("G1 X0 Y0 Z-2.1 F400"),
+            "the plunge takes the rated z_feed, not a third of 1100:
+{body}"
+        );
+        assert!(
+            body.contains("G1 X10 Y0 Z-2.1 F1100"),
+            "and the lateral cut takes the rated table_feed:
+{body}"
+        );
+    }
+
+    /// A drill cycle is **entirely** plunge, so its `F` is the rated plunge feed. It used
+    /// to emit the lateral one, which for a router-like tool is several times too fast
+    /// into the tool's weak end geometry.
+    #[test]
+    fn a_drill_cycle_takes_the_rated_plunge_feed() {
+        let mut tf = BTreeMap::new();
+        tf.insert(
+            "t1".to_string(),
+            ToolFeed {
+                name: "1.0mm drill".to_string(),
+                feeds: RatedFeeds::new(
+                    Some(FeedRate::from_mm_per_min(900.0)),
+                    Some(FeedRate::from_mm_per_min(300.0)),
+                ),
+                speed: Some(RotationalSpeed::from_rpm(12_000.0)),
+            },
+        );
+        let coder = Coder::new();
+        let body = render_step_body(&coder, &one_block_step(), &render_ctx(true), &tf)
+            .expect("renders");
+        assert!(body.contains("G81 X3 Y4 Z-2.4 R5 F300"), "the plunge rate:
+{body}");
+        assert!(!body.contains("F900"), "never the lateral one:
+{body}");
     }
 
     /// A front-face step has nothing to confirm, so it emits nothing — the prompt must not
@@ -1043,7 +1137,10 @@ mod tests {
             "r1".to_string(),
             ToolFeed {
                 name: "1mm router".to_string(),
-                feed: Some(FeedRate::from_mm_per_min(600.0)),
+                // Built the way a real router is: one rated feed, so the plunge falls back
+                // to a third of it. `RatedFeeds::new` would leave the two equal, which is
+                // a drill's rule, not a router's.
+                feeds: RatedFeeds::for_tool(Some(FeedRate::from_mm_per_min(600.0)), None, true),
                 speed: Some(RotationalSpeed::from_rpm(18_000.0)),
             },
         );

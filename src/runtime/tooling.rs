@@ -33,7 +33,7 @@ use crate::gcode::assigner::{
     self, Allowance, AssignConfig, AssignError, DemandKind, DepthDetail, FaultReason, HoleDemand,
     OverflowPolicy, RackSpec, Setup, Strategy, ToolAssignment, Weights,
 };
-use crate::gcode::feeds::{self, Limited, MachineLimits, Motion, SpindleRange};
+use crate::gcode::feeds::{self, Limited, MachineLimits, RatedFeeds, SpindleRange};
 use crate::gcode::step_data::StepValue;
 use crate::runtime::AppState;
 
@@ -266,6 +266,10 @@ pub(crate) struct EdgeConfigRaw {
     pub(crate) cutouts: bool,
     /// Retention for those interior openings.
     pub(crate) cutout_retention: RetentionRaw,
+    /// Width of the channel routed around the board — and so, exactly, the diameter of
+    /// the cutter that routes it. The outline and its cutouts share one router, so this
+    /// governs both.
+    pub(crate) kerf: Length,
     /// Material left on the wall for a finishing pass; zero means none.
     pub(crate) finishing: Length,
 }
@@ -296,6 +300,7 @@ impl Default for EdgeConfigRaw {
             outline: RetentionRaw::defaults(4),
             cutouts: true,
             cutout_retention: RetentionRaw::defaults(2),
+            kerf: Length::from_mm(2.0),
             finishing: Length::from_mm(0.1),
         }
     }
@@ -828,6 +833,7 @@ fn read_edge_config(root: &Node, base: &str) -> EdgeConfigRaw {
             &format!("{base}/cutouts/retention"),
             default.cutout_retention,
         ),
+        kerf: node_length(root, &format!("{base}/kerf")).unwrap_or(default.kerf),
         finishing: node_length(root, &format!("{base}/finishing")).unwrap_or(default.finishing),
     }
 }
@@ -1054,9 +1060,14 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let routes_slots = has_oblongs && oblong_routes;
 
     let mut warnings: Vec<String> = Vec::new();
-    let routers = plan_routers(&ctx.tools, toolset, &groups, has_route, routes_slots);
+    let routers =
+        plan_routers(&ctx.tools, toolset, &groups, has_route, raw.route_board.kerf, routes_slots);
     if has_route && routers.outline.is_none() {
-        warnings.push("No router in stock for the board outline — outline routing is unresolved.".into());
+        warnings.push(format!(
+            "No {} router in stock, which is what the board's {} edge kerf needs. A kerf is              the cutter that makes it, so nothing else will cut it to size — stock that              cutter, or set the step's kerf to a size you have.",
+            fmt_len(ctx, raw.route_board.kerf),
+            fmt_len(ctx, raw.route_board.kerf),
+        ));
     }
     for width in &routers.unroutable_widths {
         warnings.push(unroutable_slot_warning(ctx, *width));
@@ -1150,8 +1161,12 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                     .as_ref()
                     .map(|id| resolve_router_tool(ctx, id, &number_of, None))
                     .unwrap_or_else(unresolved_tool);
+                // Named with the kerf, because the kerf is the whole requirement: this
+                // row is asking for a cutter of exactly that diameter, and a `—` beside it
+                // means that cutter is not in stock rather than that some router is
+                // missing.
                 requirements.push(RequirementRow {
-                    label: "Board outline (route)".into(),
+                    label: format!("Board outline ({} kerf)", fmt_len(ctx, raw.route_board.kerf)),
                     count: 1,
                     tools: vec![router],
                 });
@@ -1178,11 +1193,10 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                 .filter_map(|id| ctx.tools.iter().find(|t| t.id == *id))
                 .map(|tool| LoadedTool {
                     name: tool.display_name(),
-                    feed: tool.feed_rate,
+                    feeds: RatedFeeds::for_tool(tool.table_feed, tool.z_feed, tool_mills(tool)),
                     speed: tool.spindle_speed,
                     // Same predicate the router selection uses, so "can it mill?" has one
                     // answer in this module rather than two that could drift.
-                    motion: if is_router_tool(tool) { Motion::Routing } else { Motion::Drilling },
                 })
                 .collect();
             warnings.extend(derate_notes(
@@ -1416,21 +1430,46 @@ pub(crate) fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_n
 fn pick_outline_router(
     tools: &[Tool],
     toolset: &crate::data::model::ToolsetProfile,
+    kerf: Length,
 ) -> Option<String> {
-    // Prefer a router already fixed in the toolset.
-    if let Some(tool) = fixed_routers(tools, toolset).next() {
-        return Some(tool.id.clone());
-    }
+    // **The kerf is the cutter.** A single-pass route removes exactly one cutter width of
+    // material, so a 2 mm kerf is a 2 mm router and nothing else will do — matched to 1 µm,
+    // the assigner's own precision.
+    //
+    // Refused rather than substituted, the same rule locating pins follow: a kerf is a
+    // dimension of the finished job, and a board cut with a 1.6 mm channel where 2 mm was
+    // specified is a different board. The caller turns a `None` into a step failure naming
+    // the size, which is a fix the operator can act on; quietly cutting narrower is not.
+    //
+    // This replaced "the smallest router in stock, or any router pinned in the toolset".
+    // Both were wrong for an edge cut: the smallest cutter is the right default for
+    // reaching tight *internal* corners and the slowest possible way to cut an outline,
+    // and a pinned 0.8 would win over everything — the operator's request losing to a
+    // convenience.
+    let wanted_um = micron(kerf);
+    let exact = |tool: &&Tool| micron(tool.diameter) == wanted_um;
 
-    // Else the smallest in-stock router (safest for internal corners).
-    stock_routers(tools)
-        .min_by_key(|t| micron(t.diameter))
+    // Being already in the toolset is worth a tie-break between equals — it costs no rack
+    // slot — but it is only ever a tie-break now, since only one diameter qualifies.
+    fixed_routers(tools, toolset)
+        .find(|t| exact(t))
+        .or_else(|| stock_routers(tools).find(exact))
         .map(|t| t.id.clone())
 }
 
 /// Whether a tool can mill (as opposed to drill).
+///
+/// Also decides how a missing plunge rating is filled in — see
+/// [`RatedFeeds::for_tool`](crate::gcode::feeds::RatedFeeds::for_tool) — which is why it
+/// is reachable outside this module as [`tool_mills`].
 fn is_router_tool(tool: &Tool) -> bool {
     matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill)
+}
+
+/// Whether `tool` cuts with its flutes rather than its point, for callers outside this
+/// module. A thin alias for the private predicate, so the answer has one definition.
+pub(crate) fn tool_mills(tool: &Tool) -> bool {
+    is_router_tool(tool)
 }
 
 /// Routers pinned in the toolset's slots, in slot order. These are already in the rack,
@@ -1593,12 +1632,13 @@ pub(crate) fn plan_routers(
     toolset: &crate::data::model::ToolsetProfile,
     groups: &[HoleGroup],
     has_route: bool,
+    kerf: Length,
     oblong_routes: bool,
 ) -> RouterPlan {
     let mut plan = RouterPlan::default();
 
     if has_route {
-        plan.outline = pick_outline_router(tools, toolset);
+        plan.outline = pick_outline_router(tools, toolset, kerf);
     }
 
     if oblong_routes {
@@ -1645,10 +1685,11 @@ fn unroutable_slot_warning(ctx: &AppState, width: Length) -> String {
 /// tool model.
 pub(crate) struct LoadedTool {
     pub name: String,
-    pub feed: Option<FeedRate>,
+    /// The tool's two rated feeds. The derate notice reports on the **lateral** one,
+    /// which is the number a datasheet leads with and the one an operator compares
+    /// against; the plunge scales by the same ratio, so one line says both.
+    pub feeds: RatedFeeds,
     pub speed: Option<RotationalSpeed>,
-    /// Which axis limit binds it — a router feeds laterally, everything else plunges.
-    pub motion: Motion,
 }
 
 /// Tells the operator that the step will not run at its tools' rated values.
@@ -1689,11 +1730,11 @@ pub(crate) fn derate_notes(
     let mut below_floor: Vec<(&str, RotationalSpeed, FeedRate)> = Vec::new();
 
     for tool in tools {
-        let Ok(resolved) = feeds::resolve(tool.feed, tool.speed, limits, tool.motion) else {
+        let Ok(resolved) = feeds::resolve(tool.feeds, tool.speed, limits) else {
             continue;
         };
         // Both are `Some` — `resolve` would have errored otherwise.
-        let (Some(rated_feed), Some(rated_speed)) = (tool.feed, tool.speed) else {
+        let (Some(rated_feed), Some(rated_speed)) = (tool.feeds.table, tool.speed) else {
             continue;
         };
         let scale = resolved.rpm.as_rpm() / rated_speed.as_rpm();
@@ -2022,12 +2063,20 @@ mod tests {
 
     // --- derate notices ----------------------------------------------------
 
+    /// A loaded **drill**: one rated feed, which is therefore also its plunge feed.
     fn loaded(name: &str, feed_mm_min: f64, rpm: f64) -> LoadedTool {
         LoadedTool {
             name: name.to_string(),
-            feed: Some(FeedRate::from_mm_per_min(feed_mm_min)),
+            feeds: RatedFeeds::for_tool(Some(FeedRate::from_mm_per_min(feed_mm_min)), None, false),
             speed: Some(RotationalSpeed::from_rpm(rpm)),
-            motion: Motion::Drilling,
+        }
+    }
+
+    /// A loaded **router**: the same one rated feed, but its plunge is a third of it.
+    fn loaded_router(name: &str, feed_mm_min: f64, rpm: f64) -> LoadedTool {
+        LoadedTool {
+            feeds: RatedFeeds::for_tool(Some(FeedRate::from_mm_per_min(feed_mm_min)), None, true),
+            ..loaded(name, feed_mm_min, rpm)
         }
     }
 
@@ -2106,15 +2155,13 @@ mod tests {
             loaded("1.0mm drill", 14_400.0, 48_000.0),
             LoadedTool {
                 name: "no feed".into(),
-                feed: None,
+                feeds: RatedFeeds::new(None, None),
                 speed: Some(RotationalSpeed::from_rpm(60_000.0)),
-                motion: Motion::Drilling,
             },
             LoadedTool {
                 name: "no speed".into(),
-                feed: Some(FeedRate::from_mm_per_min(400.0)),
+                feeds: RatedFeeds::new(Some(FeedRate::from_mm_per_min(400.0)), None),
                 speed: None,
-                motion: Motion::Drilling,
             },
         ];
         let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
@@ -2184,30 +2231,33 @@ mod tests {
         assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
     }
 
-    /// A router's plunge is derated to a third, so the same Z allows three times the feed
-    /// — it must not be reported against the drilling ceiling.
+    /// The lateral feed is judged against the **XY** ceiling and nothing else.
+    ///
+    /// There is no longer a per-tool "is this drilling or routing?" question deciding
+    /// which limit applies to one feed: a tool has two rated feeds and each is bound by
+    /// its own axis. So a slow Z axis says nothing about a lateral feed the machine can
+    /// perfectly well sustain.
     #[test]
-    fn a_router_is_judged_against_the_routing_ceiling() {
-        let mut router = loaded("1.4mm router", 4_400.0, 34_000.0);
-        router.motion = Motion::Routing;
-        // Z 1500 permits 4500 laterally, which covers the router's 4400 — nothing to say.
+    fn the_lateral_feed_is_judged_against_the_xy_ceiling_alone() {
+        let router = loaded_router("1.4mm router", 4_400.0, 34_000.0);
+        // A crawling Z (1500) with plenty of XY (5000). The lateral 4400 fits XY, and the
+        // plunge — a third of it, this tool having no rated one — fits Z easily.
         let notes = derate_notes(
             "CNC#1",
             machine(1_000.0, 100_000.0, 5_000.0, 1_500.0),
             &[router],
             UserUnitSystem::Metric,
         );
-        assert!(notes.is_empty(), "4400 fits under 3 × 1500: {notes:#?}");
+        assert!(notes.is_empty(), "4400 is under the 5000 XY ceiling: {notes:#?}");
 
-        // The same tool judged as a drill would be capped at 1500 instead.
-        let drill = loaded("1.4mm router", 4_400.0, 34_000.0);
+        // Lower the XY ceiling below it and the same tool is reported.
         let notes = derate_notes(
             "CNC#1",
-            machine(1_000.0, 100_000.0, 5_000.0, 1_500.0),
-            &[drill],
+            machine(1_000.0, 100_000.0, 2_000.0, 5_000.0),
+            &[loaded_router("1.4mm router", 4_400.0, 34_000.0)],
             UserUnitSystem::Metric,
         );
-        assert_eq!(notes.len(), 1, "as a plunge it does not fit: {notes:#?}");
+        assert_eq!(notes.len(), 1, "4400 does not fit under 2000: {notes:#?}");
     }
 
     /// Figures follow the user's units like every other number on the screen.
@@ -2248,8 +2298,10 @@ mod tests {
             point_angle: units::Angle::from_degrees(180.0),
             catalog_point_angle: None,
             flute_length: Some(Length::from_mm(30.0)),
-            feed_rate: None,
-            catalog_feed_rate: None,
+            table_feed: None,
+            catalog_table_feed: None,
+            z_feed: None,
+            catalog_z_feed: None,
             spindle_speed: None,
             catalog_spindle_speed: None,
             status: crate::data::model::ToolStatus::InStock,
@@ -2303,7 +2355,7 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
         assert_eq!(plan.for_group(&groups[0]), None, "1.2mm cutter rejected for a 0.4mm slot");
         assert_eq!(plan.unroutable_widths.len(), 1, "and the slot is reported unroutable");
         assert!(plan.mandatory_ids().is_empty(), "no router is reserved in the rack for it");
@@ -2317,7 +2369,7 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
         assert_eq!(plan.for_group(&groups[0]), Some("exact"));
         assert!(plan.unroutable_widths.is_empty());
     }
@@ -2330,105 +2382,109 @@ mod tests {
         let toolset = toolset_with_fixed(&["fixed"]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
         assert_eq!(plan.for_group(&groups[0]), Some("fixed"));
     }
 
-    /// The outline cutter and the slot cutter are independent: the outline takes the
-    /// smallest available (safest for internal corners) while each slot takes the
-    /// largest that fits, and the rack must reserve both.
-    #[test]
-    fn the_outline_and_slot_routers_are_chosen_separately() {
-        let tools = vec![router("small", 0.4), router("big", 2.0)];
-        let toolset = toolset_with_fixed(&[]);
-        let groups = vec![slot_group(1.0, 4.0)];
-
-        let plan = plan_routers(&tools, &toolset, &groups, true, true);
-        assert_eq!(plan.outline.as_deref(), Some("small"), "outline prefers the smallest");
-        assert_eq!(plan.for_group(&groups[0]), Some("small"), "2.0mm will not enter a 1.0mm slot");
-
-        // A wider slot can use the big cutter, and then both must be in the rack.
-        let wide = vec![slot_group(2.5, 8.0)];
-        let plan = plan_routers(&tools, &toolset, &wide, true, true);
-        assert_eq!(plan.for_group(&wide[0]), Some("big"));
-        assert_eq!(plan.mandatory_ids(), vec!["big".to_string(), "small".to_string()]);
-    }
-
-    /// A stock drill of `diameter_mm`, everything else as [`router`] has it.
+    /// **The kerf IS the cutter, matched exactly.**
     ///
-    /// The kind label matters: `ToolKind::from_kind_label` falls through to `Endmill` for
-    /// anything it does not recognise, so a plausible-looking `"Drill bit"` would make this
-    /// a *router* and quietly invert every test below.
-    fn drill_bit(id: &str, diameter_mm: f64) -> Tool {
-        Tool {
-            kind: "drill".to_string(),
-            name: format!("Drill {diameter_mm}mm"),
-            composite_name: format!("Drill {diameter_mm}mm"),
-            point_angle: units::Angle::from_degrees(118.0),
-            ..router(id, diameter_mm)
-        }
+    /// A single-pass route removes exactly one cutter width, so a 2 mm kerf is a 2 mm
+    /// router. It used to be "the smallest router in stock", which loaded a 0.4 mm cutter
+    /// to cut an outline a 2 mm cutter clears in a fraction of the time, with nothing the
+    /// operator could set to say otherwise.
+    #[test]
+    fn the_outline_router_is_the_kerf_exactly() {
+        let tools = vec![router("a", 0.8), router("b", 1.4), router("c", 2.0)];
+        let toolset = toolset_with_fixed(&[]);
+
+        let outline = |kerf_mm: f64| {
+            plan_routers(&tools, &toolset, &[], true, Length::from_mm(kerf_mm), false).outline
+        };
+
+        assert_eq!(outline(2.0).as_deref(), Some("c"));
+        assert_eq!(outline(1.4).as_deref(), Some("b"));
+        assert_eq!(outline(0.8).as_deref(), Some("a"));
     }
 
-    /// **The rule locating pins exist for.** Everywhere else a drill within the step's
-    /// allowance is a fine substitute — a component lead does not care about 40 µm. A pin
-    /// does: the hole's whole job is that the board returns to exactly where it was, and a
-    /// hole 0.1 mm over lets it return to anywhere within 0.1 mm.
+    /// **A kerf with no cutter is a refusal, not a substitution.**
+    ///
+    /// Cutting a 2 mm channel with the 1.4 mm bit that happens to be in the drawer does
+    /// not produce a slightly worse board, it produces a different one — so the step fails
+    /// and the operator is told which cutter to stock. The same rule locating pins follow.
     #[test]
-    fn a_pin_hole_is_never_drilled_to_a_nearly_right_size() {
-        let near_misses = vec![drill_bit("under", 3.1), drill_bit("over", 3.3)];
-        assert_eq!(
-            pick_pin_tool(&near_misses, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
-            None,
-            "0.1mm out is out — no drill, and no router in stock either"
+    fn a_kerf_with_no_matching_router_is_refused_rather_than_approximated() {
+        let tools = vec![router("narrower", 1.4), router("wider", 3.0)];
+        let plan = plan_routers(
+            &tools,
+            &toolset_with_fixed(&[]),
+            &[],
+            true,
+            Length::from_mm(2.0),
+            false,
         );
-
-        let mut with_exact = near_misses.clone();
-        with_exact.push(drill_bit("exact", 3.2));
         assert_eq!(
-            pick_pin_tool(&with_exact, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
-            Some(PinTool::Drill { id: "exact".into(), diameter: Length::from_mm(3.2) }),
-            "the exact drill is taken, never the near miss"
-        );
-    }
-
-    /// With no exact drill, the hole is *milled* to size — which is exact by a different
-    /// route, not a substitution. The largest cutter that fits, as for a slot.
-    #[test]
-    fn without_an_exact_drill_the_pin_hole_is_milled_to_size() {
-        let tools = vec![drill_bit("wrong", 3.0), router("small", 1.0), router("big", 2.0)];
-        assert_eq!(
-            pick_pin_tool(&tools, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
-            Some(PinTool::Router { id: "big".into(), diameter: Length::from_mm(2.0) }),
-            "largest that fits: stiffest, fewest passes"
-        );
-
-        // A router wider than the pin cannot make the hole at all.
-        let too_wide = vec![router("huge", 4.0)];
-        assert_eq!(
-            pick_pin_tool(&too_wide, &toolset_with_fixed(&[]), Length::from_mm(3.2)),
-            None
+            plan.outline, None,
+            "neither the nearest smaller nor the nearest larger stands in for a 2mm kerf"
         );
     }
 
-    /// A drill already pinned in the toolset costs no rack slot, so it wins over an
-    /// equally exact one that would need loading.
+    /// **Being pinned in the toolset breaks a tie; it does not win an argument.**
+    ///
+    /// A pinned router costs no rack slot, which is worth something — but not worth
+    /// cutting a different channel than the one the profile asked for. The old rule
+    /// returned the first fixed router outright, so pinning a 0.8 quietly overrode a
+    /// request for a 2 mm kerf with a 2 mm cutter sitting in stock.
     #[test]
-    fn a_fixed_exact_drill_beats_an_equally_exact_loose_one() {
-        let tools = vec![drill_bit("loose", 3.2), drill_bit("fixed", 3.2)];
-        assert_eq!(
-            pick_pin_tool(&tools, &toolset_with_fixed(&["fixed"]), Length::from_mm(3.2)),
-            Some(PinTool::Drill { id: "fixed".into(), diameter: Length::from_mm(3.2) })
+    fn a_pinned_router_does_not_override_the_requested_kerf() {
+        let tools = vec![router("pinned-narrow", 0.8), router("stocked-exact", 2.0)];
+        let plan = plan_routers(
+            &tools,
+            &toolset_with_fixed(&["pinned-narrow"]),
+            &[],
+            true,
+            Length::from_mm(2.0),
+            false,
         );
+        assert_eq!(
+            plan.outline.as_deref(),
+            Some("stocked-exact"),
+            "the requested kerf wins over the free rack slot"
+        );
+
+        // Among cutters of the *same* diameter, the pinned one is the better choice.
+        let tools = vec![router("loose", 2.0), router("pinned", 2.0)];
+        let plan = plan_routers(
+            &tools,
+            &toolset_with_fixed(&["pinned"]),
+            &[],
+            true,
+            Length::from_mm(2.0),
+            false,
+        );
+        assert_eq!(plan.outline.as_deref(), Some("pinned"), "a tie goes to the free slot");
     }
 
-    /// A drill that is out of stock cannot make the hole, however exact it is.
+    /// The outline cutter is a **required** tool of the step: chosen outside the assigner,
+    /// so nothing else would reserve it a slot, and a step that cannot load it cannot cut
+    /// the board free.
     #[test]
-    fn an_out_of_stock_drill_is_not_a_pin_tool() {
-        let tools = vec![Tool {
-            status: crate::data::model::ToolStatus::OutOfStock,
-            ..drill_bit("exact", 3.2)
-        }];
-        assert_eq!(pick_pin_tool(&tools, &toolset_with_fixed(&[]), Length::from_mm(3.2)), None);
+    fn the_kerf_cutter_is_reserved_a_rack_slot() {
+        let tools = vec![router("kerf", 2.0), router("slot", 0.4)];
+        let groups = vec![slot_group(1.0, 4.0)];
+        let plan = plan_routers(
+            &tools,
+            &toolset_with_fixed(&[]),
+            &groups,
+            true,
+            Length::from_mm(2.0),
+            true,
+        );
+        assert_eq!(plan.for_group(&groups[0]), Some("slot"), "2.0mm will not enter a 1.0mm slot");
+        assert_eq!(
+            plan.mandatory_ids(),
+            vec!["kerf".to_string(), "slot".to_string()],
+            "both the kerf cutter and the slot cutter must be in the rack"
+        );
     }
 
     /// Builds a step that machines a face, with everything else irrelevant to the test.
@@ -2638,12 +2694,12 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, false);
+        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), false);
         assert_eq!(plan.for_group(&groups[0]), None, "drill-only strategy reserves no router");
         assert!(plan.unroutable_widths.is_empty(), "and reports nothing unroutable");
 
         let round = HoleGroup { kind: DemandKind::Pth, target: Length::from_mm(0.8), minor: None, count: 1 };
-        let plan = plan_routers(&tools, &toolset, &groups, false, true);
+        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
         assert_eq!(plan.for_group(&round), None, "a round hole is drilled, not milled");
     }
 

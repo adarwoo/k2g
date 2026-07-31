@@ -86,7 +86,12 @@ impl ToolEntry {
             kind: self.tool_type.to_tool_kind(),
             diameter: self.diameter,
             point_angle: self.point_angle,
-            feed_rate: self.table_feed.or(self.z_feed),
+            // Each kept as its own rating. They were once collapsed into one
+            // `table_feed.or(z_feed)`, which threw away the plunge rate the catalogue
+            // states and left the renderer deriving one as a fixed fraction instead.
+            // Falling back to the other is still right when a catalogue gives only one.
+            table_feed: self.table_feed.or(self.z_feed),
+            z_feed: self.z_feed.or(self.table_feed),
             spindle_speed: self.spindle_rpm,
             sku: self.sku.clone(),
         }
@@ -210,7 +215,11 @@ pub struct CatalogStockTool {
     pub kind: String,
     pub diameter: Length,
     pub point_angle: Angle,
-    pub feed_rate: Option<FeedRate>,
+    /// Lateral (XY) cutting feed.
+    pub table_feed: Option<FeedRate>,
+    /// Plunge (Z-only) feed — its own rating, carried through to stock rather than
+    /// re-derived from `table_feed`.
+    pub z_feed: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub sku: Option<String>,
 }

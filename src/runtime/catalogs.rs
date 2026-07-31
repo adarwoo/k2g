@@ -82,7 +82,8 @@ fn catalog_to_stock_catalog(
                 kind,
                 diameter: core.diameter,
                 point_angle: core.point_angle,
-                feed_rate: core.feed_rate,
+                table_feed: core.table_feed,
+                z_feed: core.z_feed,
                 spindle_speed: core.spindle_speed,
                 sku: core.sku,
             });

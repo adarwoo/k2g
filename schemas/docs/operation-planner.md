@@ -197,6 +197,61 @@ handles by position.
 
 ---
 
+### 5.1 Feeds and speeds
+
+A tool has **two** rated feeds, not one: `table_feed` is what it cuts at laterally and
+`z_feed` what it plunges at. They differ because the moves differ — a straight plunge
+engages the tool's weak end-cutting geometry over its full diameter at once, where a
+lateral pass engages its flutes. Catalogues state both, and `gcode::feeds` keeps them
+apart all the way to the `F` word:
+
+| move | `F` |
+|---|---|
+| drill cycle (`G81`) — entirely plunge | `z_feed` |
+| routing lead-in / plunge | `z_feed` |
+| routing lateral cut, arc | `table_feed` |
+
+Both are rated **at the tool's rated spindle speed**, so a spindle clamp scales both by the
+same ratio. Each axis ceiling then caps its own feed and nothing else: `max_feed_xy` binds
+the lateral rate, `max_feed_z` the plunge. There is no `Motion` discriminant deciding which
+ceiling applies to a single feed — each feed has an axis.
+
+When a catalogue states only one feed, the fallback depends on what the tool *is*
+(`RatedFeeds::for_tool`): a router's single quoted feed is its lateral one, so the plunge
+falls back to a third of it (`PLUNGE_FEED_FRACTION`, the conventional derating for a
+straight plunge); a drill does nothing but plunge, so its single quoted feed **is** the
+plunge feed and is used unchanged.
+
+### 5.2 The edge kerf chooses the cutter
+
+The board outline and its interior cutouts are cut by **one** router — a step pays one tool
+change for the whole outline — and the machining profile's `route_board.kerf` (2 mm by
+default) is what chooses it.
+
+**The kerf is the cutter.** A single-pass route removes exactly one cutter width of
+material, so a 2 mm kerf is a 2 mm router and it is matched **exactly** (to 1 µm, the
+assigner's own precision). A step with no such router in stock **fails**, naming the size,
+rather than quietly cutting a narrower channel — the same rule locating pins follow (§6.1)
+and for the same reason: a kerf is a dimension of the finished job, and a board cut with a
+1.6 mm channel where 2 mm was specified is a different board.
+
+That makes the kerf cutter a **required tool of the step**. It is chosen outside the
+assigner, so it joins the routers in `RouterPlan::mandatory_ids` and is reserved a rack slot
+like any other tool the step must load.
+
+Being pinned in the toolset breaks a tie between two cutters of the same diameter — it
+costs no rack slot — but never overrides the requested size. Before this, the rule was "the
+smallest router in stock, or any router pinned in the toolset", and both halves were wrong
+for an edge cut: the smallest cutter is the right default for reaching tight *internal*
+corners and the slowest possible way to cut an outline, and a pinned 0.8 mm won over
+everything.
+
+Slots (oblong holes) are chosen separately and by their own geometry, `pick_slot_router`
+taking the widest cutter that fits the slot. A cutout narrower than the kerf is reported as
+vanishing under it rather than cut with something else.
+
+---
+
 ## 6. Coordinate placement
 
 Every op's `entry`/`exit`/`z` are **machine coordinates**, but the geometry arrives in

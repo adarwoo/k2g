@@ -183,6 +183,7 @@ $defs:
       cutouts:
         enabled: true
         retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+      kerf: 2.0mm
       finishing: 0.1mm
     properties:
       # The board's own boundary.
@@ -237,6 +238,42 @@ $defs:
             x-show-when: { enabled: [true] }
         required: [enabled]
         additionalProperties: false
+
+      # -----------------------------------------------------------------------
+      # kerf — the width of the channel routed around the board, and therefore
+      # the diameter of the cutter that routes it.
+      #
+      # A single-pass route removes exactly one cutter width of material, so the
+      # kerf IS the cutter: asking for a 2mm kerf is asking for a 2mm router.
+      # It is matched **exactly**, and a step with no such router in stock fails
+      # rather than quietly cutting a narrower channel — the same rule locating
+      # pins follow, and for the same reason. A kerf is a dimension of the
+      # finished job, not a preference: a board cut with a 1.6mm channel where
+      # 2mm was specified is a different board.
+      #
+      # Before this existed the cutter was "the smallest router in stock", which
+      # is a fine default for reaching tight internal corners and a poor one for
+      # an edge cut — it loaded a 0.8mm cutter to do a job a 2mm cutter does in
+      # a fraction of the time, with nothing the operator could set to say
+      # otherwise.
+      #
+      # The board outline and its interior cutouts share this one cutter (see
+      # `plan_outline` — a step should pay one tool change for the whole
+      # outline), so a cutout narrower than the kerf is reported as vanishing
+      # rather than cut with something else.
+      #
+      # 2mm by default: a common PCB routing cutter, stiff enough to cut an
+      # outline quickly and small enough to get round the corners of most
+      # boards.
+      # -----------------------------------------------------------------------
+      kerf:
+        title: Edge routing kerf
+        description: >-
+          Width of the channel routed around the board, which is also the
+          diameter of the cutter that routes it. Matched exactly — a step with
+          no router this size cannot run.
+        $ref: "units.yaml#/$defs/size"
+        default: 2.0mm
 
       # Material left for a final full-depth pass, cleaning up the roughing cut.
       # A length rather than a flag plus a length: 0 means no finishing pass, so
@@ -399,27 +436,37 @@ $defs:
           cutouts:
             enabled: true
             retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+          kerf: 2.0mm
           finishing: 0.1mm
 
+      # `mill_board` is `route_board` done with an area-clearing strategy rather
+      # than a contour cut, so it takes the SAME configuration — the same edge
+      # kerf, the same retention, the same cutouts and finishing.
+      #
+      # It used to have a shape all its own (`finishing: {clearance, direction}`
+      # and nothing else), while `read_edge_config` in src/runtime/tooling.rs
+      # read whichever of the two the step enables through one reader built for
+      # `route_board`'s shape. Nothing lined up: a milling step's kerf, cut mode,
+      # cutouts and retention all silently took the reader's fallbacks, its
+      # `finishing` object failed to read as a length and fell back too, and the
+      # machining screen had no control for any of them because the schema
+      # described none. The operator could see a "Mill board" section with one
+      # setting in it that changed nothing the planner read.
+      #
+      # (`direction` is gone with the rest: `route_board` dropped it in 2026-07
+      # because the toolpaths pick climb from the geometry — see the note on
+      # `finishing` in the `route_board` def.)
       mill_board:
-        type: object
+        $ref: "#/$defs/route_board"
         default:
-          finishing:
-            clearance: 0.1mm
-            direction: climb
-        properties:
-          finishing:
-            type: object
-            properties:
-              clearance:
-                $ref: "units.yaml#/$defs/size"
-                default: 0.1mm
-              direction:
-                type: string
-                default: climb
-                enum: [conventional, climb]
-            additionalProperties: false
-        additionalProperties: false
+          outline:
+            cut: mill
+            retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
+          cutouts:
+            enabled: true
+            retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
+          kerf: 2.0mm
+          finishing: 0.1mm
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it

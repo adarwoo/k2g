@@ -194,7 +194,7 @@ fn CatalogManagementPanel(
                                             {section.tools.iter().map(|tool| {
                                                 let sku = tool.sku.clone().unwrap_or_else(|| "\u{2014}".to_string());
                                                 let feed = tool
-                                                    .feed_rate
+                                                    .table_feed
                                                     .map(|f| unit_format::format_feed_display(f, unit_system))
                                                     .unwrap_or_else(|| "\u{2014}".to_string());
                                                 let speed = tool

@@ -370,7 +370,11 @@ impl AppCtx {
                     tool.id.clone(),
                     crate::gcode::program::ToolFeed {
                         name: tool.display_name(),
-                        feed: tool.feed_rate,
+                        feeds: crate::gcode::feeds::RatedFeeds::for_tool(
+                            tool.table_feed,
+                            tool.z_feed,
+                            crate::runtime::tooling::tool_mills(tool),
+                        ),
                         speed: tool.spindle_speed,
                     },
                 )

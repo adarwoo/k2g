@@ -1461,7 +1461,20 @@ fn normalize_machining_value(value: &mut Value) {
 ///   the only sensible direction for cutting a part out, and the toolpaths take it from
 ///   the geometry.
 fn normalize_route_board_value(step: &mut serde_json::Map<String, Value>) {
-    let Some(route_board) = step.get_mut("route_board").and_then(Value::as_object_mut) else {
+    // Both keys, because `mill_board` now carries the same shape: it is `route_board` with
+    // an area-clearing strategy, and it always shared `read_edge_config`. Its old shape —
+    // `finishing: {clearance, direction}` and nothing else — would be rejected by the new
+    // one, and its `direction` has the same fate as `route_board`'s did: the toolpaths
+    // pick climb from the geometry, so the setting went rather than staying as a knob that
+    // changed nothing.
+    for key in ["route_board", "mill_board"] {
+        normalize_edge_block(step, key);
+    }
+}
+
+/// One `route_board`-shaped block at `key`, migrated in place.
+fn normalize_edge_block(step: &mut serde_json::Map<String, Value>, key: &str) {
+    let Some(route_board) = step.get_mut(key).and_then(Value::as_object_mut) else {
         return;
     };
 
@@ -1487,11 +1500,14 @@ fn normalize_route_board_value(step: &mut serde_json::Map<String, Value>) {
         route_board.insert("outline".into(), Value::Object(edge));
     }
 
-    // `{clearance, direction}` → the clearance alone.
+    // `{clearance, direction}` → the clearance alone. `direction` goes with it: climb is
+    // picked from the geometry, so it was a setting that changed nothing.
     if let Some(Value::Object(finishing)) = route_board.get("finishing").cloned() {
         let clearance = finishing.get("clearance").cloned().unwrap_or(Value::from("0.1mm"));
         route_board.insert("finishing".into(), clearance);
     }
+    route_board.remove("direction");
+    route_board.remove("enabled");
 }
 
 /// `side_to_machine: top | bottom` → `board_face: front | back`.
@@ -2052,6 +2068,124 @@ mod tests {
         }
     }
 
+    /// The edge kerf is editable in the machining screen, which means it must be a
+    /// *materialised node* — `SchemaForm` walks the document's own keys, so a property the
+    /// loader has not filled in has no field to render however well the schema describes it.
+    #[test]
+    fn the_edge_kerf_is_a_materialised_field() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+        let doc = data.get(id).expect("the profile exists");
+        let node = doc
+            .root
+            .get_pointer("/steps/0/route_board/kerf")
+            .expect("materialised, or the machining screen cannot show it");
+        assert_eq!(
+            node.value,
+            NodeValue::Unit(datastore::UnitValue::Length(units::Length::from_mm(2.0)))
+        );
+    }
+
+    /// **A profile written before the kerf existed still gets the field.**
+    ///
+    /// The machining screen's form walks the *document's* keys, so a schema default that
+    /// is never materialised into an already-saved profile is a field the operator cannot
+    /// see or set — the profile silently keeps whatever the reader defaults to, with no
+    /// control anywhere to change it. Every profile already on disk is in exactly that
+    /// position, which makes this the case that matters, not the freshly-created one.
+    #[test]
+    fn a_profile_saved_before_the_kerf_existed_still_offers_it() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let proc_dir = data_dir.join("processing_profiles");
+        fs::create_dir_all(&proc_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        // A v3 profile whose `route_board` predates `kerf`; everything else is present.
+        let saved = format!(
+            "schema_version: 3\n\
+             id: \"{id}\"\n\
+             name: Before the kerf\n\
+             steps:\n\
+               - name: Cut out\n\
+                 operations: [route_board]\n\
+                 route_board:\n\
+                   outline: {{ cut: route }}\n\
+                   cutouts: {{ enabled: true }}\n\
+                   finishing: 0.1mm\n"
+        );
+        fs::write(proc_dir.join(format!("{id}.yaml")), saved).unwrap();
+
+        let (data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        let doc = data.get(id).expect("the profile loads");
+        let node = doc
+            .root
+            .get_pointer("/steps/0/route_board/kerf")
+            .expect("materialised on load, or the machining screen shows no kerf field");
+        assert_eq!(
+            node.value,
+            NodeValue::Unit(datastore::UnitValue::Length(units::Length::from_mm(2.0))),
+            "and it carries the schema default"
+        );
+
+        // And it is a *child of the object*, which is the thing `SchemaForm` walks: the
+        // form lists `object_children`, so a node reachable by pointer but absent from
+        // its parent's key set would still render nothing.
+        let parent = doc.root.get_pointer("/steps/0/route_board").expect("the op config");
+        let keys: Vec<&str> = match &parent.value {
+            NodeValue::Object(map) => map.keys().map(String::as_str).collect(),
+            other => panic!("route_board should be an object, got {other:?}"),
+        };
+        assert!(keys.contains(&"kerf"), "the form would list: {keys:?}");
+    }
+    /// **A milling step configures the same things a routing step does.**
+    ///
+    /// `read_edge_config` reads whichever of `route_board`/`mill_board` the step enables
+    /// through one reader built for `route_board`'s shape, but `mill_board` used to have a
+    /// shape all its own. Nothing lined up: a milling step's kerf, cut mode, cutouts and
+    /// retention all silently took the reader's fallbacks, and the machining screen had no
+    /// control for any of them because the schema described none.
+    #[test]
+    fn a_milling_step_offers_the_same_edge_settings_as_a_routing_one() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+        let doc = data.get(id).expect("the profile exists");
+
+        let keys = |ptr: &str| -> Vec<String> {
+            match &doc.root.get_pointer(ptr).expect(ptr).value {
+                NodeValue::Object(map) => map.keys().cloned().collect(),
+                other => panic!("{ptr} should be an object, got {other:?}"),
+            }
+        };
+        let mut routed = keys("/steps/0/route_board");
+        let mut milled = keys("/steps/0/mill_board");
+        routed.sort();
+        milled.sort();
+        assert_eq!(routed, milled, "the two operations configure the same things");
+        assert!(routed.contains(&"kerf".to_string()), "including the kerf: {routed:?}");
+    }
+
+    /// A profile written when `mill_board` had its own shape still loads, and the settings
+    /// it did carry survive. `direction` does not: climb is picked from the geometry, so
+    /// it was a knob that changed nothing — the same fate it met under `route_board`.
+    #[test]
+    fn a_mill_board_block_in_the_old_shape_is_migrated() {
+        let mut step = serde_json::json!({
+            "name": "Mill",
+            "mill_board": { "finishing": { "clearance": "0.25mm", "direction": "conventional" } },
+        });
+        normalize_step_value(&mut step);
+        assert_eq!(
+            step.pointer("/mill_board/finishing").and_then(Value::as_str),
+            Some("0.25mm"),
+            "the clearance the operator set survives as the finishing allowance"
+        );
+        assert!(
+            step.pointer("/mill_board/direction").is_none(),
+            "and the retired direction does not"
+        );
+    }
     #[test]
     fn job_singleton_references_a_machining_profile() {
         // The Job is a singleton (no id/name) referencing one machining profile;
@@ -2157,8 +2291,10 @@ mod tests {
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
                 flute_length: None,
-                feed_rate: Some(FeedRate::from_mm_per_min(1200.0)),
-                catalog_feed_rate: Some(FeedRate::from_mm_per_min(1200.0)),
+                table_feed: Some(FeedRate::from_mm_per_min(1200.0)),
+                catalog_table_feed: Some(FeedRate::from_mm_per_min(1200.0)),
+                z_feed: Some(FeedRate::from_mm_per_min(1200.0)),
+                catalog_z_feed: Some(FeedRate::from_mm_per_min(1200.0)),
                 spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),
                 catalog_spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),
                 status: ToolStatus::OutOfStock,
@@ -2177,8 +2313,10 @@ mod tests {
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
                 flute_length: None,
-                feed_rate: None,
-                catalog_feed_rate: None,
+                table_feed: None,
+                catalog_table_feed: None,
+                z_feed: None,
+                catalog_z_feed: None,
                 spindle_speed: None,
                 catalog_spindle_speed: None,
                 status: ToolStatus::InStock,

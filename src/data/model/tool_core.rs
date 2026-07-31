@@ -71,7 +71,15 @@ pub struct ToolCore {
     pub kind: ToolKind,
     pub diameter: Length,
     pub point_angle: Angle,
-    pub feed_rate: Option<FeedRate>,
+    /// The **lateral** cutting feed: what a G1 in XY runs at.
+    pub table_feed: Option<FeedRate>,
+    /// The **plunge** feed: what a G1 in Z alone runs at.
+    ///
+    /// A separate rating, not a fraction of [`Self::table_feed`]. A straight plunge
+    /// engages the tool's weak end-cutting geometry over its full diameter at once, and
+    /// how much slower that has to be is a property of the tool, which the catalogue
+    /// states. `None` only when the catalogue is silent.
+    pub z_feed: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub sku: Option<String>,
 }

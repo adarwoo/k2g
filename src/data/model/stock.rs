@@ -70,8 +70,19 @@ pub struct Tool {
     /// tool-selection Z-feasibility check to confirm the bit can reach through
     /// the board; the lossy legacy projection historically dropped it.
     pub flute_length: Option<Length>,
-    pub feed_rate: Option<FeedRate>,
-    pub catalog_feed_rate: Option<FeedRate>,
+    /// The **lateral** cutting feed — what a G1 in XY runs at.
+    pub table_feed: Option<FeedRate>,
+    pub catalog_table_feed: Option<FeedRate>,
+    /// The **plunge** feed — what a G1 in Z alone runs at, drilling included.
+    ///
+    /// Its own rating, not a fraction of [`Self::table_feed`]: a straight plunge engages
+    /// the tool's weak end-cutting geometry over its full diameter at once, and how much
+    /// slower that has to be is a property of the tool. Both were once read as
+    /// `table_feed.or(z_feed)` into a single field and written back out identically, so a
+    /// catalogue that rated them apart had the difference erased on the way in *and* on
+    /// the way out.
+    pub z_feed: Option<FeedRate>,
+    pub catalog_z_feed: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub catalog_spindle_speed: Option<RotationalSpeed>,
     pub status: ToolStatus,
@@ -107,7 +118,8 @@ fn tool_values_map(
     manufacturer: Option<&String>,
     sku: Option<&String>,
     spindle: Option<RotationalSpeed>,
-    feed: Option<FeedRate>,
+    table_feed: Option<FeedRate>,
+    z_feed: Option<FeedRate>,
     flute_length: Option<Length>,
 ) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
@@ -127,9 +139,14 @@ fn tool_values_map(
     if let Some(spindle) = spindle {
         m.insert("spindle".into(), json!(spindle));
     }
-    if let Some(feed) = feed {
-        m.insert("z_feed".into(), json!(feed));
+    // Written apart. One `feed` used to fill both keys, which silently flattened any
+    // tool whose plunge rating differed from its lateral one — including on a plain
+    // round-trip through the editor, with nothing changed.
+    if let Some(feed) = table_feed {
         m.insert("table_feed".into(), json!(feed));
+    }
+    if let Some(feed) = z_feed {
+        m.insert("z_feed".into(), json!(feed));
     }
     if let Some(flute_length) = flute_length {
         m.insert("flute_length".into(), json!(flute_length));
@@ -158,7 +175,8 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.manufacturer.as_ref(),
                 tool.sku.as_ref(),
                 tool.catalog_spindle_speed.or(tool.spindle_speed),
-                tool.catalog_feed_rate.or(tool.feed_rate),
+                tool.catalog_table_feed.or(tool.table_feed),
+                tool.catalog_z_feed.or(tool.z_feed),
                 tool.flute_length,
             );
             let effective_name = if tool.name.trim().is_empty() {
@@ -174,7 +192,8 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.manufacturer.as_ref(),
                 tool.sku.as_ref(),
                 tool.spindle_speed,
-                tool.feed_rate,
+                tool.table_feed,
+                tool.z_feed,
                 tool.flute_length,
             );
 
@@ -271,14 +290,19 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 .or(catalog_point_angle)
                 .unwrap_or_else(|| Angle::from_degrees(180.0));
 
-            let feed_of = |values: &Value| {
+            // Each read from its own key, falling back to the other only when the
+            // catalogue states just one — which is a catalogue that has not distinguished
+            // them, not a licence to treat them as the same number.
+            let feed_of = |values: &Value, key: &str, fallback: &str| {
                 values
-                    .get("table_feed")
+                    .get(key)
                     .and_then(value_to_feed)
-                    .or_else(|| values.get("z_feed").and_then(value_to_feed))
+                    .or_else(|| values.get(fallback).and_then(value_to_feed))
             };
-            let catalog_feed_rate = feed_of(&base);
-            let feed_rate = feed_of(&effective).or(catalog_feed_rate);
+            let catalog_table_feed = feed_of(&base, "table_feed", "z_feed");
+            let table_feed = feed_of(&effective, "table_feed", "z_feed").or(catalog_table_feed);
+            let catalog_z_feed = feed_of(&base, "z_feed", "table_feed");
+            let z_feed = feed_of(&effective, "z_feed", "table_feed").or(catalog_z_feed);
 
             let catalog_spindle_speed = base.get("spindle").and_then(value_to_rpm_speed);
             let spindle_speed = effective
@@ -316,8 +340,10 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 point_angle,
                 catalog_point_angle,
                 flute_length,
-                feed_rate,
-                catalog_feed_rate,
+                table_feed,
+                catalog_table_feed,
+                z_feed,
+                catalog_z_feed,
                 spindle_speed,
                 catalog_spindle_speed,
                 status: item
@@ -417,8 +443,10 @@ mod tests {
             point_angle: Angle::from_degrees(118.0),
             catalog_point_angle: Some(Angle::from_degrees(118.0)),
             flute_length: None,
-            feed_rate: Some(FeedRate::from_mm_per_min(300.0)),
-            catalog_feed_rate: Some(FeedRate::from_mm_per_min(200.0)),
+            table_feed: Some(FeedRate::from_mm_per_min(300.0)),
+            catalog_table_feed: Some(FeedRate::from_mm_per_min(200.0)),
+            z_feed: Some(FeedRate::from_mm_per_min(300.0)),
+            catalog_z_feed: Some(FeedRate::from_mm_per_min(200.0)),
             spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),
             catalog_spindle_speed: Some(RotationalSpeed::from_rpm(12000.0)),
             status: ToolStatus::InStock,

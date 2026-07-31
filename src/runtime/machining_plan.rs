@@ -375,7 +375,14 @@ fn plan_step(
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
     let oblong = raw.oblong_strategy();
     let routers =
-        plan_routers(&ctx.tools, toolset, &groups, has_route, has_oblongs && oblong.routes());
+        plan_routers(
+            &ctx.tools,
+            toolset,
+            &groups,
+            has_route,
+            raw.route_board.kerf,
+            has_oblongs && oblong.routes(),
+        );
 
     // The pin hole's tool, resolved before the assigner runs and deliberately outside it —
     // see `pick_pin_tool`. Refused rather than substituted: a registration hole that is
@@ -752,7 +759,11 @@ fn plan_outline_spans(
         ));
     }
     let Some(router_id) = routers.outline.as_deref() else {
-        return Err("No router in stock for the board outline — the outline is not planned.".into());
+        return Err(format!(
+            "No {} router in stock, which is what the board's {} edge kerf needs. A kerf is              the cutter that makes it, so nothing else will cut it to size — stock that              cutter, or set the step's kerf to a size you have.",
+            fmt_len(ctx, raw.route_board.kerf),
+            fmt_len(ctx, raw.route_board.kerf),
+        ));
     };
     let Some(router) = ctx.tools.iter().find(|t| t.id == router_id) else {
         return Err("The outline router is no longer in stock.".into());
