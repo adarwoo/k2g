@@ -1,0 +1,44 @@
+name: Audit
+
+# EU CRA Annex I Part II (3): "apply effective and regular tests and reviews of the
+# security of the product". Two complementary checks —
+#
+#   cargo audit  matches the dependency tree against the RUSTSEC advisory database,
+#                which is the "identify vulnerabilities in the components" half of
+#                Part II (1).
+#   cargo deny   catches what an advisory feed cannot: unmaintained crates, licence
+#                incompatibilities (k2g is GPL-3.0-only), and duplicate or yanked
+#                versions.
+#
+# Scheduled as well as on-PR because the code not changing is exactly when a new
+# advisory against an existing dependency goes unnoticed.
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

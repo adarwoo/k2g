@@ -397,7 +397,7 @@ async fn run_save_dialog(
         .await
         .map(|handle| handle.path().to_path_buf())?;
 
-    match fs::write(&path, program.as_bytes()) {
+    match write_program(&path, program) {
         Ok(()) => Some(path),
         Err(err) => {
             // Reported through the same path as a success, and taking `state` for exactly
@@ -410,6 +410,33 @@ async fn run_save_dialog(
             None
         }
     }
+}
+
+/// Write one program to disk, recording the fact.
+///
+/// The single choke point both the one-file and the whole-job save go through, so
+/// there is exactly one place that can put a G-code file on disk and exactly one that
+/// has to remember to record it.
+///
+/// Worth recording because this is where k2g's output leaves the application and
+/// becomes something that can drive a machine — "which program went where, and when"
+/// is the question an operator most often needs answered after the fact. Only the
+/// file name and byte count are kept; the directory is redacted, and the program text
+/// itself never goes near the record.
+fn write_program(path: &Path, text: &str) -> std::io::Result<()> {
+    use crate::runtime::security_log::{self, Event, Outcome};
+
+    let result = fs::write(path, text.as_bytes());
+    security_log::record(
+        Event::GcodeWritten,
+        if result.is_ok() { Outcome::Ok } else { Outcome::Failed },
+        serde_json::json!({
+            "path": security_log::redact(path),
+            "bytes": text.len(),
+            "error": result.as_ref().err().map(|e| e.to_string()),
+        }),
+    );
+    result
 }
 
 /// One row of the pre-save plan: a step, the name its program will be written under, and
@@ -553,7 +580,7 @@ fn write_rows(snapshot: &AppCtx, rows: &[SaveRow], folder: &Path) -> SaveReport 
         };
         let name = row.file_name.trim().to_string();
         let path = folder.join(&name);
-        match fs::write(&path, program.text.as_bytes()) {
+        match write_program(&path, &program.text) {
             Ok(()) => report.written.push(name),
             Err(err) => {
                 log::error!("could not write {}: {err}", path.display());

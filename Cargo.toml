@@ -19,6 +19,10 @@ repository = "https://github.com/adarwoo/k2g"
 # and stay MIT — MIT is GPL-compatible, so they may be combined into this GPL work
 # while keeping their own notices (both carry them in-tree).
 license = "GPL-3.0-only"
+# The package ships two binaries — the application, and the small shim KiCad executes
+# (`src/bin/k2g-kicad-launcher.rs`). Without this, a bare `cargo run` cannot choose
+# between them and errors out. The shim is never run by hand.
+default-run = "k2g"
 
 [workspace]
 members = [
@@ -46,7 +50,6 @@ gtl = { path = "crates/gtl" }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 dioxus = { version = "0.7", features = ["desktop"] }
-clap = { version = "4", features = ["derive"] }
 rhai = "1"
 thiserror = "2"
 serde_json = "1"
@@ -66,9 +69,33 @@ tracing = "0.1.44"
 tracing-subscriber = { version="0.3.23", features = ["env-filter"] }
 chrono = "0.4"
 synoptic = "2"
+# The update check (`runtime::update`) — the application's only outbound request.
+# `rustls-tls` rather than the default `native-tls`: one TLS stack whose trust
+# decisions are the same on every platform, and no OpenSSL to track advisories for.
+# Blocking, because the check runs on its own thread rather than in an async runtime.
+# `reqwest` is already in the tree via `jsonschema`, so this adds no new supply chain.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+# Verifies the signature on a downloaded installer before k2g will run it. Pure Rust,
+# no key infrastructure beyond a keypair in a CI secret, and small enough to audit.
+# Without this the update channel would be a remote-code-execution path, which is
+# worse than shipping no updater at all (EU CRA Annex I Part II (7)).
+minisign-verify = "0.2"
+# Hands a URL to the system browser. Without it, clicking a link in the About screen
+# navigates the application's *own* WebView — the window has no browser chrome, so the
+# user is left stranded in a web page with no way back to k2g.
+open = "5"
 
 [dev-dependencies]
 tempfile = "3"
+# Signing half of the release-verification pair. Test-only: k2g never signs anything,
+# it only verifies (`minisign-verify`). Needed so the update tests can prove the two
+# assertions that matter — that a correctly signed artifact is accepted, and that a
+# single flipped byte is rejected — instead of only testing malformed input.
+minisign = "0.9"
 
 # Windows-only: the removable-media (USB key / SD card) detect + eject facility in
 # `src/runtime/removable/win32.rs`, which is the only `unsafe` in this crate.
@@ -98,6 +125,10 @@ windows-sys = { version = "0.61", features = [
     # FSCTL_LOCK_VOLUME / FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_MEDIA_REMOVAL /
     # IOCTL_STORAGE_EJECT_MEDIA, PREVENT_MEDIA_REMOVAL
     "Win32_System_Ioctl",
+    # CreateToolhelp32Snapshot / Process32FirstW / Process32NextW — used by
+    # `runtime::kicad_integration` to refuse editing kicad_common.json while KiCad
+    # is running, since KiCad rewrites that file wholesale when it exits.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # Windows-only: `build.rs` compiles the app icon into the `.exe` as a Windows

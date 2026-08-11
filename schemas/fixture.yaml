@@ -151,7 +151,7 @@ properties:
       Describes how this fixture's zero is identified on the target machine; for
       GCode controllers this is normally G54, G55, and so on
     type: string
-    default: ""
+    default: "G54"
 
   # ---------------------------------------------------------------------------
   # board_flip_axis

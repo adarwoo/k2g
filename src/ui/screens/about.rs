@@ -20,6 +20,37 @@ fn arex_logo_data_url() -> &'static str {
     })
 }
 
+/// Open a URL in the user's browser, rather than in k2g's own WebView.
+///
+/// A bare `href` here navigates the application window itself. That window has no
+/// address bar, no Back button and no tabs, so following a link replaced k2g with a
+/// web page the user could not leave — and sent an HTTPS request from the application
+/// process that nothing in the UI suggested was about to happen. Handing the URL to
+/// the system browser fixes both.
+fn open_externally(url: &str) {
+    if let Err(err) = open::that_detached(url) {
+        log::warn!("Could not open {url} in a browser: {err}");
+    }
+}
+
+/// A link that leaves the application.
+///
+/// `href` is deliberately absent: with one, a middle-click or a stray Enter still
+/// navigates the WebView, which is the behaviour this exists to prevent. It is a
+/// button styled as a link and announced as one.
+#[component]
+fn ExternalLink(url: String, label: String) -> Element {
+    rsx! {
+        button {
+            class: "about-link",
+            r#type: "button",
+            title: "Opens {url} in your browser",
+            onclick: move |_| open_externally(&url),
+            "{label}"
+        }
+    }
+}
+
 /// Splits `CARGO_PKG_AUTHORS`' first entry into `(name, email)`; the email is
 /// `None` when the `Name <email>` form is not used.
 fn primary_author() -> (&'static str, Option<&'static str>) {
@@ -62,7 +93,10 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                         dd {
                             "{author_name}"
                             if let Some(email) = author_email {
-                                a { class: "about-link", href: "mailto:{email}", " · {email}" }
+                                ExternalLink {
+                                    url: "mailto:{email}",
+                                    label: " · {email}",
+                                }
                             }
                         }
                     }
@@ -72,16 +106,27 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                     }
                     div { class: "about-fact",
                         dt { "Source" }
-                        dd { a { class: "about-link", href: "{repository}", "{repository}" } }
+                        dd {
+                            ExternalLink { url: "{repository}", label: "{repository}" }
+                        }
                     }
                     div { class: "about-fact",
                         dt { "Licence" }
                         dd {
                             "{license} — free software"
-                            a {
-                                class: "about-link",
-                                href: "https://www.gnu.org/licenses/gpl-3.0.html",
-                                " · read the licence",
+                            ExternalLink {
+                                url: "https://www.gnu.org/licenses/gpl-3.0.html",
+                                label: " · read the licence",
+                            }
+                        }
+                    }
+                    div { class: "about-fact",
+                        dt { "Security" }
+                        dd {
+                            "Report a vulnerability privately — see "
+                            ExternalLink {
+                                url: "{repository}/security/policy",
+                                label: "the disclosure policy",
                             }
                         }
                     }

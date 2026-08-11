@@ -47,29 +47,83 @@ primitives:
               "G58 G59. Extended offsets (G54.1 P...) are not available on GRBL.";
     }
     `{key}
+  # Header. Modal state first and it moves nothing: a program inherits G91/G95 from
+  # whatever ran before it. G94 matters most - left in G95 the F words become
+  # feed-per-revolution. Then units, then the work offset, and only then a move.
+  #
+  # No G53 anywhere in this profile. G53 means "machine coordinates", and a stock
+  # 3018 has no homing switches, so machine zero is wherever the controller happened
+  # to power on. A G53 retract on this machine is not a safe move, it is a move to an
+  # arbitrary height. The work-frame z_safe is the only clearance this machine has.
+  #
+  # (Fitted limit switches and enabled homing? Then set has_repeatable_home: true in
+  # the machine block above and a `G53 G0 Z0` retract becomes both available and
+  # better than the work-frame one - see the MASSO profiles for that shape.)
   program_begin: |
     `(Created by kicad2gcode from '{filename}' - {timestamp})
-    `G17 G40 G49 G80 G90
-    set_origin();
+    `G90 G94 G17 G40 G49 G80
     metric();
+    set_origin();
     `G0 Z{z_safe}
   move_rapid: "`G0 X{x} Y{y} Z{z}"
   cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
   spindle_start: |
     `S{rpm}
     `M03
+    `G4 P2.0
   spindle_stop: "`M05"
-  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  # Expanded, NOT a canned cycle. GRBL implements no G8x cycles at all - it accepts
+  # G80 and rejects G81 with "error:20 unsupported command", so the G81 this profile
+  # used to emit produced a program the machine would not run.
+  #
+  # The first hole lifts to the retract plane BEFORE it traverses. That is what makes
+  # the block safe to enter from an unknown Z, which is exactly the state a manual
+  # tool change leaves behind once the operator has re-zeroed against the work. Later
+  # holes need no lift: the previous hole's retract already left the tool there.
+  #
+  # Postcondition, matching what a G99/G81/G80 block would leave: the tool is at the
+  # retract plane and no cycle is modal (there never was one).
+  drill: |
+    if index == 0 {
+        `G0 Z{z_retract}
+    }
+    `G0 X{x} Y{y}
+    `G1 Z{z_bottom} F{z_feedrate}
+    `G0 Z{z_retract}
   cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
+  # Manual change. Retract first so the collet is reachable and so the operator is
+  # not working under a tool parked in the board, then stop - pause() emits a real
+  # M0, where the bare comment line this used to emit stopped nothing at all and let
+  # the program carry on drilling with the previous tool.
+  #
+  # Z5 is a literal because tool_change is given no z_safe. It is a work-frame height
+  # for this machine and should be kept at or above the fixture's Z safe.
+  #
+  # No M06: a stock GRBL build rejects it (error:20). The T word is accepted and
+  # records the intended tool. A sender that implements M06 tool-change macros can
+  # have it back on the line below.
   tool_change: |
     `M05
-    `{manual_message}
-    `T{slot} M06
+    `G0 Z5
+    `T{slot}
+    if manual_message != "" {
+        pause(manual_message);
+    }
+  # Retract before parking, and as its own block: a combined X/Y/Z move is a diagonal
+  # that drags the tool across the work while it lifts. M2 ends the program - without
+  # it the sender has no end-of-program marker.
   program_end: |
     `(end of file)
+    `M05
+    `G0 Z{z_safe}
+    `G0 X0 Y0
+    `M2
+  # M0 is an unconditional stop; M01 only stops when the sender's optional-stop
+  # switch is on, so a tool change hung off it can be silently skipped. The comment
+  # form carries the text - GRBL has no MSG word and would reject a bare one.
   pause: |
-    `MSG {text}
-    `M01
+    `(MSG, {text})
+    `M0
   comment: "`( {text} )"
   # `line_format` owns the WHOLE line — `{text}` must be emitted or the G-code is lost.
   # `index` counts non-blank lines from 0, so the first line is N10.

@@ -74,16 +74,32 @@ hardware. What is **not** done:
 | Engraving | Not started; planned for from the outset |
 | Tab nudging | Tabs land where the distribution algorithm puts them. The job stores per-tab offsets, but nothing sets them yet. |
 | Arc-preserving offsets | Outline offsets tessellate arcs |
-| KiCad plugin action | `plugin.json` is present but its entry point is not implemented — run k2g as a standalone application |
 
 ## Requirements
 
 - **Windows** — the UI renders in WebView2. Linux is not currently tested.
-- **KiCad 9 or later**, running, with a board open and the IPC API enabled
-  (*Preferences → Plugins → enable the KiCad API*), then restarted.
-- **Rust** (stable) to build.
+- **KiCad 9 or later**, running, with a board open and the IPC API enabled.
+  k2g can enable it for you — *Settings → KiCad integration*.
+- **Rust** (stable) to build from source.
 
-## Build and run
+## Install
+
+Take the latest [release](https://github.com/adarwoo/k2g/releases): an `.msi` or
+`-setup.exe` (per-user, no admin rights) or a portable `.zip`. Every artifact is
+signed with [minisign](https://jedisct1.github.io/minisign/) and can be verified
+against `assets/release-signing.pub`.
+
+Full instructions — connecting to KiCad, registering the toolbar button, updates,
+and how to remove everything — are in
+**[docs/install-and-security.md](docs/install-and-security.md)**.
+
+### As a KiCad plugin
+
+*Settings → KiCad integration → Register with KiCad* adds a **Create GCode** button to
+the PCB editor toolbar. Pressing it opens k2g with that board already loaded, since
+KiCad hands the plugin its API socket directly. Reversible from the same screen.
+
+### From source
 
 ```sh
 git clone https://github.com/adarwoo/k2g
@@ -91,13 +107,22 @@ cd k2g
 cargo run --release
 ```
 
-There is no installer yet — the build produces an ordinary executable.
+CMake is required — `nng-sys` builds the bundled nng C library with it.
 
 | Environment variable | Effect |
 | --- | --- |
 | `RUST_LOG=debug` | Verbose logging, also visible in the in-app **Logs** screen |
-| `KICAD_API_SOCKET` | Use an explicit KiCad IPC socket instead of discovering one |
+| `KICAD_API_SOCKET` | Use an explicit KiCad IPC socket instead of discovering one. Set automatically when KiCad launches k2g as a plugin. |
+| `KICAD_API_TOKEN` | API token, likewise set by KiCad when it launches the plugin |
 | `K2G_KICAD_SINGLE_INSTANCE=1` | Skip the scan for sibling KiCad instances |
+
+## Privacy and updates in one paragraph
+
+k2g makes exactly one network request — a once-a-day check of the GitHub releases
+API — and it can be switched off in Settings, after which k2g touches nothing but the
+local KiCad socket. There is no telemetry and no analytics. Updates are never
+installed without an explicit click, and every installer is signature-checked before
+it runs. Details in [PRIVACY.md](PRIVACY.md).
 
 **On multiple KiCad instances:** KiCad serves one fixed API socket, and running instances
 are not individually addressable over it. With several KiCads open, k2g talks to whichever
@@ -107,6 +132,9 @@ one owns the socket.
 
 | Document | What it covers |
 | --- | --- |
+| [Install and security](docs/install-and-security.md) | Installing, connecting to KiCad, updating, uninstalling — and the safety warning |
+| [Privacy](PRIVACY.md) | What is stored, what leaves the machine (almost nothing) |
+| [Security policy](SECURITY.md) | Reporting a vulnerability; what is supported |
 | [Specification](schemas/docs/Specification.md) | What the application is meant to do |
 | [Architecture](schemas/docs/architecture.md) | How it is put together |
 | [GCode template language](schemas/docs/gcode-template-language.md) | Writing CNC profile templates |

@@ -3,8 +3,10 @@
 # They use a TinyG motion controller and have some specific G-code requirements and limitations.
 #
 # Important notes for Bantam Tools:
-#  - The TinyG controller does not support canned cycles like G81. The drill
-#    primitive still emits G81 and must be expanded by the application when used.
+#  - The TinyG controller does not support canned cycles like G81, so the `drill`
+#    primitive below emits the cycle expanded into plain G0/G1 moves. It used to
+#    emit G81 with a note saying the application would expand it; the application
+#    never did, and the programs this profile produced were not runnable.
 #  - G54 is reserved for the machine's own reference, so the first usable work
 #    coordinate system is G55. `set_origin` below therefore refuses G54 outright —
 #    a thing this machine could not express while the fixture held an ordinal and
@@ -55,9 +57,18 @@ primitives:
               "(G54.1 P...) are not available on TinyG.";
     }
     `{key}
+  # Header. Modal state first and it moves nothing - a program inherits G91/G95 from
+  # whatever ran before it. This profile already had G94, which is the one that most
+  # matters: left in G95 the F words become feed-per-revolution.
+  #
+  # No G53 in this profile. The machine block does not declare has_repeatable_home,
+  # so k2g treats machine coordinates as not meaningful here and the work-frame
+  # z_safe is the only clearance available. If this machine homes reliably, set
+  # has_repeatable_home: true above and prefer a `G53 G0 Z0` retract - see the MASSO
+  # profiles for that shape.
   program_begin: |
     `(Created by kicad2gcode from '{filename}' - {timestamp})
-    `G17 G90 G40 G49 G80 G94
+    `G90 G94 G17 G40 G49 G80
     metric();
     set_origin();
     `G0 Z{z_safe}
@@ -66,19 +77,53 @@ primitives:
   spindle_start: |
     `S{rpm}
     `M3
+    `G4 P2.0
   spindle_stop: "`M5"
-  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  # Expanded, not a canned cycle - TinyG implements no G8x (see the note at the top).
+  #
+  # The first hole lifts to the retract plane BEFORE it traverses, which is what
+  # makes the block safe to enter from an unknown Z - the state a manual tool change
+  # leaves once the operator has re-zeroed. Later holes are already at that plane
+  # because the previous hole's retract put them there.
+  #
+  # Postcondition, matching a G99/G81/G80 block: tool at the retract plane, no modal
+  # cycle live.
+  drill: |
+    if index == 0 {
+        `G0 Z{z_retract}
+    }
+    `G0 X{x} Y{y}
+    `G1 Z{z_bottom} F{z_feedrate}
+    `G0 Z{z_retract}
   cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
+  # Manual change. Retract first so the collet is reachable and the operator is not
+  # working under a tool parked in the board, then stop - pause() emits a real M0,
+  # where the bare comment line this used to emit stopped nothing and let the program
+  # continue with the previous tool still fitted.
+  #
+  # Z5 is a literal because tool_change is given no z_safe. It is a work-frame height
+  # for this machine; keep it at or above the fixture's Z safe.
   tool_change: |
     `M5
-    `{manual_message}
-    `T{slot} M6
+    `G0 Z5
+    `T{slot}
+    if manual_message != "" {
+        pause(manual_message);
+    }
+  # Retract before parking, and as its own block. The single `G0 X0 Y0 Z{z_safe}`
+  # this used to emit is a diagonal: it lifts and traverses at once, dragging the
+  # tool across the work on the way out.
   program_end: |
     `(end of file)
-    `G0 X0 Y0 Z{z_safe}
+    `M5
+    `G0 Z{z_safe}
+    `G0 X0 Y0
+    `M2
+  # M0 is unconditional; M1 only stops when the optional-stop switch is on, so a tool
+  # change hung off it can be silently skipped. The comment form carries the text.
   pause: |
-    `MSG {text}
-    `M1
+    `(MSG, {text})
+    `M0
   comment: "`( {text} )"
   # `line_format` owns the WHOLE line — `{text}` must be emitted or the G-code is lost.
   # `index` counts non-blank lines from 0, so the first line is N10.

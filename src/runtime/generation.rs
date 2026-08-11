@@ -387,7 +387,13 @@ fn publish_failure(message: &str) {
 /// Bump the UI-wake channel so the front-end re-syncs its ctx snapshot. Called
 /// after every publish (the worker mutates the ctx off the UI thread, which the
 /// UI cannot observe on its own).
-fn wake_ui() {
+/// Nudge the UI to re-read the global context.
+///
+/// Public because the generation worker is no longer the only background thread that
+/// publishes into the context — the update check and its installer do too, and a
+/// result that lands without a wake sits invisible until the user happens to click
+/// something.
+pub fn wake_ui() {
     if let Some(sender) = UI_WAKE.get() {
         sender.send_modify(|counter| *counter = counter.wrapping_add(1));
     }

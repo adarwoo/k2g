@@ -121,6 +121,59 @@ properties:
     type: boolean
     default: false
 
+  # --- Updates and security recording -------------------------------------
+  # Both switches below default to `true` and are user-disableable. That
+  # direction is deliberate and is what EU CRA Annex I (2)(c) and (2)(l) ask
+  # for: the protective behaviour is the default, and the user gets a clear
+  # opt-out rather than an opt-in. Flipping either default would quietly
+  # reverse that, so treat them as load-bearing rather than as taste.
+
+  update_check_enabled:
+    description: |
+      Whether k2g asks GitHub, at most once a day, whether a newer release exists.
+      This is the application's only outbound network request; disabling it makes
+      k2g fully offline. Note that performing the check discloses the machine's IP
+      address and the k2g User-Agent to GitHub — see PRIVACY.md. Nothing is
+      downloaded or installed without an explicit confirmation.
+    type: boolean
+    default: true
+
+  update_last_check:
+    description: |
+      RFC 3339 UTC timestamp of the last completed update check, used to hold the
+      check to once per 24 hours. Null until the first check runs. A check that
+      fails (offline, rate-limited) still stamps this, so a machine with no network
+      retries daily rather than on every launch.
+    type: [string, "null"]
+    default: null
+
+  update_skipped_version:
+    description: |
+      A release the user chose to skip, as a bare `X.Y.Z`. That version alone stops
+      being offered; a later one is announced normally. Null when nothing is skipped.
+    type: [string, "null"]
+    default: null
+
+  update_postponed_until:
+    description: |
+      RFC 3339 UTC timestamp before which no update banner is shown, set by "Remind
+      me later". Distinct from `update_skipped_version`: postponing silences every
+      version for a while, skipping silences one version forever.
+    type: [string, "null"]
+    default: null
+
+  security_log_enabled:
+    description: |
+      Whether security-relevant events are appended to `logs/security.jsonl` — update
+      checks and installs, opt-out changes, KiCad plugin registration and API-setting
+      edits, config rejections, G-code writes, resets and data deletion. Separate from
+      the diagnostic log, which is in-memory only and never written to disk. Home
+      directory paths are redacted to `~` before writing, so the file holds no personal
+      data. Disabling it stops writing immediately; existing files can then be deleted
+      from the Settings screen.
+    type: boolean
+    default: true
+
 required:
   [
     units,

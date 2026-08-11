@@ -9,10 +9,34 @@ pub struct SchemaValidator {
     compiled: Validator,
 }
 
+/// A retriever that fetches nothing.
+///
+/// Catalogs are user-editable YAML, so a `$ref` in one is untrusted input. Left with
+/// `jsonschema`'s default retriever, `$ref: "https://attacker.example/x"` in a catalog
+/// would make k2g issue an arbitrary HTTPS request while validating it. Every schema
+/// this application needs is registered as a resource below; anything else is a
+/// validation error naming the URI. EU CRA Annex I (2)(j).
+struct NoRemoteRefs;
+
+impl jsonschema::Retrieve for NoRemoteRefs {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<&str>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!(
+            "refusing to fetch the external schema reference '{uri}'. k2g validates \
+             against its own bundled schemas only and never retrieves one over the \
+             network."
+        )
+        .into())
+    }
+}
+
 impl SchemaValidator {
     /// Compile a JSON Schema for reuse
     pub fn new(schema: &Value, schema_dir: &Path) -> Result<Self, ConfigError> {
         let mut opts = options();
+        opts.with_retriever(NoRemoteRefs);
 
         // Register all local schemas so refs like `units.yaml#/$defs/...` and
         // `json-schema:///units.yaml#/$defs/...` resolve without external retrieval.

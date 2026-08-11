@@ -14,6 +14,7 @@ mod profiles_common;
 mod job;
 mod machining;
 mod save_program;
+mod settings;
 mod shell;
 mod stock;
 mod toolset;
@@ -25,7 +26,10 @@ use fixture::FixtureProfilesScreen;
 use logs::LogsScreen;
 use job::{JobScreen, JobViewPanel};
 use machining::MachiningProfilesScreen;
-use shell::{AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar};
+use settings::SettingsScreen;
+use shell::{
+    AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar, UpdateBanner,
+};
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;
 
@@ -82,6 +86,8 @@ pub fn AppRoot() -> Element {
 
         div { class: if snapshot.theme == Theme::Dark { "app-shell shell-theme-dark" } else { "app-shell shell-theme-light" },
             AppTopBar { state }
+
+            UpdateBanner { state }
 
             DiagnosticsBanner {
                 errors: snapshot.errors.clone(),
@@ -159,6 +165,9 @@ pub fn AppRoot() -> Element {
                                 },
                                 Screen::Catalog => rsx! {
                                     CatalogScreen { state }
+                                },
+                                Screen::Settings => rsx! {
+                                    SettingsScreen { state }
                                 },
                                 Screen::Logs => rsx! {
                                     LogsScreen { state }

@@ -1106,19 +1106,233 @@ mod tests {
             // is the one that names its step, so the pin also covers the emit-raw run
             // that assembles the banner from four separate fragments — the place a stray
             // newline or a lost space would otherwise hide.
+            //
+            // The order is the safety contract and is asserted as such:
+            //   1. modal state, moving nothing (G94 included, so an inherited G95
+            //      cannot turn every F word into feed-per-revolution)
+            //   2. units, before any coordinate
+            //   3. only then the retract, in MACHINE coordinates and with an
+            //      explicit G0 — `G53` is non-modal and supplies no motion, so a
+            //      bare `G53 Z0` after a program that left G1 modal is a feed move
+            //   4. the work offset last; nothing before it needed one
+            // and no trailing descent to a work-frame height: G53 Z0 already parked
+            // the tool at the top of travel, which is clear of everything.
             if name == "masso_g3_with_atc" {
                 assert_eq!(
                     header,
                     "(Created by K2G from 'demo' - step 1 of 2: Drill PTH - \
                      2026-01-01 00:00:00)\n\
                      (Target: MASSO G3 firmware 5.13)\n\
-                     G53 Z0\n\
-                     G17 G40 G80 G90\n\
+                     G90 G94 G17 G40 G80\n\
                      G21\n\
-                     G55\n\
-                     G0 Z20\n"
+                     G53 G0 Z0\n\
+                     G55\n"
                 );
             }
+        }
+    }
+
+    /// The machine-state invariants every shipped profile must hold, checked against the
+    /// text each one actually emits.
+    ///
+    /// This is the test that was missing. A build guard already compiled every shipped
+    /// template, and every template compiled — while three of the four emitted programs
+    /// that were unsafe or unrunnable, because nothing looked at the *output*. One of them
+    /// crashed a machine: `M06` on a controller with an automatic tool setter ends with
+    /// the spindle over the setter, and the next drill cycle's R-plane rapid descended
+    /// into it.
+    ///
+    /// The assertions are deliberately about machine state rather than exact text, so a
+    /// profile is free to spell things its own way — but not free to leave the tool
+    /// somewhere unknown.
+    #[test]
+    fn every_shipped_profile_holds_the_machine_state_invariants() {
+        let primitive = |yaml: &str, name: &str| -> String {
+            let doc: serde_yaml::Value = serde_yaml::from_str(yaml).expect("template parses");
+            doc["primitives"][name]
+                .as_str()
+                .unwrap_or_else(|| panic!("the profile declares no '{name}' primitive"))
+                .to_string()
+        };
+
+        // Detecting a move is fiddlier than it looks, and both traps below were hit
+        // while writing this test:
+        //
+        //   - A substring test does not survive contact with G-code. "G17 G40 G80"
+        //     contains "G1", so `contains("G1")` reads the safety line as a feed move.
+        //   - Whole-word matching alone is not enough either: the MASSO banner reads
+        //     "(Target: MASSO G3 firmware 5.13)", and "G3" is the machine's name here,
+        //     not an arc.
+        //
+        // So a move is a motion word AND an axis word. Comments and modal-state lines
+        // have neither.
+        let has_axis = |line: &str| line.contains('X') || line.contains('Y') || line.contains('Z');
+        let motion_word = |line: &str, words: &[&str]| {
+            line.split_whitespace().any(|word| words.contains(&word))
+        };
+        let is_motion = |line: &str| {
+            motion_word(line, &["G0", "G00", "G1", "G01", "G2", "G02", "G3", "G03"]) && has_axis(line)
+        };
+        let is_rapid = |line: &str| motion_word(line, &["G0", "G00"]) && has_axis(line);
+
+        for (name, yaml, homes) in [
+            ("masso_g3_with_atc", MASSO_ATC_YAML, true),
+            ("masso_g3_no_atc", MASSO_NO_ATC_YAML, true),
+            ("genmitsu_3018", GENMITSU_YAML, false),
+            ("batam", BATAM_YAML, false),
+        ] {
+            let coder = Coder::with_program_primitives(&ProgramPrimitives {
+                set_unit: &primitive(yaml, "set_unit"),
+                set_origin: &primitive(yaml, "set_origin"),
+                origin_reference: "G55",
+                pause: &primitive(yaml, "pause"),
+                ..Default::default()
+            })
+            .unwrap_or_else(|error| panic!("{name}: {}", error.message()));
+
+            // ---- program_begin ------------------------------------------------------
+            let mut scope = Scope::new();
+            scope.push("filename", "demo.kicad_pcb".to_string());
+            scope.push("timestamp", "2026-01-01 00:00:00".to_string());
+            scope.push("z_safe", Length::from_mm(20.0));
+            scope.push("origin_reference", "G55".to_string());
+            scope.push("steps", crate::gcode::step_data::to_array(&[]));
+            scope.push("step_index", 0_i64);
+            let header = coder
+                .render("program_begin", &primitive(yaml, "program_begin"), &mut scope)
+                .unwrap_or_else(|e| panic!("{name} header: {e}"));
+
+            // G94 pins feed-per-minute. Inherited G95 turns every F into feed-per-rev.
+            assert!(
+                header.contains("G94"),
+                "{name}: the header must select feed-per-minute:\n{header}"
+            );
+            // Units before any coordinate is emitted.
+            let unit_line = header
+                .lines()
+                .position(|l| l.split_whitespace().any(|w| w == "G21" || w == "G20"));
+            let first_move = header.lines().position(is_motion);
+            if let (Some(unit), Some(mv)) = (unit_line, first_move) {
+                assert!(unit < mv, "{name}: units must precede the first move:\n{header}");
+            }
+
+            // ---- tool_change --------------------------------------------------------
+            let mut scope = Scope::new();
+            scope.push("manual_message", "(load tool T2)".to_string());
+            scope.push("slot", 2_i64);
+            scope.push("rpm", RotationalSpeed::from_rpm(24000.0));
+            let change = coder
+                .render("tool_change", &primitive(yaml, "tool_change"), &mut scope)
+                .unwrap_or_else(|e| panic!("{name} tool_change: {e}"));
+
+            // A modal cycle survives a tool change, and any macro motion during the
+            // change would then be read as another hole. Only asked of a profile whose
+            // drill actually opens one — GRBL and TinyG have no canned cycles, and a
+            // G80 there would be cargo-cult G-code.
+            let uses_canned_cycle = primitive(yaml, "drill").contains("G81");
+            if uses_canned_cycle {
+                assert!(
+                    change.contains("G80"),
+                    "{name}: tool_change must cancel the modal cycle before changing \
+                     tool — G81 survives M06, so macro motion during the change is read \
+                     as another hole:\n{change}"
+                );
+            }
+            // And it must end at a known, clear height — the crash.
+            let last_move = change
+                .lines()
+                .rev()
+                .find(|l| is_rapid(l))
+                .unwrap_or_else(|| panic!("{name}: tool_change makes no retract:\n{change}"));
+            assert!(
+                last_move.contains('Z'),
+                "{name}: tool_change must end with a Z retract:\n{change}"
+            );
+            if homes {
+                assert!(
+                    last_move.contains("G53"),
+                    "{name} homes, so its tool_change retract must be in machine \
+                     coordinates — a work-frame Z resolves against an offset M06 may \
+                     have changed:\n{change}"
+                );
+            } else {
+                assert!(
+                    !change.contains("G53"),
+                    "{name} does not declare has_repeatable_home, so machine \
+                     coordinates are wherever it powered on. G53 here is not a safe \
+                     move, it is an arbitrary one:\n{change}"
+                );
+            }
+
+            // ---- drill --------------------------------------------------------------
+            let render_hole = |index: i64, count: i64| {
+                let mut scope = Scope::new();
+                scope.push("x", Length::from_mm(10.0));
+                scope.push("y", Length::from_mm(20.0));
+                scope.push("z_bottom", Length::from_mm(-2.4));
+                scope.push("z_retract", Length::from_mm(1.0));
+                scope.push("z_feedrate", FeedRate::from_mm_per_min(300.0));
+                scope.push("index", index);
+                scope.push("count", count);
+                coder
+                    .render("drill", &primitive(yaml, "drill"), &mut scope)
+                    .unwrap_or_else(|e| panic!("{name} drill: {e}"))
+            };
+            let first = render_hole(0, 3);
+            let last = render_hole(2, 3);
+
+            // Whichever form the profile uses, the block must be safe to enter from an
+            // unknown Z and must not leave a cycle live.
+            if first.contains("G81") {
+                assert!(
+                    first.contains("G99"),
+                    "{name}: a canned cycle must select R-plane return explicitly — \
+                     inherited G98 climbs back to the entry level after every hole, and \
+                     after a tool change that level is the top of travel:\n{first}"
+                );
+                assert!(
+                    last.contains("G80"),
+                    "{name}: the last hole must cancel the cycle:\n{last}"
+                );
+            } else {
+                // Expanded form (no canned cycles on this controller): the first hole
+                // has to lift before it traverses.
+                let lift = first.lines().position(|l| is_rapid(l) && l.contains('Z'));
+                let traverse = first.lines().position(|l| is_rapid(l) && l.contains('X'));
+                assert!(
+                    matches!((lift, traverse), (Some(l), Some(t)) if l < t),
+                    "{name}: the first hole must retract before it traverses, so the \
+                     block is safe to enter from an unknown Z:\n{first}"
+                );
+            }
+
+            // ---- program_end --------------------------------------------------------
+            let mut scope = Scope::new();
+            scope.push("filename", "demo.kicad_pcb".to_string());
+            scope.push("timestamp", "2026-01-01 00:00:00".to_string());
+            scope.push("z_safe", Length::from_mm(20.0));
+            scope.push("origin_reference", "G55".to_string());
+            scope.push("steps", crate::gcode::step_data::to_array(&[]));
+            scope.push("step_index", 0_i64);
+            let footer = coder
+                .render("program_end", &primitive(yaml, "program_end"), &mut scope)
+                .unwrap_or_else(|e| panic!("{name} program_end: {e}"));
+
+            // Z lifts before X/Y, and in its own block: a combined move is a diagonal
+            // that drags the tool across the work on the way out.
+            let park_z = footer.lines().position(|l| l.contains('Z'));
+            let park_xy = footer.lines().position(|l| l.contains('X') || l.contains('Y'));
+            if let (Some(z), Some(xy)) = (park_z, park_xy) {
+                assert!(z < xy, "{name}: the footer must lift before parking:\n{footer}");
+                assert!(
+                    !footer.lines().nth(z).unwrap().contains('X'),
+                    "{name}: the footer's retract must not also traverse:\n{footer}"
+                );
+            }
+            assert!(
+                footer.contains("M2") || footer.contains("M30"),
+                "{name}: the program must end with an end-of-program word:\n{footer}"
+            );
         }
     }
 

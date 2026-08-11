@@ -10,34 +10,74 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-
+  # Windows first in the list because it is the platform k2g actually ships on:
+  # the removable-media support, the KiCad process check and the embedded exe
+  # resource are all Windows-only code paths that the Linux job never compiles.
+  windows:
+    runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          pkg-config \
-          libglib2.0-dev
-    - name: Install system dependencies for Dioxus build
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          pkg-config \
-          libglib2.0-dev \
-          libgtk-3-dev \
-          libwebkit2gtk-4.1-dev \
-          libsoup-3.0-dev \
-          libjavascriptcoregtk-4.1-dev \
-          libssl-dev \
-          libxdo-dev          
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `nng-sys` builds the bundled nng C library with CMake. It is preinstalled on
+      # windows-latest, but a build that cannot find it fails deep inside a build
+      # script with "is `cmake` not installed?", so the version is printed here to
+      # make that immediate if the image ever changes.
+      - name: Check CMake is available
+        run: cmake --version
+      - run: cargo build --workspace --verbose
+      - run: cargo test --workspace --verbose
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libglib2.0-dev \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libssl-dev \
+            libxdo-dev
+      - run: cargo build --workspace --verbose
+      - run: cargo test --workspace --verbose
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake pkg-config libglib2.0-dev libgtk-3-dev \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+            libssl-dev libxdo-dev
+      - run: cargo fmt --check
+        continue-on-error: true
+
+      # Reporting, not gating.
+      #
+      # The workspace carries around two dozen pre-existing clippy warnings, several
+      # of them in the vendored `third_party/kicad-ipc-rs` fork that is deliberately
+      # kept close to upstream. Turning on `-D warnings` today would mean a red build
+      # on every PR for reasons unrelated to that PR, which trains people to ignore
+      # it — the exact opposite of what a lint gate is for.
+      #
+      # Clear the existing warnings, then make this gating by deleting
+      # `continue-on-error` and appending `-- -D warnings`.
+      - run: cargo clippy --workspace --all-targets
+        continue-on-error: true

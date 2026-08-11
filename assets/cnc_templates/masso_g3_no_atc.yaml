@@ -59,31 +59,83 @@ primitives:
     } else {
         `{key}
     }
+  # Header.
+  #
+  # Modal state first and it moves nothing - a program inherits G91/G95/a live G81
+  # from whatever ran before it, and every line below assumes those are known. G94
+  # especially: left in G95 the F words become feed-per-revolution.
+  #
+  # Then units, then the retract, then the work offset. The retract is in MACHINE
+  # coordinates because at this point the controller still carries the previous
+  # job's tool and offset, so a work-frame Z resolves against state this program
+  # did not set. G53 carries an explicit G0: it is non-modal and supplies no motion
+  # of its own, so after a program that left G1 modal a bare `G53 Z0` would be a
+  # feed move at whatever F was last commanded.
+  #
+  # No G49: this machine measures at M06 (tool_length_measurement: auto_setter), so
+  # cancelling tool-length compensation fights the control instead of clearing
+  # inherited state.
   program_begin: |
     `(Created by kicad2gcode from '{filename}' - {timestamp})
-    `G17 G40 G49 G80 G90
-    set_origin();
+    `G90 G94 G17 G40 G80
     metric();
-    `G0 Z{z_safe}
+    `G53 G0 Z0
+    set_origin();
   move_rapid: "`G0 X{x} Y{y} Z{z}"
   cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
+  # The dwell lets the spindle reach speed before the first plunge. Set it from the
+  # VFD's measured ramp time.
   spindle_start: |
     `S{rpm}
     `M3
+    `G4 P2.0
   spindle_stop: "`M5"
-  drill: "`G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}"
+  # Modal canned cycle: G81 with full words on the first hole, bare coordinates for
+  # the rest, G80 after the last. G99 is explicit - inherited G98 would return the
+  # tool to the level the cycle was entered at after every hole, and after a tool
+  # change that level is the top of machine travel.
+  drill: |
+    if index == 0 {
+        `G99 G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+    } else {
+        `X{x} Y{y}
+    }
+    if index == count - 1 {
+        `G80
+    }
   cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
+  # Manual change on a machine that still has an automatic tool setter, so M06 runs
+  # the measuring macro and ends with the spindle over the setter. The G53 retract
+  # after it is what stops the next cycle's R-plane rapid descending into it.
+  #
+  # pause() rather than a bare comment line: the operator has to actually be stopped
+  # to change the tool, and a `(...)` line stops nothing.
+  #
+  # G80 before the change - G81 is modal and survives M06, so macro motion would
+  # otherwise be read as another hole.
   tool_change: |
     `M5
-    `{manual_message}
+    `G80
+    if manual_message != "" {
+        pause(manual_message);
+    }
     `T{slot} M6
+    `G53 G0 Z0
+  # Z retracts before X/Y and as its own block: a combined move would be a diagonal
+  # that drags the tool across the work while lifting. G53 so parking does not depend
+  # on the work offset, and M30 last because nothing after it executes.
   program_end: |
     `(end of file)
-    `G0 Z{z_safe}
-    `G0 X0 Y0
+    `M5
+    `G80
+    `G53 G0 Z0
+    `G53 G0 X0 Y0
+    `M30
+  # M00 rather than M01: an unconditional stop, so a tool change does not depend on
+  # the operator having the optional-stop switch enabled.
   pause: |
-    `MSG {text}
-    `M1
+    `(MSG, {text})
+    `M0
   comment: "`( {text} )"
   # `line_format` owns the WHOLE line: it is handed `index` (from 0) and `text`, and
   # emits the line that replaces it. Emitting nothing would drop the line entirely.

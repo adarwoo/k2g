@@ -162,6 +162,27 @@ pub struct AppState {
     pub window_height: i64,
     /// Whether the window was maximized when it was last closed.
     pub window_maximized: bool,
+    /// Whether k2g may ask GitHub for a newer release. On by default with a user
+    /// opt-out, per EU CRA Annex I (2)(c). This gates the application's *only*
+    /// outbound network request — with it off, k2g touches nothing but the local
+    /// KiCad socket.
+    pub update_check_enabled: bool,
+    /// RFC 3339 UTC stamp of the last completed check, holding it to once a day.
+    pub update_last_check: Option<String>,
+    /// A bare `X.Y.Z` the user chose never to be offered again.
+    pub update_skipped_version: Option<String>,
+    /// RFC 3339 UTC instant before which no update banner appears ("remind me later").
+    pub update_postponed_until: Option<String>,
+    /// Whether security-relevant events are appended to `logs/security.jsonl`. On by
+    /// default with a user opt-out, per EU CRA Annex I (2)(l). Unrelated to the
+    /// in-memory diagnostic log, which is never persisted either way.
+    pub security_log_enabled: bool,
+    /// A newer release the background check found, if any and if not suppressed.
+    /// In-memory only — it is re-derived from GitHub, never persisted.
+    pub available_update: Option<update::AvailableUpdate>,
+    /// An install is downloading and verifying. Holds the banner's buttons shut so a
+    /// second click cannot start a second download over the first.
+    pub update_installing: bool,
 }
 
 include!("state.rs");
@@ -224,6 +245,22 @@ pub use log_capture::CaptureLayer;
 /// Windows-only in substance; the other platforms get a stub with the same API, so the
 /// UI needs no `cfg`.
 pub mod removable;
+
+/// Registering k2g as a KiCad IPC plugin, and enabling KiCad's API server. Both are
+/// user-initiated: nothing here touches KiCad's installation without being asked.
+pub mod kicad_integration;
+
+/// The update check — k2g's only outbound network request, off entirely when the
+/// user opts out. Downloads are signature-verified before they are ever executed.
+pub mod update;
+
+/// The persisted record of security-relevant events (EU CRA Annex I (2)(l)). Local
+/// only, opt-out, and path-redacted so it carries no personal data.
+pub mod security_log;
+
+/// Resetting k2g to its shipped state, and deleting every trace of it
+/// (EU CRA Annex I (2)(b) and (2)(m)).
+pub mod data_lifecycle;
 
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
@@ -329,13 +366,24 @@ fn default_global_settings() -> Value {
         "window_width": DEFAULT_WINDOW_WIDTH,
         "window_height": DEFAULT_WINDOW_HEIGHT,
         "window_maximized": false,
+        "update_check_enabled": true,
+        "update_last_check": Value::Null,
+        "update_skipped_version": Value::Null,
+        "update_postponed_until": Value::Null,
+        "security_log_enabled": true,
     })
 }
 
 pub fn initialize_ctx(boot: UiLaunchData) {
     // AppData is the single reader/writer of every persisted realm; initialize it
     // first so the launch-time hydrate can source its state from the live store.
-    for problem in crate::data::init_appdata() {
+    //
+    // The problems are held rather than recorded here: the security log must not
+    // write anything before the user's opt-out has been read, and the opt-out lives
+    // in the settings document this call is what loads. They are recorded a few lines
+    // below, once that preference is known.
+    let load_problems = crate::data::init_appdata();
+    for problem in &load_problems {
         warn!("AppData load: {problem}");
     }
 
@@ -345,6 +393,32 @@ pub fn initialize_ctx(boot: UiLaunchData) {
 
     let _ = GLOBAL_CTX.set(RwLock::new(AppCtx::from_launch(&boot)));
 
+    // Bring the security-log writer in line with the user's stored preference before
+    // anything can try to write, then open the record with the run that is starting.
+    // It defaults to on, so a first run is recorded from its first line.
+    let recording = with_ctx(|ctx| ctx.security_log_enabled);
+    security_log::set_enabled(recording);
+    security_log::record_ok(
+        security_log::Event::AppStarted,
+        json!({
+            // Whether KiCad handed us the socket tells the record which way this run
+            // was started — from the plugin button, or on its own.
+            "launched_by_kicad": std::env::var_os("KICAD_API_SOCKET").is_some(),
+        }),
+    );
+
+    // A configuration or catalog file that failed validation was not loaded, so the
+    // application is running on something other than what is on disk. That is worth
+    // being able to find later — it is the difference between "k2g ignored my profile"
+    // and "my profile is wrong".
+    for problem in &load_problems {
+        security_log::record(
+            security_log::Event::ConfigRejected,
+            security_log::Outcome::Failed,
+            json!({ "problem": security_log::redact_str(&problem.to_string()) }),
+        );
+    }
+
     // Start the background generation worker now that the global ctx exists (the
     // worker publishes results into it). See `docs/gcode-generation.md` §6.
     start_generation_service();
@@ -353,6 +427,11 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     // channel the watcher bumps. Started earlier, its first scan's wake would silently
     // no-op and an already-inserted stick would stay invisible until the second tick.
     removable::start_removable_media_watcher();
+
+    // Ask GitHub whether a newer release exists — at most once a day, and not at all
+    // when the user has opted out. Off the UI thread, and silent unless it finds
+    // something (EU CRA Annex I (2)(c)).
+    update::start_update_check();
 
     // If the launched job is already ready, generate once now — the mutation-driven
     // regeneration trigger never fires at launch, so without this the Code view would

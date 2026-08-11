@@ -668,6 +668,43 @@ body {
     gap: 2px;
 }
 
+/* An available update is news, not a fault, so it uses the accent colour rather
+   than the error/warning palette the diagnostics banner shares. It wraps because
+   it carries four actions and must stay usable in a narrow window. */
+.update-banner {
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.update-banner-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: currentColor;
+    box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.update-banner-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* Every action stays legible while a download runs — they are disabled, not
+   hidden, so the banner does not reflow under the pointer mid-click. */
+.update-banner-actions .text-button:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
 .diag-banner-title,
 .diag-detail-title {
     font-size: 12px;
@@ -4147,9 +4184,18 @@ summary {
     word-break: break-word;
 }
 
+/* A <button>, not an <a>: an href would still let a middle-click or a keyboard
+   Enter navigate the application's own WebView, which is the whole thing these
+   links exist to avoid. Stripped back to look like the link it behaves as. */
 .about-link {
+    appearance: none;
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
     color: var(--accent);
     text-decoration: none;
+    cursor: pointer;
 }
 
 .about-link:hover {
@@ -4211,6 +4257,243 @@ summary {
     display: flex;
     flex-direction: column;
     gap: 4px;
+    color: var(--text);
+    font-size: 13px;
+}
+
+/* --------------------------------------------------------------- Settings --- */
+
+.settings-screen {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 18px 20px 28px;
+    overflow: auto;
+    min-height: 0;
+}
+
+.settings-header {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+}
+
+.settings-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.settings-card {
+    /* Capped rather than full-bleed: every row here is explanatory prose, and a
+       measure much past this gets hard to track back to the start of the line. */
+    max-width: 760px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 20px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+}
+
+.settings-card-title {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-subtle);
+}
+
+.settings-toggle-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.settings-toggle {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.settings-toggle input[type="checkbox"] {
+    /* Sized up from the browser default: this is a consent control, and a 13px
+       checkbox next to a paragraph of explanation reads as an afterthought. */
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex: none;
+}
+
+.settings-toggle-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.settings-toggle-detail {
+    /* Indented to the label's text, not the checkbox, so the explanation reads as
+       belonging to the switch rather than as a separate paragraph. */
+    margin: 0 0 0 26px;
+    max-width: 62ch;
+    color: var(--text-subtle);
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.settings-card-intro {
+    margin: 0;
+    max-width: 66ch;
+    color: var(--text-subtle);
+    font-size: 12.5px;
+    line-height: 1.55;
+}
+
+.settings-empty {
+    margin: 0;
+    color: var(--text-subtle);
+    font-size: 12.5px;
+    font-style: italic;
+}
+
+.kicad-install {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.kicad-install-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.kicad-install-title {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text);
+}
+
+/* These badges carry meaning, so they are never colour-only: each also spells its
+   state out in the label ("API on" / "API off" / "plugin stale"). */
+.kicad-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    color: var(--text-subtle);
+}
+
+.kicad-badge.on {
+    border-color: color-mix(in srgb, var(--ok, #2e9e5b) 45%, var(--border));
+    color: var(--ok, #2e9e5b);
+}
+
+.kicad-badge.warn {
+    border-color: color-mix(in srgb, var(--warn, #c98a12) 45%, var(--border));
+    color: var(--warn, #c98a12);
+}
+
+.kicad-install-note {
+    margin: 0;
+    max-width: 66ch;
+    color: var(--text-subtle);
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.kicad-install-path {
+    margin: 0;
+    font-size: 11.5px;
+    color: var(--text-subtle);
+    word-break: break-all;
+}
+
+.kicad-install-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* The destructive card is marked out by a warm border rather than a red fill: the
+   actions inside are legitimate and occasionally necessary, so the card should read
+   as "pay attention", not as an error state. */
+.settings-card-danger {
+    border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+
+.settings-danger-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+
+.settings-danger-copy {
+    flex: 1 1 320px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 14px;
+    color: var(--text);
+}
+
+/* The detail paragraph is reused from the toggle rows, which indent to clear a
+   checkbox. There is none here. */
+.settings-danger-copy .settings-toggle-detail {
+    margin-left: 0;
+}
+
+.text-button.danger {
+    color: var(--err);
+    border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+    flex: none;
+}
+
+.text-button.danger:hover {
+    background: color-mix(in srgb, var(--err) 12%, transparent);
+    border-color: var(--err);
+}
+
+.settings-facts {
+    margin: 0 0 0 26px;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 8px 18px;
+    align-items: center;
+}
+
+.settings-fact {
+    display: contents;
+}
+
+.settings-fact dt {
+    color: var(--text-subtle);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.settings-fact dd {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
     color: var(--text);
     font-size: 13px;
 }

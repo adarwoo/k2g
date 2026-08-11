@@ -12,8 +12,20 @@
 //! A missing or unreadable icon is cosmetic, so every failure below degrades to a
 //! `cargo:warning` and the default icon — it never breaks the build.
 
+/// Version parsing, shared verbatim with the application.
+///
+/// `include!` rather than a `use`: a build script is compiled as its own crate and
+/// cannot import from the crate it is building. The alternative — restating the rules
+/// here — is what lets a build script's idea of "newer" drift from the update
+/// checker's, which is the one place the two must agree.
+// The build script uses only `parse_core`; `is_newer` exists for the update checker.
+#[allow(dead_code)]
+#[path = "src/version.rs"]
+mod version;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/version.rs");
     println!("cargo:rerun-if-changed=assets/icons/icon.png");
 
     warn_on_version_drift();
@@ -64,12 +76,10 @@ fn warn_on_version_drift() {
 
     // `v0.9.0-typed-values` -> `0.9.0`. Anything that does not look like a three-part
     // version is someone else's tagging scheme, and not this check's business.
-    let numeric = tag.trim_start_matches('v').split('-').next().unwrap_or_default();
-    let is_semver = numeric.split('.').count() == 3
-        && numeric.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-    if !is_semver {
+    let Some(core) = version::parse_core(tag) else {
         return;
-    }
+    };
+    let numeric = format!("{}.{}.{}", core.0, core.1, core.2);
 
     let declared = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     if numeric != declared {

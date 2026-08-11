@@ -6,7 +6,7 @@ Canonical product and UX requirements: Unified_Specification.md
 ## Core technology decisions
 
 1. The application is written in the Rust programming language
-2. The rust used is Rust 2024
+2. Edition 2021, across every crate in the workspace
 3. All configuration files are stored as Yaml files
 4. All types of Yaml have a schema file specified in Yaml
 
@@ -65,18 +65,29 @@ The K2G project integrates multiple Rust crates, internal modules, and frontend 
 - **Async Runtime**: Tokio (v1) with full runtime features
 - **Serialization**: Serde (derive, JSON, YAML support)
 - **Schema Validation**: jsonschema (v0.28)
-- **UI Frameworks**: Dioxus (v0.7, desktop) and Next.js (v16) for web
+- **UI Framework**: Dioxus (v0.7, desktop). There is no web frontend.
 - **Scripting**: Rhai (v1) expression evaluation
 - **IPC Communication**: NNG (v1.0.1) for KiCad connection
 - **Protobuf**: Prost (v0.14) for message serialization
 - **Geometry**: Clipper2-rust (v1.0) for polygon operations
-- **CLI**: Clap (v4) for argument parsing
-- **Utilities**: image (v0.24), log (v0.4), rfd (v0.15), thiserror (v2)
+- **HTTP**: reqwest (v0.12, rustls) — used by `runtime::update` alone, for the
+  release check. The only outbound request the application makes.
+- **Signature verification**: minisign-verify (v0.2) — checks a downloaded installer
+  before it is executed
+- **Utilities**: image (v0.24), log (v0.4), rfd (v0.15), thiserror (v2), open (v5)
 
 **Internal Structure:**
-- `kicad-ipc-rs` (v0.4.0) — KiCad IPC API client (published crate, used by k2g with blocking feature)
-- `k2g` (v0.1.0) — Main application integrating all modules and crates
-- 9 core modules (cli, board, catalog, config, stitching, ui, rhai_parser, units, user_path)
+- `kicad-ipc-rs` (v0.5.1) — KiCad IPC API client, vendored under `third_party/` and
+  patched in; used by the `pcb` crate with the blocking feature
+- Workspace crates: `units`, `datastore`, `gtl`, `pcb`, `xtask`
+- `k2g` — the application. Two binaries: `k2g` (the desktop app) and
+  `k2g-kicad-launcher` (the shim KiCad executes; see `runtime::kicad_integration`)
+- Top-level modules under `src/`: `catalog_io`, `data`, `gcode`, `paths`, `runtime`,
+  `ui`, `version`
+
+**Distribution:** `dx bundle` produces a per-user MSI/NSIS installer plus a portable
+zip; every artifact carries a detached minisign signature and each release ships a
+CycloneDX SBOM. See `docs/install-and-security.md`.
 
 # Operations
 

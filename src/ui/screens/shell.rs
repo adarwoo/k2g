@@ -223,6 +223,132 @@ fn app_icon_data_url() -> &'static str {
     })
 }
 
+/// Announces an available release, with the four choices EU CRA Annex I (2)(c) asks
+/// for: take it, postpone it, skip this one, or stop being asked.
+///
+/// Deliberately a banner rather than a modal. k2g may be mid-job with a spindle
+/// warm, and a dialog that steals focus to talk about software versions is the wrong
+/// interruption. Nothing here downloads or installs without the explicit click.
+#[component]
+pub fn UpdateBanner(state: Signal<crate::runtime::AppCtx>) -> Element {
+    let snapshot = state.read().clone();
+    let Some(update) = snapshot.available_update.clone() else {
+        return rsx! {};
+    };
+    let installing = snapshot.update_installing;
+
+    let current = env!("CARGO_PKG_VERSION");
+    let version = update.version.clone();
+    // First non-empty line of the release notes. The full text is on the release
+    // page, and a banner is not the place to render markdown.
+    let headline = update
+        .notes
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .chars()
+        .take(160)
+        .collect::<String>();
+
+    let for_install = update.clone();
+    let skip_version = update.version.clone();
+
+    rsx! {
+        div { class: "diag-banner-wrap",
+            div { class: "update-banner",
+                div { class: "diag-banner-main",
+                    span { class: "update-banner-dot" }
+                    div { class: "diag-banner-copy",
+                        div { class: "diag-banner-title", "k2g {version} is available" }
+                        div { class: "diag-banner-subtitle",
+                            if installing {
+                                "Downloading and checking the signature…"
+                            } else if headline.is_empty() {
+                                "You are running {current}. The installer is signature-checked before it runs."
+                            } else {
+                                "{headline}"
+                            }
+                        }
+                    }
+                }
+
+                div { class: "update-banner-actions",
+                    button {
+                        class: "text-button",
+                        disabled: installing,
+                        onclick: move |_| {
+                            super::mutate_ctx(state, |s| {
+                                s.app.update_installing = true;
+                                s.log_event("Downloading the k2g update…");
+                            });
+                            let mut state = state;
+                            crate::runtime::update::start_install(
+                                for_install.clone(),
+                                move |outcome| {
+                                    match outcome {
+                                        Ok(()) => {
+                                            crate::runtime::with_ctx_mut(|ctx| {
+                                                ctx.log_event(
+                                                    "Installer verified and started — close k2g to let it finish.",
+                                                );
+                                            });
+                                        }
+                                        Err(message) => {
+                                            crate::runtime::with_ctx_mut(|ctx| {
+                                                ctx.app.update_installing = false;
+                                                ctx.log_event(format!("Update failed: {message}"));
+                                            });
+                                        }
+                                    }
+                                    crate::runtime::wake_ui();
+                                },
+                            );
+                            state.set(crate::runtime::ctx_snapshot());
+                        },
+                        if installing { "Installing…" } else { "Install" }
+                    }
+                    button {
+                        class: "text-button",
+                        disabled: installing,
+                        onclick: move |_| {
+                            super::mutate_ctx(state, |s| {
+                                s.postpone_update(crate::runtime::update::POSTPONE_DAYS);
+                                s.app.available_update = None;
+                            });
+                        },
+                        "Remind me later"
+                    }
+                    button {
+                        class: "text-button",
+                        disabled: installing,
+                        onclick: move |_| {
+                            let version = skip_version.clone();
+                            super::mutate_ctx(state, |s| {
+                                s.skip_update_version(version);
+                                s.app.available_update = None;
+                            });
+                        },
+                        "Skip this version"
+                    }
+                    button {
+                        class: "text-button",
+                        disabled: installing,
+                        onclick: move |_| {
+                            super::mutate_ctx(state, |s| {
+                                s.set_update_check_enabled(false);
+                                s.app.available_update = None;
+                                s.log_event("Update checks are off. k2g will make no network requests.");
+                            });
+                        },
+                        "Turn off update checks"
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn DiagnosticsBanner(
     errors: Vec<AppError>,
@@ -336,6 +462,7 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
         Some(Screen::Stock),
         Some(Screen::Catalog),
         None,
+        Some(Screen::Settings),
         Some(Screen::Logs),
         Some(Screen::About),
     ];
@@ -464,6 +591,20 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M12 6C9 4.5 6 4.5 4 6v12c2-1.5 5-1.5 8 0" }
                 path { d: "M12 6c3-1.5 6-1.5 8 0v12c-2-1.5-5-1.5-8 0" }
                 path { d: "M12 6v12" }
+            }
+        },
+        Screen::Settings => rsx! {
+            // A sliders panel — application preferences.
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                path { d: "M5 6h14" }
+                path { d: "M5 12h14" }
+                path { d: "M5 18h14" }
+                circle { cx: "9", cy: "6", r: "2" }
+                circle { cx: "15", cy: "12", r: "2" }
+                circle { cx: "8", cy: "18", r: "2" }
             }
         },
         Screen::Logs => rsx! {

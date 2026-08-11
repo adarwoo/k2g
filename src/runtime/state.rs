@@ -68,9 +68,9 @@ impl AppState {
             rack_slots: BTreeMap::new(),
             board: boot.board_snapshot.clone(),
             kicad_status: boot.kicad_status.clone(),
-            gcode_save_directory: load_persisted_directory("gcode_save_directory"),
-            last_removable_media_path: load_persisted_directory("last_removable_media_path"),
-            job_view_pinned: load_persisted_flag("job_view_pinned"),
+            gcode_save_directory: load_persisted_string("gcode_save_directory"),
+            last_removable_media_path: load_persisted_string("last_removable_media_path"),
+            job_view_pinned: load_persisted_flag("job_view_pinned", false),
             job_pin_width: load_persisted_job_pin_width(),
             window_width: load_persisted_window_dimension(
                 "window_width",
@@ -82,7 +82,16 @@ impl AppState {
                 DEFAULT_WINDOW_HEIGHT,
                 MIN_WINDOW_HEIGHT,
             ),
-            window_maximized: load_persisted_flag("window_maximized"),
+            window_maximized: load_persisted_flag("window_maximized", false),
+            // Both default to `true` when the key is absent, so a settings file
+            // written before these existed opts *in* rather than silently out.
+            update_check_enabled: load_persisted_flag("update_check_enabled", true),
+            update_last_check: load_persisted_string("update_last_check"),
+            update_skipped_version: load_persisted_string("update_skipped_version"),
+            update_postponed_until: load_persisted_string("update_postponed_until"),
+            security_log_enabled: load_persisted_flag("security_log_enabled", true),
+            available_update: None,
+            update_installing: false,
         };
 
         state.hydrate_from_persistence();
@@ -297,6 +306,11 @@ impl AppState {
             "window_width": self.window_width,
             "window_height": self.window_height,
             "window_maximized": self.window_maximized,
+            "update_check_enabled": self.update_check_enabled,
+            "update_last_check": self.update_last_check,
+            "update_skipped_version": self.update_skipped_version,
+            "update_postponed_until": self.update_postponed_until,
+            "security_log_enabled": self.security_log_enabled,
         })
     }
 
@@ -552,6 +566,116 @@ impl AppState {
         }
         self.last_removable_media_path = Some(directory);
         self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Update-check preferences
+    //
+    // The four setters below are the whole of EU CRA Annex I (2)(c)'s user-facing
+    // contract: checks are on by default, the user is *notified* rather than
+    // surprised, they may "temporarily postpone", and they have a clear opt-out.
+    // Postpone and skip are deliberately separate — see the doc comments.
+    // -----------------------------------------------------------------------
+
+    /// Turns the daily update check on or off.
+    ///
+    /// Switching it off also clears the postpone and skip stamps: they exist only to
+    /// suppress a banner that can no longer appear, and leaving them set would make a
+    /// later re-enable behave according to a decision the user made long ago about a
+    /// version that has since shipped.
+    pub fn set_update_check_enabled(&mut self, enabled: bool) {
+        if self.update_check_enabled == enabled {
+            return;
+        }
+        self.update_check_enabled = enabled;
+        if !enabled {
+            self.update_postponed_until = None;
+            self.update_skipped_version = None;
+        }
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+        security_log::record_ok(
+            security_log::Event::UpdateCheckSettingChanged,
+            serde_json::json!({ "enabled": enabled }),
+        );
+    }
+
+    /// Stamps a completed check, whatever its outcome.
+    ///
+    /// Called on failure too (offline, rate-limited, malformed response). Stamping only
+    /// on success would make a machine with no network retry on every single launch,
+    /// which is both useless and the closest thing to abusive traffic this app can emit.
+    pub fn record_update_check_now(&mut self) {
+        self.update_last_check = Some(chrono::Utc::now().to_rfc3339());
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Silences *every* update banner for `days` — the "remind me later" action.
+    pub fn postpone_update(&mut self, days: i64) {
+        let until = chrono::Utc::now() + chrono::Duration::days(days);
+        self.update_postponed_until = Some(until.to_rfc3339());
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Silences one specific version forever — the "skip this version" action.
+    ///
+    /// Distinct from [`Self::postpone_update`] on purpose: postponing is about *when*
+    /// the user wants to be asked, skipping is about *which release* they have decided
+    /// against. A skipped `0.9.1` must not stop `0.9.2` from being announced, and only
+    /// storing the version (rather than a flag) gets that for free.
+    pub fn skip_update_version(&mut self, version: impl Into<String>) {
+        self.update_skipped_version = Some(version.into());
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Undoes both suppressions, so the next check announces whatever it finds.
+    ///
+    /// One action rather than two: the Settings screen shows whichever suppressions are
+    /// active, and a user clearing either one is saying "start telling me about updates
+    /// again". Clearing only the half they clicked would leave the other silently in
+    /// force and the banner still absent, which reads as the button not working.
+    pub fn clear_update_suppressions(&mut self) {
+        if self.update_postponed_until.is_none() && self.update_skipped_version.is_none() {
+            return;
+        }
+        self.update_postponed_until = None;
+        self.update_skipped_version = None;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Turns the persisted security log on or off (EU CRA Annex I (2)(l) opt-out).
+    ///
+    /// Returns the previous value so the caller can record the transition *before* the
+    /// writer stops: an opt-out that leaves no trace of itself makes the log's own
+    /// gaps unexplainable, which is exactly what an audit record must not do.
+    pub fn set_security_log_enabled(&mut self, enabled: bool) -> bool {
+        let previous = self.security_log_enabled;
+        if previous == enabled {
+            return previous;
+        }
+
+        // Record the transition while the writer is still open, then close it. An
+        // opt-out that leaves no trace of itself makes the record's own gap
+        // unexplainable — a reader cannot tell "nothing happened" from "recording
+        // stopped", and that ambiguity is exactly what an audit trail must not have.
+        if !enabled {
+            security_log::record_ok(
+                security_log::Event::SecurityLogSettingChanged,
+                serde_json::json!({ "enabled": false }),
+            );
+        }
+
+        self.security_log_enabled = enabled;
+        security_log::set_enabled(enabled);
+
+        if enabled {
+            security_log::record_ok(
+                security_log::Event::SecurityLogSettingChanged,
+                serde_json::json!({ "enabled": true }),
+            );
+        }
+
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+        previous
     }
 
     /// The file name a G-code Save should offer: the board's name (KiCad's file stem,
@@ -2130,11 +2254,16 @@ fn sanitize_file_stem(stem: &str) -> String {
         .to_string()
 }
 
-/// A persisted boolean settings flag, defaulting to false when absent.
-fn load_persisted_flag(key: &str) -> bool {
+/// A persisted boolean settings flag, falling back to `default` when the key is
+/// absent or holds a non-boolean.
+///
+/// `default` is a parameter rather than a fixed `false` because the opt-out flags
+/// must read as *enabled* when missing: a settings file written before
+/// `update_check_enabled` existed has to mean "checks on", not "user opted out".
+fn load_persisted_flag(key: &str, default: bool) -> bool {
     persistence_state()
         .and_then(|state| state.global_settings.get(key).and_then(Value::as_bool))
-        .unwrap_or(false)
+        .unwrap_or(default)
 }
 
 /// The persisted docked-column width, clamped to the handle's bounds so a hand-edited
@@ -2156,12 +2285,14 @@ fn load_persisted_window_dimension(key: &str, default: i64, minimum: i64) -> i64
         .clamp(minimum, MAX_WINDOW_DIMENSION)
 }
 
-/// A remembered directory from the settings file, if it carries one under `key`.
+/// A non-empty string from the settings file, if it carries one under `key`.
 ///
-/// Blank is treated as absent: a settings file hand-edited to `""` would otherwise
-/// open a dialog at the process's current directory, which is wherever the app happened
-/// to be launched from.
-fn load_persisted_directory(key: &str) -> Option<String> {
+/// Blank is treated as absent everywhere this is used. For a remembered directory that
+/// matters concretely — a file hand-edited to `""` would otherwise open a dialog at the
+/// process's current directory, which is wherever the app happened to be launched from.
+/// For the update timestamps it means a blank stamp re-checks rather than parsing to a
+/// bogus instant.
+fn load_persisted_string(key: &str) -> Option<String> {
     persistence_state()?
         .global_settings
         .get(key)

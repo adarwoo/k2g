@@ -2656,6 +2656,79 @@ mod tests {
         );
     }
 
+    /// The CRA opt-out switches and their bookkeeping must survive a write/reload
+    /// cycle, and a settings file written before they existed must still load.
+    ///
+    /// Both halves matter for a different reason than the directory keys above. The
+    /// settings document is rewritten *whole* on every save, so a key missing from
+    /// `make_global_settings_payload` is not merely un-persisted — it is actively
+    /// erased on the next unrelated write. For a consent flag that failure mode is
+    /// an opt-out that silently reverts, which is precisely what Annex I (2)(c) and
+    /// (2)(l) exist to prevent.
+    #[test]
+    fn the_update_and_recording_preferences_round_trip() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // A settings file from before any of these keys existed.
+        let previous = "schema_version: 1\n\
+                        units: mm\n\
+                        theme: Dark\n\
+                        selected_process_profile_id: null\n\
+                        selected_cnc_profile_id: null\n\
+                        selected_fixture_profile_id: null\n\
+                        selected_toolset_profile_id: null\n";
+        fs::write(data_dir.join(SETTINGS_FILE), previous).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "settings without the keys should load: {errors:#?}");
+
+        // Then record a full opt-out plus the suppression bookkeeping.
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["update_check_enabled"] = Value::Bool(false);
+        value["security_log_enabled"] = Value::Bool(false);
+        value["update_last_check"] = Value::String("2026-08-11T09:30:00+00:00".to_string());
+        value["update_skipped_version"] = Value::String("0.9.1".to_string());
+        value["update_postponed_until"] = Value::String("2026-08-18T09:30:00+00:00".to_string());
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| p.is_empty()),
+            "recording the preferences should not error"
+        );
+        data.flush();
+
+        let (reloaded, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "reload should be clean: {errors:#?}");
+        let read = |pointer: &str| {
+            reloaded
+                .settings()
+                .and_then(|doc| doc.root.get_pointer(pointer))
+                .map(|node| node.value.clone())
+        };
+        assert!(
+            matches!(read("/update_check_enabled"), Some(NodeValue::Bool(false))),
+            "the update opt-out must survive a reload, got {:?}",
+            read("/update_check_enabled")
+        );
+        assert!(
+            matches!(read("/security_log_enabled"), Some(NodeValue::Bool(false))),
+            "the recording opt-out must survive a reload, got {:?}",
+            read("/security_log_enabled")
+        );
+        assert!(
+            matches!(read("/update_skipped_version"), Some(NodeValue::Str(ref s)) if s == "0.9.1"),
+            "the skipped version must survive a reload"
+        );
+        assert!(
+            matches!(read("/update_postponed_until"), Some(NodeValue::Str(ref s)) if s.starts_with("2026-08-18")),
+            "the postpone deadline must survive a reload"
+        );
+        assert!(
+            matches!(read("/update_last_check"), Some(NodeValue::Str(ref s)) if s.starts_with("2026-08-11")),
+            "the last-check stamp must survive a reload"
+        );
+    }
+
     /// A `linear_cut` that cannot emit a feed is repaired; one that can — by variable or
     /// hardcoded — is left exactly as the operator wrote it.
     /// Loading a profile reports what is wrong with it and **changes no template**.

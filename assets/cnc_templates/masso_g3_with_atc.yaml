@@ -48,10 +48,33 @@ primitives:
   # Program
   # ===========================================================================
 
-  # Header. First retract is G53 (machine coordinates): at this point the
-  # controller still carries the previous job's tool and offset, so a work-
-  # coordinate Z would resolve against state this program didn't set. Only
-  # after set_origin() is a work-coordinate z_safe meaningful.
+  # Header.
+  #
+  # Order matters here and each line earns its place:
+  #
+  #   1. Modal state FIRST, and it moves nothing. A program inherits whatever the
+  #      last one left - G91 incremental, G95 feed-per-revolution, a live G81. Every
+  #      line below depends on those being known, so nothing may move until they are.
+  #      G94 in particular: left in G95 the F words become feed-per-*revolution* and
+  #      every plunge runs ~20000x slow or fast depending which way you read it.
+  #   2. Units, before any coordinate is emitted.
+  #   3. Only then the retract - and in MACHINE coordinates, because at this point the
+  #      controller still carries the previous job's tool and offset, so a work-frame
+  #      Z would resolve against state this program did not set.
+  #   4. The work offset last. Nothing before it needed one.
+  #
+  # G53 carries an explicit G0. G53 is non-modal and supplies no motion of its own:
+  # after a program that left G1 modal, a bare `G53 Z0` is a FEED move at whatever F
+  # was last commanded - or an error if none was.
+  #
+  # No G49 here: this machine measures at M06 (tool_length_measurement: auto_setter),
+  # so cancelling tool-length compensation would be fighting the control rather than
+  # clearing inherited state.
+  #
+  # There is deliberately no closing `G0 Z{z_safe}`. G53 Z0 has already parked the
+  # tool at the top of machine travel, which is clear of everything; descending to a
+  # work-frame height from there buys nothing and gets closer to the fixture. Every
+  # tool block retracts again on entry, and every cycle makes its own approach.
   program_begin: |
     let board = filename;
     board.replace(".kicad_pcb", "");
@@ -65,22 +88,31 @@ primitives:
     }
     ` - {timestamp})
     `(Target: MASSO G3 firmware 5.13)
-    `G53 Z0
-    `G17 G40 G80 G90
+    `G90 G94 G17 G40 G80
     metric();
+    `G53 G0 Z0
     set_origin();
-    `G0 Z{z_safe}
 
   # Footer. M05 is belt-and-braces - the body has already stopped the spindle,
   # but the footer must be safe even if a future path reaches it early.
   # Park via G53 so it does not depend on the work offset still being valid,
   # and clear of the board so the operator can reach the work.
   # M30 last: nothing after it executes.
+  # Footer. M05 is belt-and-braces - the body has already stopped the spindle, but
+  # the footer must be safe even if a future path reaches it early. G80 likewise: a
+  # program must not end leaving a canned cycle live for whatever runs next.
+  #
+  # Z retracts before X/Y, as its own block. Parking with a single `G53 G0 X0 Y0 Z0`
+  # would be a diagonal move that drags the tool across the work while it lifts.
+  #
+  # G53 so parking does not depend on the work offset still being valid, and M30
+  # last because nothing after it executes.
   program_end: |
     `(end of program)
     `M05
-    `G53 Z0
-    `G53 X0 Y0
+    `G80
+    `G53 G0 Z0
+    `G53 G0 X0 Y0
     `M30
 
   # G21/G20 as standard.
@@ -123,12 +155,37 @@ primitives:
   # order). The tool setter fires at M06, so nothing else is needed here.
   # manual_message is empty on this machine; the guard keeps the template
   # correct if the profile is ever cloned for a manual-change MASSO.
+  # Tool change.
+  #
+  # POSTCONDITION - the two lines after M06 are not optional:
+  #
+  #   G80  No canned cycle is active. G81 is modal and survives a tool change, so
+  #        any motion the controller's own M06 macro makes would be interpreted as
+  #        another hole - at the previous hole's depth and feed.
+  #
+  #   G53 G0 Z0  The tool is at machine clearance.
+  #
+  # The retract is THE reason this machine crashed. With an automatic tool setter,
+  # M06 ends wherever the controller's macro leaves the spindle, which is directly
+  # over the setter after it has measured. The next thing the program does is a
+  # drill cycle whose R-plane rapid descends - into the setter. The generator cannot
+  # know where M06 parked the spindle, so the program must not inherit that position.
+  #
+  # X/Y is deliberately left undefined on exit: callers position explicitly, and a
+  # tool change should not decide where the work is.
+  #
+  # Cloning this for a machine whose clearance is not the top of Z travel - a dust
+  # shoe, a camera, a rack in the way - use `G53 G0 Z-5` or whatever is genuinely
+  # clear. It is a machine fact, so it belongs here in the profile rather than in a
+  # schema field the application would have to turn into a G-word.
   tool_change: |
     `M05
+    `G80
     if manual_message != "" {
         pause(manual_message);
     }
     `T{slot} M06
+    `G53 G0 Z0
 
   # Auto setter at M06 - nothing to emit, and the engine skips this primitive
   # anyway because tool_length_measurement is auto_setter.
@@ -137,9 +194,14 @@ primitives:
   # S before M03, then a spin-up dwell so the first plunge never happens on a
   # spindle still ramping. 2 s suits a 60k air-cooled spindle; set it from the
   # VFD's measured ramp time.
+  #
+  # The dwell is a literal rather than a machine-block field for the same reason as
+  # the clearance above: it is this spindle's ramp time, and the profile is where
+  # this machine's facts live.
   spindle_start: |
     `S{rpm}
     `M03
+    `G4 P2.0
 
   spindle_stop: "`M05"
 
@@ -171,9 +233,17 @@ primitives:
   # restartable program, replace the body with the single fully-worded line:
   #   `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
   # and keep the trailing G80.
+  # G99 is explicit and matters: it returns the tool to the R plane between holes
+  # rather than to the initial level it entered the cycle at. Inherited G98 would
+  # climb back to whatever Z the block started from after EVERY hole - on a board
+  # with a few hundred holes that is minutes of vertical travel for nothing.
+  #
+  # It also has to be stated rather than assumed, because the cycle is opened right
+  # after a tool change that parked the tool at machine top: under G98 the initial
+  # level IS machine top, and the cycle would return there after every hole.
   drill: |
     if index == 0 {
-        `G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
+        `G99 G81 X{x} Y{y} Z{z_bottom} R{z_retract} F{z_feedrate}
     } else {
         `X{x} Y{y}
     }

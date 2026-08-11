@@ -182,10 +182,41 @@ fn schema_id(value: &Value, key: &str) -> String {
         .to_string()
 }
 
+/// A retriever that fetches nothing.
+///
+/// `jsonschema` ships a `DefaultRetriever` that resolves an unregistered `$ref` over
+/// the network. Every schema k2g compiles is registered below, so that path should
+/// never be taken — but "should never" is doing a lot of work when the schemas being
+/// compiled include ones a user can edit. A catalog carrying
+/// `$ref: "https://attacker.example/x"` would otherwise make the application issue an
+/// arbitrary HTTPS request during validation, from a code path with no business
+/// touching the network at all.
+///
+/// Installing this turns that into a validation error naming the URI, which is both
+/// safe and far easier to diagnose than a hang. EU CRA Annex I (2)(j) — limit attack
+/// surfaces, including external interfaces.
+pub(crate) struct NoRemoteRefs;
+
+impl jsonschema::Retrieve for NoRemoteRefs {
+    fn retrieve(
+        &self,
+        uri: &jsonschema::Uri<&str>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err(format!(
+            "refusing to fetch the external schema reference '{uri}'. k2g validates \
+             against its own bundled schemas only and never retrieves one over the \
+             network."
+        )
+        .into())
+    }
+}
+
 /// Compiles a schema with every schema in the set registered as a resource, so
-/// cross-file `$ref`s (`units.yaml#/...`) resolve without external retrieval.
+/// cross-file `$ref`s (`units.yaml#/...`) resolve without external retrieval — and
+/// with [`NoRemoteRefs`] installed so an unregistered one fails instead of fetching.
 fn compile_with_resources(schemas: &IndexMap<String, RawSchema>, root: &Value) -> Result<Validator, String> {
     let mut opts = options();
+    opts.with_retriever(NoRemoteRefs);
     for (id, raw) in schemas {
         let resource = Resource::from_contents(raw.value.clone()).map_err(|e| e.to_string())?;
         opts.with_resource(id.clone(), resource.clone());
@@ -225,5 +256,88 @@ fn collect_x_refs_into(value: &Value, pointer: String, out: &mut Vec<(String, St
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod remote_ref_tests {
+    use super::*;
+
+    /// A schema carrying an `http(s)` `$ref` must fail to compile rather than fetch
+    /// it.
+    ///
+    /// This is a real reachable path, not a hypothetical: catalogs are user-editable
+    /// YAML validated through this same machinery, so a `$ref` in one is untrusted
+    /// input. Before [`NoRemoteRefs`] was installed, `jsonschema`'s default retriever
+    /// would have made k2g issue an arbitrary HTTPS request during validation.
+    ///
+    /// The test needs no network — that is the point. If it ever starts *passing* by
+    /// reaching the internet, it fails here first.
+    #[test]
+    fn a_remote_ref_is_refused_rather_than_fetched() {
+        let schemas: IndexMap<String, RawSchema> = IndexMap::new();
+        let hostile = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "sneaky": { "$ref": "https://attacker.example/schema.json" }
+            }
+        });
+
+        let error = compile_with_resources(&schemas, &hostile)
+            .expect_err("a remote $ref must not compile");
+        assert!(
+            error.contains("attacker.example"),
+            "the refusal should name the URI it declined, got: {error}"
+        );
+        assert!(
+            error.contains("refusing to fetch"),
+            "the refusal should say why, got: {error}"
+        );
+    }
+
+    /// The refusal must not break the ordinary case: `$schema` pointing at the
+    /// draft meta-schema is resolved from `jsonschema`'s built-ins, not fetched, and
+    /// must keep working.
+    #[test]
+    fn the_bundled_meta_schema_still_resolves() {
+        let schemas: IndexMap<String, RawSchema> = IndexMap::new();
+        let ordinary = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": { "name": { "type": "string" } }
+        });
+        assert!(
+            compile_with_resources(&schemas, &ordinary).is_ok(),
+            "a plain local schema must still compile"
+        );
+    }
+
+    /// Cross-file refs between registered schemas must still resolve — those are the
+    /// refs k2g's own schemas actually use (`units.yaml#/$defs/...`).
+    #[test]
+    fn refs_between_registered_schemas_still_resolve() {
+        let mut schemas: IndexMap<String, RawSchema> = IndexMap::new();
+        let units = serde_json::json!({
+            "$id": "units.yaml",
+            "$defs": { "length": { "type": "string" } }
+        });
+        schemas.insert(
+            "units.yaml".to_string(),
+            RawSchema {
+                id: "units.yaml".to_string(),
+                text: String::new(),
+                value: units,
+            },
+        );
+
+        let root = serde_json::json!({
+            "type": "object",
+            "properties": { "width": { "$ref": "units.yaml#/$defs/length" } }
+        });
+        assert!(
+            compile_with_resources(&schemas, &root).is_ok(),
+            "a ref to a registered schema must still resolve"
+        );
     }
 }

@@ -1,0 +1,182 @@
+name: Release
+
+# Tagging `vX.Y.Z-<codename>` builds, signs and publishes a release.
+#
+# The signing step is what makes k2g's in-app updater possible at all: it will not run
+# an installer whose minisign signature does not verify against the key compiled into
+# the running build (`assets/release-signing.pub`). A release published without its
+# `.minisig` files is a release nobody can install through the updater — see
+# `runtime::update::fetch_latest`, which treats a missing signature as a broken
+# release rather than as permission to skip verification.
+#
+# Setting this up once:
+#
+#   1. Generate an unencrypted keypair:   rsign generate -W -p k2g.pub -s k2g.key
+#      Unencrypted is deliberate. A passphrase protects a key at rest against someone
+#      who has the file; here the file *is* a repository secret, so the passphrase
+#      would have to be stored next to it and would protect nothing.
+#   2. Put the contents of `k2g.key` in the repository secret MINISIGN_SECRET_KEY.
+#      Keep an offline copy — losing it means every installed build stops accepting
+#      updates until users reinstall by hand.
+#   3. Commit the contents of `k2g.pub` to `assets/release-signing.pub`, replacing the
+#      placeholder. Until that is done the updater refuses every download, by design.
+
+on:
+  push:
+    tags: [ "v*" ]
+  # Manual runs build and sign but do not publish, so the pipeline can be exercised
+  # without minting a release.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `build.rs` compares Cargo.toml's version against the nearest tag; a
+          # shallow clone has no tags and the check silently passes.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Never ship a release that has not passed its own tests.
+      - name: Test
+        run: cargo test --workspace --release
+
+      # Unconditional, because every later step names artifacts after it. Done as its
+      # own step rather than folded into the tag check below: that check only runs for
+      # a tag push, and a manual run would then leave the version empty and produce
+      # files called `k2g--portable-windows-x64.zip`.
+      - name: Read the declared version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "k2g") | .version')
+          test -n "$declared"
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
+          echo "Building k2g $declared"
+
+      # The version in Cargo.toml is what the About screen, every G-code header and
+      # the exe's file properties report. A tag that disagrees with it would publish
+      # an installer whose contents lie about which release they are — and would make
+      # the updater compare the wrong numbers, since it reads the tag and the running
+      # build reads Cargo.toml.
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_core="${tag#v}"; tag_core="${tag_core%%-*}"
+          if [ "$tag_core" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::tag $tag declares $tag_core but Cargo.toml says ${{ steps.meta.outputs.version }}"
+            exit 1
+          fi
+
+      - name: Install the Dioxus CLI
+        run: cargo install dioxus-cli --locked
+
+      - name: Bundle
+        run: dx bundle --platform desktop --release --package-types msi --package-types nsis
+
+      # A portable build alongside the installers: the binary embeds every schema,
+      # catalog, stylesheet and script it needs, so "unzip and run" genuinely works
+      # and costs nothing to offer.
+      - name: Portable zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          cp target/release/k2g.exe staging/
+          cp target/release/k2g-kicad-launcher.exe staging/
+          cp README.md LICENSE PRIVACY.md SECURITY.md staging/ 2>/dev/null || true
+          7z a "k2g-${{ steps.meta.outputs.version }}-portable-windows-x64.zip" ./staging/*
+
+      # Annex I Part II (1): a machine-readable bill of materials covering at least
+      # the top-level dependencies. cargo-cyclonedx emits the full transitive graph.
+      - name: Software bill of materials
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --all
+          find . -name '*.cdx.json' -maxdepth 2 -print
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find target/dx -type f \( -name '*.msi' -o -name '*.exe' \) \
+            -not -name 'k2g.exe' -not -name 'k2g-kicad-launcher.exe' \
+            -exec cp {} dist/ \;
+          cp ./*-portable-windows-x64.zip dist/ 2>/dev/null || true
+          cp ./k2g.cdx.json "dist/k2g-${{ steps.meta.outputs.version }}.cdx.json" 2>/dev/null || true
+          ls -la dist
+
+      # Detached signatures over every artifact. This is the root of trust for the
+      # in-app updater: TLS and GitHub's account security are not relied on, only
+      # this key.
+      - name: Sign every artifact
+        shell: bash
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::MINISIGN_SECRET_KEY is not set. Releasing unsigned artifacts \
+          would publish installers that k2g's own updater then refuses to run; see the \
+          setup notes at the top of this workflow."
+            exit 1
+          fi
+          cargo install rsign2 --locked
+          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+          for artifact in dist/*; do
+            case "$artifact" in *.minisig) continue;; esac
+            rsign sign -W -s minisign.key -x "${artifact}.minisig" "$artifact"
+            echo "signed $artifact"
+          done
+          # Shredding is pointless on the runner's disk, but the file must not survive
+          # into a later step or an uploaded artifact.
+          rm -f minisign.key
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k2g-windows
+          path: dist/*
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          # Release notes reach users verbatim in the update banner, so they say what
+          # the artifacts are and how to check them.
+          body: |
+            ## Verifying this release
+
+            Every artifact is signed with minisign. k2g's own updater checks the
+            signature before it will run an installer; to check by hand:
+
+            ```
+            minisign -Vm k2g-<version>.msi -P <the public key in assets/release-signing.pub>
+            ```
+
+            `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
+            this build.
+
+            ## Safety
+
+            k2g emits programs that drive a physical CNC machine. Verify every program
+            against the actual fixture, stock and tooling before running it.

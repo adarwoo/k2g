@@ -1249,6 +1249,27 @@ Startup flow:
 - Detect KiCad connection context
 - If launched from KiCad PCB context, board is preselected and locked into the current project
 - Otherwise, show selectable list of active KiCad PCB instances
+
+### 13.1 Launching from KiCad
+
+k2g registers as a KiCad IPC API plugin with an `exec` runtime, contributing a
+**Create GCode** action to the PCB editor toolbar. Registration is user-initiated
+from Settings; k2g never writes into a KiCad installation unasked.
+
+When KiCad launches the action it places `KICAD_API_SOCKET` and `KICAD_API_TOKEN` in
+the child process's environment. k2g's IPC client prefers both over its own
+socket discovery, so a plugin launch connects to *precisely* the instance that
+started it — there is no discovery step and no ambiguity about which KiCad is meant
+when several are open. This is what "launched from KiCad PCB context" above resolves
+to in practice.
+
+KiCad resolves a plugin's entrypoint relative to the directory holding its manifest
+and refuses an absolute path, so what is registered is a small launcher that starts
+the installed k2g rather than a copy of the application. The launcher is re-pointed
+automatically after an update. See `runtime::kicad_integration`.
+
+The IPC API is disabled in a stock KiCad. k2g reports its state per installed version
+and can enable it, with consent, when KiCad is not running.
 - PCB list should refresh when dropdown is opened
 - After selection, import PCB data and open or refresh the project's data
    - PCB data shall includde

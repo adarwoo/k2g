@@ -1,7 +1,34 @@
+[application]
+name = "k2g"
+
 [bundle]
-icon = [
-   "assets/icons/icon.png"
-]
+# Reverse-domain identifier, matching the one k2g registers with KiCad
+# (`runtime::kicad_integration::PLUGIN_IDENTIFIER`). Installers and the OS use this
+# as the application's stable identity, so it must not drift between releases.
+identifier = "com.github.adarwoo.k2g"
+publisher = "Bill Arreckx"
+copyright = "Copyright © Bill Arreckx. Licensed under GPL-3.0-only."
+category = "DeveloperTool"
+short_description = "KiCad to G-code — CAM for machining PCBs"
+long_description = """
+k2g turns a KiCad PCB into CNC machine G-code: drilling, routing, edge profiling and \
+double-sided work, driven by machine, fixture and tooling profiles you control.
+
+k2g emits programs that drive a physical machine. Verify every program against the \
+actual fixture, stock and tooling before running it.
+"""
+icon = ["assets/icons/icon.png"]
 
 [bundle.windows]
 icon_path = "assets/icons/icon.png"
+
+[bundle.windows.nsis]
+# Per-user install, into %LOCALAPPDATA%. Two reasons, both load-bearing:
+#
+#  1. The updater launches the downloaded installer directly. A per-machine install
+#     would need elevation at that moment, turning a one-click update into a UAC
+#     prompt from a process the user did not obviously start.
+#  2. k2g writes its KiCad plugin registration into the user's own Documents folder
+#     and reads per-user configuration. A machine-wide install would put the
+#     executable somewhere shared while everything around it stayed per-user.
+install_mode = "currentUser"
