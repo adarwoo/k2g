@@ -2244,6 +2244,27 @@ p {
     opacity: 0.75;
 }
 
+/* One operation's settings within a step, foldable by its own heading.
+ *
+ * The heading is a flex row so the toggle sits beside it rather than above, and the
+ * margin that separates a section heading from its fields moves to the row — folded,
+ * there are no fields for it to separate the heading from, and the gap read as a bug. */
+.op-section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.op-section-header > .section-title {
+    margin: 0;
+}
+
+/* Folded, the header *is* the section, so the space under it goes too. */
+.op-section:has(> .op-section-header > [aria-expanded="false"]) > .op-section-header {
+    margin-bottom: 0;
+}
+
 /* Multi-step machining editor: each step is a bordered card with reorder/remove
    controls; the whole set can grow via the dashed add-step button. */
 .step-card {

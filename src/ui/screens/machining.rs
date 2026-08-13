@@ -363,6 +363,15 @@ fn StepCard(
     // there would be nothing to click to get it back.
     let is_folded = multi && collapsed.read().contains(&index);
 
+    // Which of this step's operation sections are folded, by operation key.
+    //
+    // Local to the card, and deliberately not persisted: it is a reading position, not a
+    // preference — the operator folds what they are not editing right now, and next
+    // session they are editing something else. The step's own fold state lives with the
+    // parent because reordering has to move it; this does not, because the sections
+    // reorder with the card that owns them.
+    let mut folded_ops = use_signal(BTreeSet::<String>::new);
+
     // Read unconditionally, used only when folded. `use_field` allocates no hook slot
     // today — it subscribes by reading a global signal — so a conditional call happens to
     // be safe, but reading it as one invites the reader to conclude that hooks may be
@@ -470,12 +479,38 @@ fn StepCard(
                     SchemaField { id, ptr: format!("/steps/{index}/board_face") }
                 }
 
-                // Configuration sections for the currently enabled operations.
+                // Configuration sections for the currently enabled operations, each one
+                // foldable. A step running three operations is three schema forms deep
+                // enough to bury the one being edited, and they are edited one at a time.
+                //
+                // Folded by key rather than by position: the list is filtered by what the
+                // step enables, so an operation's index changes when a *different* one is
+                // ticked. Keyed by index, unticking PTH would silently fold whatever moved
+                // up into its place.
                 for op in machining_operations().iter() {
                     if enabled_ops.iter().any(|enabled| enabled == op.key) {
-                        div { class: "schema-section",
-                            h4 { class: "section-title", "{op.label}" }
-                            SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                        div { class: "schema-section op-section",
+                            div { class: "op-section-header",
+                                button {
+                                    r#type: "button",
+                                    class: "icon-btn",
+                                    title: if folded_ops.read().contains(op.key) { "Expand section" } else { "Collapse section" },
+                                    "aria-expanded": if folded_ops.read().contains(op.key) { "false" } else { "true" },
+                                    onclick: move |_| {
+                                        folded_ops
+                                            .with_mut(|folded| {
+                                                if !folded.remove(op.key) {
+                                                    folded.insert(op.key.to_string());
+                                                }
+                                            });
+                                    },
+                                    if folded_ops.read().contains(op.key) { "▸" } else { "▾" }
+                                }
+                                h4 { class: "section-title", "{op.label}" }
+                            }
+                            if !folded_ops.read().contains(op.key) {
+                                SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                            }
                         }
                     }
                 }
