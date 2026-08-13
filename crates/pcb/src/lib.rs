@@ -47,6 +47,11 @@ mod stitching;
 pub use error::PcbError;
 pub use kicad::{KiCad, PcbInfo};
 pub use snapshot::{
-    BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind, Slot,
+    BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind, PolyNode,
+    PolyRing, Slot,
 };
-pub use stitching::{routing_offset, stitch_edge_shapes, Contour, Segment, StitchResult};
+pub use stitching::corners::{convex_corners, corner_fillet_area_nm2, Corner, MIN_CORNER_TURN_RAD};
+pub use stitching::{
+    fit_cutout, offset_paths, path_perimeter_nm, routing_offset, stitch_edge_shapes, Contour,
+    CutoutFit, Segment, StitchResult,
+};

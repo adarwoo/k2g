@@ -67,6 +67,14 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         short_label: "Route",
         once_per_face: true,
     },
+    // Once per face like the boundary: the openings exist once, so two steps both
+    // claiming them on one face is a genuine conflict rather than a division of labour.
+    MachiningOperation {
+        key: "route_cutouts",
+        label: "Route interior cutouts",
+        short_label: "Cutouts",
+        once_per_face: true,
+    },
     MachiningOperation {
         key: "drill_locating_pins",
         label: "Drill locating pins",

@@ -37,6 +37,7 @@ $defs:
       - drill_pth
       - drill_npth
       - route_board
+      - route_cutouts
       - drill_locating_pins
       - mill_board
 
@@ -293,6 +294,72 @@ $defs:
     additionalProperties: false
 
   # -------------------------------------------------------------------------
+  # route_cutouts — the interior openings, cut on their own terms.
+  #
+  # `route_board` cuts the boundary and, optionally, the cutouts with ONE cutter:
+  # the edge kerf. That is right for the boundary, where the kerf IS a dimension
+  # of the finished job and so is matched exactly. It is wrong for a cutout,
+  # which is a hole in the middle of the board whose only requirement is that the
+  # cutter reaches everywhere the drawing says is gone. A 2mm edge cutter cannot
+  # enter a 1.5mm opening, and under `route_board` that opening is reported as
+  # vanishing under the kerf rather than cut with the 1mm router already in the
+  # rack.
+  #
+  # So: a separate operation, with a cutter chosen by **fit** rather than by
+  # request, plus the two things a cutout needs and a boundary does not — the
+  # slug held so the cutter cannot throw it, and the corners relieved because a
+  # round cutter cannot cut a sharp one.
+  #
+  # There is deliberately no kerf and no retention *mode* here. The kerf is not
+  # the operator's to choose (the fit decides it), and "no retention" is not a
+  # choice worth offering for a slug: it is either held or it is a projectile.
+  #
+  # When this operation runs on a face, `route_board`/`mill_board` on that face
+  # leave the cutouts alone, so an opening is never cut twice.
+  # -------------------------------------------------------------------------
+  route_cutouts:
+    type: object
+    default:
+      retain_island: true
+      island_tab: 4%
+      drill_sharp_corners: true
+    properties:
+      retain_island:
+        title: Hold the slug
+        description: >-
+          Leave one uncut tab holding the piece of board each cutout removes, so
+          the cutter does not throw it. Only an opening wider than twice the
+          router diameter leaves a slug at all — a narrower one is cleared
+          completely by the single pass round its wall, and has nothing to hold.
+        type: boolean
+        default: true
+      island_tab:
+        title: Tab width
+        description: >-
+          Width of that tab as a fraction of the slug's own perimeter, floored at
+          1mm. A fraction rather than a length because the slug's size is the
+          board's business, not the profile's: the same profile cuts a 4mm disc
+          and a 40mm panel out of the middle of a board, and no one width suits
+          both. A tab working out wider than 2mm is perforated automatically —
+          past a couple of millimetres a solid tab tears rather than snaps.
+        $ref: "units.yaml#/$defs/percent_0_100"
+        default: 4%
+        x-show-when: { retain_island: [true] }
+      drill_sharp_corners:
+        title: Relieve sharp corners
+        description: >-
+          Drill into each corner the round cutter cannot reach, so the corner
+          comes out close to sharp instead of filleted to the cutter's radius.
+          The hole is tangent to both edges, so it can never cut past what was
+          drawn, and it is made in the drill phase while the board is still
+          whole. Skipped, with a note, at any corner no drill already in the
+          rack suits.
+        type: boolean
+        default: true
+    required: [retain_island]
+    additionalProperties: false
+
+  # -------------------------------------------------------------------------
   # step — one machining setup within the profile's ordered sequence.
   #
   # Each step references **exactly one** CNC, fixture and toolset profile.
@@ -438,6 +505,13 @@ $defs:
             retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
           kerf: 2.0mm
           finishing: 0.1mm
+
+      route_cutouts:
+        $ref: "#/$defs/route_cutouts"
+        default:
+          retain_island: true
+          island_tab: 4%
+          drill_sharp_corners: true
 
       # `mill_board` is `route_board` done with an area-clearing strategy rather
       # than a contour cut, so it takes the SAME configuration — the same edge

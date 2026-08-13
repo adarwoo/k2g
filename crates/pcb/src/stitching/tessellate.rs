@@ -9,7 +9,7 @@ use std::f64::consts::{PI, TAU};
 
 /// Minimum chord-height (sagitta) in nm before we stop subdividing an arc.
 /// 1 000 nm = 1 µm — sub-micron accuracy, far finer than any router bit.
-const SAGITTA_TOLERANCE_NM: f64 = 1_000.0;
+pub(super) const SAGITTA_TOLERANCE_NM: f64 = 1_000.0;
 
 /// Maximum number of segments per full circle (prevents degenerate cases on
 /// very large radii).

@@ -1195,9 +1195,15 @@ pub(crate) fn map_graphic_shape_geometry(
             })
         }
         common_types::graphic_shape::Geometry::Polygon(polyset) => {
-            Some(PcbGraphicShapeGeometry::Polygon {
-                polygon_count: polyset.polygons.len(),
-            })
+            // A polygon whose vertices fail to map is dropped rather than failing the
+            // whole board read: one unreadable shape should not cost the caller every
+            // other edge on the layer.
+            let polygons: Vec<PolygonWithHolesNm> = polyset
+                .polygons
+                .iter()
+                .filter_map(|polygon| map_polygon_with_holes(polygon.clone()).ok())
+                .collect();
+            Some(PcbGraphicShapeGeometry::Polygon { polygons })
         }
         common_types::graphic_shape::Geometry::Bezier(bezier) => {
             Some(PcbGraphicShapeGeometry::Bezier {

@@ -90,9 +90,34 @@ pub enum BoardEdgeShape {
         control2: BoardPoint,
         end: BoardPoint,
     },
+    /// A polygon drawn on Edge.Cuts, as one or more already-closed rings.
+    ///
+    /// A KiCad polygon set carries an outline plus any interior holes, and each of those
+    /// is a closed ring in its own right — so they are flattened into one list here and
+    /// the stitcher treats each as a complete contour rather than a chain to be joined
+    /// to anything else. Nesting (which ring is a cutout) is decided later by
+    /// containment, alongside every other closed contour, so a polygon's own idea of
+    /// what its holes are needs no special handling.
     GraphicPolygon {
         id: Option<String>,
-        polygon_count: usize,
+        rings: Vec<PolyRing>,
+    },
+}
+
+/// One closed ring of a polygon shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PolyRing {
+    pub nodes: Vec<PolyNode>,
+}
+
+/// A vertex of a polygon ring. KiCad polygons may carry arc nodes, not only points.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PolyNode {
+    Point(BoardPoint),
+    Arc {
+        start: BoardPoint,
+        mid: BoardPoint,
+        end: BoardPoint,
     },
 }
 
@@ -173,7 +198,11 @@ impl BoardHole {
     pub fn drill_axes(&self) -> Option<(Length, Length)> {
         let dx = self.drill_x.or(self.drill_y)?;
         let dy = self.drill_y.or(self.drill_x)?;
-        Some(if dx.as_mm() >= dy.as_mm() { (dx, dy) } else { (dy, dx) })
+        Some(if dx.as_mm() >= dy.as_mm() {
+            (dx, dy)
+        } else {
+            (dy, dx)
+        })
     }
 
     /// This hole as a milled [`Slot`], or `None` when it is round. The single place a
@@ -187,7 +216,11 @@ impl BoardHole {
         // Negated: KiCad's pad angle is CCW as displayed, the board frame is Y-down.
         let mut angle_deg = -self.orientation_deg.unwrap_or(0.0);
         // The long axis is the pad's local Y when `drill_y` is the major one.
-        if self.drill_y.zip(self.drill_x).is_some_and(|(dy, dx)| dy.as_mm() > dx.as_mm()) {
+        if self
+            .drill_y
+            .zip(self.drill_x)
+            .is_some_and(|(dy, dx)| dy.as_mm() > dx.as_mm())
+        {
             angle_deg += 90.0;
         }
         Some(Slot {
@@ -311,7 +344,8 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
     for item in arc_items {
         if let PcbItem::Arc(arc) = item {
             if arc.layer.name == "BL_Edge_Cuts" {
-                if let (Some(start), Some(mid), Some(end)) = (arc.start_nm, arc.mid_nm, arc.end_nm) {
+                if let (Some(start), Some(mid), Some(end)) = (arc.start_nm, arc.mid_nm, arc.end_nm)
+                {
                     edge_shapes.push(BoardEdgeShape::Arc {
                         id: arc.id.clone(),
                         start: point_from_nm(start),
@@ -545,13 +579,45 @@ fn edge_shape_from_graphic(
             control2: point_from_nm(control2_nm.to_owned()?),
             end: point_from_nm(end_nm.to_owned()?),
         }),
-        PcbGraphicShapeGeometry::Polygon { polygon_count } => {
+        PcbGraphicShapeGeometry::Polygon { polygons } => {
+            let rings: Vec<PolyRing> = polygons
+                .iter()
+                .flat_map(|polygon| polygon.outline.iter().chain(polygon.holes.iter()))
+                .filter_map(poly_ring_from_nm)
+                .collect();
+            if rings.is_empty() {
+                return None;
+            }
             Some(BoardEdgeShape::GraphicPolygon {
                 id: id.clone(),
-                polygon_count: *polygon_count,
+                rings,
             })
         }
     }
+}
+
+/// One IPC polyline into a closed ring, or `None` if it holds too little to close.
+fn poly_ring_from_nm(line: &kicad_ipc_rs::model::board::PolyLineNm) -> Option<PolyRing> {
+    use kicad_ipc_rs::model::board::PolyLineNodeGeometryNm as Node;
+
+    let nodes: Vec<PolyNode> = line
+        .nodes
+        .iter()
+        .map(|node| match node {
+            Node::Point(p) => PolyNode::Point(point_from_nm(*p)),
+            Node::Arc(arc) => PolyNode::Arc {
+                start: point_from_nm(arc.start),
+                mid: point_from_nm(arc.mid),
+                end: point_from_nm(arc.end),
+            },
+        })
+        .collect();
+
+    // Two nodes cannot enclose an area. `closed` is not required to be set: KiCad's own
+    // polygon tool produces rings that are closed by construction whether or not the
+    // flag says so, and refusing those would drop the shape for a field that carries no
+    // geometry.
+    (nodes.len() >= 3).then_some(PolyRing { nodes })
 }
 
 #[cfg(test)]
@@ -592,7 +658,10 @@ mod tests {
         BoardHole {
             id: None,
             kind: HoleKind::PadPth,
-            position: BoardPoint { x: Length::from_mm(0.0), y: Length::from_mm(0.0) },
+            position: BoardPoint {
+                x: Length::from_mm(0.0),
+                y: Length::from_mm(0.0),
+            },
             drill_x: mm(drill_x_mm),
             drill_y: mm(drill_y_mm),
             plated: Some(true),
@@ -623,7 +692,9 @@ mod tests {
     #[test]
     fn near_equal_axes_are_not_slots() {
         assert!(hole(1.0, 1.0, None).slot().is_none());
-        assert!(hole(1.0, 1.0 - OBLONG_TOLERANCE_UM / 2000.0, None).slot().is_none());
+        assert!(hole(1.0, 1.0 - OBLONG_TOLERANCE_UM / 2000.0, None)
+            .slot()
+            .is_none());
         assert!(hole(3.2, 1.6, None).slot().is_some());
     }
 
@@ -646,7 +717,11 @@ mod tests {
 
         // -90° in KiCad negates to +90° in the board frame: the axis runs along +Y.
         let end = slot.point_at(Length::from_mm(0.8));
-        assert!(end.x.as_mm().abs() < 1e-9, "x is unchanged: {}", end.x.as_mm());
+        assert!(
+            end.x.as_mm().abs() < 1e-9,
+            "x is unchanged: {}",
+            end.x.as_mm()
+        );
         assert!((end.y.as_mm() - 0.8).abs() < 1e-9);
     }
 }

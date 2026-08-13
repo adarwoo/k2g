@@ -21,7 +21,7 @@ use crate::runtime::AppCtx;
 #[component]
 pub fn RackView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let plan = plan_tooling(&snapshot);
+    let plan = plan_tooling(&snapshot, snapshot.stitched_board_data.as_ref());
     let step_count = plan.steps.len();
     let selected = snapshot.selected_step.min(step_count.saturating_sub(1));
 
@@ -43,7 +43,10 @@ pub fn RackView(state: Signal<AppCtx>) -> Element {
 
     // Only meaningful once a previous step could have left something in the rack.
     let show_status = step_count > 1;
-    let changes = rows.iter().filter(|row| row.status == SlotChange::Load).count();
+    let changes = rows
+        .iter()
+        .filter(|row| row.status == SlotChange::Load)
+        .count();
 
     rsx! {
         div { class: "screen single rack-view",

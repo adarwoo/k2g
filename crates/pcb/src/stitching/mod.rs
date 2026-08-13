@@ -24,6 +24,7 @@
 //!    - Outer boundaries → negative offset (route *inside*)
 //!    - Inner holes      → positive offset (route *outside*)
 
+pub mod corners;
 pub mod tessellate;
 
 use clipper2_rust::core::{Path64, Point64};
@@ -41,9 +42,21 @@ use crate::snapshot::{BoardEdgeShape, BoardPoint};
 /// instead of being flattened into a fan of G1 chords. All coordinates are nm.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Segment {
-    Line { start: (i64, i64), end: (i64, i64) },
-    Arc { start: (i64, i64), mid: (i64, i64), end: (i64, i64) },
-    Bezier { start: (i64, i64), control1: (i64, i64), control2: (i64, i64), end: (i64, i64) },
+    Line {
+        start: (i64, i64),
+        end: (i64, i64),
+    },
+    Arc {
+        start: (i64, i64),
+        mid: (i64, i64),
+        end: (i64, i64),
+    },
+    Bezier {
+        start: (i64, i64),
+        control1: (i64, i64),
+        control2: (i64, i64),
+        end: (i64, i64),
+    },
 }
 
 impl Segment {
@@ -59,7 +72,9 @@ impl Segment {
     /// The point the move ends at.
     pub fn end(&self) -> (i64, i64) {
         match *self {
-            Segment::Line { end, .. } | Segment::Arc { end, .. } | Segment::Bezier { end, .. } => end,
+            Segment::Line { end, .. } | Segment::Arc { end, .. } | Segment::Bezier { end, .. } => {
+                end
+            }
         }
     }
 
@@ -68,11 +83,26 @@ impl Segment {
     /// swaps its two control points.
     fn reversed(self) -> Segment {
         match self {
-            Segment::Line { start, end } => Segment::Line { start: end, end: start },
-            Segment::Arc { start, mid, end } => Segment::Arc { start: end, mid, end: start },
-            Segment::Bezier { start, control1, control2, end } => {
-                Segment::Bezier { start: end, control1: control2, control2: control1, end: start }
-            }
+            Segment::Line { start, end } => Segment::Line {
+                start: end,
+                end: start,
+            },
+            Segment::Arc { start, mid, end } => Segment::Arc {
+                start: end,
+                mid,
+                end: start,
+            },
+            Segment::Bezier {
+                start,
+                control1,
+                control2,
+                end,
+            } => Segment::Bezier {
+                start: end,
+                control1: control2,
+                control2: control1,
+                end: start,
+            },
         }
     }
 
@@ -82,9 +112,17 @@ impl Segment {
         match self {
             Segment::Line { end, .. } => Segment::Line { start: p, end },
             Segment::Arc { mid, end, .. } => Segment::Arc { start: p, mid, end },
-            Segment::Bezier { control1, control2, end, .. } => {
-                Segment::Bezier { start: p, control1, control2, end }
-            }
+            Segment::Bezier {
+                control1,
+                control2,
+                end,
+                ..
+            } => Segment::Bezier {
+                start: p,
+                control1,
+                control2,
+                end,
+            },
         }
     }
 }
@@ -161,8 +199,8 @@ struct Fragment {
     label: String, // shape id or index, for warnings
 }
 
-fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
-    let label = match shape {
+fn shape_label(shape: &BoardEdgeShape, index: usize) -> String {
+    match shape {
         BoardEdgeShape::Track { id, .. }
         | BoardEdgeShape::Arc { id, .. }
         | BoardEdgeShape::GraphicSegment { id, .. }
@@ -174,7 +212,96 @@ fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
             .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("shape#{index}")),
+    }
+}
+
+/// One shape into however many fragments it contributes.
+///
+/// Every primitive but the polygon yields exactly one. A polygon set carries an outline
+/// and any number of holes, each already a closed ring, so it is the one shape that can
+/// produce several — which is why this returns a list rather than an `Option`.
+fn shape_to_fragments(shape: &BoardEdgeShape, index: usize) -> Vec<Fragment> {
+    if let BoardEdgeShape::GraphicPolygon { rings, .. } = shape {
+        let label = shape_label(shape, index);
+        return rings
+            .iter()
+            .enumerate()
+            .filter_map(|(r, ring)| polygon_ring_fragment(ring, format!("{label}/ring{r}")))
+            .collect();
+    }
+    shape_to_fragment(shape, index).into_iter().collect()
+}
+
+/// A closed polygon ring into a fragment, preserving arc nodes as arcs.
+fn polygon_ring_fragment(ring: &crate::snapshot::PolyRing, label: String) -> Option<Fragment> {
+    use crate::snapshot::PolyNode;
+
+    let mut pts: Vec<(i64, i64)> = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut cursor: Option<(i64, i64)> = None;
+
+    // Bridges the gap when an arc node does not begin where the previous node ended.
+    // KiCad's rings are continuous, but a stray gap should become a straight edge rather
+    // than a hole in the contour.
+    let line_to = |pts: &mut Vec<(i64, i64)>,
+                   segments: &mut Vec<Segment>,
+                   from: (i64, i64),
+                   to: (i64, i64)| {
+        if from != to {
+            pts.push(to);
+            segments.push(Segment::Line {
+                start: from,
+                end: to,
+            });
+        }
     };
+
+    for node in &ring.nodes {
+        match node {
+            PolyNode::Point(p) => {
+                let p = nm(p);
+                match cursor {
+                    None => pts.push(p),
+                    Some(prev) => line_to(&mut pts, &mut segments, prev, p),
+                }
+                cursor = Some(p);
+            }
+            PolyNode::Arc { start, mid, end } => {
+                let (s, m, e) = (nm(start), nm(mid), nm(end));
+                match cursor {
+                    None => pts.push(s),
+                    Some(prev) => line_to(&mut pts, &mut segments, prev, s),
+                }
+                tessellate::tessellate_arc(
+                    &mut pts, s.0 as f64, s.1 as f64, m.0 as f64, m.1 as f64, e.0 as f64,
+                    e.1 as f64,
+                );
+                pts.push(e);
+                segments.push(Segment::Arc {
+                    start: s,
+                    mid: m,
+                    end: e,
+                });
+                cursor = Some(e);
+            }
+        }
+    }
+
+    // Close the ring explicitly: the `closed` flag is advisory and the last node rarely
+    // repeats the first.
+    let (first, last) = (*pts.first()?, cursor?);
+    line_to(&mut pts, &mut segments, last, first);
+
+    (segments.len() >= 3).then_some(Fragment {
+        points: pts,
+        segments,
+        is_closed: true,
+        label,
+    })
+}
+
+fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
+    let label = shape_label(shape, index);
 
     let mut pts: Vec<(i64, i64)> = Vec::new();
     let mut segments: Vec<Segment> = Vec::new();
@@ -190,56 +317,101 @@ fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
             segments.push(Segment::Line { start: s, end: e });
         }
 
-        BoardEdgeShape::Arc { start, mid, end, .. }
-        | BoardEdgeShape::GraphicArc { start, mid, end, .. } => {
+        BoardEdgeShape::Arc {
+            start, mid, end, ..
+        }
+        | BoardEdgeShape::GraphicArc {
+            start, mid, end, ..
+        } => {
             let s = nm(start);
             let m = nm(mid);
             let e = nm(end);
             tessellate::tessellate_arc(
-                &mut pts,
-                s.0 as f64, s.1 as f64,
-                m.0 as f64, m.1 as f64,
-                e.0 as f64, e.1 as f64,
+                &mut pts, s.0 as f64, s.1 as f64, m.0 as f64, m.1 as f64, e.0 as f64, e.1 as f64,
             );
             pts.push(e); // include end point
-            segments.push(Segment::Arc { start: s, mid: m, end: e });
+            segments.push(Segment::Arc {
+                start: s,
+                mid: m,
+                end: e,
+            });
         }
 
-        BoardEdgeShape::GraphicBezier { start, control1, control2, end, .. } => {
+        BoardEdgeShape::GraphicBezier {
+            start,
+            control1,
+            control2,
+            end,
+            ..
+        } => {
             let s = nm(start);
             let c1 = nm(control1);
             let c2 = nm(control2);
             let e = nm(end);
             tessellate::tessellate_bezier(
                 &mut pts,
-                s.0 as f64, s.1 as f64,
-                c1.0 as f64, c1.1 as f64,
-                c2.0 as f64, c2.1 as f64,
-                e.0 as f64, e.1 as f64,
+                s.0 as f64,
+                s.1 as f64,
+                c1.0 as f64,
+                c1.1 as f64,
+                c2.0 as f64,
+                c2.1 as f64,
+                e.0 as f64,
+                e.1 as f64,
             );
             pts.push(e);
-            segments.push(Segment::Bezier { start: s, control1: c1, control2: c2, end: e });
+            segments.push(Segment::Bezier {
+                start: s,
+                control1: c1,
+                control2: c2,
+                end: e,
+            });
         }
 
         // --- self-closing primitives: segments already form a closed loop ---
-        BoardEdgeShape::GraphicCircle { center, radius_point, .. } => {
+        BoardEdgeShape::GraphicCircle {
+            center,
+            radius_point,
+            ..
+        } => {
             let (cx, cy) = nm(center);
             let (rx, ry) = nm(radius_point);
             tessellate::tessellate_circle(&mut pts, cx as f64, cy as f64, rx as f64, ry as f64);
             let segments = circle_segments(cx as f64, cy as f64, rx as f64, ry as f64);
-            return Some(Fragment { points: pts, segments, is_closed: true, label });
+            return Some(Fragment {
+                points: pts,
+                segments,
+                is_closed: true,
+                label,
+            });
         }
 
-        BoardEdgeShape::GraphicRectangle { top_left, bottom_right, corner_radius, .. } => {
+        BoardEdgeShape::GraphicRectangle {
+            top_left,
+            bottom_right,
+            corner_radius,
+            ..
+        } => {
             let (x0, y0) = nm(top_left);
             let (x1, y1) = nm(bottom_right);
-            let r = corner_radius.as_ref().map(|l| l.as_nm() as f64).unwrap_or(0.0);
-            tessellate::tessellate_rectangle(&mut pts, x0 as f64, y0 as f64, x1 as f64, y1 as f64, r);
+            let r = corner_radius
+                .as_ref()
+                .map(|l| l.as_nm() as f64)
+                .unwrap_or(0.0);
+            tessellate::tessellate_rectangle(
+                &mut pts, x0 as f64, y0 as f64, x1 as f64, y1 as f64, r,
+            );
             let segments = rect_segments(x0 as f64, y0 as f64, x1 as f64, y1 as f64, r);
-            return Some(Fragment { points: pts, segments, is_closed: true, label });
+            return Some(Fragment {
+                points: pts,
+                segments,
+                is_closed: true,
+                label,
+            });
         }
 
-        // Polygon: we have only a count, not the actual geometry — skip.
+        // Handled by `shape_to_fragments`, which can return the several rings a polygon
+        // set may hold; this function can only return one.
         BoardEdgeShape::GraphicPolygon { .. } => return None,
     }
 
@@ -247,7 +419,12 @@ fn shape_to_fragment(shape: &BoardEdgeShape, index: usize) -> Option<Fragment> {
         return None;
     }
 
-    Some(Fragment { points: pts, segments, is_closed: false, label })
+    Some(Fragment {
+        points: pts,
+        segments,
+        is_closed: false,
+        label,
+    })
 }
 
 /// The two semicircle arcs that make up a full circle, going CCW from the east point.
@@ -260,8 +437,16 @@ fn circle_segments(cx: f64, cy: f64, rx: f64, ry: f64) -> Vec<Segment> {
     let west = pt(cx - r, cy);
     let south = pt(cx, cy - r);
     vec![
-        Segment::Arc { start: east, mid: north, end: west },
-        Segment::Arc { start: west, mid: south, end: east },
+        Segment::Arc {
+            start: east,
+            mid: north,
+            end: west,
+        },
+        Segment::Arc {
+            start: west,
+            mid: south,
+            end: east,
+        },
     ]
 }
 
@@ -278,22 +463,41 @@ fn rect_segments(x0: f64, y0: f64, x1: f64, y1: f64, corner_radius_nm: f64) -> V
     if r <= 1.0 {
         let corners = [pt(lx, ty), pt(rx, ty), pt(rx, by), pt(lx, by)];
         return (0..4)
-            .map(|i| Segment::Line { start: corners[i], end: corners[(i + 1) % 4] })
+            .map(|i| Segment::Line {
+                start: corners[i],
+                end: corners[(i + 1) % 4],
+            })
             .collect();
     }
 
     // A quarter-arc corner centred at (acx,acy), swept from t0 to t1.
     let arc = |acx: f64, acy: f64, t0: f64, t1: f64| {
         let p = |t: f64| pt(acx + r * t.cos(), acy + r * t.sin());
-        Segment::Arc { start: p(t0), mid: p((t0 + t1) * 0.5), end: p(t1) }
+        Segment::Arc {
+            start: p(t0),
+            mid: p((t0 + t1) * 0.5),
+            end: p(t1),
+        }
     };
     let tl = arc(lx + r, ty + r, PI, PI * 1.5);
     let tr = arc(rx - r, ty + r, PI * 1.5, TAU);
     let br = arc(rx - r, by - r, 0.0, PI * 0.5);
     let bl = arc(lx + r, by - r, PI * 0.5, PI);
     // Straight edges join each corner arc's end to the next arc's start.
-    let line = |a: Segment, b: Segment| Segment::Line { start: a.end(), end: b.start() };
-    vec![tl, line(tl, tr), tr, line(tr, br), br, line(br, bl), bl, line(bl, tl)]
+    let line = |a: Segment, b: Segment| Segment::Line {
+        start: a.end(),
+        end: b.start(),
+    };
+    vec![
+        tl,
+        line(tl, tr),
+        tr,
+        line(tr, br),
+        br,
+        line(br, bl),
+        bl,
+        line(bl, tl),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -316,7 +520,10 @@ fn stitch_fragments(fragments: Vec<Fragment>) -> (Vec<Chain>, Vec<String>) {
     let mut open: Vec<Fragment> = Vec::new();
     for frag in fragments {
         if frag.is_closed {
-            closed.push(Chain { points: frag.points, segments: frag.segments });
+            closed.push(Chain {
+                points: frag.points,
+                segments: frag.segments,
+            });
         } else {
             open.push(frag);
         }
@@ -432,7 +639,7 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
     let fragments: Vec<Fragment> = shapes
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| shape_to_fragment(s, i))
+        .flat_map(|(i, s)| shape_to_fragments(s, i))
         .collect();
 
     // --- stitch ---
@@ -458,8 +665,10 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
             "[stitch]   chain {i}: {} pts / {} seg  bbox ({:.3},{:.3})-({:.3},{:.3}) mm",
             chain.points.len(),
             chain.segments.len(),
-            xmin as f64 / 1_000_000.0, ymin as f64 / 1_000_000.0,
-            xmax as f64 / 1_000_000.0, ymax as f64 / 1_000_000.0,
+            xmin as f64 / 1_000_000.0,
+            ymin as f64 / 1_000_000.0,
+            xmax as f64 / 1_000_000.0,
+            ymax as f64 / 1_000_000.0,
         );
     }
     if !errors.is_empty() {
@@ -494,9 +703,11 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         })
         .collect();
     contours_with_depth.sort_by(|(depth_a, contour_a), (depth_b, contour_b)| {
-        depth_a
-            .cmp(depth_b)
-            .then_with(|| signed_area_nm2(&contour_b.points).unsigned_abs().cmp(&signed_area_nm2(&contour_a.points).unsigned_abs()))
+        depth_a.cmp(depth_b).then_with(|| {
+            signed_area_nm2(&contour_b.points)
+                .unsigned_abs()
+                .cmp(&signed_area_nm2(&contour_a.points).unsigned_abs())
+        })
     });
     // --- validate: floating islands (depth ≥ 2) ---
     for (depth, contour) in &contours_with_depth {
@@ -510,7 +721,10 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         }
     }
 
-    let contours: Vec<Contour> = contours_with_depth.into_iter().map(|(_, contour)| contour).collect();
+    let contours: Vec<Contour> = contours_with_depth
+        .into_iter()
+        .map(|(_, contour)| contour)
+        .collect();
 
     log::debug!("[stitch] contour nesting ({} total):", contours.len());
     for (i, c) in contours.iter().enumerate() {
@@ -520,13 +734,18 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
             "[stitch]   #{i} {} {} pts  bbox ({:.3},{:.3})-({:.3},{:.3}) mm  area {:.2} mm^2",
             if c.is_hole { "HOLE " } else { "OUTER" },
             c.points.len(),
-            xmin as f64 / 1_000_000.0, ymin as f64 / 1_000_000.0,
-            xmax as f64 / 1_000_000.0, ymax as f64 / 1_000_000.0,
+            xmin as f64 / 1_000_000.0,
+            ymin as f64 / 1_000_000.0,
+            xmax as f64 / 1_000_000.0,
+            ymax as f64 / 1_000_000.0,
             area as f64 / 1e12,
         );
     }
     if !errors.is_empty() {
-        log::debug!("[stitch] {} validation error(s) — board cannot be processed:", errors.len());
+        log::debug!(
+            "[stitch] {} validation error(s) — board cannot be processed:",
+            errors.len()
+        );
         for e in &errors {
             log::debug!("[stitch]   ERROR: {e}");
         }
@@ -538,8 +757,10 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
 fn bbox_nm(pts: &[(i64, i64)]) -> (i64, i64, i64, i64) {
     let (mut xmin, mut ymin, mut xmax, mut ymax) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
     for &(x, y) in pts {
-        xmin = xmin.min(x); ymin = ymin.min(y);
-        xmax = xmax.max(x); ymax = ymax.max(y);
+        xmin = xmin.min(x);
+        ymin = ymin.min(y);
+        xmax = xmax.max(x);
+        ymax = ymax.max(y);
     }
     (xmin, ymin, xmax, ymax)
 }
@@ -554,7 +775,6 @@ fn signed_area_nm2(pts: &[(i64, i64)]) -> i128 {
     }
     sum / 2
 }
-
 
 /// Offsets each contour by `tool_radius_nm` into the cutter-centre path that frees the
 /// board at its **nominal** size, one entry per input contour and in the same order.
@@ -578,21 +798,69 @@ fn signed_area_nm2(pts: &[(i64, i64)]) -> i128 {
 /// offset, which is what makes it correct without a special case per corner type. The
 /// typed [`Contour::segments`] are preserved for a later arc-fitting pass
 /// (operation-planner.md §3) but are not consulted here.
-pub fn routing_offset(contours: &[Contour], tool_radius_nm: i64) -> Vec<Option<Vec<(i64, i64)>>> {
+/// Chord tolerance for the arcs an offset generates, matched to the tessellator's own
+/// so a path is no coarser after offsetting than it was before. Pinned rather than left
+/// at Clipper's proportional default because [`fit_cutout`] measures areas across two
+/// offsets and needs a stated error bound rather than a floating one.
+const OFFSET_ARC_TOLERANCE_NM: f64 = tessellate::SAGITTA_TOLERANCE_NM;
+
+/// Every path that offsetting `paths` by `delta_nm` produces, as one group.
+///
+/// Positive grows and negative shrinks **whatever the input winding** — Clipper reads
+/// the orientation of each group and flips the delta to suit, which matters here because
+/// nothing in this crate normalises the winding of a stitched contour.
+///
+/// Returned largest-area-first with ties broken by Clipper's own order, so the result is
+/// a total function of the input: two runs on the same board give the same program.
+fn offset_group(paths: &[Vec<(i64, i64)>], delta_nm: f64) -> Vec<Vec<(i64, i64)>> {
     use clipper2_rust::{
         core::Paths64,
         inflate_paths_64,
         offset::{EndType, JoinType},
     };
 
+    let input: Paths64 = paths
+        .iter()
+        .filter(|p| p.len() >= 3)
+        .map(|p| p.iter().map(|&(x, y)| Point64 { x, y }).collect::<Path64>())
+        .collect();
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out: Vec<Vec<(i64, i64)>> = inflate_paths_64(
+        &input,
+        delta_nm,
+        JoinType::Round,
+        EndType::Polygon,
+        2.0,
+        OFFSET_ARC_TOLERANCE_NM,
+    )
+    .iter()
+    .map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect::<Vec<(i64, i64)>>())
+    .filter(|p| p.len() >= 3)
+    .collect();
+    out.sort_by_key(|p| std::cmp::Reverse(signed_area_nm2(p).unsigned_abs()));
+    out
+}
+
+/// Offsets one closed path, returning **every** fragment it breaks into.
+///
+/// The fragment count is information, not noise: shrinking a shape that has a neck
+/// narrower than twice the offset splits it in two, and that is precisely how
+/// [`fit_cutout`] detects a cutter that cannot pass. Callers that only want the body of
+/// the shape can take the first, which is the largest.
+pub fn offset_paths(points: &[(i64, i64)], delta_nm: f64) -> Vec<Vec<(i64, i64)>> {
+    offset_group(&[points.to_vec()], delta_nm)
+}
+
+pub fn routing_offset(contours: &[Contour], tool_radius_nm: i64) -> Vec<Option<Vec<(i64, i64)>>> {
     contours
         .iter()
         .map(|contour| {
             if contour.points.len() < 3 {
                 return None;
             }
-            let input: Paths64 =
-                vec![contour.points.iter().map(|&(x, y)| Point64 { x, y }).collect::<Path64>()];
             // Grow the boundary, shrink the cutouts — the kerf lands on the waste side
             // of each. `Round` joins are the tool's own radius sweeping a convex corner.
             let delta = if contour.is_hole {
@@ -600,14 +868,99 @@ pub fn routing_offset(contours: &[Contour], tool_radius_nm: i64) -> Vec<Option<V
             } else {
                 tool_radius_nm as f64
             };
-            let offset = inflate_paths_64(&input, delta, JoinType::Round, EndType::Polygon, 2.0, 0.0);
-            offset
-                .iter()
-                .map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect::<Vec<(i64, i64)>>())
-                .max_by_key(|path| signed_area_nm2(path).unsigned_abs())
-                .filter(|path| path.len() >= 3)
+            // Largest fragment only. That is a real loss of information where the offset
+            // splits — a pinched cutout silently becomes one lobe — which is why
+            // interior openings go through `fit_cutout` instead of this, and why it
+            // refuses a cutter that splits the erosion rather than cutting one half.
+            offset_paths(&contour.points, delta).into_iter().next()
         })
         .collect()
+}
+
+/// What a candidate cutter would make of one interior opening.
+#[derive(Clone, Debug)]
+pub struct CutoutFit {
+    /// The cutter-centre loop: the boundary of `erode(C, R)`, one closed path.
+    pub wall_path: Vec<(i64, i64)>,
+    /// The slug or slugs left standing once the wall pass has run: `erode(C, D)`.
+    ///
+    /// Empty when the pass clears the whole opening, which happens exactly when the
+    /// opening is nowhere wider than twice the cutter diameter. More than one when the
+    /// opening is wide at both ends and pinched in the middle — a dumbbell leaves two
+    /// pieces, and one tab between them holds neither.
+    pub slugs: Vec<Vec<(i64, i64)>>,
+    /// Material the cutter cannot reach, over and above the fillets its own radius
+    /// forces it to leave at every sharp corner. Never usefully zero — see
+    /// [`corners::corner_fillet_area_nm2`].
+    pub excess_nm2: f64,
+}
+
+/// Whether `tool_radius_nm` can cut `contour` as drawn, and what it leaves behind.
+///
+/// Two questions, answered separately because they fail in different ways and want
+/// different remedies.
+///
+/// **Can the cutter get everywhere?** `erode(C, R)` is the set of places the cutter's
+/// centre may stand. Empty means it does not fit at all. *Split* means there is a neck
+/// narrower than 2R somewhere: the cut would come out as two disjoint loops that free
+/// neither piece, which is worse than refusing the tool. That test needs no tolerance,
+/// so it runs first.
+///
+/// **Does it leave more than it must?** `open(C,R) = dilate(erode(C,R), R)` is exactly
+/// the union of every radius-R disc that fits inside `C` — precisely what the cutter can
+/// reach, corners and all. Whatever remains is fillet plus genuinely unreachable
+/// material, and the fillets have a closed form, so subtracting them leaves an honest
+/// measure of the second. A round cutter *always* leaves something at a sharp corner;
+/// without that subtraction every rectangular cutout would look unreachable.
+///
+/// `None` when the cutter does not fit. The area threshold is deliberately **not**
+/// applied here — that is tool-selection policy, and it lives with the picker.
+pub fn fit_cutout(contour: &Contour, tool_radius_nm: i64) -> Option<CutoutFit> {
+    if contour.points.len() < 3 || tool_radius_nm <= 0 {
+        return None;
+    }
+    let r = tool_radius_nm as f64;
+
+    let erosion = offset_paths(&contour.points, -r);
+    if erosion.len() != 1 {
+        return None; // does not fit, or a neck splits it
+    }
+
+    let opening = offset_group(&erosion, r);
+    let open_area: f64 = opening
+        .iter()
+        .map(|p| signed_area_nm2(p).unsigned_abs() as f64)
+        .sum();
+    let total_area = signed_area_nm2(&contour.points).unsigned_abs() as f64;
+
+    let budget: f64 = corners::convex_corners(contour, corners::MIN_CORNER_TURN_RAD)
+        .iter()
+        .map(|c| corners::corner_fillet_area_nm2(r, c.interior_rad))
+        .sum();
+
+    // The slug is the erosion eroded again by the same radius: the cutter sweeps a disc
+    // of radius R along a centreline already R inside the wall, so it clears everything
+    // within 2R of the wall. `erode(C, 2R)` is what survives — and it is empty exactly
+    // when the opening is nowhere wider than 2R+2R, i.e. twice the cutter *diameter*.
+    let slugs = offset_paths(&contour.points, -2.0 * r);
+
+    Some(CutoutFit {
+        wall_path: erosion.into_iter().next()?,
+        slugs,
+        excess_nm2: (total_area - open_area - budget).max(0.0),
+    })
+}
+
+/// Perimeter of a closed polygon, in nanometres.
+pub fn path_perimeter_nm(path: &[(i64, i64)]) -> f64 {
+    if path.len() < 2 {
+        return 0.0;
+    }
+    path.iter()
+        .zip(path.iter().cycle().skip(1))
+        .take(path.len())
+        .map(|(&(ax, ay), &(bx, by))| ((bx - ax) as f64).hypot((by - ay) as f64))
+        .sum()
 }
 
 // ---------------------------------------------------------------------------
@@ -636,14 +989,22 @@ fn point_in_polygon_nm(pt: (i64, i64), poly: &[(i64, i64)]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::{PolyNode, PolyRing};
     use units::Length;
 
     fn pt(x_mm: f64, y_mm: f64) -> BoardPoint {
-        BoardPoint { x: Length::from_mm(x_mm), y: Length::from_mm(y_mm) }
+        BoardPoint {
+            x: Length::from_mm(x_mm),
+            y: Length::from_mm(y_mm),
+        }
     }
 
     fn segment(id: &str, ax: f64, ay: f64, bx: f64, by: f64) -> BoardEdgeShape {
-        BoardEdgeShape::GraphicSegment { id: Some(id.into()), start: pt(ax, ay), end: pt(bx, by) }
+        BoardEdgeShape::GraphicSegment {
+            id: Some(id.into()),
+            start: pt(ax, ay),
+            end: pt(bx, by),
+        }
     }
 
     /// Asserts the segments form a continuous, closed loop: each segment ends exactly
@@ -675,8 +1036,15 @@ mod tests {
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.contours.len(), 1);
         let contour = &result.contours[0];
-        assert_eq!(contour.segments.len(), 4, "one typed segment per edge, not flattened");
-        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Line { .. })));
+        assert_eq!(
+            contour.segments.len(),
+            4,
+            "one typed segment per edge, not flattened"
+        );
+        assert!(contour
+            .segments
+            .iter()
+            .all(|s| matches!(s, Segment::Line { .. })));
         assert_closed_loop(&contour.segments);
     }
 
@@ -698,8 +1066,22 @@ mod tests {
         assert_eq!(result.contours.len(), 1);
         let contour = &result.contours[0];
         assert_eq!(contour.segments.len(), 2);
-        assert_eq!(contour.segments.iter().filter(|s| matches!(s, Segment::Arc { .. })).count(), 1);
-        assert_eq!(contour.segments.iter().filter(|s| matches!(s, Segment::Line { .. })).count(), 1);
+        assert_eq!(
+            contour
+                .segments
+                .iter()
+                .filter(|s| matches!(s, Segment::Arc { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            contour
+                .segments
+                .iter()
+                .filter(|s| matches!(s, Segment::Line { .. }))
+                .count(),
+            1
+        );
         assert_closed_loop(&contour.segments);
     }
 
@@ -716,7 +1098,10 @@ mod tests {
         assert_eq!(result.contours.len(), 1);
         let contour = &result.contours[0];
         assert_eq!(contour.segments.len(), 4);
-        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Line { .. })));
+        assert!(contour
+            .segments
+            .iter()
+            .all(|s| matches!(s, Segment::Line { .. })));
         assert_closed_loop(&contour.segments);
     }
 
@@ -732,7 +1117,10 @@ mod tests {
         assert_eq!(result.contours.len(), 1);
         let contour = &result.contours[0];
         assert_eq!(contour.segments.len(), 2);
-        assert!(contour.segments.iter().all(|s| matches!(s, Segment::Arc { .. })));
+        assert!(contour
+            .segments
+            .iter()
+            .all(|s| matches!(s, Segment::Arc { .. })));
         assert_closed_loop(&contour.segments);
     }
 
@@ -758,8 +1146,278 @@ mod tests {
         let result = stitch_edge_shapes(&shapes);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         assert_eq!(result.contours.len(), 2);
-        assert!(result.contours.iter().any(|c| !c.is_hole), "one outer boundary");
+        assert!(
+            result.contours.iter().any(|c| !c.is_hole),
+            "one outer boundary"
+        );
         assert!(result.contours.iter().any(|c| c.is_hole), "one inner hole");
-        assert!(result.contours.iter().all(|c| c.segments.len() == 4), "typed segments kept");
+        assert!(
+            result.contours.iter().all(|c| c.segments.len() == 4),
+            "typed segments kept"
+        );
+    }
+
+    /// A polygon-drawn cutout must reach the machining path like any other shape.
+    ///
+    /// KiCad's polygon tool is an ordinary way to draw an opening, and upstream
+    /// `kicad-ipc-rs` maps the shape to a vertex *count* with the geometry discarded. We
+    /// carried the vertices through the fork precisely so this works; before that, a
+    /// board whose cutout was drawn this way lost it with no error anywhere — it simply
+    /// never got machined, which is the worst way for a CAM tool to fail.
+    #[test]
+    fn a_polygon_ring_becomes_a_closed_contour() {
+        let ring = |pts: &[(f64, f64)]| PolyRing {
+            nodes: pts
+                .iter()
+                .map(|&(x, y)| PolyNode::Point(pt(x, y)))
+                .collect(),
+        };
+        let shapes = vec![
+            BoardEdgeShape::GraphicRectangle {
+                id: Some("outer".into()),
+                top_left: pt(0.0, 0.0),
+                bottom_right: pt(20.0, 20.0),
+                corner_radius: None,
+            },
+            BoardEdgeShape::GraphicPolygon {
+                id: Some("poly-cutout".into()),
+                rings: vec![ring(&[(5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)])],
+            },
+        ];
+
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(
+            result.contours.len(),
+            2,
+            "the polygon is a contour, not a dropped shape"
+        );
+
+        let hole = result
+            .contours
+            .iter()
+            .find(|c| c.is_hole)
+            .expect("the polygon nests as a hole");
+        assert_eq!(
+            hole.segments.len(),
+            4,
+            "closed by its own edges, not left open"
+        );
+        assert_eq!(
+            signed_area_nm2(&hole.points).unsigned_abs(),
+            100_000_000_000_000,
+            "10mm x 10mm in nm^2"
+        );
+    }
+
+    /// A rectangular nm contour, for the fit tests.
+    fn rect_contour(w_mm: f64, h_mm: f64) -> Contour {
+        let (w, h) = ((w_mm * 1e6) as i64, (h_mm * 1e6) as i64);
+        let pts = vec![(0, 0), (w, 0), (w, h), (0, h)];
+        let segments = (0..4)
+            .map(|i| Segment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % 4],
+            })
+            .collect();
+        Contour {
+            points: pts,
+            segments,
+            is_hole: true,
+        }
+    }
+
+    fn nm(mm: f64) -> i64 {
+        (mm * 1e6) as i64
+    }
+
+    /// A cutter that fits must not be refused just because it is round.
+    ///
+    /// `open(C,R)` can never recover a sharp corner, so the raw leftover area of a
+    /// rectangular cutout is always about `0.86 R²` however well the cutter fits. A fit
+    /// test that did not subtract the corner budget would reject every rectangle on the
+    /// board — which is most of them.
+    #[test]
+    fn a_rectangular_cutout_is_cut_by_a_cutter_that_fits_despite_its_corners() {
+        let c = rect_contour(10.0, 6.0);
+        let fit = fit_cutout(&c, nm(1.0)).expect("a 2mm cutter fits a 6mm-wide opening");
+        let r_sq = 1e6_f64 * 1e6;
+        assert!(
+            fit.excess_nm2 < r_sq,
+            "excess {} nm² should be under one cutter-radius square ({r_sq})",
+            fit.excess_nm2
+        );
+    }
+
+    /// A neck narrower than the cutter must be refused, not silently half-cut.
+    ///
+    /// Shrinking a pinched shape splits it, and `routing_offset` would hand back only
+    /// the larger lobe — so the program would cut one closed loop inside one half and
+    /// leave the neck and the other half attached, with nothing to say so. Refusing the
+    /// tool is the only safe answer.
+    #[test]
+    fn a_neck_narrower_than_the_cutter_splits_the_erosion_and_is_refused() {
+        // Two 8mm squares joined by a 1mm-wide, 4mm-long waist.
+        let pts = vec![
+            (nm(0.0), nm(0.0)),
+            (nm(8.0), nm(0.0)),
+            (nm(8.0), nm(3.5)),
+            (nm(12.0), nm(3.5)),
+            (nm(12.0), nm(0.0)),
+            (nm(20.0), nm(0.0)),
+            (nm(20.0), nm(8.0)),
+            (nm(12.0), nm(8.0)),
+            (nm(12.0), nm(4.5)),
+            (nm(8.0), nm(4.5)),
+            (nm(8.0), nm(8.0)),
+            (nm(0.0), nm(8.0)),
+        ];
+        let n = pts.len();
+        let segments = (0..n)
+            .map(|i| Segment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % n],
+            })
+            .collect();
+        let dumbbell = Contour {
+            points: pts,
+            segments,
+            is_hole: true,
+        };
+
+        assert!(
+            fit_cutout(&dumbbell, nm(1.0)).is_none(),
+            "a 2mm cutter cannot pass a 1mm waist"
+        );
+        assert!(
+            fit_cutout(&dumbbell, nm(0.4)).is_some(),
+            "a 0.8mm cutter passes it and should be accepted"
+        );
+    }
+
+    /// An opening no wider than twice the cutter diameter leaves nothing to hold.
+    ///
+    /// The wall pass sweeps a disc of radius R along a centreline already R inside the
+    /// edge, so it clears everything within 2R of the wall — the whole opening, once the
+    /// opening is nowhere wider than 4R. This is the exact condition, not a rule of
+    /// thumb, and it is what lets the operation skip pocketing altogether.
+    #[test]
+    fn an_opening_no_wider_than_twice_the_cutter_diameter_leaves_no_slug() {
+        // 1mm cutter (R=0.5): clears anything up to 2mm wide.
+        let narrow = rect_contour(20.0, 1.8);
+        let fit = fit_cutout(&narrow, nm(0.5)).expect("the cutter fits");
+        assert!(
+            fit.slugs.is_empty(),
+            "1.8mm < 2 x 1mm: the pass clears the whole opening"
+        );
+
+        let wide = rect_contour(20.0, 3.0);
+        let fit = fit_cutout(&wide, nm(0.5)).expect("the cutter fits");
+        assert!(
+            !fit.slugs.is_empty(),
+            "3mm > 2 x 1mm: a slug survives and must be held"
+        );
+    }
+
+    /// A dumbbell wide enough for the cutter can still leave two islands.
+    ///
+    /// The waist passes the cutter but is too narrow to leave material, so the slug
+    /// splits while the cut path does not. One tab would hold one lobe and throw the
+    /// other, which is why island retention works per slug rather than per cutout.
+    #[test]
+    fn a_wide_waisted_dumbbell_leaves_two_islands() {
+        let pts = vec![
+            (nm(0.0), nm(0.0)),
+            (nm(10.0), nm(0.0)),
+            (nm(10.0), nm(4.4)),
+            (nm(14.0), nm(4.4)),
+            (nm(14.0), nm(0.0)),
+            (nm(24.0), nm(0.0)),
+            (nm(24.0), nm(10.0)),
+            (nm(14.0), nm(10.0)),
+            (nm(14.0), nm(5.6)),
+            (nm(10.0), nm(5.6)),
+            (nm(10.0), nm(10.0)),
+            (nm(0.0), nm(10.0)),
+        ];
+        let n = pts.len();
+        let segments = (0..n)
+            .map(|i| Segment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % n],
+            })
+            .collect();
+        let dumbbell = Contour {
+            points: pts,
+            segments,
+            is_hole: true,
+        };
+
+        // R=0.4 (0.8mm cutter) against a 1.2mm waist. The cutter passes it — 1.2 > 2R —
+        // but 1.2 < 2 x 0.8mm, so no material survives the waist and the slug splits.
+        // That gap between "the cutter fits" and "material survives" is exactly where
+        // one cutout turns into two islands.
+        let fit = fit_cutout(&dumbbell, nm(0.4)).expect("0.8mm cutter passes the 1.2mm waist");
+        assert_eq!(
+            fit.slugs.len(),
+            2,
+            "two lobes of material, each needing its own tab"
+        );
+    }
+
+    /// The slug is the shape the tab is sized against, not the drawing.
+    ///
+    /// A 20mm square cut with a 1mm cutter leaves a ~18mm square: the tab is a fraction
+    /// of *that* perimeter. Sizing off the drawn contour would scale the tab with the
+    /// cutter, which has nothing to do with how big the loose piece is.
+    #[test]
+    fn the_slug_is_the_opening_eroded_by_the_cutter_diameter() {
+        let fit = fit_cutout(&rect_contour(20.0, 20.0), nm(0.5)).expect("fits");
+        assert_eq!(fit.slugs.len(), 1);
+        let perimeter_mm = path_perimeter_nm(&fit.slugs[0]) / 1e6;
+        // Eroded by the cutter diameter (2 x 0.5mm), so 18mm a side. The corners stay
+        // sharp: round joins apply to the outside of a turn, and shrinking a convex
+        // shape turns every corner the other way.
+        assert!(
+            (perimeter_mm - 72.0).abs() < 0.2,
+            "expected a 4 x 18mm slug perimeter, got {perimeter_mm}"
+        );
+    }
+
+    /// A polygon's holes are rings in their own right.
+    ///
+    /// A single polygon shape can carry an outline *and* interior holes. Flattening them
+    /// into one ring list means nesting is decided by the same containment pass that
+    /// handles every other contour, rather than the polygon carrying a private opinion
+    /// about which of its rings are openings.
+    #[test]
+    fn a_polygon_carrying_its_own_hole_yields_both_rings() {
+        let ring = |pts: &[(f64, f64)]| PolyRing {
+            nodes: pts
+                .iter()
+                .map(|&(x, y)| PolyNode::Point(pt(x, y)))
+                .collect(),
+        };
+        let shapes = vec![BoardEdgeShape::GraphicPolygon {
+            id: Some("poly".into()),
+            rings: vec![
+                ring(&[(0.0, 0.0), (30.0, 0.0), (30.0, 30.0), (0.0, 30.0)]),
+                ring(&[(10.0, 10.0), (20.0, 10.0), (20.0, 20.0), (10.0, 20.0)]),
+            ],
+        }];
+
+        let result = stitch_edge_shapes(&shapes);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.contours.len(), 2);
+        assert_eq!(
+            result.contours.iter().filter(|c| c.is_hole).count(),
+            1,
+            "the inner ring"
+        );
+        assert_eq!(
+            result.contours.iter().filter(|c| !c.is_hole).count(),
+            1,
+            "the outer ring"
+        );
     }
 }

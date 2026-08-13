@@ -104,9 +104,12 @@ pub fn distribute_tabs(
         return Vec::new();
     }
 
-    let length = |&(x0, y0, x1, y1): &(f64, f64, f64, f64)| ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
-    let capacity: Vec<usize> =
-        segments.iter().map(|s| segment_capacity(length(s), tab_width_mm)).collect();
+    let length =
+        |&(x0, y0, x1, y1): &(f64, f64, f64, f64)| ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
+    let capacity: Vec<usize> = segments
+        .iter()
+        .map(|s| segment_capacity(length(s), tab_width_mm))
+        .collect();
 
     // Longest first; ties on the lower index so the result is a total function of the
     // input (op-planner §8: no hash order, no clock, no RNG).
@@ -195,7 +198,10 @@ impl Loop {
         if total <= 0.0 {
             return None;
         }
-        Some(Self { points: closed, cumulative })
+        Some(Self {
+            points: closed,
+            cumulative,
+        })
     }
 
     /// Total length of the loop, in millimetres.
@@ -214,7 +220,11 @@ impl Loop {
             .clamp(1, self.points.len() - 1);
         let (from, to) = (self.points[idx - 1], self.points[idx]);
         let span = self.cumulative[idx] - self.cumulative[idx - 1];
-        let t = if span > 0.0 { (target - self.cumulative[idx - 1]) / span } else { 0.0 };
+        let t = if span > 0.0 {
+            (target - self.cumulative[idx - 1]) / span
+        } else {
+            0.0
+        };
         Point::new(
             Length::from_mm(from.x.as_mm() + (to.x.as_mm() - from.x.as_mm()) * t),
             Length::from_mm(from.y.as_mm() + (to.y.as_mm() - from.y.as_mm()) * t),
@@ -235,7 +245,8 @@ impl Loop {
             let len_sq = dx * dx + dy * dy;
             // Projection parameter onto this edge, clamped to the edge itself.
             let t = if len_sq > 0.0 {
-                (((probe.x.as_mm() - from.x.as_mm()) * dx + (probe.y.as_mm() - from.y.as_mm()) * dy)
+                (((probe.x.as_mm() - from.x.as_mm()) * dx
+                    + (probe.y.as_mm() - from.y.as_mm()) * dy)
                     / len_sq)
                     .clamp(0.0, 1.0)
             } else {
@@ -375,7 +386,115 @@ pub fn mouse_bite_centres(
     let centre = tab.rem_euclid(1.0) * total;
     let pitch = tab_width_mm / holes as f64;
     let first = centre - tab_width_mm / 2.0 + pitch / 2.0;
-    (0..holes).map(|i| loop_.point_at(first + pitch * i as f64)).collect()
+    (0..holes)
+        .map(|i| loop_.point_at(first + pitch * i as f64))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Islands
+//
+// Built and tested ahead of its caller: the `route_cutouts` operation stores its
+// settings but does not yet plan a toolpath, because choosing a cutter per cutout needs
+// `RouterPlan` to carry one. The geometry is the half that can be settled on its own —
+// and the half with the safety property worth pinning early, since a slug with no tab is
+// a loose piece of board over a spinning cutter.
+// ---------------------------------------------------------------------------
+
+/// The narrowest tab worth leaving on a slug, in millimetres.
+///
+/// Below this a tab is a whisker: it tears out of the edge of the slug during the cut
+/// instead of holding it, which is the failure the tab exists to prevent.
+#[allow(dead_code)] // awaiting its caller in `plan_cutout_spans`
+pub const MIN_ISLAND_TAB_MM: f64 = 1.0;
+
+/// A tab wider than this is perforated rather than left solid.
+///
+/// Past a couple of millimetres a solid tab does not snap — it tears, and takes a bite
+/// of the edge with it. Perforating turns the same width into something that breaks
+/// where it is meant to.
+#[allow(dead_code)] // awaiting its caller in `plan_cutout_spans`
+pub const MOUSE_BITE_TAB_MM: f64 = 2.0;
+
+/// The single tab that holds one island.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(dead_code)] // awaiting its caller in `plan_cutout_spans`
+pub struct IslandTab {
+    /// Where on the cut path it sits, as a fraction of the loop in `[0, 1)`.
+    pub at: f64,
+    /// Its width, millimetres.
+    pub width_mm: f64,
+    /// Whether it is wide enough to want perforating.
+    pub mouse_bites: bool,
+}
+
+/// The point a lone tab should anchor to on a closed polygon: the midpoint of its
+/// longest edge, ties broken by the lowest index.
+///
+/// A slug has no "straight sides" to spread tabs across the way a board outline does —
+/// the slug of a round cutout is a round slug — so [`distribute_tabs`], which works on
+/// an outline's flats and is allowed to return fewer tabs than asked, has nothing to
+/// work with here and would return none at all. That is not an option when the thing
+/// being held is a loose piece of board over a spinning cutter.
+///
+/// The longest edge is the flat if the slug has one, and an arbitrary-but-fixed chord if
+/// it does not. Both are right: on a rectangle it puts the tab where the outline rule
+/// would have put it, and on a circle every position is the same position. Ties go to
+/// the lowest index so the choice is a total function of the input — no hash order, no
+/// clock, no RNG, same board same program.
+#[allow(dead_code)] // awaiting its caller in `plan_cutout_spans`
+pub fn longest_edge_midpoint(path: &[(f64, f64)]) -> Option<(f64, f64)> {
+    if path.len() < 2 {
+        return None;
+    }
+    let mut best: Option<(f64, (f64, f64))> = None;
+    for i in 0..path.len() {
+        let (ax, ay) = path[i];
+        let (bx, by) = path[(i + 1) % path.len()];
+        let len = (bx - ax).hypot(by - ay);
+        if best.as_ref().is_none_or(|(blen, _)| len > *blen) {
+            best = Some((len, ((ax + bx) / 2.0, (ay + by) / 2.0)));
+        }
+    }
+    best.map(|(_, mid)| mid)
+}
+
+/// Sizes and places the tab that holds one island.
+///
+/// One tab, because a slug is waste: it has to survive the cut, not come out square.
+///
+/// The width is a fraction of the **slug's own** perimeter rather than a fixed length,
+/// because one profile cuts a 4 mm disc and a 40 mm panel out of the middle of a board
+/// and no single width suits both — with a floor at [`MIN_ISLAND_TAB_MM`] so a tiny slug
+/// still gets something real to hold it. `slug_perimeter_mm` is measured in *board*
+/// space: the placement may scale the axes differently, and a tab width is a length on
+/// the part, not on the table.
+///
+/// Clamped so it can never exceed what a closed loop has room for. One tab needs its own
+/// width plus [`TAB_CLEARANCE_WIDTHS`] of clear run, so `L >= 4W`; without the clamp a
+/// 1.2 mm slug takes the 1 mm floor and leaves 0.2 mm of loop to cut, which is no cut at
+/// all.
+#[allow(dead_code)] // awaiting its caller in `plan_cutout_spans`
+pub fn island_tab(
+    path: &Loop,
+    slug_perimeter_mm: f64,
+    anchor: Point,
+    ratio: f64,
+) -> Option<IslandTab> {
+    let loop_len = path.length_mm();
+    if loop_len <= 0.0 || slug_perimeter_mm <= 0.0 {
+        return None;
+    }
+    let wanted = (ratio * slug_perimeter_mm).max(MIN_ISLAND_TAB_MM);
+    let width_mm = wanted.clamp(MIN_TAB_MM, loop_len / (1.0 + TAB_CLEARANCE_WIDTHS));
+    if width_mm < MIN_TAB_MM {
+        return None;
+    }
+    Some(IslandTab {
+        at: path.nearest_fraction(anchor).rem_euclid(1.0),
+        width_mm,
+        mouse_bites: width_mm > MOUSE_BITE_TAB_MM,
+    })
 }
 
 #[cfg(test)]
@@ -402,9 +521,21 @@ mod tests {
         assert!((r.length_mm() - 120.0).abs() < 1e-9);
         assert_eq!(at(r.point_at(0.0)), (0.0, 0.0));
         assert_eq!(at(r.point_at(40.0)), (40.0, 0.0), "the first corner");
-        assert_eq!(at(r.point_at(50.0)), (40.0, 10.0), "halfway up the right side");
-        assert_eq!(at(r.point_at(120.0)), (0.0, 0.0), "a full lap returns to the start");
-        assert_eq!(at(r.point_at(130.0)), at(r.point_at(10.0)), "past the end wraps");
+        assert_eq!(
+            at(r.point_at(50.0)),
+            (40.0, 10.0),
+            "halfway up the right side"
+        );
+        assert_eq!(
+            at(r.point_at(120.0)),
+            (0.0, 0.0),
+            "a full lap returns to the start"
+        );
+        assert_eq!(
+            at(r.point_at(130.0)),
+            at(r.point_at(10.0)),
+            "past the end wraps"
+        );
     }
 
     /// The inverse of `point_at`: a click anywhere near the loop resolves to the fraction
@@ -445,9 +576,8 @@ mod tests {
         let spans = cut_spans(&r, &tabs, 2.0);
         assert_eq!(spans.len(), 4, "four tabs cut the loop into four spans");
 
-        let span_length = |span: &Vec<Point>| -> f64 {
-            span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum()
-        };
+        let span_length =
+            |span: &Vec<Point>| -> f64 { span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum() };
         let cut: f64 = spans.iter().map(span_length).sum();
         assert!(
             (cut - (120.0 - 4.0 * 2.0)).abs() < 1e-6,
@@ -487,9 +617,8 @@ mod tests {
     #[test]
     fn a_span_is_exactly_as_long_as_the_arc_it_covers() {
         let r = rectangle();
-        let length = |span: &Vec<Point>| -> f64 {
-            span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum()
-        };
+        let length =
+            |span: &Vec<Point>| -> f64 { span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum() };
 
         // One 2 mm tab at the start: the span runs 1 → 119 mm, across three corners.
         let spans = cut_spans(&r, &[0.0], 2.0);
@@ -540,7 +669,11 @@ mod tests {
         // Placements are wrapped, ordered and de-duplicated, so the spans come out in
         // loop order and 1.2 does not become a second tab beside the one at 0.2.
         let wrapped = tab_positions(&[0.9, 1.2, 0.2], 4);
-        assert_eq!(wrapped.len(), 2, "1.2 and 0.2 are the same place: {wrapped:?}");
+        assert_eq!(
+            wrapped.len(),
+            2,
+            "1.2 and 0.2 are the same place: {wrapped:?}"
+        );
         assert!((wrapped[0] - 0.2).abs() < 1e-9 && (wrapped[1] - 0.9).abs() < 1e-9);
     }
 
@@ -549,7 +682,11 @@ mod tests {
     /// An equilateral-ish triangle whose sides are long enough to hold any tab count
     /// the tests ask for, so allocation is tested without capacity interfering.
     fn triangle() -> Vec<(f64, f64, f64, f64)> {
-        vec![(0.0, 0.0, 90.0, 0.0), (90.0, 0.0, 45.0, 80.0), (45.0, 80.0, 0.0, 0.0)]
+        vec![
+            (0.0, 0.0, 90.0, 0.0),
+            (90.0, 0.0, 45.0, 80.0),
+            (45.0, 80.0, 0.0, 0.0),
+        ]
     }
 
     /// How many tabs each segment received.
@@ -569,13 +706,25 @@ mod tests {
         // Sides are 90, ~91.4, ~91.9 — so segment 0 is the shortest.
         let five = distribute_tabs(&t, 5, 2.0);
         assert_eq!(five.len(), 5);
-        assert_eq!(per_segment(&five, 3), vec![1, 2, 2], "5 over 3 → 2, 2, 1 by length");
+        assert_eq!(
+            per_segment(&five, 3),
+            vec![1, 2, 2],
+            "5 over 3 → 2, 2, 1 by length"
+        );
 
         let two = distribute_tabs(&t, 2, 2.0);
-        assert_eq!(per_segment(&two, 3), vec![0, 1, 1], "2 over 3 → one each on the longest two");
+        assert_eq!(
+            per_segment(&two, 3),
+            vec![0, 1, 1],
+            "2 over 3 → one each on the longest two"
+        );
 
         let three = distribute_tabs(&t, 3, 2.0);
-        assert_eq!(per_segment(&three, 3), vec![1, 1, 1], "an exact share needs no remainder");
+        assert_eq!(
+            per_segment(&three, 3),
+            vec![1, 1, 1],
+            "an exact share needs no remainder"
+        );
     }
 
     /// One tab sits at the midpoint; several split the side into equal gaps, counting the
@@ -584,7 +733,10 @@ mod tests {
     fn tabs_are_evenly_spaced_within_a_segment_including_its_corners() {
         let single = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 1, 2.0);
         assert_eq!(single.len(), 1);
-        assert!((single[0].t - 0.5).abs() < 1e-9, "a single tab is at the middle");
+        assert!(
+            (single[0].t - 0.5).abs() < 1e-9,
+            "a single tab is at the middle"
+        );
         assert!((single[0].point.0 - 50.0).abs() < 1e-9);
 
         let three = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 3, 2.0);
@@ -605,14 +757,22 @@ mod tests {
         let anchors = distribute_tabs(&seg, 11, width);
         assert_eq!(anchors.len(), 11);
 
-        let mut edges: Vec<(f64, f64)> =
-            anchors.iter().map(|a| (a.point.0 - width / 2.0, a.point.0 + width / 2.0)).collect();
+        let mut edges: Vec<(f64, f64)> = anchors
+            .iter()
+            .map(|a| (a.point.0 - width / 2.0, a.point.0 + width / 2.0))
+            .collect();
         edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let clearance = TAB_CLEARANCE_WIDTHS * width;
         assert!(edges[0].0 >= clearance - 1e-9, "clear of the first corner");
-        assert!(100.0 - edges[10].1 >= clearance - 1e-9, "clear of the last corner");
+        assert!(
+            100.0 - edges[10].1 >= clearance - 1e-9,
+            "clear of the last corner"
+        );
         for pair in edges.windows(2) {
-            assert!(pair[1].0 - pair[0].1 >= clearance - 1e-9, "tabs are {clearance} mm apart");
+            assert!(
+                pair[1].0 - pair[0].1 >= clearance - 1e-9,
+                "tabs are {clearance} mm apart"
+            );
         }
     }
 
@@ -621,8 +781,16 @@ mod tests {
     #[test]
     fn tabs_that_do_not_fit_move_to_a_segment_with_room() {
         // A long side and two stubs: 7 × 2 mm = 14 mm is the minimum for one tab.
-        let segments = vec![(0.0, 0.0, 200.0, 0.0), (200.0, 0.0, 205.0, 0.0), (205.0, 0.0, 0.0, 0.0)];
-        assert_eq!(segment_capacity(5.0, 2.0), 0, "a 5 mm stub holds no 2 mm tab");
+        let segments = vec![
+            (0.0, 0.0, 200.0, 0.0),
+            (200.0, 0.0, 205.0, 0.0),
+            (205.0, 0.0, 0.0, 0.0),
+        ];
+        assert_eq!(
+            segment_capacity(5.0, 2.0),
+            0,
+            "a 5 mm stub holds no 2 mm tab"
+        );
         let anchors = distribute_tabs(&segments, 4, 2.0);
         assert_eq!(anchors.len(), 4, "none are lost");
         let counts = per_segment(&anchors, 3);
@@ -660,9 +828,18 @@ mod tests {
     /// Degenerate asks are answered with an empty list, not a panic or a divide by zero.
     #[test]
     fn degenerate_distributions_are_empty() {
-        assert!(distribute_tabs(&triangle(), 0, 2.0).is_empty(), "no tabs asked for");
-        assert!(distribute_tabs(&[], 4, 2.0).is_empty(), "no segments to place them on");
-        assert!(distribute_tabs(&triangle(), 4, 0.0).is_empty(), "a zero-width tab is not a tab");
+        assert!(
+            distribute_tabs(&triangle(), 0, 2.0).is_empty(),
+            "no tabs asked for"
+        );
+        assert!(
+            distribute_tabs(&[], 4, 2.0).is_empty(),
+            "no segments to place them on"
+        );
+        assert!(
+            distribute_tabs(&triangle(), 4, 0.0).is_empty(),
+            "a zero-width tab is not a tab"
+        );
     }
 
     /// Mouse-bite holes sit inside the tab, evenly pitched, without breaking into the
@@ -672,7 +849,11 @@ mod tests {
         let r = rectangle();
         // A 3 mm tab with a 0.5 mm drill: 3 / (2 × 0.5) = 3 holes, pitched 1 mm.
         let centres = mouse_bite_centres(&r, 0.0, 3.0, Length::from_mm(0.5));
-        assert_eq!(centres.len(), 3, "the count comes from the tab and the drill");
+        assert_eq!(
+            centres.len(),
+            3,
+            "the count comes from the tab and the drill"
+        );
         // Tab spans 118.5 → 1.5 mm, so the holes sit at 119, 120 and 1 mm.
         for (centre, distance) in centres.iter().zip([119.0, 120.0, 1.0]) {
             assert!(
@@ -688,11 +869,123 @@ mod tests {
     #[test]
     fn the_mouse_bite_count_is_derived_and_never_below_two() {
         let r = rectangle();
-        let holes = |width, drill| mouse_bite_centres(&r, 0.25, width, Length::from_mm(drill)).len();
+        let holes =
+            |width, drill| mouse_bite_centres(&r, 0.25, width, Length::from_mm(drill)).len();
         assert_eq!(holes(3.0, 0.5), 3);
         assert_eq!(holes(6.0, 0.5), 6, "a wider tab takes more");
         assert_eq!(holes(3.0, 1.0), 2, "a bigger drill takes fewer");
         assert_eq!(holes(1.0, 1.0), 2, "floored at two, not rounded to one");
-        assert!(mouse_bite_centres(&r, 0.0, 3.0, Length::from_mm(0.0)).is_empty(), "no drill");
+        assert!(
+            mouse_bite_centres(&r, 0.0, 3.0, Length::from_mm(0.0)).is_empty(),
+            "no drill"
+        );
+    }
+
+    /// A perfectly round slug must still get its tab.
+    ///
+    /// This is the case that makes the island tab its own function rather than another
+    /// caller of [`distribute_tabs`]: a circular cutout has no straight segment, so the
+    /// outline machinery finds nowhere to put a tab and returns none — and a slug with
+    /// no tab is a loose disc of board over a spinning cutter. The longest-edge rule
+    /// always has an answer, because a polygon always has a longest edge.
+    #[test]
+    fn an_island_tab_is_placed_on_a_perfectly_round_slug() {
+        let circle: Vec<(f64, f64)> = (0..64)
+            .map(|i| {
+                let a = std::f64::consts::TAU * i as f64 / 64.0;
+                (10.0 * a.cos(), 10.0 * a.sin())
+            })
+            .collect();
+        let anchor = longest_edge_midpoint(&circle).expect("a polygon has a longest edge");
+
+        let pts: Vec<Point> = circle
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let path = Loop::new(&pts).expect("a circle is a loop");
+
+        let tab = island_tab(
+            &path,
+            std::f64::consts::TAU * 10.0,
+            Point::new(Length::from_mm(anchor.0), Length::from_mm(anchor.1)),
+            0.04,
+        )
+        .expect("a round slug still gets held");
+        assert!(tab.width_mm > 0.0 && tab.at.is_finite());
+    }
+
+    /// The tab lands on the flat of a rectangular slug.
+    ///
+    /// Where the shape *does* have flats, the island rule must agree with where the
+    /// outline rule would have put a tab — otherwise the same board grows tabs in
+    /// different places depending on which operation cut it.
+    #[test]
+    fn the_island_tab_lands_on_the_middle_of_the_longest_flat() {
+        let rect = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)];
+        let mid = longest_edge_midpoint(&rect).expect("has edges");
+        assert_eq!(
+            mid,
+            (20.0, 0.0),
+            "midpoint of the first 40mm side, ties to lowest index"
+        );
+    }
+
+    /// A tab can never be wider than the loop has room for.
+    ///
+    /// One tab needs its own width plus three widths of clear run, so a loop shorter
+    /// than four tab widths cannot hold the floor width. Unclamped, a 1.2 mm slug takes
+    /// the 1 mm floor, `cut_spans` finds the tabs wider than the loop, and the cutout is
+    /// not cut at all — silently, because an empty span list is also what "nothing to
+    /// do" looks like.
+    #[test]
+    fn the_island_tab_can_never_exceed_what_the_loop_has_room_for() {
+        let tiny: Vec<Point> = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let path = Loop::new(&tiny).expect("a loop");
+        let tab = island_tab(&path, 4.0, tiny[0], 0.04).expect("still held");
+
+        assert!(
+            tab.width_mm <= path.length_mm() / 4.0 + 1e-9,
+            "width {} must leave room on a {}mm loop",
+            tab.width_mm,
+            path.length_mm()
+        );
+        assert!(
+            !cut_spans(&path, &[tab.at], tab.width_mm).is_empty(),
+            "something is still cut"
+        );
+    }
+
+    /// The 4% ratio and the 1 mm floor, and which one wins where.
+    ///
+    /// The floor is what stops a small slug getting a tab too thin to hold it; the ratio
+    /// is what stops a large one getting a tab too thin to matter. Each has to win in
+    /// its own regime or one of those two failures comes back.
+    #[test]
+    fn the_island_tab_takes_the_ratio_or_the_floor_whichever_is_larger() {
+        let big: Vec<Point> = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let path = Loop::new(&big).expect("a loop");
+
+        // 400mm slug perimeter at 4% -> 16mm, well over the floor.
+        let wide = island_tab(&path, 400.0, big[0], 0.04).expect("held");
+        assert!(
+            (wide.width_mm - 16.0).abs() < 1e-9,
+            "the ratio wins: {}",
+            wide.width_mm
+        );
+        assert!(wide.mouse_bites, "16mm of solid tab would tear, not snap");
+
+        // 10mm slug perimeter at 4% -> 0.4mm, under the floor.
+        let narrow = island_tab(&path, 10.0, big[0], 0.04).expect("held");
+        assert!(
+            (narrow.width_mm - MIN_ISLAND_TAB_MM).abs() < 1e-9,
+            "the floor wins"
+        );
+        assert!(!narrow.mouse_bites, "a 1mm tab snaps on its own");
     }
 }

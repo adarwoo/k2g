@@ -172,6 +172,7 @@ pub(crate) struct StepRaw {
     pub(crate) toolset_id: Option<Uuid>,
     pub(crate) drill: DrillConfigRaw,
     pub(crate) route_board: EdgeConfigRaw,
+    pub(crate) route_cutouts: CutoutConfigRaw,
     /// `board_face == "back"`. Read per step rather than taken from the profile
     /// projection (which only carries `steps[0]`), because a later step may be the
     /// back-face one — which is exactly the step whose geometry the placement has to
@@ -208,6 +209,11 @@ impl StepRaw {
     /// planner's business rather than this question's.
     pub(crate) fn routes_outline(&self) -> bool {
         self.enabled("route_board") || self.enabled("mill_board")
+    }
+
+    /// The interior openings, cut on their own terms rather than with the edge kerf.
+    pub(crate) fn routes_cutouts(&self) -> bool {
+        self.enabled("route_cutouts")
     }
 
     /// Registration pins: two holes on the fixture's flip line, drilled through the
@@ -247,7 +253,12 @@ impl RetentionRaw {
     /// The schema's defaults, with `count` varying by what is being held: an outline
     /// wants four tabs, a cutout's slug one or two.
     fn defaults(count: usize) -> Self {
-        Self { tabs: true, count, width: Length::from_mm(2.0), mouse_bites: false }
+        Self {
+            tabs: true,
+            count,
+            width: Length::from_mm(2.0),
+            mouse_bites: false,
+        }
     }
 }
 
@@ -303,6 +314,40 @@ impl Default for EdgeConfigRaw {
             kerf: Length::from_mm(2.0),
             finishing: Length::from_mm(0.1),
         }
+    }
+}
+
+/// The step's `route_cutouts` config, defaulted when absent.
+///
+/// No kerf and no retention *mode*, unlike the edge: the cutter is chosen by fit rather
+/// than requested, and a slug is either held or it is a projectile.
+pub(crate) struct CutoutConfigRaw {
+    pub(crate) retain_island: bool,
+    /// Tab width as a fraction of the slug perimeter — `"4%"` in the schema, `0.04` here.
+    pub(crate) tab_ratio: f64,
+    pub(crate) drill_sharp_corners: bool,
+}
+
+impl Default for CutoutConfigRaw {
+    fn default() -> Self {
+        // The schema's own defaults for `route_cutouts`.
+        Self {
+            retain_island: true,
+            tab_ratio: 0.04,
+            drill_sharp_corners: true,
+        }
+    }
+}
+
+fn read_cutout_config(root: &Node, base: &str) -> CutoutConfigRaw {
+    let default = CutoutConfigRaw::default();
+    CutoutConfigRaw {
+        retain_island: node_bool(root, &format!("{base}/retain_island"))
+            .unwrap_or(default.retain_island),
+        tab_ratio: node_percent_fraction(root, &format!("{base}/island_tab"))
+            .unwrap_or(default.tab_ratio),
+        drill_sharp_corners: node_bool(root, &format!("{base}/drill_sharp_corners"))
+            .unwrap_or(default.drill_sharp_corners),
     }
 }
 
@@ -381,32 +426,54 @@ impl Default for DrillConfigRaw {
             drill_first: true,
             pilot: false,
             oblong: "drill_ends_then_route".to_string(),
-            oversize: Allowance { relative: 0.08, max: Length::from_mm(0.10) },
-            undersize: Allowance { relative: 0.06, max: Length::from_mm(0.08) },
+            oversize: Allowance {
+                relative: 0.08,
+                max: Length::from_mm(0.10),
+            },
+            undersize: Allowance {
+                relative: 0.06,
+                max: Length::from_mm(0.08),
+            },
         }
     }
 }
 
 /// Builds the tooling plan for the current context. Reads all steps of the selected
 /// machining profile, runs the assigner for each, and formats the outcome.
-pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
+pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> ToolingPlan {
     let Some(profile_id) = ctx
         .selected_process_profile_id
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
     else {
-        return ToolingPlan { steps: vec![], note: Some("Select a machining profile to plan tooling.".into()), rack_schedule: None };
+        return ToolingPlan {
+            steps: vec![],
+            note: Some("Select a machining profile to plan tooling.".into()),
+            rack_schedule: None,
+        };
     };
     if ctx.board.is_none() {
-        return ToolingPlan { steps: vec![], note: Some("No board loaded — nothing to machine.".into()), rack_schedule: None };
+        return ToolingPlan {
+            steps: vec![],
+            note: Some("No board loaded — nothing to machine.".into()),
+            rack_schedule: None,
+        };
     }
     if !appdata_ready() {
-        return ToolingPlan { steps: vec![], note: Some("Configuration store is not ready.".into()), rack_schedule: None };
+        return ToolingPlan {
+            steps: vec![],
+            note: Some("Configuration store is not ready.".into()),
+            rack_schedule: None,
+        };
     }
 
     let raw_steps = read_steps(profile_id);
     if raw_steps.is_empty() {
-        return ToolingPlan { steps: vec![], note: Some("The machining profile has no steps.".into()), rack_schedule: None };
+        return ToolingPlan {
+            steps: vec![],
+            note: Some("The machining profile has no steps.".into()),
+            rack_schedule: None,
+        };
     }
 
     // The physical rack is the first resolvable step's toolset (jobs share one toolset
@@ -419,7 +486,7 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
         .into_iter()
         .enumerate()
         .map(|(index, raw)| {
-            let outcome = plan_step(ctx, &raw);
+            let outcome = plan_step(ctx, stitched, &raw);
             if let StepOutcome::Resolved(resolved) = &outcome {
                 if !resolved.tool_ids.is_empty() {
                     schedule_input.push((index, raw.name.clone(), resolved.tool_ids.clone()));
@@ -431,7 +498,10 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
                     }
                 }
             }
-            StepPlan { name: raw.name.clone(), outcome }
+            StepPlan {
+                name: raw.name.clone(),
+                outcome,
+            }
         })
         .collect();
 
@@ -440,7 +510,11 @@ pub fn plan_tooling(ctx: &AppState) -> ToolingPlan {
         .filter(|_| !schedule_input.is_empty())
         .map(|toolset| build_rack_schedule(ctx, toolset, &schedule_input));
 
-    ToolingPlan { steps, note: None, rack_schedule }
+    ToolingPlan {
+        steps,
+        note: None,
+        rack_schedule,
+    }
 }
 
 /// Builds the cross-step rack schedule: each physical slot's tool per step, with the
@@ -477,8 +551,11 @@ fn build_rack_schedule(
 
     // Build one row per physical slot (fixed first, then spare — both in index order).
     let mut rows: Vec<RackSlotSchedule> = Vec::new();
-    let mut all_slots: Vec<(u8, bool)> =
-        fixed.keys().map(|s| (*s, true)).chain(spare_slots.iter().map(|s| (*s, false))).collect();
+    let mut all_slots: Vec<(u8, bool)> = fixed
+        .keys()
+        .map(|s| (*s, true))
+        .chain(spare_slots.iter().map(|s| (*s, false)))
+        .collect();
     all_slots.sort_by_key(|(index, _)| *index);
 
     for (index, is_fixed) in all_slots {
@@ -494,20 +571,32 @@ fn build_rack_schedule(
                     match state.get(&index) {
                         Some(id) => RackCell {
                             tool: Some(tool_label(ctx, id)),
-                            status: if changed.contains(&index) { SlotChange::Load } else { SlotChange::Kept },
+                            status: if changed.contains(&index) {
+                                SlotChange::Load
+                            } else {
+                                SlotChange::Kept
+                            },
                         },
-                        None => RackCell { tool: None, status: SlotChange::Empty },
+                        None => RackCell {
+                            tool: None,
+                            status: SlotChange::Empty,
+                        },
                     }
                 }
             })
             .collect();
-        rows.push(RackSlotSchedule { slot: format!("T{index}"), cells });
+        rows.push(RackSlotSchedule {
+            slot: format!("T{index}"),
+            cells,
+        });
     }
 
     RackSchedule {
         steps: steps
             .iter()
-            .map(|(step_index, _, _)| RackStepColumn { step_index: *step_index })
+            .map(|(step_index, _, _)| RackStepColumn {
+                step_index: *step_index,
+            })
             .collect(),
         slots: rows,
     }
@@ -526,7 +615,10 @@ fn build_rack_schedule(
 /// place that knows.
 pub fn rack_for_step(schedule: &RackSchedule, step_index: usize) -> Option<Vec<RackSlotView>> {
     // Column position is not step index — only resolved, tool-loading steps get columns.
-    let column = schedule.steps.iter().position(|s| s.step_index == step_index)?;
+    let column = schedule
+        .steps
+        .iter()
+        .position(|s| s.step_index == step_index)?;
     Some(
         schedule
             .slots
@@ -548,12 +640,18 @@ fn schedule_spare_slots(
     spare_slots: &[u8],
     fixed_tools: &std::collections::BTreeSet<String>,
     steps: &[(usize, String, Vec<String>)],
-) -> Vec<(std::collections::BTreeMap<u8, String>, std::collections::BTreeSet<u8>)> {
+) -> Vec<(
+    std::collections::BTreeMap<u8, String>,
+    std::collections::BTreeSet<u8>,
+)> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut loaded: BTreeMap<u8, String> = BTreeMap::new();
     let mut snapshots = Vec::new();
     for (_, _, step_tools) in steps {
-        let dynamic: Vec<&String> = step_tools.iter().filter(|t| !fixed_tools.contains(*t)).collect();
+        let dynamic: Vec<&String> = step_tools
+            .iter()
+            .filter(|t| !fixed_tools.contains(*t))
+            .collect();
         let needed: BTreeSet<&String> = dynamic.iter().copied().collect();
         let mut changed: BTreeSet<u8> = BTreeSet::new();
         for tool in dynamic {
@@ -713,6 +811,7 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     "route_board"
                 };
                 let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}"));
+                let route_cutouts = read_cutout_config(root, &format!("/steps/{i}/route_cutouts"));
 
                 // Only when the step actually drills pins. The per-operation config
                 // objects are materialised by the loader whether or not their operation
@@ -745,6 +844,7 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     toolset_id: node_ref(root, &format!("/steps/{i}/toolset")),
                     drill,
                     route_board,
+                    route_cutouts,
                     machines_back: node_str(root, &format!("/steps/{i}/board_face"))
                         .is_some_and(|face| face.eq_ignore_ascii_case("back")),
                     pin_diameter,
@@ -796,9 +896,7 @@ fn node_to_step_value(node: &Node) -> StepValue {
         NodeValue::Unit(UnitValue::Feed(v)) => StepValue::Feed(*v),
         NodeValue::Unit(UnitValue::Angle(v)) => StepValue::Angle(*v),
         NodeValue::Unit(UnitValue::Rpm(v)) => StepValue::Rpm(*v),
-        NodeValue::Array(items) => {
-            StepValue::List(items.iter().map(node_to_step_value).collect())
-        }
+        NodeValue::Array(items) => StepValue::List(items.iter().map(node_to_step_value).collect()),
         NodeValue::Object(fields) => StepValue::Map(
             fields
                 .iter()
@@ -816,8 +914,7 @@ fn read_retention(root: &Node, base: &str, default: RetentionRaw) -> RetentionRa
             .unwrap_or(default.tabs),
         count: node_count(root, &format!("{base}/count")).unwrap_or(default.count),
         width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
-        mouse_bites: node_bool(root, &format!("{base}/mouse_bites"))
-            .unwrap_or(default.mouse_bites),
+        mouse_bites: node_bool(root, &format!("{base}/mouse_bites")).unwrap_or(default.mouse_bites),
     }
 }
 
@@ -842,7 +939,8 @@ fn read_edge_config(root: &Node, base: &str) -> EdgeConfigRaw {
 fn read_drill_config(root: &Node, base: &str) -> DrillConfigRaw {
     let default = DrillConfigRaw::default();
     DrillConfigRaw {
-        route_fallback: node_bool(root, &format!("{base}/route_fallback")).unwrap_or(default.route_fallback),
+        route_fallback: node_bool(root, &format!("{base}/route_fallback"))
+            .unwrap_or(default.route_fallback),
         drill_first: node_bool(root, &format!("{base}/drill_first")).unwrap_or(default.drill_first),
         pilot: node_bool(root, &format!("{base}/pilot")).unwrap_or(default.pilot),
         oblong: node_str(root, &format!("{base}/oblong")).unwrap_or(default.oblong),
@@ -854,7 +952,8 @@ fn read_drill_config(root: &Node, base: &str) -> DrillConfigRaw {
 /// Reads an `{relative, max}` allowance, defaulting each field.
 fn read_allowance(root: &Node, base: &str, fallback: Allowance) -> Allowance {
     Allowance {
-        relative: node_percent_fraction(root, &format!("{base}/relative")).unwrap_or(fallback.relative),
+        relative: node_percent_fraction(root, &format!("{base}/relative"))
+            .unwrap_or(fallback.relative),
         max: node_length(root, &format!("{base}/max")).unwrap_or(fallback.max),
     }
 }
@@ -869,8 +968,7 @@ fn read_allowance(root: &Node, base: &str, fallback: Allowance) -> Allowance {
 /// fixture's `breakthrough`. With no fixture resolved the bed check is relaxed (so a
 /// mid-configuration view still plans); the reach check is always enforced.
 pub(crate) fn build_setup(ctx: &AppState, fixture_id: Option<Uuid>) -> Setup {
-    let fixture =
-        fixture_id.and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
+    let fixture = fixture_id.and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
     Setup {
         board_thickness: ctx
             .board
@@ -882,7 +980,9 @@ pub(crate) fn build_setup(ctx: &AppState, fixture_id: Option<Uuid>) -> Setup {
                 Length::from_mm((f.backboard_thickness.as_mm() - f.bed_clearance.as_mm()).max(0.0))
             })
             .unwrap_or(Length::from_mm(1_000.0)),
-        breakthrough_margin: fixture.map(|f| f.breakthrough).unwrap_or(Length::from_mm(0.5)),
+        breakthrough_margin: fixture
+            .map(|f| f.breakthrough)
+            .unwrap_or(Length::from_mm(0.5)),
     }
 }
 
@@ -903,8 +1003,12 @@ pub(crate) fn missing_bindings(raw: &StepRaw) -> Option<String> {
     .filter_map(|(label, absent)| absent.then_some(label))
     .collect();
 
-    (!missing.is_empty())
-        .then(|| format!("This step has no {} profile selected.", missing.join(", no ")))
+    (!missing.is_empty()).then(|| {
+        format!(
+            "This step has no {} profile selected.",
+            missing.join(", no ")
+        )
+    })
 }
 
 /// Everything wrong with how a profile arranges its locating-pin step, one operator-facing
@@ -1004,11 +1108,13 @@ fn first_face_change(steps: &[StepRaw]) -> Option<(usize, usize)> {
 /// Takes the steps rather than a profile id for the same reason
 /// [`locating_pin_faults`] does: so the decision is testable without the store.
 pub(crate) fn duplicate_operations_reason(steps: &[StepRaw]) -> Option<String> {
-    let conflicts = crate::data::model::conflicting_operations(
-        steps
-            .iter()
-            .map(|step| (step.name.as_str(), step.machines_back, step.operations.as_slice())),
-    );
+    let conflicts = crate::data::model::conflicting_operations(steps.iter().map(|step| {
+        (
+            step.name.as_str(),
+            step.machines_back,
+            step.operations.as_slice(),
+        )
+    }));
 
     (!conflicts.is_empty()).then(|| {
         conflicts
@@ -1020,7 +1126,7 @@ pub(crate) fn duplicate_operations_reason(steps: &[StepRaw]) -> Option<String> {
 }
 
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
-fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
+fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw) -> StepOutcome {
     let has_pth = raw.drills_pth();
     let has_npth = raw.drills_npth();
     let has_route = raw.routes_outline();
@@ -1050,7 +1156,11 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let atc_slots = machine.atc_slot_count as usize;
 
     // Build the hole demand set from the board, grouped by (kind, size) for counts.
-    let holes = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
+    let holes = ctx
+        .board
+        .as_ref()
+        .map(|b| b.holes.as_slice())
+        .unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
 
     // A router is needed for the board outline and/or for oblong slots that route.
@@ -1060,8 +1170,22 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     let routes_slots = has_oblongs && oblong_routes;
 
     let mut warnings: Vec<String> = Vec::new();
-    let routers =
-        plan_routers(&ctx.tools, toolset, &groups, has_route, raw.route_board.kerf, routes_slots);
+    let cutout_contours = cutout_contours(stitched, raw);
+    let routers = plan_routers(
+        &ctx.tools,
+        toolset,
+        &groups,
+        has_route,
+        raw.route_board.kerf,
+        routes_slots,
+        CutoutRouting {
+            contours: &cutout_contours,
+            relieve_corners: raw.routes_cutouts() && raw.route_cutouts.drill_sharp_corners,
+        },
+    );
+    for index in &routers.uncuttable_cutouts {
+        warnings.push(uncuttable_cutout_warning(ctx, *index));
+    }
     if has_route && routers.outline.is_none() {
         warnings.push(format!(
             "No {} router in stock, which is what the board's {} edge kerf needs. A kerf is              the cutter that makes it, so nothing else will cut it to size — stock that              cutter, or set the step's kerf to a size you have.",
@@ -1075,22 +1199,24 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
     // The locating-pin tool, resolved exactly as the Machining plan resolves it, so the
     // rack this tab shows is the rack that plan loads. Never a nearest-size drill — see
     // `pick_pin_tool`.
-    let pin_tool = raw
-        .pin_diameter
-        .filter(|_| has_locating)
-        .and_then(|diameter| match pick_pin_tool(&ctx.tools, toolset, diameter) {
-            Some(tool) => Some(tool),
-            None => {
-                warnings.push(format!(
+    let pin_tool =
+        raw.pin_diameter
+            .filter(|_| has_locating)
+            .and_then(
+                |diameter| match pick_pin_tool(&ctx.tools, toolset, diameter) {
+                    Some(tool) => Some(tool),
+                    None => {
+                        warnings.push(format!(
                     "No {} drill in stock for the locating pins, and no router narrow enough \
                      to mill one. A registration hole is never made to a nearly-right size, \
                      so the step cannot run — stock a {} drill.",
                     fmt_len(ctx, diameter),
                     fmt_len(ctx, diameter),
                 ));
-                None
-            }
-        });
+                        None
+                    }
+                },
+            );
     if let Some(PinTool::Router { .. }) = pin_tool.as_ref() {
         warnings.push(
             "No exact-size drill for the locating pins, so their holes are milled to size \
@@ -1130,13 +1256,19 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
             // The assigner already placed each tool on the toolset's real slot (fixed
             // tools pinned; the rest filling spare slots in order; do-not-use slots
             // skipped), so the slot numbers are used as-is.
-            let number_of: std::collections::BTreeMap<&str, u8> =
-                assignment.rack.iter().map(|s| (s.tool_id.as_str(), s.slot)).collect();
+            let number_of: std::collections::BTreeMap<&str, u8> = assignment
+                .rack
+                .iter()
+                .map(|s| (s.tool_id.as_str(), s.slot))
+                .collect();
 
             let rack_rows: Vec<RackRow> = assignment
                 .rack
                 .iter()
-                .map(|s| RackRow { slot: format!("T{}", s.slot), tool: tool_label(ctx, &s.tool_id) })
+                .map(|s| RackRow {
+                    slot: format!("T{}", s.slot),
+                    tool: tool_label(ctx, &s.tool_id),
+                })
                 .collect();
 
             let mut requirements: Vec<RequirementRow> = groups
@@ -1151,7 +1283,11 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                         oblong_routes,
                         routers.for_group(group),
                     );
-                    RequirementRow { label: group.label(ctx), count: group.count, tools }
+                    RequirementRow {
+                        label: group.label(ctx),
+                        count: group.count,
+                        tools,
+                    }
                 })
                 .collect();
 
@@ -1166,7 +1302,10 @@ fn plan_step(ctx: &AppState, raw: &StepRaw) -> StepOutcome {
                 // means that cutter is not in stock rather than that some router is
                 // missing.
                 requirements.push(RequirementRow {
-                    label: format!("Board outline ({} kerf)", fmt_len(ctx, raw.route_board.kerf)),
+                    label: format!(
+                        "Board outline ({} kerf)",
+                        fmt_len(ctx, raw.route_board.kerf)
+                    ),
                     count: 1,
                     tools: vec![router],
                 });
@@ -1240,7 +1379,13 @@ fn resolve_group_tools(
     // Oblong / slot: possibly a drill (ends or chain) and a router (the slot).
     let mut tools = Vec::new();
     if oblong_drills {
-        tools.push(resolve_drill_tool(ctx, assignment, group, number_of, Some("drill")));
+        tools.push(resolve_drill_tool(
+            ctx,
+            assignment,
+            group,
+            number_of,
+            Some("drill"),
+        ));
     }
     if oblong_routes {
         match slot_router {
@@ -1248,7 +1393,10 @@ fn resolve_group_tools(
             // No cutter fits this slot. Show the route step unresolved rather than
             // dropping it: the requirement is real, and the step warning says why it
             // cannot be met.
-            None => tools.push(ResolvedTool { role: Some("route"), ..unresolved_tool() }),
+            None => tools.push(ResolvedTool {
+                role: Some("route"),
+                ..unresolved_tool()
+            }),
         }
     }
     if tools.is_empty() {
@@ -1266,10 +1414,20 @@ fn resolve_drill_tool(
     role: Option<&'static str>,
 ) -> ResolvedTool {
     let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else {
-        return ResolvedTool { role, ..unresolved_tool() };
+        return ResolvedTool {
+            role,
+            ..unresolved_tool()
+        };
     };
-    let slot = number_of.get(assigned.tool_id.as_str()).map(|n| format!("T{n}")).unwrap_or_else(|| "—".into());
-    let diameter = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter);
+    let slot = number_of
+        .get(assigned.tool_id.as_str())
+        .map(|n| format!("T{n}"))
+        .unwrap_or_else(|| "—".into());
+    let diameter = ctx
+        .tools
+        .iter()
+        .find(|t| t.id == assigned.tool_id)
+        .map(|t| t.diameter);
     let match_len = group.minor.unwrap_or(group.target);
     let routed = assigned.strategy == Strategy::Route;
     match diameter {
@@ -1279,9 +1437,23 @@ fn resolve_drill_tool(
             } else {
                 delta_cell(dia, match_len)
             };
-            ResolvedTool { slot, role, diameter: fmt_len(ctx, dia), delta_text, delta_class, routed }
+            ResolvedTool {
+                slot,
+                role,
+                diameter: fmt_len(ctx, dia),
+                delta_text,
+                delta_class,
+                routed,
+            }
         }
-        None => ResolvedTool { slot, role, diameter: "—".into(), delta_text: "—".into(), delta_class: "", routed },
+        None => ResolvedTool {
+            slot,
+            role,
+            diameter: "—".into(),
+            delta_text: "—".into(),
+            delta_class: "",
+            routed,
+        },
     }
 }
 
@@ -1293,14 +1465,24 @@ fn resolve_router_tool(
     number_of: &std::collections::BTreeMap<&str, u8>,
     role: Option<&'static str>,
 ) -> ResolvedTool {
-    let slot = number_of.get(router_id).map(|n| format!("T{n}")).unwrap_or_else(|| "—".into());
+    let slot = number_of
+        .get(router_id)
+        .map(|n| format!("T{n}"))
+        .unwrap_or_else(|| "—".into());
     let diameter = ctx
         .tools
         .iter()
         .find(|t| t.id == router_id)
         .map(|t| fmt_len(ctx, t.diameter))
         .unwrap_or_else(|| "—".into());
-    ResolvedTool { slot, role, diameter, delta_text: "exact".into(), delta_class: "tooling-delta-ok", routed: true }
+    ResolvedTool {
+        slot,
+        role,
+        diameter,
+        delta_text: "exact".into(),
+        delta_class: "tooling-delta-ok",
+        routed: true,
+    }
 }
 
 /// The size-delta cell for a drill of `tool` diameter making a `target`-size hole.
@@ -1317,8 +1499,16 @@ fn delta_cell(tool: Length, target: Length) -> (String, &'static str) {
         return ("exact".to_string(), "tooling-delta-ok");
     }
     let pct = (micron(tool) - target_um) as f64 / target_um as f64 * 100.0;
-    let class = if pct.abs() < 2.0 { "tooling-delta-ok" } else { "tooling-delta-warn" };
-    let text = if pct.abs() < 0.05 { format!("{pct:+.2}%") } else { format!("{pct:+.1}%") };
+    let class = if pct.abs() < 2.0 {
+        "tooling-delta-ok"
+    } else {
+        "tooling-delta-warn"
+    };
+    let text = if pct.abs() < 0.05 {
+        format!("{pct:+.2}%")
+    } else {
+        format!("{pct:+.1}%")
+    };
     (text, class)
 }
 
@@ -1350,7 +1540,11 @@ impl HoleGroup {
     /// when the hole is not drilled by the enabled operations. This is the one place
     /// the kind/oblong classification lives, so [`collect_hole_groups`] and the
     /// operation-planner adapter agree on a hole's group (and thus its [`id`](Self::id)).
-    pub(crate) fn from_hole(hole: &pcb::BoardHole, has_pth: bool, has_npth: bool) -> Option<HoleGroup> {
+    pub(crate) fn from_hole(
+        hole: &pcb::BoardHole,
+        has_pth: bool,
+        has_npth: bool,
+    ) -> Option<HoleGroup> {
         let kind = match hole.kind {
             pcb::HoleKind::PadPth | pcb::HoleKind::Via if has_pth => DemandKind::Pth,
             pcb::HoleKind::PadNpth if has_npth => DemandKind::Npth,
@@ -1361,7 +1555,12 @@ impl HoleGroup {
         // this group and the machining plan's chain geometry can never disagree about
         // which holes are slots.
         let minor = hole.slot().map(|slot| slot.width);
-        Some(HoleGroup { kind, target: major, minor, count: 1 })
+        Some(HoleGroup {
+            kind,
+            target: major,
+            minor,
+            count: 1,
+        })
     }
 
     /// A stable identity used to match the assigner's per-hole result back to a group.
@@ -1407,14 +1606,22 @@ impl HoleGroup {
 /// distinct (kind, size) requirements with counts. A hole with unequal X/Y drill is an
 /// oblong (major = larger axis, minor = smaller). Classification is delegated to
 /// [`HoleGroup::from_hole`] so grouping and the operation-planner adapter never drift.
-pub(crate) fn collect_hole_groups(holes: &[pcb::BoardHole], has_pth: bool, has_npth: bool) -> Vec<HoleGroup> {
+pub(crate) fn collect_hole_groups(
+    holes: &[pcb::BoardHole],
+    has_pth: bool,
+    has_npth: bool,
+) -> Vec<HoleGroup> {
     let mut groups: Vec<HoleGroup> = Vec::new();
     for hole in holes {
-        let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
+        let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else {
+            continue;
+        };
         let target_um = micron(group.target);
         let minor_um = group.minor.map(micron).unwrap_or(-1);
         if let Some(existing) = groups.iter_mut().find(|g| {
-            g.kind == group.kind && micron(g.target) == target_um && g.minor.map(micron).unwrap_or(-1) == minor_um
+            g.kind == group.kind
+                && micron(g.target) == target_um
+                && g.minor.map(micron).unwrap_or(-1) == minor_um
         }) {
             existing.count += 1;
         } else {
@@ -1463,7 +1670,10 @@ fn pick_outline_router(
 /// [`RatedFeeds::for_tool`](crate::gcode::feeds::RatedFeeds::for_tool) — which is why it
 /// is reachable outside this module as [`tool_mills`].
 fn is_router_tool(tool: &Tool) -> bool {
-    matches!(ToolKind::from_kind_label(&tool.kind), ToolKind::Routerbit | ToolKind::Endmill)
+    matches!(
+        ToolKind::from_kind_label(&tool.kind),
+        ToolKind::Routerbit | ToolKind::Endmill
+    )
 }
 
 /// Whether `tool` cuts with its flutes rather than its point, for callers outside this
@@ -1579,7 +1789,10 @@ pub(crate) fn pick_pin_tool(
             .find(exact)
     });
     if let Some(tool) = drill {
-        return Some(PinTool::Drill { id: tool.id.clone(), diameter: tool.diameter });
+        return Some(PinTool::Drill {
+            id: tool.id.clone(),
+            diameter: tool.diameter,
+        });
     }
 
     // Milled to size instead. Largest that fits, as for a slot: stiffest, fewest passes.
@@ -1606,6 +1819,23 @@ pub(crate) struct RouterPlan {
     by_slot_width_um: std::collections::BTreeMap<i64, String>,
     /// Slot widths no available router is small enough to mill.
     pub(crate) unroutable_widths: Vec<Length>,
+    /// Contour index → the router that cuts that interior opening, and what it leaves.
+    ///
+    /// Per cutout rather than one for all of them, because a cutout's cutter is chosen by
+    /// **fit**: a board with a 6 mm window and a 1.5 mm slot wants two different cutters,
+    /// and forcing one on both means either failing the slot or crawling round the window.
+    pub(crate) cutouts: std::collections::BTreeMap<usize, (String, pcb::CutoutFit)>,
+    /// Cutout indices no available router can cut.
+    pub(crate) uncuttable_cutouts: Vec<usize>,
+    /// Contour index → the relief drill for each of its convex corners, in the order
+    /// [`pcb::convex_corners`] reports them. `None` where no drill suits.
+    ///
+    /// Resolved here rather than at plan time because these drills have to be **reserved**:
+    /// a step that only cuts openings drills nothing else, so its rack would otherwise hold
+    /// routers alone and every corner would be skipped for want of a tool that was in stock
+    /// all along. Mouse bites can afford to take whatever is already loaded; corner relief
+    /// is the only reason such a step needs a drill at all.
+    pub(crate) corner_drills: std::collections::BTreeMap<usize, Vec<Option<String>>>,
 }
 
 impl RouterPlan {
@@ -1613,7 +1843,9 @@ impl RouterPlan {
     /// slot too narrow for every available cutter (see [`Self::unroutable_widths`]).
     pub(crate) fn for_group(&self, group: &HoleGroup) -> Option<&str> {
         let width = group.minor?;
-        self.by_slot_width_um.get(&micron(width)).map(String::as_str)
+        self.by_slot_width_um
+            .get(&micron(width))
+            .map(String::as_str)
     }
 
     /// Every router the rack must hold, deduplicated and in a stable order.
@@ -1621,8 +1853,127 @@ impl RouterPlan {
         let mut ids: std::collections::BTreeSet<String> =
             self.by_slot_width_um.values().cloned().collect();
         ids.extend(self.outline.clone());
+        ids.extend(self.cutouts.values().map(|(id, _)| id.clone()));
+        ids.extend(self.corner_drills.values().flatten().flatten().cloned());
         ids.into_iter().collect()
     }
+}
+
+/// The band of drill diameters that relieves a corner of interior angle `θ` cut by a
+/// router of diameter `d`, as `(minimum, ideal)` in millimetres.
+///
+/// The ideal sits the drill tangent to both edges with its centre on the arc the router
+/// leaves. The minimum is where the drilled hole stops overlapping that arc at all: below
+/// it the hole is an island of its own with an uncut web between it and the pocket, which
+/// comes out as a loose chip rather than a sharper corner.
+pub(crate) fn corner_relief_band(router_diameter_mm: f64, interior_rad: f64) -> Option<(f64, f64)> {
+    let s = (interior_rad / 2.0).sin();
+    if s <= f64::EPSILON {
+        return None;
+    }
+    let ideal = router_diameter_mm * (1.0 - s);
+    (ideal > 0.0).then_some((ideal / (1.0 + s), ideal))
+}
+
+/// The largest drill in the band, preferring one already racked.
+///
+/// Largest because within the band a smaller drill's extra reach is second-order while
+/// merging cleanly with the routed pocket is not, and a wider drill is stiffer.
+fn pick_corner_drill(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    min_mm: f64,
+    ideal_mm: f64,
+) -> Option<String> {
+    let suits = |t: &&Tool| {
+        matches!(
+            crate::data::model::tool_core::ToolKind::from_kind_label(&t.kind),
+            crate::data::model::tool_core::ToolKind::Drillbit
+        ) && t.diameter.as_mm() >= min_mm
+            && t.diameter.as_mm() <= ideal_mm
+    };
+    let racked: Vec<&Tool> = toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_ref())
+        .filter_map(|id| tools.iter().find(|t| &t.id == id))
+        .collect();
+    racked
+        .iter()
+        .copied()
+        .filter(suits)
+        .max_by_key(|t| micron(t.diameter))
+        .map(|t| t.id.clone())
+        .or_else(|| {
+            tools
+                .iter()
+                .filter(|t| t.status == crate::data::model::ToolStatus::InStock)
+                .filter(suits)
+                .max_by_key(|t| micron(t.diameter))
+                .map(|t| t.id.clone())
+        })
+}
+
+/// The router that cuts one interior opening: the largest that can reach all of it,
+/// preferring one already loaded.
+///
+/// Chosen by **fit**, which is the opposite of how the edge kerf is chosen. A kerf is a
+/// dimension of the finished job, so it is matched exactly and a missing cutter fails the
+/// step. A cutout has no such dimension — it is a hole in the middle of a board, and the
+/// only thing asked of the cutter is that it reaches everywhere the drawing says is gone.
+///
+/// Already-racked first and only then largest, because the wall pass is a single lap
+/// whatever the diameter: a wider cutter buys stiffness, never fewer passes, and that is
+/// not worth a tool change to get. The outline's cutter is tried before either, since a
+/// step that also routes the edge already has it loaded.
+///
+/// A candidate is accepted when [`pcb::fit_cutout`] reaches everywhere and strands no
+/// more than one cutter-radius square of material beyond the fillets its own roundness
+/// forces it to leave at each corner. That budget is generous by design: real unreachable
+/// material — a 1 mm arm the cutter cannot enter — is many times it, while the numerical
+/// error of two chained offsets is far below.
+fn pick_cutout_router(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    contour: &pcb::Contour,
+    outline_router: Option<&str>,
+) -> Option<(String, pcb::CutoutFit)> {
+    let mut candidates: Vec<&Tool> = Vec::new();
+    if let Some(id) = outline_router {
+        candidates.extend(tools.iter().find(|t| t.id == id));
+    }
+    let mut racked: Vec<&Tool> = fixed_routers(tools, toolset).collect();
+    racked.sort_by_key(|t| std::cmp::Reverse(micron(t.diameter)));
+    candidates.extend(racked);
+    let mut stock: Vec<&Tool> = stock_routers(tools).collect();
+    stock.sort_by_key(|t| std::cmp::Reverse(micron(t.diameter)));
+    candidates.extend(stock);
+
+    for tool in candidates {
+        let radius_nm = (tool.diameter.as_nm() / 2.0).round() as i64;
+        if radius_nm <= 0 {
+            continue;
+        }
+        let Some(fit) = pcb::fit_cutout(contour, radius_nm) else {
+            continue;
+        };
+        let budget = (radius_nm as f64) * (radius_nm as f64);
+        if fit.excess_nm2 <= budget {
+            return Some((tool.id.clone(), fit));
+        }
+    }
+    None
+}
+
+/// What the interior openings need from the router planner.
+///
+/// A pair rather than two parameters because they are one decision: the corner drills are
+/// sized from the cutter each opening gets, so asking for relief without the contours is
+/// meaningless.
+pub(crate) struct CutoutRouting<'a> {
+    pub(crate) contours: &'a [(usize, &'a pcb::Contour)],
+    /// Reserve a relief drill for each corner the cutter will round off.
+    pub(crate) relieve_corners: bool,
 }
 
 /// Resolves a step's routing tools: the outline router (when it routes the outline) and
@@ -1634,11 +1985,41 @@ pub(crate) fn plan_routers(
     has_route: bool,
     kerf: Length,
     oblong_routes: bool,
+    cutouts: CutoutRouting<'_>,
 ) -> RouterPlan {
     let mut plan = RouterPlan::default();
 
     if has_route {
         plan.outline = pick_outline_router(tools, toolset, kerf);
+    }
+
+    // Resolved here rather than in the planner so the Tooling tab and the machining plan
+    // reserve the same slots — the rack is built from `mandatory_ids`, and a cutter the
+    // two disagree about is a cutter with no slot number.
+    let CutoutRouting { contours: cutouts, relieve_corners } = cutouts;
+    for (index, contour) in cutouts {
+        match pick_cutout_router(tools, toolset, contour, plan.outline.as_deref()) {
+            Some((tool_id, fit)) => {
+                if relieve_corners {
+                    let diameter_mm = tools
+                        .iter()
+                        .find(|t| t.id == tool_id)
+                        .map(|t| t.diameter.as_mm())
+                        .unwrap_or(0.0);
+                    let drills = pcb::convex_corners(contour, pcb::MIN_CORNER_TURN_RAD)
+                        .iter()
+                        .map(|corner| {
+                            let (min, ideal) =
+                                corner_relief_band(diameter_mm, corner.interior_rad)?;
+                            pick_corner_drill(tools, toolset, min, ideal)
+                        })
+                        .collect();
+                    plan.corner_drills.insert(*index, drills);
+                }
+                plan.cutouts.insert(*index, (tool_id, fit));
+            }
+            None => plan.uncuttable_cutouts.push(*index),
+        }
     }
 
     if oblong_routes {
@@ -1662,6 +2043,45 @@ pub(crate) fn plan_routers(
     plan
 }
 
+/// The interior openings this step is responsible for, paired with their contour index.
+///
+/// Empty unless the step runs `route_cutouts`: without that operation the openings are
+/// the edge router's business and are cut to its kerf, so there is no per-cutout cutter
+/// to choose and nothing to reserve.
+pub(crate) fn cutout_contours<'a>(
+    stitched: Option<&'a pcb::StitchResult>,
+    raw: &StepRaw,
+) -> Vec<(usize, &'a pcb::Contour)> {
+    if !raw.routes_cutouts() {
+        return Vec::new();
+    }
+    let Some(stitched) = stitched else {
+        return Vec::new();
+    };
+    if !stitched.errors.is_empty() {
+        return Vec::new();
+    }
+    stitched
+        .contours
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_hole)
+        .collect()
+}
+
+/// Why an opening could not be cut, naming the smallest router in stock so the fix reads
+/// straight off the message.
+fn uncuttable_cutout_warning(ctx: &AppState, index: usize) -> String {
+    match stock_routers(&ctx.tools).min_by_key(|t| micron(t.diameter)) {
+        Some(smallest) => format!(
+            "Cutout #{index} cannot be cut by any router in stock — the smallest ({}) still \
+             cannot reach all of it. Stock a smaller router, or widen the opening.",
+            fmt_len(ctx, smallest.diameter),
+        ),
+        None => format!("Cutout #{index} cannot be cut: there is no router in stock."),
+    }
+}
+
 /// Why a slot could not be milled, naming the width and the closest cutter so the fix —
 /// stock a smaller router, or switch the step to a drill-only oblong strategy — is
 /// readable straight off the message.
@@ -1674,7 +2094,10 @@ fn unroutable_slot_warning(ctx: &AppState, width: Length) -> String {
             fmt_len(ctx, smallest.diameter),
             fmt_len(ctx, width),
         ),
-        None => format!("Slot {} cannot be milled — no router in stock.", fmt_len(ctx, width)),
+        None => format!(
+            "Slot {} cannot be milled — no router in stock.",
+            fmt_len(ctx, width)
+        ),
     }
 }
 
@@ -1754,7 +2177,10 @@ pub(crate) fn derate_notes(
     // The worst case is the one to sanity-check: the deepest cut in speed, or the largest
     // increase where the spindle floor pushed tools up.
     let deepest = |group: &[(&str, f64, FeedRate)]| {
-        group.iter().min_by(|a, b| a.1.total_cmp(&b.1)).map(|w| (w.0.to_string(), w.1, w.2))
+        group
+            .iter()
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|w| (w.0.to_string(), w.1, w.2))
     };
 
     if let Some((name, scale, rated)) = deepest(&capped) {
@@ -1782,7 +2208,9 @@ pub(crate) fn derate_notes(
     // Nothing was altered for these — the program carries the tool's own rated pair. What
     // the machine does with a speed below its floor is the machine's business, and that is
     // exactly why it is worth saying out loud.
-    let slowest = below_floor.iter().min_by(|a, b| a.1.as_rpm().total_cmp(&b.1.as_rpm()));
+    let slowest = below_floor
+        .iter()
+        .min_by(|a, b| a.1.as_rpm().total_cmp(&b.1.as_rpm()));
     if let Some((name, rated_speed, rated_feed)) = slowest {
         notes.push(format!(
             "{} of {total} tool(s) are rated below {machine}'s {} minimum — the program still \
@@ -1848,7 +2276,11 @@ pub(crate) fn build_rack_spec(
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let placeable = distinct_fixed + spare_slots.len();
-    let capacity = if atc_slots > 0 { placeable.min(atc_slots) } else { placeable };
+    let capacity = if atc_slots > 0 {
+        placeable.min(atc_slots)
+    } else {
+        placeable
+    };
 
     RackSpec {
         capacity,
@@ -2024,7 +2456,13 @@ fn node_pin_diameter(root: &Node, ptr: &str) -> Option<Length> {
 /// Reads a `percent` value (stored untyped, usually `"8%"`) as a fraction (`0.08`).
 fn node_percent_fraction(root: &Node, ptr: &str) -> Option<f64> {
     match &root.get_pointer(ptr)?.value {
-        NodeValue::Str(s) => s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|v| v / 100.0),
+        NodeValue::Str(s) => s
+            .trim()
+            .trim_end_matches('%')
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|v| v / 100.0),
         NodeValue::Float(f) => Some(*f / 100.0),
         NodeValue::Int(i) => Some(*i as f64 / 100.0),
         _ => None,
@@ -2053,7 +2491,10 @@ mod tests {
         BoardHole {
             id: None,
             kind,
-            position: BoardPoint { x: Length::from_mm(0.0), y: Length::from_mm(0.0) },
+            position: BoardPoint {
+                x: Length::from_mm(0.0),
+                y: Length::from_mm(0.0),
+            },
             drill_x: Some(Length::from_mm(dx_mm)),
             drill_y: Some(Length::from_mm(dy_mm)),
             plated: None,
@@ -2102,19 +2543,34 @@ mod tests {
     #[test]
     fn every_capped_tool_collapses_into_a_single_note() {
         let tools = vec![
-            loaded("1.0mm drill", 14_400.0, 48_000.0), // → 50%
-            loaded("0.8mm drill", 17_100.0, 57_000.0), // → 42.1%
+            loaded("1.0mm drill", 14_400.0, 48_000.0),  // → 50%
+            loaded("0.8mm drill", 17_100.0, 57_000.0),  // → 42.1%
             loaded("0.3mm drill", 20_000.0, 100_000.0), // → 24%, the deepest
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
-        assert_eq!(notes.len(), 1, "one aggregated line, not one per tool: {notes:#?}");
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
+        assert_eq!(
+            notes.len(),
+            1,
+            "one aggregated line, not one per tool: {notes:#?}"
+        );
         let note = &notes[0];
         assert!(note.contains("3 of 3 tool(s)"), "counts them: {note}");
         assert!(note.contains("24000 rpm"), "names the ceiling: {note}");
-        assert!(note.contains("0.3mm drill"), "names the worst offender: {note}");
+        assert!(
+            note.contains("0.3mm drill"),
+            "names the worst offender: {note}"
+        );
         assert!(note.contains("24%"), "reports the deepest derate: {note}");
         // Unspaced, which is how `UserUnitDisplay` renders a feed everywhere else.
-        assert!(note.contains("20000mm/min"), "against the rated feed: {note}");
+        assert!(
+            note.contains("20000mm/min"),
+            "against the rated feed: {note}"
+        );
     }
 
     /// Over the ceiling and under the floor are opposite problems with opposite fixes, so
@@ -2126,7 +2582,12 @@ mod tests {
             loaded("1.0mm drill", 14_400.0, 48_000.0), // above the ceiling → scaled
             loaded("slow cutter", 200.0, 1_000.0),     // below the floor   → reported only
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
         assert_eq!(notes.len(), 2, "one per direction: {notes:#?}");
         assert!(notes[0].contains("capped"), "capping first: {}", notes[0]);
         assert!(notes[1].contains("below"), "then the floor: {}", notes[1]);
@@ -2142,9 +2603,16 @@ mod tests {
     #[test]
     fn nothing_clamped_produces_no_note_at_all() {
         let tools = vec![loaded("1.0mm drill", 600.0, 12_000.0)];
-        let notes =
-            derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
-        assert!(notes.is_empty(), "rated speed is reachable — nothing to say: {notes:#?}");
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
+        assert!(
+            notes.is_empty(),
+            "rated speed is reachable — nothing to say: {notes:#?}"
+        );
     }
 
     /// A missing rating is generation's error to report, with its own message. Counting it
@@ -2164,10 +2632,23 @@ mod tests {
                 speed: None,
             },
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Metric);
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &tools,
+            UserUnitSystem::Metric,
+        );
         assert_eq!(notes.len(), 1);
-        assert!(notes[0].contains("1 of 3 tool(s)"), "only the rated one is counted: {}", notes[0]);
-        assert!(!notes[0].contains("no feed") && !notes[0].contains("no speed"), "{}", notes[0]);
+        assert!(
+            notes[0].contains("1 of 3 tool(s)"),
+            "only the rated one is counted: {}",
+            notes[0]
+        );
+        assert!(
+            !notes[0].contains("no feed") && !notes[0].contains("no speed"),
+            "{}",
+            notes[0]
+        );
     }
 
     /// "Worst" is the deepest derate — the smallest fraction of the rated speed — and it
@@ -2175,11 +2656,20 @@ mod tests {
     #[test]
     fn the_worst_offender_is_the_deepest_derate() {
         let capped = vec![
-            loaded("mild", 1_000.0, 30_000.0),  // → 80%
+            loaded("mild", 1_000.0, 30_000.0),   // → 80%
             loaded("severe", 1_000.0, 96_000.0), // → 25%
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &capped, UserUnitSystem::Metric);
-        assert!(notes[0].contains("severe") && notes[0].contains("25%"), "{}", notes[0]);
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &capped,
+            UserUnitSystem::Metric,
+        );
+        assert!(
+            notes[0].contains("severe") && notes[0].contains("25%"),
+            "{}",
+            notes[0]
+        );
 
         // Under the floor nothing is scaled, so the tools are ranked by rated speed and
         // the slowest — the furthest from what the machine can do — is the one named.
@@ -2187,7 +2677,12 @@ mod tests {
             loaded("mild", 1_000.0, 4_000.0),
             loaded("severe", 1_000.0, 500.0),
         ];
-        let notes = derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &below, UserUnitSystem::Metric);
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &below,
+            UserUnitSystem::Metric,
+        );
         assert!(notes[0].contains("severe"), "{}", notes[0]);
     }
 
@@ -2205,15 +2700,31 @@ mod tests {
             UserUnitSystem::Metric,
         );
         assert_eq!(notes.len(), 1, "{notes:#?}");
-        assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
-        assert!(notes[0].contains("1500mm/min"), "names the Z limit: {}", notes[0]);
+        assert!(
+            notes[0].contains("faster than CNC#1 can move"),
+            "{}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("1500mm/min"),
+            "names the Z limit: {}",
+            notes[0]
+        );
         assert!(
             notes[0].contains("the spindle keeps its speed"),
             "must say the spindle was not derated for it: {}",
             notes[0]
         );
-        assert!(notes[0].contains("cut lighter than rated"), "and what that costs: {}", notes[0]);
-        assert!(notes[0].contains("Raise the machine's feed limits"), "names the fix: {}", notes[0]);
+        assert!(
+            notes[0].contains("cut lighter than rated"),
+            "and what that costs: {}",
+            notes[0]
+        );
+        assert!(
+            notes[0].contains("Raise the machine's feed limits"),
+            "names the fix: {}",
+            notes[0]
+        );
     }
 
     /// A high spindle floor no longer changes the answer: the floor is not in the formula,
@@ -2227,8 +2738,16 @@ mod tests {
             &tools,
             UserUnitSystem::Metric,
         );
-        assert_eq!(notes.len(), 1, "the floor is irrelevant at 100000 rpm: {notes:#?}");
-        assert!(notes[0].contains("faster than CNC#1 can move"), "{}", notes[0]);
+        assert_eq!(
+            notes.len(),
+            1,
+            "the floor is irrelevant at 100000 rpm: {notes:#?}"
+        );
+        assert!(
+            notes[0].contains("faster than CNC#1 can move"),
+            "{}",
+            notes[0]
+        );
     }
 
     /// The lateral feed is judged against the **XY** ceiling and nothing else.
@@ -2248,7 +2767,10 @@ mod tests {
             &[router],
             UserUnitSystem::Metric,
         );
-        assert!(notes.is_empty(), "4400 is under the 5000 XY ceiling: {notes:#?}");
+        assert!(
+            notes.is_empty(),
+            "4400 is under the 5000 XY ceiling: {notes:#?}"
+        );
 
         // Lower the XY ceiling below it and the same tool is reported.
         let notes = derate_notes(
@@ -2264,9 +2786,17 @@ mod tests {
     #[test]
     fn the_rated_feed_is_shown_in_the_users_units() {
         let tools = vec![loaded("1.0mm drill", 25_400.0, 48_000.0)];
-        let notes =
-            derate_notes("CNC#1", spindle(5_000.0, 24_000.0), &tools, UserUnitSystem::Imperial);
-        assert!(notes[0].contains("1000ipm"), "25400 mm/min is 1000 ipm: {}", notes[0]);
+        let notes = derate_notes(
+            "CNC#1",
+            spindle(5_000.0, 24_000.0),
+            &tools,
+            UserUnitSystem::Imperial,
+        );
+        assert!(
+            notes[0].contains("1000ipm"),
+            "25400 mm/min is 1000 ipm: {}",
+            notes[0]
+        );
     }
 
     #[test]
@@ -2287,7 +2817,7 @@ mod tests {
     // --- routing tool selection -------------------------------------------
 
     /// A stock router of the given diameter.
-    fn router(id: &str, diameter_mm: f64) -> Tool {
+    pub(super) fn router(id: &str, diameter_mm: f64) -> Tool {
         Tool {
             id: id.to_string(),
             composite_name: format!("Router {diameter_mm}mm"),
@@ -2313,7 +2843,7 @@ mod tests {
     }
 
     /// A toolset with the given tools pinned in slots (empty = nothing fixed).
-    fn toolset_with_fixed(fixed: &[&str]) -> crate::data::model::ToolsetProfile {
+    pub(super) fn toolset_with_fixed(fixed: &[&str]) -> crate::data::model::ToolsetProfile {
         crate::data::model::ToolsetProfile {
             id: "ts".into(),
             name: "Test".into(),
@@ -2355,21 +2885,52 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
-        assert_eq!(plan.for_group(&groups[0]), None, "1.2mm cutter rejected for a 0.4mm slot");
-        assert_eq!(plan.unroutable_widths.len(), 1, "and the slot is reported unroutable");
-        assert!(plan.mandatory_ids().is_empty(), "no router is reserved in the rack for it");
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &groups,
+            false,
+            Length::from_mm(1e6),
+            true,
+            CutoutRouting { contours: &[], relieve_corners: false },
+        );
+        assert_eq!(
+            plan.for_group(&groups[0]),
+            None,
+            "1.2mm cutter rejected for a 0.4mm slot"
+        );
+        assert_eq!(
+            plan.unroutable_widths.len(),
+            1,
+            "and the slot is reported unroutable"
+        );
+        assert!(
+            plan.mandatory_ids().is_empty(),
+            "no router is reserved in the rack for it"
+        );
     }
 
     /// Among cutters that fit, the largest wins: fewest passes and the stiffest tool,
     /// with one exactly the slot width milling it in a single pass.
     #[test]
     fn the_slot_router_is_the_largest_that_fits() {
-        let tools = vec![router("tiny", 0.2), router("exact", 0.4), router("wide", 1.2)];
+        let tools = vec![
+            router("tiny", 0.2),
+            router("exact", 0.4),
+            router("wide", 1.2),
+        ];
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &groups,
+            false,
+            Length::from_mm(1e6),
+            true,
+            CutoutRouting { contours: &[], relieve_corners: false },
+        );
         assert_eq!(plan.for_group(&groups[0]), Some("exact"));
         assert!(plan.unroutable_widths.is_empty());
     }
@@ -2382,7 +2943,15 @@ mod tests {
         let toolset = toolset_with_fixed(&["fixed"]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &groups,
+            false,
+            Length::from_mm(1e6),
+            true,
+            CutoutRouting { contours: &[], relieve_corners: false },
+        );
         assert_eq!(plan.for_group(&groups[0]), Some("fixed"));
     }
 
@@ -2398,7 +2967,16 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
 
         let outline = |kerf_mm: f64| {
-            plan_routers(&tools, &toolset, &[], true, Length::from_mm(kerf_mm), false).outline
+            plan_routers(
+                &tools,
+                &toolset,
+                &[],
+                true,
+                Length::from_mm(kerf_mm),
+                false,
+                CutoutRouting { contours: &[], relieve_corners: false },
+            )
+            .outline
         };
 
         assert_eq!(outline(2.0).as_deref(), Some("c"));
@@ -2421,6 +2999,7 @@ mod tests {
             true,
             Length::from_mm(2.0),
             false,
+            CutoutRouting { contours: &[], relieve_corners: false },
         );
         assert_eq!(
             plan.outline, None,
@@ -2444,6 +3023,7 @@ mod tests {
             true,
             Length::from_mm(2.0),
             false,
+            CutoutRouting { contours: &[], relieve_corners: false },
         );
         assert_eq!(
             plan.outline.as_deref(),
@@ -2460,8 +3040,13 @@ mod tests {
             true,
             Length::from_mm(2.0),
             false,
+            CutoutRouting { contours: &[], relieve_corners: false },
         );
-        assert_eq!(plan.outline.as_deref(), Some("pinned"), "a tie goes to the free slot");
+        assert_eq!(
+            plan.outline.as_deref(),
+            Some("pinned"),
+            "a tie goes to the free slot"
+        );
     }
 
     /// The outline cutter is a **required** tool of the step: chosen outside the assigner,
@@ -2478,8 +3063,13 @@ mod tests {
             true,
             Length::from_mm(2.0),
             true,
+            CutoutRouting { contours: &[], relieve_corners: false },
         );
-        assert_eq!(plan.for_group(&groups[0]), Some("slot"), "2.0mm will not enter a 1.0mm slot");
+        assert_eq!(
+            plan.for_group(&groups[0]),
+            Some("slot"),
+            "2.0mm will not enter a 1.0mm slot"
+        );
         assert_eq!(
             plan.mandatory_ids(),
             vec!["kerf".to_string(), "slot".to_string()],
@@ -2497,6 +3087,7 @@ mod tests {
             toolset_id: Some(uuid::Uuid::now_v7()),
             drill: Default::default(),
             route_board: Default::default(),
+            route_cutouts: Default::default(),
             machines_back,
             pin_diameter: None,
         }
@@ -2515,7 +3106,10 @@ mod tests {
     /// overwhelmingly common job, and must stay frictionless.
     #[test]
     fn a_single_sided_job_needs_no_locating_pins() {
-        assert!(locating_pin_faults(&[]).is_empty(), "no steps, nothing to fault");
+        assert!(
+            locating_pin_faults(&[]).is_empty(),
+            "no steps, nothing to fault"
+        );
         assert!(
             locating_pin_faults(&[step_on("Drill", false), step_on("Cut out", false)]).is_empty(),
             "an all-front profile generates"
@@ -2540,7 +3134,11 @@ mod tests {
             "names the pair: {}",
             faults[0]
         );
-        assert!(faults[0].contains("add one first"), "says what to do: {}", faults[0]);
+        assert!(
+            faults[0].contains("add one first"),
+            "says what to do: {}",
+            faults[0]
+        );
 
         assert!(
             locating_pin_faults(&[
@@ -2572,7 +3170,9 @@ mod tests {
     fn pins_must_be_the_first_step() {
         let faults = locating_pin_faults(&[step_on("Drill", false), pin_step("Pins", false)]);
         assert!(
-            faults.iter().any(|f| f.contains("step 2 'Pins'") && f.contains("not the first step")),
+            faults
+                .iter()
+                .any(|f| f.contains("step 2 'Pins'") && f.contains("not the first step")),
             "{faults:?}"
         );
     }
@@ -2619,7 +3219,11 @@ mod tests {
             ..step_on(name, bottom)
         };
 
-        assert_eq!(duplicate_operations_reason(&[]), None, "no steps, nothing to clash");
+        assert_eq!(
+            duplicate_operations_reason(&[]),
+            None,
+            "no steps, nothing to clash"
+        );
         assert_eq!(
             duplicate_operations_reason(&[
                 step_doing("Drill", false, &["drill_pth", "drill_npth"]),
@@ -2634,8 +3238,14 @@ mod tests {
             step_doing("Drill again", false, &["drill_pth"]),
         ])
         .expect("the same holes drilled twice must be refused");
-        assert!(reason.contains("Drill plated holes"), "names the operation: {reason}");
-        assert!(reason.contains("'Drill'") && reason.contains("'Drill again'"), "names both steps: {reason}");
+        assert!(
+            reason.contains("Drill plated holes"),
+            "names the operation: {reason}"
+        );
+        assert!(
+            reason.contains("'Drill'") && reason.contains("'Drill again'"),
+            "names both steps: {reason}"
+        );
     }
 
     /// Milling the front and then the back is the two-sided workflow, not a mistake —
@@ -2669,10 +3279,15 @@ mod tests {
             toolset_id: toolset.then(uuid::Uuid::now_v7),
             drill: Default::default(),
             route_board: Default::default(),
+            route_cutouts: Default::default(),
             machines_back: false,
             pin_diameter: None,
         };
-        assert_eq!(missing_bindings(&step(true, true, true)), None, "all three set");
+        assert_eq!(
+            missing_bindings(&step(true, true, true)),
+            None,
+            "all three set"
+        );
         assert_eq!(
             missing_bindings(&step(false, true, true)).as_deref(),
             Some("This step has no CNC profile selected.")
@@ -2694,13 +3309,45 @@ mod tests {
         let toolset = toolset_with_fixed(&[]);
         let groups = vec![slot_group(0.4, 3.0)];
 
-        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), false);
-        assert_eq!(plan.for_group(&groups[0]), None, "drill-only strategy reserves no router");
-        assert!(plan.unroutable_widths.is_empty(), "and reports nothing unroutable");
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &groups,
+            false,
+            Length::from_mm(1e6),
+            false,
+            CutoutRouting { contours: &[], relieve_corners: false },
+        );
+        assert_eq!(
+            plan.for_group(&groups[0]),
+            None,
+            "drill-only strategy reserves no router"
+        );
+        assert!(
+            plan.unroutable_widths.is_empty(),
+            "and reports nothing unroutable"
+        );
 
-        let round = HoleGroup { kind: DemandKind::Pth, target: Length::from_mm(0.8), minor: None, count: 1 };
-        let plan = plan_routers(&tools, &toolset, &groups, false, Length::from_mm(1e6), true);
-        assert_eq!(plan.for_group(&round), None, "a round hole is drilled, not milled");
+        let round = HoleGroup {
+            kind: DemandKind::Pth,
+            target: Length::from_mm(0.8),
+            minor: None,
+            count: 1,
+        };
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &groups,
+            false,
+            Length::from_mm(1e6),
+            true,
+            CutoutRouting { contours: &[], relieve_corners: false },
+        );
+        assert_eq!(
+            plan.for_group(&round),
+            None,
+            "a round hole is drilled, not milled"
+        );
     }
 
     #[test]
@@ -2709,8 +3356,16 @@ mod tests {
         // Spare slots T2/T3/T4; a tool "fix" is pinned (fixed) elsewhere.
         let fixed: BTreeSet<String> = ["fix".to_string()].into_iter().collect();
         let steps = vec![
-            (0, "s1".to_string(), vec!["fix".into(), "A".into(), "B".into()]),
-            (1, "s2".to_string(), vec!["fix".into(), "B".into(), "C".into()]),
+            (
+                0,
+                "s1".to_string(),
+                vec!["fix".into(), "A".into(), "B".into()],
+            ),
+            (
+                1,
+                "s2".to_string(),
+                vec!["fix".into(), "B".into(), "C".into()],
+            ),
         ];
         let snaps = schedule_spare_slots(&[2, 3, 4], &fixed, &steps);
 
@@ -2722,10 +3377,22 @@ mod tests {
 
         // Step 2: B keeps T3 (the optimisation), C takes the empty T4; A idles in T2.
         let (state2, changed2) = &snaps[1];
-        assert_eq!(state2.get(&3), Some(&"B".to_string()), "B stays put across steps");
+        assert_eq!(
+            state2.get(&3),
+            Some(&"B".to_string()),
+            "B stays put across steps"
+        );
         assert_eq!(state2.get(&4), Some(&"C".to_string()));
-        assert_eq!(state2.get(&2), Some(&"A".to_string()), "idle tool is left loaded");
-        assert_eq!(changed2, &BTreeSet::from([4]), "only the new tool's slot changes");
+        assert_eq!(
+            state2.get(&2),
+            Some(&"A".to_string()),
+            "idle tool is left loaded"
+        );
+        assert_eq!(
+            changed2,
+            &BTreeSet::from([4]),
+            "only the new tool's slot changes"
+        );
     }
 
     /// Columns exist only for steps that resolved *and* loaded tools, so a column's
@@ -2735,12 +3402,21 @@ mod tests {
     fn the_rack_is_projected_by_step_index_not_by_column_position() {
         let schedule = RackSchedule {
             // Steps 0 and 2 resolved; step 1 loaded nothing and has no column.
-            steps: vec![RackStepColumn { step_index: 0 }, RackStepColumn { step_index: 2 }],
+            steps: vec![
+                RackStepColumn { step_index: 0 },
+                RackStepColumn { step_index: 2 },
+            ],
             slots: vec![RackSlotSchedule {
                 slot: "T1".to_string(),
                 cells: vec![
-                    RackCell { tool: Some("drill".into()), status: SlotChange::Load },
-                    RackCell { tool: Some("router".into()), status: SlotChange::Kept },
+                    RackCell {
+                        tool: Some("drill".into()),
+                        status: SlotChange::Load,
+                    },
+                    RackCell {
+                        tool: Some("router".into()),
+                        status: SlotChange::Kept,
+                    },
                 ],
             }],
         };
@@ -2750,12 +3426,24 @@ mod tests {
         assert_eq!(step0[0].status, SlotChange::Load);
 
         // The *second* column belongs to step 2, not step 1.
-        assert_eq!(rack_for_step(&schedule, 1), None, "a step with no column has no rack");
+        assert_eq!(
+            rack_for_step(&schedule, 1),
+            None,
+            "a step with no column has no rack"
+        );
         let step2 = rack_for_step(&schedule, 2).expect("step 2 has a column");
         assert_eq!(step2[0].tool.as_deref(), Some("router"));
-        assert_eq!(step2[0].status, SlotChange::Kept, "carried over from an earlier step");
+        assert_eq!(
+            step2[0].status,
+            SlotChange::Kept,
+            "carried over from an earlier step"
+        );
 
-        assert_eq!(rack_for_step(&schedule, 9), None, "a step beyond the profile has none");
+        assert_eq!(
+            rack_for_step(&schedule, 9),
+            None,
+            "a step beyond the profile has none"
+        );
     }
 
     #[test]
@@ -2765,10 +3453,17 @@ mod tests {
         let snaps = schedule_spare_slots(
             &[1],
             &BTreeSet::new(),
-            &[(0, "s1".into(), vec!["A".into()]), (1, "s2".into(), vec!["B".into()])],
+            &[
+                (0, "s1".into(), vec!["A".into()]),
+                (1, "s2".into(), vec!["B".into()]),
+            ],
         );
         assert_eq!(snaps[0].0.get(&1), Some(&"A".to_string()));
-        assert_eq!(snaps[1].0.get(&1), Some(&"B".to_string()), "B evicts the idle A");
+        assert_eq!(
+            snaps[1].0.get(&1),
+            Some(&"B".to_string()),
+            "B evicts the idle A"
+        );
         assert!(snaps[1].1.contains(&1), "the reload counts as a change");
     }
 
@@ -2778,16 +3473,191 @@ mod tests {
         let groups = collect_hole_groups(&holes, false, true);
         assert_eq!(groups.len(), 1);
         assert_eq!(micron(groups[0].target), 4000, "major axis is the target");
-        assert_eq!(groups[0].minor.map(micron), Some(2000), "minor axis retained");
+        assert_eq!(
+            groups[0].minor.map(micron),
+            Some(2000),
+            "minor axis retained"
+        );
         assert_eq!(groups[0].kind, DemandKind::Npth);
     }
 
     #[test]
     fn filters_holes_by_enabled_operation() {
-        let holes = vec![hole(HoleKind::PadPth, 0.8, 0.8), hole(HoleKind::PadNpth, 3.0, 3.0)];
+        let holes = vec![
+            hole(HoleKind::PadPth, 0.8, 0.8),
+            hole(HoleKind::PadNpth, 3.0, 3.0),
+        ];
         // Only PTH enabled → the NPTH hole is excluded from the demand.
         let groups = collect_hole_groups(&holes, true, false);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].kind, DemandKind::Pth);
+    }
+}
+
+#[cfg(test)]
+mod cutout_router_tests {
+    use super::*;
+    use crate::data::model::ToolsetProfile;
+
+    fn nm(mm: f64) -> i64 {
+        (mm * 1e6) as i64
+    }
+
+    /// A rectangular opening `w x h` mm, as the stitcher would hand it over.
+    fn opening(w: f64, h: f64) -> pcb::Contour {
+        let pts = vec![(0, 0), (nm(w), 0), (nm(w), nm(h)), (0, nm(h))];
+        let segments = (0..4)
+            .map(|i| pcb::Segment::Line {
+                start: pts[i],
+                end: pts[(i + 1) % 4],
+            })
+            .collect();
+        pcb::Contour {
+            points: pts,
+            segments,
+            is_hole: true,
+        }
+    }
+
+    fn drill(id: &str, diameter_mm: f64) -> Tool {
+        let mut t = super::tests::router(id, diameter_mm);
+        t.kind = "Drillbit".to_string();
+        t.name = format!("Drill {diameter_mm}mm");
+        t
+    }
+
+    fn empty_toolset() -> ToolsetProfile {
+        super::tests::toolset_with_fixed(&[])
+    }
+
+    /// The cutter is chosen to fit the opening, not to match a requested size.
+    ///
+    /// This is the whole reason interior openings are their own operation. A 1.5mm slot
+    /// cut under `route_board` is measured against the edge kerf, and a 2mm kerf reports
+    /// it as vanishing rather than reaching for the 1.4mm router sitting in stock. The
+    /// widest cutter that fits is preferred because the wall pass is one lap whatever the
+    /// diameter — a wider cutter buys stiffness, never fewer passes.
+    #[test]
+    fn each_opening_takes_the_widest_router_that_fits_it() {
+        let tools = vec![
+            super::tests::router("r3", 3.0),
+            super::tests::router("r1_4", 1.4),
+            super::tests::router("r0_8", 0.8),
+        ];
+        let toolset = empty_toolset();
+
+        let wide = opening(8.0, 5.0);
+        let narrow = opening(9.5, 1.5);
+        let plan = plan_routers(
+            &tools,
+            &toolset,
+            &[],
+            false,
+            Length::from_mm(2.0),
+            false,
+            CutoutRouting { contours: &[(0, &wide), (1, &narrow)], relieve_corners: false },
+        );
+
+        assert_eq!(
+            plan.cutouts[&0].0, "r3",
+            "5mm of width takes the 3mm cutter"
+        );
+        assert_eq!(
+            plan.cutouts[&1].0, "r1_4",
+            "1.5mm of width takes the 1.4mm cutter, not the 3mm one"
+        );
+        assert!(plan.uncuttable_cutouts.is_empty());
+    }
+
+    /// An opening no router can enter is reported, not quietly skipped.
+    ///
+    /// Cutting it with something too wide would take out the board either side of it.
+    #[test]
+    fn an_opening_narrower_than_every_router_is_reported_uncuttable() {
+        let tools = vec![super::tests::router("r2", 2.0)];
+        let hairline = opening(9.0, 0.5);
+        let plan = plan_routers(
+            &tools,
+            &empty_toolset(),
+            &[],
+            false,
+            Length::from_mm(2.0),
+            false,
+            CutoutRouting { contours: &[(0, &hairline)], relieve_corners: false },
+        );
+
+        assert!(plan.cutouts.is_empty());
+        assert_eq!(plan.uncuttable_cutouts, vec![0]);
+    }
+
+    /// Corner relief drills must be **reserved**, or they can never be used.
+    ///
+    /// A step that only cuts openings drills nothing else, so its rack is built from the
+    /// routers alone. Choosing the relief drill at plan time from "whatever is already
+    /// racked" — the rule mouse bites follow — would therefore skip every corner on
+    /// exactly the step the feature exists for, with a drill in stock the whole time.
+    #[test]
+    fn corner_relief_drills_are_reserved_a_slot() {
+        let tools = vec![
+            super::tests::router("r3", 3.0),
+            drill("d0_9", 0.9),
+            drill("d0_1", 0.1),
+        ];
+        let square = opening(8.0, 8.0);
+        let plan = plan_routers(
+            &tools,
+            &empty_toolset(),
+            &[],
+            false,
+            Length::from_mm(2.0),
+            false,
+            CutoutRouting { contours: &[(0, &square)], relieve_corners: true },
+        );
+
+        // 3mm cutter, 90 degree corners: ideal = 3 * (1 - sin45) = 0.879mm, and the band
+        // reaches down to 0.879 / (1 + sin45) = 0.515mm. The 0.9mm drill is over the
+        // ideal; the 0.1mm one is under the merge floor and would leave an uncut web.
+        let chosen = &plan.corner_drills[&0];
+        assert_eq!(chosen.len(), 4, "four corners");
+        assert!(
+            chosen.iter().all(|d| d.is_none()),
+            "neither drill is inside the band, so no corner is relieved: {chosen:?}"
+        );
+
+        // With one in the band, it is chosen *and* reserved.
+        let tools = vec![super::tests::router("r3", 3.0), drill("d0_8", 0.8)];
+        let plan = plan_routers(
+            &tools,
+            &empty_toolset(),
+            &[],
+            false,
+            Length::from_mm(2.0),
+            false,
+            CutoutRouting { contours: &[(0, &square)], relieve_corners: true },
+        );
+        assert!(plan.corner_drills[&0]
+            .iter()
+            .all(|d| d.as_deref() == Some("d0_8")));
+        assert!(
+            plan.mandatory_ids().contains(&"d0_8".to_string()),
+            "the relief drill must hold a rack slot: {:?}",
+            plan.mandatory_ids()
+        );
+    }
+
+    /// The relief band, at the one angle with a value anyone can check by eye.
+    ///
+    /// A drill below the minimum does not reach the routed pocket, so instead of a
+    /// sharper corner it leaves a ring of uncut material and a loose chip.
+    #[test]
+    fn the_corner_relief_band_runs_from_the_merge_diameter_to_the_ideal() {
+        let (min, ideal) = corner_relief_band(2.0, std::f64::consts::FRAC_PI_2).unwrap();
+        assert!(
+            (ideal - 0.5857864).abs() < 1e-6,
+            "2mm cutter, 90 degrees: {ideal}"
+        );
+        assert!((min - ideal / (1.0 + 0.5_f64.sqrt())).abs() < 1e-9);
+        // A straight edge is not a corner and wants no drill.
+        assert!(corner_relief_band(2.0, std::f64::consts::PI).is_none());
     }
 }

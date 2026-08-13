@@ -35,10 +35,16 @@ members = [
     "xtask",
 ]
 
-# Vendored fork of kicad-ipc-rs (Milind220/kicad-ipc-rs 0.5.1). Our only change
-# surfaces the pad-stack orientation (`PcbPadStack.angle_degrees`) that upstream
-# maps away, which we need to machine rotated oblong/slot drills. Kept until the
-# field lands upstream; see third_party/kicad-ipc-rs.
+# Vendored fork of kicad-ipc-rs (Milind220/kicad-ipc-rs 0.5.1). Two changes, both
+# recovering geometry upstream maps away, both kept until they land upstream; see
+# third_party/kicad-ipc-rs.
+#
+#   * `PcbPadStack.angle_degrees` — the pad-stack orientation, which we need to
+#     machine rotated oblong/slot drills.
+#   * `PcbGraphicShapeGeometry::Polygon.polygons` — the actual vertices of a polygon
+#     shape, where upstream keeps only how many there are. A cutout drawn with
+#     KiCad's polygon tool is otherwise invisible to us: it has no geometry to
+#     stitch, so it silently never gets machined.
 [patch.crates-io]
 kicad-ipc-rs = { path = "third_party/kicad-ipc-rs" }
 

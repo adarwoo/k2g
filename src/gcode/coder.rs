@@ -492,6 +492,14 @@ fn sample_steps() -> Vec<StepValue> {
             ("drill_pth".into(), holes("drill_ends_then_route")),
             ("drill_npth".into(), holes("drill_ends_then_route")),
             ("route_board".into(), route_board.clone()),
+            (
+                "route_cutouts".into(),
+                StepValue::Map(vec![
+                    ("retain_island".into(), StepValue::Bool(true)),
+                    ("island_tab".into(), StepValue::Text("4%".into())),
+                    ("drill_sharp_corners".into(), StepValue::Bool(true)),
+                ]),
+            ),
             ("mill_board".into(), mill_board.clone()),
             ("cnc_name".into(), StepValue::Text(cnc.into())),
             ("fixture_name".into(), StepValue::Text("Vacuum bed".into())),

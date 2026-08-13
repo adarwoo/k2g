@@ -2020,14 +2020,20 @@ mod tests {
         assert_eq!(operations(&data, 1), vec!["drill_npth".to_string()], "PTH is taken");
         assert!(data.add_step(id));
         assert_eq!(operations(&data, 2), vec!["route_board".to_string()], "and so is NPTH");
+        assert!(data.add_step(id));
+        assert_eq!(
+            operations(&data, 3),
+            vec!["route_cutouts".to_string()],
+            "cutouts are their own once-per-face claim, taken before the repeatable ones"
+        );
 
         // Past the once-per-side operations it settles on the repeatable one rather
         // than running out — a step must carry at least one operation.
         assert!(data.add_step(id));
         assert!(data.add_step(id));
-        assert_eq!(operations(&data, 3), vec!["drill_locating_pins".to_string()]);
+        assert_eq!(operations(&data, 4), vec!["drill_locating_pins".to_string()]);
         assert_eq!(
-            operations(&data, 4),
+            operations(&data, 5),
             vec!["drill_locating_pins".to_string()],
             "pins are repeatable, so they stay available"
         );

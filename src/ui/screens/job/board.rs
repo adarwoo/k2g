@@ -658,8 +658,25 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                 "M {sx} {sy} C {c1x} {c1y} {c2x} {c2y} {ex} {ey}"
                             )))
                         }
-                        // GraphicPolygon only carries a count; skip it.
-                        BoardEdgeShape::GraphicPolygon { .. } => None,
+                        // Each ring drawn as a closed path. Arc nodes are drawn as
+                        // their chord here — the preview only needs the shape to read,
+                        // and the machining path takes its arcs from the stitched
+                        // contour, not from this.
+                        BoardEdgeShape::GraphicPolygon { rings, .. } => {
+                            let mut d = String::new();
+                            for ring in rings {
+                                for (i, node) in ring.nodes.iter().enumerate() {
+                                    let p = match node {
+                                        pcb::PolyNode::Point(p) => p,
+                                        pcb::PolyNode::Arc { start, .. } => start,
+                                    };
+                                    let (x, y) = (tx(p.x.as_mm()), ty(p.y.as_mm()));
+                                    d.push_str(&format!("{} {x} {y} ", if i == 0 { "M" } else { "L" }));
+                                }
+                                d.push_str("Z ");
+                            }
+                            (!d.is_empty()).then(|| SvgShape::Path(d.trim_end().to_string()))
+                        }
                     }
                 }).collect()
             } else {

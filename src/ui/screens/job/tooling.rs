@@ -16,7 +16,7 @@ use crate::runtime::AppCtx;
 #[component]
 pub fn ToolingView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let plan = plan_tooling(&snapshot);
+    let plan = plan_tooling(&snapshot, snapshot.stitched_board_data.as_ref());
     let has_steps = !plan.steps.is_empty();
     let selected = snapshot.selected_step.min(plan.steps.len().saturating_sub(1));
 

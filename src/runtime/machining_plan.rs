@@ -86,7 +86,9 @@ fn job_frame(steps: &[StepRaw], fixture: Option<&FixtureProfile>) -> JobFrame {
         .and_then(|step| step.pin_diameter);
 
     JobFrame {
-        margin: pin_diameter.map(|d| pins::margin(d, flip_axis)).unwrap_or_default(),
+        margin: pin_diameter
+            .map(|d| pins::margin(d, flip_axis))
+            .unwrap_or_default(),
         pin_diameter,
         flip_axis,
     }
@@ -219,7 +221,10 @@ pub fn board_solid(ctx: &AppCtx, step: usize) -> Option<scene::BoardSolid> {
             .filter(|c| c.is_hole)
             .map(|c| c.points.iter().map(place).collect())
             .collect(),
-        thickness_mm: board.thickness.map(|t| t.as_mm()).unwrap_or(DEFAULT_THICKNESS_MM),
+        thickness_mm: board
+            .thickness
+            .map(|t| t.as_mm())
+            .unwrap_or(DEFAULT_THICKNESS_MM),
         // Which way up the board is lying, so the renderer knows which of its two faces
         // the spindle is looking at. The back is drawn red and the front green either way;
         // this only says which one is on top.
@@ -311,7 +316,10 @@ const DEFAULT_THICKNESS_MM: f64 = 1.6;
 
 /// A whole-plan note (nothing to plan).
 fn note(message: &str) -> MachiningPlan {
-    MachiningPlan { steps: vec![], note: Some(message.to_string()) }
+    MachiningPlan {
+        steps: vec![],
+        note: Some(message.to_string()),
+    }
 }
 
 /// Plans one step's drill phase, in the job's shared coordinate `frame`.
@@ -324,11 +332,20 @@ fn plan_step(
 ) -> StepPlan {
     let name = raw.name.clone();
     let mut notes: Vec<String> = Vec::new();
-
     let has_pth = raw.drills_pth();
     let has_npth = raw.drills_npth();
     let has_route = raw.routes_outline();
     let has_locating = raw.drills_locating_pins();
+
+    // `route_cutouts` takes the openings off the edge operation on this step, so an
+    // operator who has both selected sees why the edge pass no longer touches them.
+    if raw.routes_cutouts() && has_route && raw.route_board.cutouts {
+        notes.push(
+            "The interior openings are cut by 'Route interior cutouts', each with a cutter \
+             chosen to fit it, so the edge pass leaves them alone."
+                .to_string(),
+        );
+    }
 
     // Every binding is required to plan. Defaulting a missing CNC to "no ATC, unity
     // scaling" or a missing fixture to nominal heights would produce a plausible-looking
@@ -348,13 +365,25 @@ fn plan_step(
         unreachable!("missing_bindings just established all three are present")
     };
     let Some(toolset) = ctx.toolsets.iter().find(|t| t.id == toolset_id.to_string()) else {
-        return failed(index, name, vec!["The step's toolset profile could not be found.".into()]);
+        return failed(
+            index,
+            name,
+            vec!["The step's toolset profile could not be found.".into()],
+        );
     };
     let Some(cnc) = ctx.machines.iter().find(|m| m.id == cnc_id.to_string()) else {
-        return failed(index, name, vec!["The step's CNC profile could not be found.".into()]);
+        return failed(
+            index,
+            name,
+            vec!["The step's CNC profile could not be found.".into()],
+        );
     };
     let Some(fixture) = ctx.fixtures.iter().find(|f| f.id == fixture_id.to_string()) else {
-        return failed(index, name, vec!["The step's fixture profile could not be found.".into()]);
+        return failed(
+            index,
+            name,
+            vec!["The step's fixture profile could not be found.".into()],
+        );
     };
     let atc_slots = cnc.atc_slot_count as usize;
 
@@ -365,7 +394,11 @@ fn plan_step(
     // could never have expressed a MASSO's `G54.1 P1..P100`. The check happens when the
     // program is generated, and refuses it outright rather than warning.
 
-    let holes: &[pcb::BoardHole] = ctx.board.as_ref().map(|b| b.holes.as_slice()).unwrap_or(&[]);
+    let holes: &[pcb::BoardHole] = ctx
+        .board
+        .as_ref()
+        .map(|b| b.holes.as_slice())
+        .unwrap_or(&[]);
     let groups = collect_hole_groups(holes, has_pth, has_npth);
 
     // The rack must reserve every router routing requires — the outline cutter and one
@@ -374,15 +407,20 @@ fn plan_step(
     // same slot numbers.
     let has_oblongs = groups.iter().any(|g| g.minor.is_some());
     let oblong = raw.oblong_strategy();
-    let routers =
-        plan_routers(
-            &ctx.tools,
-            toolset,
-            &groups,
-            has_route,
-            raw.route_board.kerf,
-            has_oblongs && oblong.routes(),
-        );
+    let cutout_contours =
+        crate::runtime::tooling::cutout_contours(ctx.stitched_board_data.as_ref(), raw);
+    let routers = plan_routers(
+        &ctx.tools,
+        toolset,
+        &groups,
+        has_route,
+        raw.route_board.kerf,
+        has_oblongs && oblong.routes(),
+        crate::runtime::tooling::CutoutRouting {
+            contours: &cutout_contours,
+            relieve_corners: raw.routes_cutouts() && raw.route_cutouts.drill_sharp_corners,
+        },
+    );
 
     // The pin hole's tool, resolved before the assigner runs and deliberately outside it —
     // see `pick_pin_tool`. Refused rather than substituted: a registration hole that is
@@ -403,9 +441,11 @@ fn plan_step(
         return failed(
             index,
             name,
-            vec!["This step drills locating pins but no pin diameter is set. Choose one in \
+            vec![
+                "This step drills locating pins but no pin diameter is set. Choose one in \
                   the machining profile."
-                .into()],
+                    .into(),
+            ],
         );
     }
     let pin_tool = match pin_diameter {
@@ -429,8 +469,17 @@ fn plan_step(
         None => None,
     };
 
-    if groups.is_empty() && !has_route && pin_tool.is_none() {
-        return StepPlan { index, name, blocks: vec![], notes };
+    // Nothing to assign *and* nothing to route. Cutouts count as work in their own right:
+    // a step that only cuts interior openings has no holes, no outline and no pins, and
+    // before they were an operation of their own that combination could only mean an empty
+    // step.
+    if groups.is_empty() && !has_route && !raw.routes_cutouts() && pin_tool.is_none() {
+        return StepPlan {
+            index,
+            name,
+            blocks: vec![],
+            notes,
+        };
     }
 
     // Assemble assigner inputs identically to the tooling adapter.
@@ -462,8 +511,11 @@ fn plan_step(
     };
 
     // Tool id → rack slot, for the block's display.
-    let slots: std::collections::BTreeMap<String, u8> =
-        assignment.rack.iter().map(|s| (s.tool_id.clone(), s.slot)).collect();
+    let slots: std::collections::BTreeMap<String, u8> = assignment
+        .rack
+        .iter()
+        .map(|s| (s.tool_id.clone(), s.slot))
+        .collect();
 
     // Turn each round hole into a target: a point-drill when a drill was assigned, or a
     // spiral route when the assigner fell back to a router (too big to drill, or a drill
@@ -475,9 +527,18 @@ fn plan_step(
     let mut unmilled_slots = 0usize;
     let mut short_flute_routers: std::collections::BTreeSet<String> = Default::default();
     for (i, hole) in holes.iter().enumerate() {
-        let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else { continue };
-        let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else { continue };
-        let Some(tool_diameter) = ctx.tools.iter().find(|t| t.id == assigned.tool_id).map(|t| t.diameter) else {
+        let Some(group) = HoleGroup::from_hole(hole, has_pth, has_npth) else {
+            continue;
+        };
+        let Some(assigned) = assignment.holes.iter().find(|h| h.hole_id == group.id()) else {
+            continue;
+        };
+        let Some(tool_diameter) = ctx
+            .tools
+            .iter()
+            .find(|t| t.id == assigned.tool_id)
+            .map(|t| t.diameter)
+        else {
             continue;
         };
         let source = hole.id.clone().unwrap_or_else(|| format!("hole#{i}"));
@@ -512,7 +573,10 @@ fn plan_step(
                 match router {
                     Some(router) => {
                         let z_bottom = assigner::router_plunge(&setup);
-                        if router.flute_length.is_some_and(|f| f.as_mm() < z_bottom.as_mm()) {
+                        if router
+                            .flute_length
+                            .is_some_and(|f| f.as_mm() < z_bottom.as_mm())
+                        {
                             short_flute_routers.insert(router.name.clone());
                         }
                         // The medial axis: the two end centres, which is exactly where a
@@ -552,7 +616,9 @@ fn plan_step(
                 at: hole.position.clone(),
                 tool_id: assigned.tool_id.clone(),
                 tool_diameter,
-                shape: RouteShape::Hole { hole_diameter: group.target },
+                shape: RouteShape::Hole {
+                    hole_diameter: group.target,
+                },
                 z_bottom: assigned.z_bottom,
             });
         }
@@ -608,12 +674,17 @@ fn plan_step(
                     // them. They are the datum: they want making together.
                     chain: Some("pin".to_string()),
                 }),
-                PinTool::Router { id, diameter: cutter } => route_targets.push(RouteTarget {
+                PinTool::Router {
+                    id,
+                    diameter: cutter,
+                } => route_targets.push(RouteTarget {
                     source: format!("pin.{n}"),
                     at,
                     tool_id: id.clone(),
                     tool_diameter: *cutter,
-                    shape: RouteShape::Hole { hole_diameter: diameter },
+                    shape: RouteShape::Hole {
+                        hole_diameter: diameter,
+                    },
                     z_bottom,
                 }),
             }
@@ -650,21 +721,46 @@ fn plan_step(
         }
     }
 
+    // The interior openings, when the step claims them in their own right. Planned
+    // before the blocks for the same reason the outline is: its corner relief and mouse
+    // bites are drilled, and they belong to the drill phase.
+    let mut cutout_spans: std::collections::BTreeMap<String, Vec<OutlineSpan>> = Default::default();
+    if raw.routes_cutouts() {
+        let (spans, warnings) = plan_cutout_spans(
+            ctx,
+            raw,
+            &routers,
+            &placement,
+            &mut drill_targets,
+            &slots,
+            &setup,
+        );
+        notes.extend(warnings);
+        cutout_spans = spans;
+    }
+
     let mut blocks = plan_drilling(&drill_targets, &placement, start, &slots);
     blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
     if let Some(outline_router) = routers.outline.as_deref() {
         let tool = ctx.tools.iter().find(|t| t.id == outline_router);
         if let Some(tool) = tool {
             let z_bottom = assigner::router_plunge(&setup);
-            if tool.flute_length.is_some_and(|f| f.as_mm() < z_bottom.as_mm()) {
+            if tool
+                .flute_length
+                .is_some_and(|f| f.as_mm() < z_bottom.as_mm())
+            {
                 notes.push(format!(
                     "Outline router '{}' cannot reach through the board — the outline will \
                      not be cut free. Stock a longer cutter.",
                     tool.name
                 ));
             }
+            // The cutouts cut with this same tool ride in the same block, so a step that
+            // routes both with one cutter pays one tool change rather than two.
+            let mut spans = outline_spans.clone();
+            spans.extend(cutout_spans.remove(outline_router).unwrap_or_default());
             blocks.extend(plan_outline(
-                &outline_spans,
+                &spans,
                 outline_router,
                 tool.diameter,
                 // Negative machine-Z depth (board top is Z0; op-planner §6).
@@ -674,6 +770,35 @@ fn plan_step(
                 &slots,
             ));
         }
+    }
+
+    // Cutouts on any cutter the outline did not already use — one block each, since
+    // `plan_outline` groups nothing across calls and two calls for one tool would read
+    // as two tool changes.
+    for (router_id, spans) in &cutout_spans {
+        let Some(tool) = ctx.tools.iter().find(|t| &t.id == router_id) else {
+            continue;
+        };
+        let z_bottom = assigner::router_plunge(&setup);
+        if tool
+            .flute_length
+            .is_some_and(|f| f.as_mm() < z_bottom.as_mm())
+        {
+            notes.push(format!(
+                "Cutout router '{}' cannot reach through the board — the openings will not \
+                 be cut free. Stock a longer cutter.",
+                tool.name
+            ));
+        }
+        blocks.extend(plan_outline(
+            spans,
+            router_id,
+            tool.diameter,
+            Length::from_mm(-z_bottom.as_mm()),
+            placement.z_retract(),
+            start,
+            &slots,
+        ));
     }
 
     // The back-face program opens with a "Back face up?" prompt, and that
@@ -704,7 +829,10 @@ fn plan_step(
         notes.push(format!(
             "Slot router(s) {} cannot reach through the board — the slot walls will be cut \
              short. Stock a longer cutter.",
-            short_flute_routers.into_iter().collect::<Vec<_>>().join(", ")
+            short_flute_routers
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     // Surface unmillable slots here too: the Tooling tab carries the full detail.
@@ -718,7 +846,12 @@ fn plan_step(
         notes.push(diagnostic.message.clone());
     }
 
-    StepPlan { index, name, blocks, notes }
+    StepPlan {
+        index,
+        name,
+        blocks,
+        notes,
+    }
 }
 
 /// Builds the board-outline cut spans, and pushes any mouse-bite holes onto
@@ -740,6 +873,205 @@ fn plan_step(
 /// Per-contour shortfalls — a contour that vanishes under the kerf, tabs the sides have
 /// no room for — come back as warnings alongside the spans, because the rest of the
 /// outline is still worth cutting.
+/// The cut spans for the board's interior openings, grouped by the router that cuts them,
+/// plus the drills they need pushed onto `drill_targets`.
+///
+/// Separate from [`plan_outline_spans`] because a cutout is a different problem from a
+/// boundary at every step. Its cutter is chosen by **fit** rather than matched to a
+/// requested kerf, so two openings of different sizes may want two different cutters —
+/// hence the grouping. The material it *removes* has to be held rather than the material
+/// it leaves. And its corners are the ones a round cutter rounds off.
+///
+/// Both the corner relief and the mouse bites are drills, so they join the drill phase
+/// and are made while the board is still whole and still registered — `Phase::Drill`
+/// sorts before `Phase::Route`, so that ordering costs nothing here.
+#[allow(clippy::too_many_arguments)]
+fn plan_cutout_spans(
+    ctx: &AppCtx,
+    raw: &StepRaw,
+    routers: &RouterPlan,
+    placement: &Placement,
+    drill_targets: &mut Vec<DrillTarget>,
+    slots: &std::collections::BTreeMap<String, u8>,
+    setup: &assigner::Setup,
+) -> (
+    std::collections::BTreeMap<String, Vec<OutlineSpan>>,
+    Vec<String>,
+) {
+    let mut by_router: std::collections::BTreeMap<String, Vec<OutlineSpan>> = Default::default();
+    let mut notes: Vec<String> = Vec::new();
+
+    let Some(stitched) = ctx.stitched_board_data.as_ref() else {
+        return (by_router, notes);
+    };
+    let cfg = &raw.route_cutouts;
+    let placed_tabs = with_appdata(|data| data.job_edge_tabs());
+    let mut corners_skipped = 0usize;
+
+    // Numbered among the cutouts, as `job.yaml#/edge_tabs/index` means it.
+    for (kind_index, (contour_index, contour)) in stitched
+        .contours
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_hole)
+        .enumerate()
+    {
+        let Some((router_id, fit)) = routers.cutouts.get(&contour_index) else {
+            continue; // reported by the tooling plan as uncuttable
+        };
+        if !ctx.tools.iter().any(|t| &t.id == router_id) {
+            continue; // chosen when the routers were planned, but no longer in stock
+        }
+        let label = TabContour::Cutout.as_str();
+
+        let points: Vec<Point> = fit
+            .wall_path
+            .iter()
+            .map(|&(x, y)| {
+                placement.xy(&pcb::BoardPoint {
+                    x: Length::from_mm(x as f64 / 1e6),
+                    y: Length::from_mm(y as f64 / 1e6),
+                })
+            })
+            .collect();
+        let Some(path) = outline::Loop::new(&points) else {
+            continue;
+        };
+
+        // --- corner relief, before anything is cut ---
+        if cfg.drill_sharp_corners {
+            for (n, corner) in pcb::convex_corners(contour, pcb::MIN_CORNER_TURN_RAD)
+                .iter()
+                .enumerate()
+            {
+                let s = (corner.interior_rad / 2.0).sin();
+                if s <= f64::EPSILON {
+                    continue;
+                }
+                // The drill was chosen and reserved a slot when the routers were planned,
+                // so the two cannot disagree about which tool this corner uses.
+                let Some(tool_id) = routers
+                    .corner_drills
+                    .get(&contour_index)
+                    .and_then(|drills| drills.get(n))
+                    .and_then(|d| d.clone())
+                else {
+                    corners_skipped += 1;
+                    continue;
+                };
+                let Some(drill) = ctx.tools.iter().find(|t| t.id == tool_id) else {
+                    corners_skipped += 1;
+                    continue;
+                };
+                let (drill_dia, z_bottom) = (drill.diameter, assigner::router_plunge(setup));
+                // Placed from the drill actually chosen, never from the ideal: tangency
+                // is what keeps the hole inside the two edges, and a centre computed for
+                // a larger drill would put a smaller one's cut past them.
+                let offset_nm = (drill_dia.as_mm() / 2.0 / s) * 1e6;
+                let at = pcb::BoardPoint {
+                    x: Length::from_mm((corner.at.0 as f64 + corner.bisector.0 * offset_nm) / 1e6),
+                    y: Length::from_mm((corner.at.1 as f64 + corner.bisector.1 * offset_nm) / 1e6),
+                };
+                drill_targets.push(DrillTarget {
+                    source: format!("{label}#{kind_index}.corner{n}"),
+                    at,
+                    tool_id,
+                    diameter: drill_dia,
+                    z_bottom,
+                    // One run per cutout so the relief holes are drilled round the
+                    // opening in order rather than scattered through the tour.
+                    chain: Some(format!("{label}#{kind_index}.corners")),
+                });
+            }
+        }
+
+        // --- the slug, and the tab that holds it ---
+        let mut tabs: Vec<(f64, f64, bool)> = Vec::new(); // (fraction, width, bites)
+        if cfg.retain_island {
+            for (k, slug) in fit.slugs.iter().enumerate() {
+                let perimeter_mm = pcb::path_perimeter_nm(slug) / 1e6;
+                let slug_mm: Vec<(f64, f64)> = slug
+                    .iter()
+                    .map(|&(x, y)| (x as f64 / 1e6, y as f64 / 1e6))
+                    .collect();
+                let Some(anchor) = outline::longest_edge_midpoint(&slug_mm) else {
+                    continue;
+                };
+                let anchor = placement.xy(&pcb::BoardPoint {
+                    x: Length::from_mm(anchor.0),
+                    y: Length::from_mm(anchor.1),
+                });
+                let Some(tab) = outline::island_tab(&path, perimeter_mm, anchor, cfg.tab_ratio)
+                else {
+                    continue;
+                };
+                // The operator's own nudge, keyed the way the job stores it.
+                let nudge = placed_tabs
+                    .iter()
+                    .find(|t| {
+                        t.contour == TabContour::Cutout && t.index == kind_index && t.tab == k
+                    })
+                    .map(|t| t.offset.as_mm())
+                    .unwrap_or(0.0);
+                tabs.push((
+                    (tab.at + nudge / path.length_mm()).rem_euclid(1.0),
+                    tab.width_mm,
+                    tab.mouse_bites,
+                ));
+            }
+        }
+
+        // One width for the whole loop, since `cut_spans` cuts a single loop: the widest
+        // of this cutout's tabs, so no island is held by less than it asked for.
+        let width_mm = tabs.iter().map(|t| t.1).fold(0.0_f64, f64::max);
+        let fractions: Vec<f64> = tabs.iter().map(|t| t.0).collect();
+
+        for (n, span) in outline::cut_spans(&path, &fractions, width_mm)
+            .into_iter()
+            .enumerate()
+        {
+            by_router
+                .entry(router_id.clone())
+                .or_default()
+                .push(OutlineSpan {
+                    source: format!("{label}#{kind_index}.span{n}"),
+                    path: span,
+                });
+        }
+
+        for (n, (fraction, _, bites)) in tabs.iter().enumerate() {
+            if !bites {
+                continue;
+            }
+            let Some(bite_tool) = mouse_bite_drill(ctx, slots) else {
+                continue;
+            };
+            for (h, centre) in outline::mouse_bite_centres(&path, *fraction, width_mm, bite_tool.1)
+                .into_iter()
+                .enumerate()
+            {
+                drill_targets.push(DrillTarget {
+                    source: format!("{label}#{kind_index}.bite{n}.{h}"),
+                    at: placement.unplace(&centre),
+                    tool_id: bite_tool.0.clone(),
+                    diameter: bite_tool.1,
+                    z_bottom: bite_tool.2,
+                    chain: Some(format!("{label}#{kind_index}.bite{n}")),
+                });
+            }
+        }
+    }
+
+    if corners_skipped > 0 {
+        notes.push(format!(
+            "{corners_skipped} sharp corner(s) were left as the cutter rounds them: no drill \
+             in the rack falls in the size band that would relieve them without leaving an \
+             uncut web. Add a smaller drill to the toolset."
+        ));
+    }
+    (by_router, notes)
+}
+
 fn plan_outline_spans(
     ctx: &AppCtx,
     raw: &StepRaw,
@@ -749,7 +1081,9 @@ fn plan_outline_spans(
     slots: &std::collections::BTreeMap<String, u8>,
 ) -> Result<(Vec<OutlineSpan>, Vec<String>), String> {
     let Some(stitched) = ctx.stitched_board_data.as_ref() else {
-        return Err("The board outline has not been stitched yet — refresh the board snapshot.".into());
+        return Err(
+            "The board outline has not been stitched yet — refresh the board snapshot.".into(),
+        );
     };
     if !stitched.errors.is_empty() {
         return Err(format!(
@@ -784,14 +1118,24 @@ fn plan_outline_spans(
     let (mut outer_n, mut cutout_n) = (0usize, 0usize);
 
     for (contour, offset) in stitched.contours.iter().zip(offsets) {
-        let kind = if contour.is_hole { TabContour::Cutout } else { TabContour::Outer };
-        let index = if contour.is_hole { &mut cutout_n } else { &mut outer_n };
+        let kind = if contour.is_hole {
+            TabContour::Cutout
+        } else {
+            TabContour::Outer
+        };
+        let index = if contour.is_hole {
+            &mut cutout_n
+        } else {
+            &mut outer_n
+        };
         let (kind_index, label) = (*index, kind.as_str());
         *index += 1;
 
-        // An interior opening the step chooses not to route: it stays as drawn copper,
-        // and the board keeps the material.
-        if contour.is_hole && !edge.cutouts {
+        // An interior opening this pass does not own: either the step chooses not to
+        // route its cutouts at all, or `route_cutouts` has claimed them and will cut
+        // them with a cutter chosen to fit rather than with the edge kerf. Cutting them
+        // here as well would put the cutter round each opening twice.
+        if contour.is_hole && (!edge.cutouts || raw.routes_cutouts()) {
             continue;
         }
 
@@ -808,7 +1152,9 @@ fn plan_outline_spans(
                 })
             })
             .collect();
-        let Some(path) = outline::Loop::new(&points) else { continue };
+        let Some(path) = outline::Loop::new(&points) else {
+            continue;
+        };
 
         let retention = edge.retention(contour.is_hole);
         let width_mm = retention.width.as_mm();
@@ -819,11 +1165,8 @@ fn plan_outline_spans(
         // computed anchor is then placed and projected onto the offset path, which for
         // an outward offset of a straight run is exactly the perpendicular foot.
         let tabs: Vec<f64> = if retention.tabs {
-            let anchors = outline::distribute_tabs(
-                &straight_segments_mm(contour),
-                retention.count,
-                width_mm,
-            );
+            let anchors =
+                outline::distribute_tabs(&straight_segments_mm(contour), retention.count, width_mm);
             if anchors.len() < retention.count {
                 crowded += retention.count - anchors.len();
             }
@@ -848,16 +1191,21 @@ fn plan_outline_spans(
             Vec::new()
         };
 
-        for (n, span) in outline::cut_spans(&path, &tabs, width_mm).into_iter().enumerate() {
-            spans.push(OutlineSpan { source: format!("{label}#{kind_index}.span{n}"), path: span });
+        for (n, span) in outline::cut_spans(&path, &tabs, width_mm)
+            .into_iter()
+            .enumerate()
+        {
+            spans.push(OutlineSpan {
+                source: format!("{label}#{kind_index}.span{n}"),
+                path: span,
+            });
         }
 
         // Mouse bites are drills, so they join the drill phase rather than the route one.
         if retention.mouse_bites {
             if let Some(bite_tool) = mouse_bite_drill(ctx, slots) {
                 for (n, tab) in tabs.iter().enumerate() {
-                    let centres =
-                        outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
+                    let centres = outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
                     for (h, centre) in centres.into_iter().enumerate() {
                         drill_targets.push(DrillTarget {
                             source: format!("{label}#{kind_index}.bite{n}.{h}"),
@@ -975,7 +1323,12 @@ fn fmt_len(ctx: &AppCtx, length: Length) -> String {
 
 /// A step that could not be planned — no blocks, the reasons surfaced as notes.
 fn failed(index: usize, name: String, messages: Vec<String>) -> StepPlan {
-    StepPlan { index, name, blocks: vec![], notes: messages }
+    StepPlan {
+        index,
+        name,
+        blocks: vec![],
+        notes: messages,
+    }
 }
 
 /// A compact one-liner per assigner error; the Tooling tab carries the full detail.

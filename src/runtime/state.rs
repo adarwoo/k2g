@@ -875,9 +875,9 @@ impl AppState {
     /// with no solution, so the status pill and diagnostics banner reflect that the
     /// job cannot be machined until it is fixed. De-duplicates against what is already
     /// posted so re-running on every mutation does not re-toast an unchanged failure.
-    pub fn validate_tooling(&mut self) {
+    pub fn validate_tooling(&mut self, stitched: Option<&pcb::StitchResult>) {
         let failures: Vec<(String, Vec<String>)> = if crate::data::appdata_ready() {
-            crate::runtime::tooling::plan_tooling(self)
+            crate::runtime::tooling::plan_tooling(self, stitched)
                 .steps
                 .into_iter()
                 .filter_map(|step| match step.outcome {
@@ -2037,6 +2037,12 @@ fn default_operation_setup_value(op: ProductionOperation) -> Value {
                 "direction": "climb",
             }
         }),
+        ProductionOperation::RouteCutouts => json!({
+            "enabled": false,
+            "retain_island": true,
+            "island_tab": "4%",
+            "drill_sharp_corners": true,
+        }),
         ProductionOperation::MillBoard => json!({
             "enabled": false,
             "finishing": {
@@ -2200,6 +2206,7 @@ fn operation_to_key(operation: ProductionOperation) -> &'static str {
         ProductionOperation::DrillPth => "drill_pth",
         ProductionOperation::DrillNpth => "drill_npth",
         ProductionOperation::RouteBoard => "route_board",
+        ProductionOperation::RouteCutouts => "route_cutouts",
         ProductionOperation::MillBoard => "mill_board",
     }
 }
@@ -2210,6 +2217,7 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
         "drill_pth" => Some(ProductionOperation::DrillPth),
         "drill_npth" => Some(ProductionOperation::DrillNpth),
         "route_board" => Some(ProductionOperation::RouteBoard),
+        "route_cutouts" => Some(ProductionOperation::RouteCutouts),
         "mill_board" => Some(ProductionOperation::MillBoard),
         _ => None,
     }

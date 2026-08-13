@@ -4,7 +4,10 @@ impl AppCtx {
         let mut app = AppState::new(boot);
         // Validate tool selection up front so an infeasible job reads as not-ready
         // (red pill + banner) from the first frame, not only after the first mutation.
-        app.validate_tooling();
+        // No stitched outline yet at launch: the board is collected first and
+        // stitched on the way into the context, so cutout cutters resolve on the
+        // first sync rather than here.
+        app.validate_tooling(None);
 
         let mut status = BTreeMap::new();
         status.insert(STATUS_KEY_KICAD.to_string(), boot.kicad_status.clone());
@@ -115,7 +118,7 @@ impl AppCtx {
 
         // Re-run tool selection so an infeasible job raises a blocking error before
         // readiness is judged (a job with no tooling solution must not read as ready).
-        self.app.validate_tooling();
+        self.app.validate_tooling(self.stitched_board_data.as_ref());
 
         let readiness = evaluate_generation_readiness(&self.app, self.stitched_board_data.as_ref());
         self.status.insert(

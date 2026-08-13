@@ -564,9 +564,14 @@ pub enum PcbGraphicShapeGeometry {
         center_nm: Option<Vector2Nm>,
         radius_point_nm: Option<Vector2Nm>,
     },
-    Polygon {
-        polygon_count: usize,
-    },
+    /// A polygon shape, with its actual outlines.
+    ///
+    /// Upstream keeps only `polygon_count` here and drops the geometry. A polygon on
+    /// `Edge.Cuts` is a perfectly ordinary way to draw a board outline or a cutout, and
+    /// with only a count there is nothing to machine — the shape vanishes silently
+    /// somewhere downstream. The vertices are already in the response; this carries
+    /// them, reusing the same `PolygonWithHolesNm` the pad-shape query returns.
+    Polygon { polygons: Vec<PolygonWithHolesNm> },
     Bezier {
         start_nm: Option<Vector2Nm>,
         control1_nm: Option<Vector2Nm>,
