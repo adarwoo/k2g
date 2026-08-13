@@ -75,9 +75,31 @@ pub fn launch(data: UiLaunchData) {
         .launch(screens::AppRoot);
 }
 
+/// Edge length of the icon handed to the window manager.
+///
+/// Not cosmetic, and not arbitrary. On X11 the window icon reaches the desktop as the
+/// `_NET_WM_ICON` property, and GTK installs it only up to a point: measured on
+/// WebKitGTK/GTK3 here, 256×256 lands, while 512×512 and the master's own 1024×1024 are
+/// dropped — no error, no warning, and the property simply absent. The taskbar and the
+/// Alt-Tab switcher then have nothing to draw, which is exactly the blank icon this
+/// solves. Windows was unaffected throughout, because it does not go through
+/// `_NET_WM_ICON` at all.
+///
+/// 256 is also the largest size Windows itself draws, so scaling here costs nothing on
+/// either platform and saves shipping a second asset.
+const WINDOW_ICON_EDGE: u32 = 256;
+
 fn load_window_icon() -> Option<dioxus::desktop::tao::window::Icon> {
     let icon_bytes = include_bytes!("../../assets/icons/icon.png");
-    let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
+    // The master is square, so `resize_exact` cannot distort it.
+    let image = image::load_from_memory(icon_bytes)
+        .ok()?
+        .resize_exact(
+            WINDOW_ICON_EDGE,
+            WINDOW_ICON_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .into_rgba8();
     let (width, height) = image.dimensions();
     dioxus::desktop::tao::window::Icon::from_rgba(image.into_raw(), width, height).ok()
 }
