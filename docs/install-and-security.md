@@ -86,7 +86,7 @@ and has to be turned on once.
 
 ### The easy way
 
-Open k2g → **Settings** → **KiCad integration**. It lists every KiCad version it finds
+Open k2g → the **settings cog** in the top bar → **KiCad integration**. It lists every KiCad version it finds
 and offers two buttons per version:
 
 - **Enable the KiCad API** — sets `api.enable_server` in that version's
@@ -139,7 +139,7 @@ broken rather than as permission to skip the check.
 
 Close k2g when the installer starts — it cannot replace a running executable.
 
-To turn checking off: **Settings → Updates**. k2g then makes no network requests at
+To turn checking off: the **settings cog → Updates**. k2g then makes no network requests at
 all and you update manually from the releases page. Doing so does not disable
 anything else.
 
@@ -170,11 +170,11 @@ everything k2g knows.
 
 ## Uninstalling
 
-1. **Unregister the KiCad plugin**, if you registered it: Settings → KiCad integration
+1. **Unregister the KiCad plugin**, if you registered it: settings cog → KiCad integration
    → *Unregister*, for each version. This is the only thing k2g puts outside its own
    directory, and the uninstaller does not touch it.
 2. **Turn the KiCad API back off** if you only enabled it for k2g — same card.
-3. **Delete your data**: Settings → Data and reset → *Delete all data*. This removes
+3. **Delete your data**: settings cog → Data and reset → *Delete all data*. This removes
    the directory above in full and closes k2g. Skip it if you plan to reinstall and
    want your profiles back.
 4. **Remove the application**: Windows Settings → Apps → k2g → Uninstall, or delete

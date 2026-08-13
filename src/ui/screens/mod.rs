@@ -26,7 +26,7 @@ use fixture::FixtureProfilesScreen;
 use logs::LogsScreen;
 use job::{JobScreen, JobViewPanel};
 use machining::MachiningProfilesScreen;
-use settings::SettingsScreen;
+use settings::SettingsDialog;
 use shell::{
     AppTopBar, DiagnosticsBanner, EventNotifications, NavigationRail, StatusBar, UpdateBanner,
 };
@@ -43,6 +43,9 @@ pub fn mutate_ctx<R>(mut state: Signal<crate::runtime::AppCtx>, f: impl FnOnce(&
 pub fn AppRoot() -> Element {
     let state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
+    // Owned here rather than in `AppTopBar`, where the cog that sets it lives — see the
+    // note beside the dialog itself at the foot of the shell.
+    let mut settings_open = use_signal(|| false);
 
     // Remember the window's size and maximized state for the next launch.
     crate::ui::window_state::use_window_geometry();
@@ -85,7 +88,7 @@ pub fn AppRoot() -> Element {
         style { "{APP_STYLE}" }
 
         div { class: if snapshot.theme == Theme::Dark { "app-shell shell-theme-dark" } else { "app-shell shell-theme-light" },
-            AppTopBar { state }
+            AppTopBar { state, settings_open }
 
             UpdateBanner { state }
 
@@ -166,9 +169,6 @@ pub fn AppRoot() -> Element {
                                 Screen::Catalog => rsx! {
                                     CatalogScreen { state }
                                 },
-                                Screen::Settings => rsx! {
-                                    SettingsScreen { state }
-                                },
                                 Screen::Logs => rsx! {
                                     LogsScreen { state }
                                 },
@@ -184,6 +184,21 @@ pub fn AppRoot() -> Element {
             EventNotifications { state }
 
             StatusBar { state }
+
+            // Last child of `.app-shell`, and nowhere deeper. `.wizard-overlay` is
+            // `position: absolute; inset: 0`, so it fills the nearest positioned
+            // ancestor — which is `.app-shell` — and so covers the rail and status bar
+            // the way a modal should. Inside `.screen-host` (`overflow: auto`) it would
+            // be clipped and would scroll with the screen; inside `AppTopBar` it would
+            // work only for as long as `.shell-topbar` never gains a `position` of its
+            // own, which is an invariant nothing states or checks.
+            //
+            // Mounted only while open: the dialog's KiCad probe walks two directory
+            // trees and enumerates processes, which is not something to keep warm behind
+            // a hidden element.
+            if *settings_open.read() {
+                SettingsDialog { state, on_close: move |_| settings_open.set(false) }
+            }
         }
     }
 }
@@ -201,6 +216,7 @@ mod dialog_safety_tests {
         ("machining.rs", include_str!("machining.rs")),
         ("toolset.rs", include_str!("toolset.rs")),
         ("profiles_common.rs", include_str!("profiles_common.rs")),
+        ("settings.rs", include_str!("settings.rs")),
     ];
 
     /// No screen may open a **blocking** native dialog.

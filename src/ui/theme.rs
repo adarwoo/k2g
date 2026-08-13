@@ -342,6 +342,32 @@ body {
     border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
 }
 
+/* The Settings cog's button. `.icon-button`'s `8px 12px` is sized for a text label; an
+   icon-only button wants an even box, and the flex centring keeps the glyph off the
+   text baseline — an inline SVG otherwise sits on it and leaves a descender's worth of
+   dead space underneath. Declared after `.icon-button`, which it ties with on
+   specificity, or this padding would not apply at all. */
+.topbar-settings-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 7px;
+    line-height: 0;
+}
+
+/* 18px rather than the 16px of `.topbar-save-media-svg`: the gear's teeth are 2.4 user
+   units deep, which at 16px is thinner than the stroke drawing them, and the whole
+   thing collapses into a plain ring. */
+.topbar-settings-svg {
+    width: 18px;
+    height: 18px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .shell-body {
     flex: 1;
     min-height: 0;
@@ -4263,26 +4289,50 @@ summary {
 
 /* --------------------------------------------------------------- Settings --- */
 
-.settings-screen {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    padding: 18px 20px 28px;
-    overflow: auto;
-    min-height: 0;
+/* The Settings dialog, opened from the cog in the top bar over whatever screen is in
+   view. A `.wizard-dialog`, but a far bigger one: the cards inside are paragraphs of
+   regulatory prose rather than a name field, so it borrows `.help-panel`'s shape — a
+   fixed head above a scrolling body — instead of growing until it runs off the window.
+
+   Declared *after* `.wizard-dialog`, and that is load-bearing rather than incidental:
+   both are plain single-class rules setting `width` and `padding`, so they tie on
+   specificity and source order is the only thing making these win. `.save-plan-dialog`
+   is declared on the wrong side of that line and its width has never once applied.
+   Pinned by `the_settings_dialog_outranks_the_wizard_dialog`. */
+.settings-dialog {
+    width: min(820px, 94vw);
+    max-height: 86vh;
+    padding: 0;
+    gap: 0;
+    overflow: hidden;
 }
 
-.settings-header {
+.settings-dialog-head {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
 }
 
 .settings-title {
     margin: 0;
-    font-size: 20px;
+    font-size: 17px;
     font-weight: 700;
     color: var(--text);
+}
+
+/* The scrolling half. `min-height: 0` is what actually lets it scroll: without it a
+   flex item refuses to shrink below its content, and the dialog grows past its
+   `max-height` instead of the cards scrolling inside it. */
+.settings-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 18px 20px 22px;
+    overflow-y: auto;
+    min-height: 0;
 }
 
 .settings-card {
@@ -5009,6 +5059,41 @@ mod tests {
             selected > hover,
             "the selected background must be declared after the hover it ties with, or a \
              hovered row would lose its selected tint"
+        );
+    }
+
+    /// The Settings dialog must outrank the wizard dialog it widens.
+    ///
+    /// `.wizard-dialog` and `.settings-dialog` are both plain single-class rules setting
+    /// `width` and `padding`, so they tie on specificity and source order alone decides.
+    /// Declared the other way round, the dialog snaps back to 520px and regains the
+    /// padding its own head and body then double up — silently, because a too-narrow
+    /// dialog still renders.
+    ///
+    /// This is not hypothetical. `.save-plan-dialog` (`width: min(680px, 92vw)`) is
+    /// declared *before* `.wizard-dialog` and has therefore never applied; the save
+    /// dialog has been 520px the whole time. That bug is the reason this test exists.
+    #[test]
+    fn the_settings_dialog_outranks_the_wizard_dialog() {
+        let rules = rules();
+        let index_of = |wanted: &str| {
+            rules
+                .iter()
+                .position(|(selector, body)| selector == wanted && body.contains("width"))
+                .unwrap_or_else(|| panic!("the sheet declares a `{wanted}` width rule"))
+        };
+
+        let wizard = index_of(".wizard-dialog");
+        let settings = index_of(".settings-dialog");
+        assert_eq!(
+            class_count(".settings-dialog"),
+            class_count(".wizard-dialog"),
+            "if these stop tying, this test is measuring the wrong thing"
+        );
+        assert!(
+            settings > wizard,
+            "the settings dialog's width must be declared after the wizard dialog it ties \
+             with, or the modal renders at the 520px meant for a name field"
         );
     }
 }

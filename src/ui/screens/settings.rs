@@ -1,10 +1,15 @@
-//! The Settings screen: preferences that have no natural home elsewhere in the UI.
+//! The Settings dialog: preferences that have no natural home elsewhere in the UI.
 //!
-//! Deliberately *not* a mirror of the shell chrome. Units and the theme already have
-//! direct controls in the top bar, and duplicating them here would give the same
-//! preference two places to be changed and two places to look wrong. What lands here
-//! is what the chrome cannot express: the KiCad integration, the update and recording
-//! opt-outs, and the destructive data actions.
+//! A dialog rather than a screen, reached from the cog in the top bar and floating over
+//! whatever is in view. These are things a user changes once and then leaves alone, so
+//! they do not earn a permanent seat in the navigation rail beside the screens that make
+//! up the actual work.
+//!
+//! The theme lives here. It had its own top-bar button until that button became the cog
+//! that opens this dialog — a palette is picked once and forgotten, which is not worth
+//! standing chrome. The *unit system* is the opposite case and stays in the top bar,
+//! deliberately unmirrored here: it is changed constantly while reading a job, and a
+//! preference with two homes has two places to be changed and two places to look wrong.
 //!
 //! The opt-out cards carry their regulatory rationale in prose, on screen, because
 //! EU CRA Annex I (2)(c) and (2)(l) ask for a *clear* opt-out — a bare switch labelled
@@ -15,10 +20,11 @@ use dioxus::prelude::*;
 use crate::runtime::kicad_integration::{
     self, IntegrationStatus, KicadInstall, KicadRunning,
 };
+use crate::ui::navigation::Theme;
 
 /// One labelled switch with an explanation beneath it.
 ///
-/// `detail` is not decoration: for both switches on this screen it is the only place
+/// `detail` is not decoration: for every switch here it is the only place
 /// the user learns what the setting actually does (what leaves the machine, what gets
 /// written to disk). Kept as a separate element so it can be styled as secondary text
 /// without becoming a tooltip nobody opens.
@@ -189,7 +195,10 @@ fn KicadInstallRow(
 }
 
 #[component]
-pub fn SettingsScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
+pub fn SettingsDialog(
+    state: Signal<crate::runtime::AppCtx>,
+    on_close: EventHandler<()>,
+) -> Element {
     let snapshot = state.read().clone();
 
     let update_checks_on = snapshot.update_check_enabled;
@@ -235,252 +244,310 @@ pub fn SettingsScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
         .unwrap_or_else(|| "(cannot locate the data directory)".to_string());
 
     rsx! {
-        div { class: "screen single settings-screen",
-            header { class: "settings-header",
-                h1 { class: "settings-title", "Settings" }
-            }
+        div {
+            class: "wizard-overlay",
+            // Dismissing on the backdrop is safe here in a way it would not be in a form
+            // dialog: every control inside takes effect the moment it is used, so there
+            // is no half-finished edit for a stray click to throw away.
+            onclick: move |_| on_close.call(()),
 
-            section { class: "settings-card",
-                h2 { class: "settings-card-title", "KiCad integration" }
+            div {
+                class: "wizard-dialog settings-dialog",
+                "role": "dialog",
+                "aria-modal": "true",
+                "aria-label": "Settings",
+                // Focused on mount so Escape has somewhere to land. Unlike
+                // `ProfileNameDialog` there is no input here to hang the handler on, and
+                // a keydown only reaches an element that contains the focus — without
+                // this the key does nothing until something inside is clicked.
+                tabindex: "-1",
+                onmounted: move |evt| async move {
+                    let _ = evt.set_focus(true).await;
+                },
+                onkeydown: move |evt| {
+                    let key = evt.key().to_string().to_ascii_lowercase();
+                    if key == "escape" || key == "esc" {
+                        on_close.call(());
+                    }
+                },
+                onclick: move |evt| evt.stop_propagation(),
 
-                p { class: "settings-card-intro",
-                    "k2g reads boards over KiCad's IPC API, which KiCad ships switched off. "
-                    "Registering k2g as a plugin adds a Create GCode button to the PCB editor's "
-                    "toolbar; pressing it opens k2g with that board already loaded. Both actions "
-                    "below change files belonging to KiCad, so both are shown in full before they "
-                    "run and both can be undone."
+                header { class: "settings-dialog-head",
+                    h2 { class: "settings-title", "Settings" }
+                    button {
+                        class: "text-button",
+                        r#type: "button",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
                 }
 
-                if kicad_rows.is_empty() {
-                    p { class: "settings-empty",
-                        "No KiCad installation found for this user. KiCad creates its configuration "
-                        "directory the first time it runs — start KiCad once, then come back."
-                    }
-                } else {
-                    for (install , status) in kicad_rows.into_iter() {
-                        KicadInstallRow {
-                            key: "{install.version}",
-                            install,
-                            status,
-                            running: kicad_running,
-                            on_changed: move |outcome: Result<String, String>| {
-                                match outcome {
-                                    Ok(message) => super::mutate_ctx(state, |s| s.log_event(message)),
-                                    Err(message) => {
-                                        super::mutate_ctx(
-                                            state,
-                                            |s| s.log_event(format!("KiCad integration failed: {message}")),
-                                        )
-                                    }
+                div { class: "settings-dialog-body",
+
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "Appearance" }
+
+                        div { class: "settings-toggle-row",
+                            div { class: "unit-toggle",
+                                button {
+                                    class: if snapshot.theme == Theme::Light { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                                    r#type: "button",
+                                    onclick: move |_| super::mutate_ctx(state, |s| s.set_theme(Theme::Light)),
+                                    "Light"
                                 }
-                                probe.set(probe() + 1);
+                                button {
+                                    class: if snapshot.theme == Theme::Dark { "unit-toggle-btn active" } else { "unit-toggle-btn" },
+                                    r#type: "button",
+                                    onclick: move |_| super::mutate_ctx(state, |s| s.set_theme(Theme::Dark)),
+                                    "Dark"
+                                }
+                            }
+                            p { class: "settings-toggle-detail",
+                                "Applies immediately and is remembered between runs. k2g does not "
+                                "follow the desktop's own light/dark setting: a job runs for hours, "
+                                "and a window that repaints itself at dusk mid-cut is a surprise "
+                                "rather than a convenience."
+                            }
+                        }
+                    }
+
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "KiCad integration" }
+
+                        p { class: "settings-card-intro",
+                            "k2g reads boards over KiCad's IPC API, which KiCad ships switched off. "
+                            "Registering k2g as a plugin adds a Create GCode button to the PCB editor's "
+                            "toolbar; pressing it opens k2g with that board already loaded. Both actions "
+                            "below change files belonging to KiCad, so both are shown in full before they "
+                            "run and both can be undone."
+                        }
+
+                        if kicad_rows.is_empty() {
+                            p { class: "settings-empty",
+                                "No KiCad installation found for this user. KiCad creates its configuration "
+                                "directory the first time it runs — start KiCad once, then come back."
+                            }
+                        } else {
+                            for (install , status) in kicad_rows.into_iter() {
+                                KicadInstallRow {
+                                    key: "{install.version}",
+                                    install,
+                                    status,
+                                    running: kicad_running,
+                                    on_changed: move |outcome: Result<String, String>| {
+                                        match outcome {
+                                            Ok(message) => super::mutate_ctx(state, |s| s.log_event(message)),
+                                            Err(message) => {
+                                                super::mutate_ctx(
+                                                    state,
+                                                    |s| s.log_event(format!("KiCad integration failed: {message}")),
+                                                )
+                                            }
+                                        }
+                                        probe.set(probe() + 1);
+                                    },
+                                }
+                            }
+                        }
+                    }
+
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "Updates" }
+
+                        ToggleRow {
+                            label: "Check for updates automatically",
+                            detail: "Once a day, k2g asks GitHub whether a newer release exists. \
+                                     This is the only network request k2g ever makes — with it off, \
+                                     the application talks to nothing but the local KiCad socket. \
+                                     Performing the check tells GitHub this machine's IP address. \
+                                     Nothing is ever downloaded or installed without your confirmation, \
+                                     and every download is signature-checked before it runs.",
+                            checked: update_checks_on,
+                            on_toggle: move |enabled| {
+                                super::mutate_ctx(state, |s| s.set_update_check_enabled(enabled));
                             },
                         }
-                    }
-                }
-            }
 
-            section { class: "settings-card",
-                h2 { class: "settings-card-title", "Updates" }
-
-                ToggleRow {
-                    label: "Check for updates automatically",
-                    detail: "Once a day, k2g asks GitHub whether a newer release exists. \
-                             This is the only network request k2g ever makes — with it off, \
-                             the application talks to nothing but the local KiCad socket. \
-                             Performing the check tells GitHub this machine's IP address. \
-                             Nothing is ever downloaded or installed without your confirmation, \
-                             and every download is signature-checked before it runs.",
-                    checked: update_checks_on,
-                    on_toggle: move |enabled| {
-                        super::mutate_ctx(state, |s| s.set_update_check_enabled(enabled));
-                    },
-                }
-
-                if update_checks_on {
-                    dl { class: "settings-facts",
-                        div { class: "settings-fact",
-                            dt { "Last checked" }
-                            dd { class: "mono",
-                                match last_check.clone() {
-                                    Some(when) => when,
-                                    None => "never".to_string(),
-                                }
-                            }
-                        }
-                        if let Some(version) = skipped.clone() {
-                            div { class: "settings-fact",
-                                dt { "Skipped version" }
-                                dd {
-                                    span { class: "mono", "{version}" }
-                                    button {
-                                        class: "text-button",
-                                        onclick: move |_| {
-                                            super::mutate_ctx(
-                                                state,
-                                                |s| {
-                                                    s.clear_update_suppressions();
-                                                },
-                                            );
-                                        },
-                                        "Stop skipping"
+                        if update_checks_on {
+                            dl { class: "settings-facts",
+                                div { class: "settings-fact",
+                                    dt { "Last checked" }
+                                    dd { class: "mono",
+                                        match last_check.clone() {
+                                            Some(when) => when,
+                                            None => "never".to_string(),
+                                        }
                                     }
                                 }
-                            }
-                        }
-                        if let Some(until) = postponed.clone() {
-                            div { class: "settings-fact",
-                                dt { "Reminders paused until" }
-                                dd {
-                                    span { class: "mono", "{until}" }
-                                    button {
-                                        class: "text-button",
-                                        onclick: move |_| {
-                                            super::mutate_ctx(
-                                                state,
-                                                |s| {
-                                                    s.clear_update_suppressions();
+                                if let Some(version) = skipped.clone() {
+                                    div { class: "settings-fact",
+                                        dt { "Skipped version" }
+                                        dd {
+                                            span { class: "mono", "{version}" }
+                                            button {
+                                                class: "text-button",
+                                                onclick: move |_| {
+                                                    super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.clear_update_suppressions();
+                                                        },
+                                                    );
                                                 },
-                                            );
-                                        },
-                                        "Resume reminders"
+                                                "Stop skipping"
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Some(until) = postponed.clone() {
+                                    div { class: "settings-fact",
+                                        dt { "Reminders paused until" }
+                                        dd {
+                                            span { class: "mono", "{until}" }
+                                            button {
+                                                class: "text-button",
+                                                onclick: move |_| {
+                                                    super::mutate_ctx(
+                                                        state,
+                                                        |s| {
+                                                            s.clear_update_suppressions();
+                                                        },
+                                                    );
+                                                },
+                                                "Resume reminders"
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-            }
 
-            section { class: "settings-card",
-                h2 { class: "settings-card-title", "Security recording" }
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "Security recording" }
 
-                ToggleRow {
-                    label: "Record security-relevant events",
-                    detail: "Appends a line to logs/security.jsonl when something security-relevant \
-                             happens: update checks and installs, changes to these switches, KiCad \
-                             plugin registration and API-setting edits, rejected configuration files, \
-                             G-code written to disk, and resets. Nothing is transmitted anywhere — \
-                             the file stays on this machine, and home-directory paths are shortened \
-                             to ~ so it contains no personal data. The diagnostic log on the Logs \
-                             screen is separate and is never written to disk either way.",
-                    checked: security_log_on,
-                    on_toggle: move |enabled| {
-                        super::mutate_ctx(state, |s| { s.set_security_log_enabled(enabled); });
-                    },
-                }
-
-                // Offered only once recording is off. Beside a live switch it would
-                // read as "clear the log", which it is not — the record's value is
-                // its continuity, and the one moment deleting it is clearly the
-                // user's intent is just after they asked to stop keeping one.
-                if !security_log_on {
-                    div { class: "kicad-install-actions",
-                        button {
-                            class: "text-button",
-                            onclick: move |_| {
-                                let message = match crate::runtime::security_log::erase() {
-                                    Ok(()) => "Deleted the security log.".to_string(),
-                                    Err(err) => format!("Could not delete the security log: {err}"),
-                                };
-                                super::mutate_ctx(state, |s| s.log_event(message));
+                        ToggleRow {
+                            label: "Record security-relevant events",
+                            detail: "Appends a line to logs/security.jsonl when something security-relevant \
+                                     happens: update checks and installs, changes to these switches, KiCad \
+                                     plugin registration and API-setting edits, rejected configuration files, \
+                                     G-code written to disk, and resets. Nothing is transmitted anywhere — \
+                                     the file stays on this machine, and home-directory paths are shortened \
+                                     to ~ so it contains no personal data. The diagnostic log on the Logs \
+                                     screen is separate and is never written to disk either way.",
+                            checked: security_log_on,
+                            on_toggle: move |enabled| {
+                                super::mutate_ctx(state, |s| { s.set_security_log_enabled(enabled); });
                             },
-                            "Delete the log kept so far"
                         }
-                    }
-                }
-            }
 
-            section { class: "settings-card settings-card-danger",
-                h2 { class: "settings-card-title", "Data and reset" }
-
-                p { class: "settings-card-intro",
-                    "Everything k2g stores lives in one directory: "
-                    span { class: "mono", "{data_dir}" }
-                    ". Nothing is kept anywhere else and nothing is stored online. The one "
-                    "exception is a KiCad plugin registration, which lives in KiCad's own "
-                    "folders — remove that from the KiCad integration card above."
-                }
-
-                div { class: "settings-danger-row",
-                    div { class: "settings-danger-copy",
-                        strong { "Reset settings to defaults" }
-                        p { class: "settings-toggle-detail",
-                            "Deletes your settings, profiles, stock and job, and re-creates the "
-                            "shipped defaults on the next start. Your tool catalogs and the "
-                            "security log are kept."
-                        }
-                    }
-                    button {
-                        class: "text-button danger",
-                        onclick: move |_| {
-                            if !confirm_destructive(
-                                "Reset all settings, profiles, stock and the job to their shipped defaults?\n\nYour tool catalogs and the security log are kept.\n\nk2g must be restarted afterwards.",
-                            ) {
-                                return;
-                            }
-                            let message = match crate::runtime::data_lifecycle::factory_reset() {
-                                Ok(path) => {
-                                    format!("Settings reset. Restart k2g to finish. ({})", path.display())
-                                }
-                                Err(err) => format!("Reset failed: {err}"),
-                            };
-                            super::mutate_ctx(state, |s| s.log_event(message));
-                            probe.set(probe() + 1);
-                        },
-                        "Reset settings"
-                    }
-                }
-
-                div { class: "settings-danger-row",
-                    div { class: "settings-danger-copy",
-                        strong { "Delete all k2g data" }
-                        p { class: "settings-toggle-detail",
-                            "Removes the whole directory above — settings, profiles, catalogs and "
-                            "logs. k2g closes, and the next start behaves like a fresh install. "
-                            "This cannot be undone."
-                        }
-                    }
-                    button {
-                        class: "text-button danger",
-                        onclick: move |_| {
-                            if !confirm_destructive(
-                                "Delete every k2g setting, profile, catalog and log?\n\nThis cannot be undone. k2g will close.",
-                            ) {
-                                return;
-                            }
-                            match crate::runtime::data_lifecycle::delete_all_data() {
-                                Ok(_) => {
-                                    // Quit rather than carry on: the in-memory store is
-                                    // still holding everything just deleted, and its
-                                    // background flush would write a good deal of it
-                                    // straight back out.
-                                    dioxus::desktop::window().close();
-                                }
-                                Err(err) => {
-                                    super::mutate_ctx(
-                                        state,
-                                        |s| s.log_event(format!("Deletion failed: {err}")),
-                                    );
+                        // Offered only once recording is off. Beside a live switch it would
+                        // read as "clear the log", which it is not — the record's value is
+                        // its continuity, and the one moment deleting it is clearly the
+                        // user's intent is just after they asked to stop keeping one.
+                        if !security_log_on {
+                            div { class: "kicad-install-actions",
+                                button {
+                                    class: "text-button",
+                                    onclick: move |_| {
+                                        let message = match crate::runtime::security_log::erase() {
+                                            Ok(()) => "Deleted the security log.".to_string(),
+                                            Err(err) => format!("Could not delete the security log: {err}"),
+                                        };
+                                        super::mutate_ctx(state, |s| s.log_event(message));
+                                    },
+                                    "Delete the log kept so far"
                                 }
                             }
-                        },
-                        "Delete all data"
+                        }
+                    }
+
+                    section { class: "settings-card settings-card-danger",
+                        h2 { class: "settings-card-title", "Data and reset" }
+
+                        p { class: "settings-card-intro",
+                            "Everything k2g stores lives in one directory: "
+                            span { class: "mono", "{data_dir}" }
+                            ". Nothing is kept anywhere else and nothing is stored online. The one "
+                            "exception is a KiCad plugin registration, which lives in KiCad's own "
+                            "folders — remove that from the KiCad integration card above."
+                        }
+
+                        div { class: "settings-danger-row",
+                            div { class: "settings-danger-copy",
+                                strong { "Reset settings to defaults" }
+                                p { class: "settings-toggle-detail",
+                                    "Deletes your settings, profiles, stock and job, and re-creates the "
+                                    "shipped defaults on the next start. Your tool catalogs and the "
+                                    "security log are kept."
+                                }
+                            }
+                            button {
+                                class: "text-button danger",
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        if !super::profiles_common::confirm(
+                                            "Reset settings",
+                                            "Reset all settings, profiles, stock and the job to their shipped defaults?\n\nYour tool catalogs and the security log are kept.\n\nk2g must be restarted afterwards.",
+                                        ).await {
+                                            return;
+                                        }
+                                        let message = match crate::runtime::data_lifecycle::factory_reset() {
+                                            Ok(path) => {
+                                                format!("Settings reset. Restart k2g to finish. ({})", path.display())
+                                            }
+                                            Err(err) => format!("Reset failed: {err}"),
+                                        };
+                                        super::mutate_ctx(state, |s| s.log_event(message));
+                                        probe.set(probe() + 1);
+                                    });
+                                },
+                                "Reset settings"
+                            }
+                        }
+
+                        div { class: "settings-danger-row",
+                            div { class: "settings-danger-copy",
+                                strong { "Delete all k2g data" }
+                                p { class: "settings-toggle-detail",
+                                    "Removes the whole directory above — settings, profiles, catalogs and "
+                                    "logs. k2g closes, and the next start behaves like a fresh install. "
+                                    "This cannot be undone."
+                                }
+                            }
+                            button {
+                                class: "text-button danger",
+                                onclick: move |_| {
+                                    spawn(async move {
+                                        if !super::profiles_common::confirm(
+                                            "Delete all k2g data",
+                                            "Delete every k2g setting, profile, catalog and log?\n\nThis cannot be undone. k2g will close.",
+                                        ).await {
+                                            return;
+                                        }
+                                        match crate::runtime::data_lifecycle::delete_all_data() {
+                                            Ok(_) => {
+                                                // Quit rather than carry on: the in-memory store is
+                                                // still holding everything just deleted, and its
+                                                // background flush would write a good deal of it
+                                                // straight back out.
+                                                dioxus::desktop::window().close();
+                                            }
+                                            Err(err) => {
+                                                super::mutate_ctx(
+                                                    state,
+                                                    |s| s.log_event(format!("Deletion failed: {err}")),
+                                                );
+                                            }
+                                        }
+                                    });
+                                },
+                                "Delete all data"
+                            }
+                        }
                     }
                 }
             }
         }
     }
-}
-
-/// Ask before something irreversible. Blocking and modal on purpose — these two
-/// actions destroy work, and a toast that can be missed is not consent.
-fn confirm_destructive(message: &str) -> bool {
-    rfd::MessageDialog::new()
-        .set_title("k2g")
-        .set_description(message)
-        .set_level(rfd::MessageLevel::Warning)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes
 }

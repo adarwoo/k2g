@@ -11,7 +11,11 @@ use crate::runtime::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
 use super::save_program::SaveProgramButton;
 
 #[component]
-pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
+pub fn AppTopBar(
+    state: Signal<crate::runtime::AppCtx>,
+    settings_open: Signal<bool>,
+) -> Element {
+    let mut settings_open = settings_open;
     let snapshot = state.read().clone();
 
     let has_board = snapshot.board.is_some();
@@ -171,18 +175,47 @@ pub fn AppTopBar(state: Signal<crate::runtime::AppCtx>) -> Element {
                 // this is what you do about it.
                 SaveProgramButton { state }
 
+                // Application preferences, including the palette that used to have its
+                // own button here. Icon-only, so it carries the label a sighted user
+                // gets from the tooltip and a screen reader gets from `aria-label`.
                 button {
-                    class: "icon-button",
-                    onclick: move |_| {
-                        dispatch_ui_command(state, UiCommand::ToggleTheme);
-                    },
-                    if snapshot.theme == Theme::Dark {
-                        "Theme: Dark"
-                    } else {
-                        "Theme: Light"
-                    }
+                    class: "icon-button topbar-settings-btn",
+                    r#type: "button",
+                    title: "Settings",
+                    "aria-label": "Settings",
+                    "aria-haspopup": "dialog",
+                    "aria-expanded": if *settings_open.read() { "true" } else { "false" },
+                    onclick: move |_| settings_open.set(true),
+                    SettingsCogIcon {}
                 }
             }
+        }
+    }
+}
+
+/// The Settings cog.
+///
+/// A real gear rather than the sliders glyph the rail used, because up here it has no
+/// label beside it: three sliders with no word next to them read as a filter or an
+/// equaliser, and the cog is the one shape every operator already takes to mean
+/// "preferences".
+///
+/// Generated rather than placed by hand — a gear will not come out of the round-numbered
+/// primitives the other icons are built from. Centre 12,12; eight teeth on a 45° pitch;
+/// tips on r=9.9 and roots on r=7.5; each tooth 20° wide at the tip and 32° at the root,
+/// with the valleys between them arcs of the root circle. Eight teeth is the fewest that
+/// still reads as a gear and the most that survives the size — twelve blur into a fuzzy
+/// ring. The hub is a separate circle so the centre stays open; closed, the whole thing
+/// is a blob at a glance.
+#[component]
+fn SettingsCogIcon() -> Element {
+    rsx! {
+        svg {
+            class: "topbar-settings-svg",
+            view_box: "0 0 24 24",
+            "aria-hidden": "true",
+            path { d: "M19.21 9.93 L21.75 10.28 L21.75 13.72 L19.21 14.07 A7.5 7.5 0 0 1 18.56 15.64 L20.11 17.68 L17.68 20.11 L15.64 18.56 A7.5 7.5 0 0 1 14.07 19.21 L13.72 21.75 L10.28 21.75 L9.93 19.21 A7.5 7.5 0 0 1 8.36 18.56 L6.32 20.11 L3.89 17.68 L5.44 15.64 A7.5 7.5 0 0 1 4.79 14.07 L2.25 13.72 L2.25 10.28 L4.79 9.93 A7.5 7.5 0 0 1 5.44 8.36 L3.89 6.32 L6.32 3.89 L8.36 5.44 A7.5 7.5 0 0 1 9.93 4.79 L10.28 2.25 L13.72 2.25 L14.07 4.79 A7.5 7.5 0 0 1 15.64 5.44 L17.68 3.89 L20.11 6.32 L18.56 8.36 A7.5 7.5 0 0 1 19.21 9.93 Z" }
+            circle { cx: "12", cy: "12", r: "3.4" }
         }
     }
 }
@@ -462,7 +495,6 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
         Some(Screen::Stock),
         Some(Screen::Catalog),
         None,
-        Some(Screen::Settings),
         Some(Screen::Logs),
         Some(Screen::About),
     ];
@@ -591,20 +623,6 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M12 6C9 4.5 6 4.5 4 6v12c2-1.5 5-1.5 8 0" }
                 path { d: "M12 6c3-1.5 6-1.5 8 0v12c-2-1.5-5-1.5-8 0" }
                 path { d: "M12 6v12" }
-            }
-        },
-        Screen::Settings => rsx! {
-            // A sliders panel — application preferences.
-            svg {
-                class: "rail-icon-svg",
-                view_box: "0 0 24 24",
-                "aria-hidden": "true",
-                path { d: "M5 6h14" }
-                path { d: "M5 12h14" }
-                path { d: "M5 18h14" }
-                circle { cx: "9", cy: "6", r: "2" }
-                circle { cx: "15", cy: "12", r: "2" }
-                circle { cx: "8", cy: "18", r: "2" }
             }
         },
         Screen::Logs => rsx! {

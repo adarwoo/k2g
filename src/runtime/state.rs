@@ -498,6 +498,22 @@ impl AppState {
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
+    /// Records the chosen palette.
+    ///
+    /// Light and Dark only, with no "follow the system": a machining session runs for
+    /// hours, and a window that repaints itself when the desktop crosses into evening
+    /// is a surprise mid-job rather than a convenience.
+    ///
+    /// The equality guard is what lets the settings dialog wire this straight to a
+    /// segmented control — re-picking the palette already in use writes nothing.
+    pub fn set_theme(&mut self, theme: Theme) {
+        if self.theme == theme {
+            return;
+        }
+        self.theme = theme;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
     /// Records the docked column's width after a split-handle drag. Called on release
     /// rather than on every mouse move, so a drag is one settings write, not hundreds.
     pub fn set_job_pin_width(&mut self, width: i64) {

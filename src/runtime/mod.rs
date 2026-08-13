@@ -76,7 +76,6 @@ pub const STATUS_KEY_GENERATION_MODIFIED_UUIDS: &str = "generation.modified_uuid
 #[derive(Clone, Copy)]
 pub enum UiCommand {
     SetUnitSystem(UserUnitSystem),
-    ToggleTheme,
 }
 
 /// Runtime diagnostic entry shown in UI.
@@ -565,13 +564,6 @@ pub fn apply_ui_command(command: UiCommand) {
         match command {
             UiCommand::SetUnitSystem(unit_system) => {
                 ctx.app.unit_system = unit_system;
-            }
-            UiCommand::ToggleTheme => {
-                ctx.app.theme = if ctx.app.theme == Theme::Dark {
-                    Theme::Light
-                } else {
-                    Theme::Dark
-                };
             }
         }
 

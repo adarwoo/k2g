@@ -26,6 +26,32 @@ fn main() {
 
     log::info!("Starting k2g {}", env!("CARGO_PKG_VERSION"));
 
+    // WebKitGTK renders through a DMABUF path that assumes the GPU stack can share
+    // buffers between the web process and the compositor. Where it can't, the web
+    // process dies mid-frame and the only thing k2g sees is
+    // `Error sending edits to webview: Broken pipe` — the window is simply blank,
+    // with the actual fault (a rejected GPU command submission) buried in pages of
+    // driver noise on stderr, under no heading that mentions the webview.
+    //
+    // Set unconditionally rather than probing the driver: it was found on nouveau,
+    // but the same path breaks on the proprietary NVIDIA driver and inside VMs, and
+    // a blank window is a far worse failure than losing hardware compositing on a
+    // UI this static. WebKit reads `0` as "keep the renderer", so a stack that
+    // works can have it back with `WEBKIT_DISABLE_DMABUF_RENDERER=0`; only an
+    // absent variable is overridden, never a value the user chose.
+    //
+    // Safe here, and only here: `set_var` requires that no other thread is reading
+    // the environment, and main() is still single-threaded at this point — the
+    // KiCad connection below and the webview itself both come later.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        log::info!(
+            "Disabled the WebKit DMABUF renderer; \
+             set WEBKIT_DISABLE_DMABUF_RENDERER=0 to keep hardware compositing"
+        );
+    }
+
     // Repair any KiCad plugin registration that still points at a previous build,
     // before connecting — an update replaces the executable, and the registration
     // has to follow it or the toolbar button starts launching nothing. Only ever

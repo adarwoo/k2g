@@ -77,9 +77,11 @@ hardware. What is **not** done:
 
 ## Requirements
 
-- **Windows** — the UI renders in WebView2. Linux is not currently tested.
+- **Windows** — the UI renders in WebView2. Linux runs (the UI renders in
+  WebKitGTK) but is not covered by the release builds; see
+  [Linux](#linux) for the GPU caveat.
 - **KiCad 9 or later**, running, with a board open and the IPC API enabled.
-  k2g can enable it for you — *Settings → KiCad integration*.
+  k2g can enable it for you — *settings cog → KiCad integration*.
 - **Rust** (stable) to build from source.
 
 ## Install
@@ -95,7 +97,7 @@ and how to remove everything — are in
 
 ### As a KiCad plugin
 
-*Settings → KiCad integration → Register with KiCad* adds a **Create GCode** button to
+*Settings cog → KiCad integration → Register with KiCad* adds a **Create GCode** button to
 the PCB editor toolbar. Pressing it opens k2g with that board already loaded, since
 KiCad hands the plugin its API socket directly. Reversible from the same screen.
 
@@ -109,6 +111,29 @@ cargo run --release
 
 CMake is required — `nng-sys` builds the bundled nng C library with it.
 
+#### Linux
+
+The desktop shell is GTK + WebKitGTK, so the build needs their development
+packages. On Debian/Ubuntu (the same list CI installs):
+
+```sh
+sudo apt-get install -y build-essential cmake pkg-config libglib2.0-dev \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+  libjavascriptcoregtk-4.1-dev libssl-dev libxdo-dev
+```
+
+`libssl-dev` is needed even though k2g itself speaks TLS through rustls:
+`dioxus-desktop` pins `tungstenite` to `native-tls` on every non-Android target
+for its hot-reload socket, with no feature to turn it off.
+
+k2g disables WebKit's DMABUF renderer on Linux (see `main.rs`), because on a
+driver that can't share buffers the web process dies and the window comes up
+blank. If your GPU stack is healthy, `WEBKIT_DISABLE_DMABUF_RENDERER=0` restores
+hardware compositing — worth doing for the 3D view. The open-source `nouveau`
+driver is known not to be one of the healthy stacks on recent NVIDIA cards: it
+was seen rejecting WebKit's GPU command submissions outright (`nouveau: kernel
+rejected pushbuf`), which is the failure this workaround exists for.
+
 | Environment variable | Effect |
 | --- | --- |
 | `RUST_LOG=debug` | Verbose logging, also visible in the in-app **Logs** screen |
@@ -119,7 +144,7 @@ CMake is required — `nng-sys` builds the bundled nng C library with it.
 ## Privacy and updates in one paragraph
 
 k2g makes exactly one network request — a once-a-day check of the GitHub releases
-API — and it can be switched off in Settings, after which k2g touches nothing but the
+API — and it can be switched off from the settings cog, after which k2g touches nothing but the
 local KiCad socket. There is no telemetry and no analytics. Updates are never
 installed without an explicit click, and every installer is signature-checked before
 it runs. Details in [PRIVACY.md](PRIVACY.md).

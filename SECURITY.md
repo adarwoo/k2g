@@ -61,7 +61,7 @@ Because k2g is GPL-3.0, the practical floor is stronger than a promise from one 
 - **Signed updates.** Every release artifact carries a detached [minisign](https://jedisct1.github.io/minisign/) signature. k2g verifies it against a public key compiled into the executable *before* running an installer; a download that fails verification is deleted, not offered. The root of trust is that key, not TLS and not GitHub. Verify by hand with `minisign -Vm <file> -P <key from assets/release-signing.pub>`.
 - **Software bill of materials.** Every release ships `k2g-<version>.cdx.json`, a CycloneDX SBOM of the full dependency graph.
 - **Dependency monitoring.** `cargo audit` against the RUSTSEC database and `cargo deny` run on every pull request and weekly on a schedule; Dependabot proposes updates.
-- **Almost no network surface.** The update check is the only outbound request k2g makes, and it can be switched off in Settings. Schema validation is pinned to bundled schemas and refuses to fetch a remote `$ref`.
+- **Almost no network surface.** The update check is the only outbound request k2g makes, and it can be switched off from the settings cog. Schema validation is pinned to bundled schemas and refuses to fetch a remote `$ref`.
 - **A local security record.** Update checks and installs, KiCad integration changes, rejected configuration and G-code writes are recorded to `logs/security.jsonl`. It never leaves the machine and holds no personal data. See [PRIVACY.md](PRIVACY.md).
 
 ## Regulatory note

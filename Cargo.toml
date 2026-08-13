@@ -4,8 +4,8 @@ name = "k2g"
 # `k2g_version` a G-code header can print, the Windows executable's file properties
 # (seeded from CARGO_PKG_* by `build.rs`) and the crate metadata all read this one
 # value. `build.rs` warns when it falls behind the newest `vX.Y.Z-*` git tag, which is
-# how it reached 0.9.0 having sat at 0.1.0 through nine of them.
-version = "0.9.0"
+# how it reached 0.10.0 having sat at 0.1.0 through nine of them.
+version = "0.10.0"
 edition = "2021"
 description = "GCode generator"
 authors = ["Bill Arreckx <software@arreckx.com>"]
