@@ -2890,6 +2890,7 @@ dependencies = [
  "dioxus",
  "dioxus-logger",
  "dirs",
+ "gtk",
  "gtl",
  "image 0.24.9",
  "jsonschema",

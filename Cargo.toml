@@ -109,6 +109,17 @@ minisign = "0.9"
 # tokio/rfd/dirs-sys, so this compiles no additional crate, and the higher-level
 # wrappers would still be `unsafe` at every call site while pulling `windows-core` in
 # for a handful of kernel32 entry points.
+# Linux-only: asking GTK for the dark variant of the desktop theme, so the parts of the
+# UI the webview does not draw follow k2g's own light/dark setting. A `<select>` popup is
+# the visible case — WebKitGTK hands it to GTK, which paints it from the desktop theme and
+# not from our stylesheet, so a dark k2g on a light desktop opened a white list.
+#
+# Adds nothing to the build: `gtk` is already in the lockfile, because tao's Linux backend
+# is written against it. The version is pinned to tao's to keep it that way — a mismatch
+# would compile a second copy of the whole gtk stack.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     # HANDLE, INVALID_HANDLE_VALUE, CloseHandle, GENERIC_READ/GENERIC_WRITE

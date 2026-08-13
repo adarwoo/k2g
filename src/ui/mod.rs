@@ -89,6 +89,34 @@ pub fn launch(data: UiLaunchData) {
 /// either platform and saves shipping a second asset.
 const WINDOW_ICON_EDGE: u32 = 256;
 
+/// Point the platform's own widgets at the same light or dark as the rest of k2g.
+///
+/// Nearly all of the UI is drawn by the webview from `theme.rs`, so it follows the app's
+/// setting for free. A `<select>`'s open list is the exception: WebKitGTK does not draw it
+/// at all, it hands it to GTK, which paints it from the *desktop* theme. Set k2g to dark
+/// on a light desktop and the list opens white — a bright rectangle in the middle of a
+/// dark window, and no amount of CSS reaches it (`select option { background }` is simply
+/// ignored, which is worth knowing before trying it).
+///
+/// This asks GTK for the **dark variant of whatever theme the user has**, rather than
+/// forcing a specific one the way `GTK_THEME=Adwaita:dark` would: their desktop stays
+/// theirs, and it follows the in-app toggle rather than needing a restart.
+///
+/// Linux-only by nature. Windows draws its own controls from the system setting and was
+/// never affected.
+#[cfg(target_os = "linux")]
+pub fn apply_platform_theme(dark: bool) {
+    use gtk::prelude::GtkSettingsExt;
+
+    // `None` before GTK is up. Callers run from the rendered UI, by which point it is.
+    if let Some(settings) = gtk::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(dark);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_platform_theme(_dark: bool) {}
+
 fn load_window_icon() -> Option<dioxus::desktop::tao::window::Icon> {
     let icon_bytes = include_bytes!("../../assets/icons/icon.png");
     // The master is square, so `resize_exact` cannot distort it.

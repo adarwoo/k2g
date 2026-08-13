@@ -880,7 +880,7 @@ body {
 .panel select,
 .panel input,
 .gcode-editor {
-    background: var(--bg-elev);
+    background-color: var(--bg-elev);
     color: var(--text);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -890,6 +890,36 @@ body {
 
 .top-control select {
     width: 220px;
+}
+
+/* Every dropdown, on both themes.
+ *
+ * `appearance: none` is not cosmetic here: with the native appearance left on,
+ * WebKitGTK draws the platform combo box over the top and ignores `background` and
+ * `color` entirely, so a dark k2g on a light desktop showed a light grey box with
+ * near-invisible text. Windows draws its controls from the system setting and never
+ * had the problem, which is why this went unnoticed for so long.
+ *
+ * Stripping the native appearance also takes the platform's arrow, so one is drawn
+ * back on as a background image. It is a fixed grey rather than `currentColor`
+ * because a background image cannot read it — mid-grey is legible on both palettes.
+ *
+ * The *open* list is a separate problem and cannot be solved here at all: WebKitGTK
+ * does not draw it, GTK does, from the desktop theme. See `ui::apply_platform_theme`.
+ */
+select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888f9a' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    background-size: 10px 6px;
+    padding-right: 26px;
+}
+
+/* Nothing to point at, so no arrow — and the space it would have taken back. */
+select:disabled {
+    background-image: none;
+    padding-right: 10px;
 }
 
 .spacer {
@@ -1328,7 +1358,7 @@ body {
     min-width: 140px;
     border: 1px solid var(--border);
     border-radius: 10px;
-    background: var(--bg-elev);
+    background-color: var(--bg-elev);
     color: var(--text);
     padding: 9px 12px;
     font-size: 12px;
@@ -1467,7 +1497,7 @@ body {
     min-width: 120px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--bg-elev);
+    background-color: var(--bg-elev);
     color: var(--text);
     padding: 5px 8px;
     font-size: 11px;
@@ -1488,7 +1518,7 @@ body {
 .toolset-slot-select.state-spare {
     color: var(--ok);
     border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
-    background: color-mix(in srgb, var(--ok) 14%, var(--bg-elev));
+    background-color: color-mix(in srgb, var(--ok) 14%, var(--bg-elev));
 }
 
 .toolset-slot-select.state-do-not-use {
@@ -1508,7 +1538,7 @@ body {
 .project-ref-select.broken-ref-select {
     color: #c56a10;
     border-color: color-mix(in srgb, #c56a10 55%, var(--border));
-    background: color-mix(in srgb, #c56a10 16%, var(--bg-elev));
+    background-color: color-mix(in srgb, #c56a10 16%, var(--bg-elev));
 }
 
 .project-layout {

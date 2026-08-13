@@ -50,6 +50,13 @@ pub fn AppRoot() -> Element {
     // Remember the window's size and maximized state for the next launch.
     crate::ui::window_state::use_window_geometry();
 
+    // Keep the platform's own widgets on the same side of light/dark as the stylesheet.
+    // Re-runs whenever the theme changes, because it reads the signal — see
+    // `apply_platform_theme` for what is not drawn by the webview and why it matters.
+    use_effect(move || {
+        crate::ui::apply_platform_theme(state.read().theme == Theme::Dark);
+    });
+
     // Bridge background generation → UI. The worker publishes results into the
     // global ctx off the UI thread and bumps a wake channel; re-sync the signal on
     // each bump so the Job views refresh without a user action. (The startup board
