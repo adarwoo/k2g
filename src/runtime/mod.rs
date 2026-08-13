@@ -43,11 +43,17 @@ pub const GCODE_FILE_EXTENSION: &str = "nc";
 /// Tooling and Rack views at the 1400px minimum the dock needs overall.
 pub const DEFAULT_JOB_PIN_WIDTH: i64 = 560;
 
-/// Bounds the split handle honours. Below the minimum a G-code line wraps and the
-/// dock stops being readable; the maximum stops a stored width from crowding out the
-/// screen beside it (the layout also caps it proportionally — see the CSS).
+/// How narrow the docked Job column may be dragged. Below this a G-code line wraps and
+/// the dock stops being readable.
+///
+/// There is deliberately **no maximum**. What the split has to protect is the screen on
+/// the other side, not the dock, and a fixed ceiling is the wrong tool for it: 1000px
+/// was most of a laptop panel and a third of a wide monitor. The layout reserves a fixed
+/// width for the screen instead and lets the dock have everything else — see
+/// `--job-dock-width` in the theme. A stored width wider than the window will therefore
+/// come back as "as wide as it goes", which is what the operator meant by dragging it
+/// there.
 pub const MIN_JOB_PIN_WIDTH: i64 = 380;
-pub const MAX_JOB_PIN_WIDTH: i64 = 1000;
 
 /// Size a fresh install opens the window at, in logical pixels. Wide enough for the
 /// docked Job column the layout wants (see the 1250px media query in the theme), and

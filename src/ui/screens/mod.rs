@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::ui::navigation::*;
 use super::theme::APP_STYLE;
-use crate::runtime::{ctx_snapshot, with_ctx_mut, MAX_JOB_PIN_WIDTH, MIN_JOB_PIN_WIDTH};
+use crate::runtime::{ctx_snapshot, with_ctx_mut, MIN_JOB_PIN_WIDTH};
 
 mod about;
 mod cnc;
@@ -128,7 +128,7 @@ pub fn AppRoot() -> Element {
                             dock_drag_last.set(x);
                             let next = (*dock_live_width.read() + (x - last)) as i64;
                             dock_live_width
-                                .set(next.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH) as f64);
+                                .set(next.max(MIN_JOB_PIN_WIDTH) as f64);
                         },
                         onmouseup: move |_| {
                             if !*dock_dragging.read() {

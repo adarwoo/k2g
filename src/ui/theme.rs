@@ -528,10 +528,10 @@ body {
 /*
  * Docked Job view: the pinned Job column, a drag handle, and the active screen.
  *
- * The column width comes in as `--job-dock-width` from the split handle, but the
- * track is `min(var(...), 46%)` so a stored width can never crowd out the screen
- * beside it however the window is resized — the stored value is a preference, the
- * cap is the guarantee.
+ * The column width comes in as `--job-dock-width` from the split handle, and the
+ * track subtracts a fixed reserve for the screen beside it, so a stored width can
+ * never crowd it out however the window is resized — the stored value is a
+ * preference, the reserve is the guarantee. See `.dock-layout.is-docked`.
  */
 .dock-layout {
     flex: 1;
@@ -541,9 +541,22 @@ body {
     flex-direction: column;
 }
 
+/* The dock takes the width it was dragged to; the screen beside it keeps 480px.
+ *
+ * Expressed as a floor on the *screen* rather than a ceiling on the dock, because the
+ * screen is what has to stay usable — and a ceiling cannot know what it is protecting.
+ * This was `46%`, which meant the guarantee changed with the window: a third of a wide
+ * monitor, most of a laptop panel. `calc(100% - 8px - 480px)` reserves the handle and
+ * the screen and gives the dock everything else, so the same drag behaves the same way
+ * on any display.
+ *
+ * The subtraction cannot go below the dock's own minimum in practice: the media query
+ * below stacks the layout entirely under 1250px, and by then 100% is still comfortably
+ * over 480 + 8 + 380.
+ */
 .dock-layout.is-docked {
     display: grid;
-    grid-template-columns: min(var(--job-dock-width, 560px), 46%) 8px minmax(0, 1fr);
+    grid-template-columns: min(var(--job-dock-width, 560px), calc(100% - 8px - 480px)) 8px minmax(0, 1fr);
     align-items: stretch;
     gap: 0;
 }

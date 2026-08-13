@@ -517,7 +517,7 @@ impl AppState {
     /// Records the docked column's width after a split-handle drag. Called on release
     /// rather than on every mouse move, so a drag is one settings write, not hundreds.
     pub fn set_job_pin_width(&mut self, width: i64) {
-        let width = width.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH);
+        let width = width.max(MIN_JOB_PIN_WIDTH);
         if self.job_pin_width == width {
             return;
         }
@@ -2290,13 +2290,15 @@ fn load_persisted_flag(key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// The persisted docked-column width, clamped to the handle's bounds so a hand-edited
-/// settings file cannot produce an unusable layout.
+/// The persisted docked-column width, floored so a hand-edited settings file cannot
+/// produce an unreadably narrow column. Not ceilinged: the layout reserves the screen's
+/// width and gives the dock the rest, so an over-large stored value simply means "as
+/// wide as it goes" (see [`crate::runtime::MIN_JOB_PIN_WIDTH`]).
 fn load_persisted_job_pin_width() -> i64 {
     persistence_state()
         .and_then(|state| state.global_settings.get("job_pin_width").and_then(Value::as_i64))
         .unwrap_or(DEFAULT_JOB_PIN_WIDTH)
-        .clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH)
+        .max(MIN_JOB_PIN_WIDTH)
 }
 
 /// A persisted window dimension, clamped so a stale or hand-edited settings file cannot
@@ -2541,13 +2543,17 @@ mod job_dock_tests {
         }
     }
 
-    /// A hand-edited or stale settings file cannot produce an unusable column.
+    /// A hand-edited or stale settings file cannot produce an unreadable column.
+    ///
+    /// Floor only. A width wider than the window is *not* clamped here, because the
+    /// layout already reserves the screen beside it and hands the dock whatever is left
+    /// — so an over-large value resolves to "as wide as it goes" rather than to a number
+    /// this code would have to guess at without knowing the window.
     #[test]
-    fn the_persisted_dock_width_is_clamped_to_the_handle_bounds() {
+    fn the_persisted_dock_width_is_floored_but_not_capped() {
         const { assert!(MIN_JOB_PIN_WIDTH < DEFAULT_JOB_PIN_WIDTH) };
-        const { assert!(DEFAULT_JOB_PIN_WIDTH < MAX_JOB_PIN_WIDTH) };
-        assert_eq!((-500i64).clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
-        assert_eq!(99_999i64.clamp(MIN_JOB_PIN_WIDTH, MAX_JOB_PIN_WIDTH), MAX_JOB_PIN_WIDTH);
+        assert_eq!((-500i64).max(MIN_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
+        assert_eq!(99_999i64.max(MIN_JOB_PIN_WIDTH), 99_999, "no ceiling to hit");
     }
 }
 
