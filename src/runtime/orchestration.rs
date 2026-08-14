@@ -48,6 +48,7 @@ impl AppCtx {
             job_references,
             status,
             catalogs_loaded: false,
+            isolation: Default::default(),
             revision: 0,
             plan_cache: Default::default(),
         }

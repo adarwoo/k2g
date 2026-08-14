@@ -235,6 +235,13 @@ pub struct AppCtx {
     /// "what is the revision now?" would happily file a plan computed from a stale
     /// snapshot under the current revision — then serve it as though it were fresh.
     pub revision: u64,
+    /// Isolation contours for copper engraving, and whether any are being worked out.
+    ///
+    /// On the context rather than in [`AppState`], which is deep-cloned before every
+    /// mutation so the post-mutation sync has something to diff against — and a board's
+    /// worth of contours is not something to copy on each keystroke. The result itself is
+    /// behind an `Arc` for the same reason.
+    pub isolation: isolation::IsolationState,
     /// The last machining plan, shared by every clone of this context.
     ///
     /// Deliberately behind an `Arc` that clones by *sharing* rather than copying: a
@@ -254,6 +261,9 @@ pub mod tooling;
 
 /// Operation-planner adapter: the in-memory machining plan for the "Machining" tab.
 pub mod machining_plan;
+
+/// Isolation contours for copper engraving, computed on their own worker thread.
+pub mod isolation;
 
 /// In-memory capture of `tracing`/`log` output for the Logs screen.
 pub mod log_capture;
@@ -440,6 +450,10 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     // Start the background generation worker now that the global ctx exists (the
     // worker publishes results into it). See `docs/gcode-generation.md` §6.
     start_generation_service();
+
+    // Its own worker, not a share of the generation one: generation is gated on the job
+    // being ready to machine, while the views want contours to draw regardless.
+    isolation::start_isolation_service();
 
     // After the generation service, not before: that call is what creates the UI wake
     // channel the watcher bumps. Started earlier, its first scan's wake would silently
