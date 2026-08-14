@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use dioxus::prelude::*;
 
 use crate::gcode::scene;
-use crate::runtime::machining_plan::{self, plan_machining};
+use crate::runtime::machining_plan::{self, cached_plan};
 use crate::runtime::AppCtx;
 
 /// The DOM id the canvas is mounted under. The script finds it rather than being handed
@@ -443,7 +443,7 @@ impl ScenePayload {
     /// because it was fixed to the trace when it was built, not by counting position in
     /// this list.
     fn build(ctx: &AppCtx, step: usize, hidden: &BTreeSet<String>) -> Self {
-        let plan = plan_machining(ctx);
+        let plan = cached_plan(ctx);
         let all = plan.steps.get(step).map(scene::trace_step).unwrap_or_default();
 
         // The legend lists every tool of the step, hidden ones included — it is the only

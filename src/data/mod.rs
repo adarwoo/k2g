@@ -819,7 +819,25 @@ pub fn flush_appdata() {
 pub fn with_appdata_mut<R>(f: impl FnOnce(&mut AppData) -> R) -> R {
     let lock = APP_DATA.get().expect("AppData must be initialized before use");
     let mut guard = lock.write().expect("AppData write lock poisoned");
-    f(&mut guard)
+    let result = f(&mut guard);
+    DATA_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
+    result
+}
+
+/// Bumped by every write to the store, and by nothing else.
+static DATA_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the store has been written to.
+///
+/// The one honest answer to "has anything I read from here changed?". Derived caches key
+/// on it rather than on a list of the fields they happen to read, because that list is
+/// maintained by hand and a forgotten entry does not fail — it silently serves the
+/// operator a plan for a job they have already edited.
+///
+/// Bumped per write rather than per *changed* write, so a no-op edit costs a recompute.
+/// That is the cheap side of the trade.
+pub fn data_revision() -> u64 {
+    DATA_REVISION.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Compiles the embedded schemas into a [`DataStore`]. The schemas are validated

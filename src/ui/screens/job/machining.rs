@@ -10,7 +10,7 @@ use units::{Length, UserUnitDisplay, UserUnitSystem};
 
 use crate::gcode::plan::{StepPlan, ToolBlock};
 use crate::ui::screens::job::machining_3d::Machining3dView;
-use crate::runtime::machining_plan::plan_machining;
+use crate::runtime::machining_plan::cached_plan;
 use crate::runtime::AppCtx;
 
 /// Max ops listed per tool block before collapsing the tail into a "+N more" row —
@@ -21,7 +21,7 @@ const OP_LIST_CAP: usize = 40;
 #[component]
 pub fn MachiningView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
-    let plan = plan_machining(&snapshot);
+    let plan = cached_plan(&snapshot);
     let unit = snapshot.unit_system;
     let total_ops = plan.total_ops();
 

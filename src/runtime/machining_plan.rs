@@ -30,6 +30,8 @@
 //! drills one set of pins and every program of the job has to be written against the same
 //! zero, or the second setup cuts somewhere the first did not.
 
+use std::sync::Arc;
+
 use uuid::Uuid;
 
 use units::{Length, UserUnitDisplay};
@@ -105,8 +107,86 @@ fn frame_fixture<'a>(ctx: &'a AppCtx, steps: &[StepRaw]) -> Option<&'a FixturePr
     ctx.fixtures.iter().find(|f| f.id == id.to_string())
 }
 
+/// What a cached plan was built from.
+///
+/// Two counters, and no list of the fields the planner happens to read. A key assembled
+/// field by field is a key someone has to remember to extend, and the failure when they
+/// do not is the worst kind this program has: a plan that looks current, prices a job
+/// correctly, and describes work the operator has already changed.
+///
+/// The two stores are counted separately because they change independently — a step's
+/// operations are edited straight into the datastore without the context hearing about
+/// it, and the board arrives in the context without the datastore hearing about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PlanKey {
+    context: u64,
+    data: u64,
+}
+
+impl PlanKey {
+    fn of(ctx: &AppCtx) -> Self {
+        PlanKey { context: ctx.revision, data: crate::data::data_revision() }
+    }
+}
+
+/// The last machining plan and the key it was built under.
+///
+/// Cloning shares rather than copies, so every snapshot of the context looks at the same
+/// cell — which is the point, since the UI takes snapshots continuously and the job
+/// changes rarely.
+type CachedPlan = std::sync::Mutex<Option<(PlanKey, Arc<MachiningPlan>)>>;
+
+#[derive(Clone, Default)]
+pub struct PlanCache(std::sync::Arc<CachedPlan>);
+
+impl std::fmt::Debug for PlanCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PlanCache")
+    }
+}
+
+impl PlanCache {
+    /// The plan for `key`, calling `build` only if the one held is for something else.
+    ///
+    /// The lock is dropped before `build` runs. Two threads arriving together will both
+    /// build and the second will overwrite the first with an identical answer — one
+    /// wasted run, in exchange for never holding a mutex across the heaviest call in the
+    /// program while a UI thread waits behind it.
+    fn get_or_build(
+        &self,
+        key: PlanKey,
+        build: impl FnOnce() -> MachiningPlan,
+    ) -> Arc<MachiningPlan> {
+        if let Ok(cache) = self.0.lock() {
+            if let Some((cached, plan)) = cache.as_ref() {
+                if *cached == key {
+                    return Arc::clone(plan);
+                }
+            }
+        }
+        let plan = Arc::new(build());
+        if let Ok(mut cache) = self.0.lock() {
+            *cache = Some((key, Arc::clone(&plan)));
+        }
+        plan
+    }
+}
+
+/// The machining plan for this context, planning it only if nothing else already has.
+///
+/// **Use this, not [`plan_machining`].** The Machining view and the 3D view render from
+/// the same plan and re-render for reasons that have nothing to do with the job — a tool
+/// hidden in the legend, a section collapsed, the dock dragged — and planning a dense
+/// board takes long enough to be felt. Nothing about a render changes what the plan is.
+///
+pub fn cached_plan(ctx: &AppCtx) -> Arc<MachiningPlan> {
+    ctx.plan_cache.get_or_build(PlanKey::of(ctx), || plan_machining(ctx))
+}
+
 /// Builds the machining plan for the current context: one [`StepPlan`] per machining
 /// step of the selected profile, each with its ordered drill-phase tool blocks.
+///
+/// Plans unconditionally. Callers on a render path want [`cached_plan`] instead.
 pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
     let Some(profile_id) = ctx
         .selected_process_profile_id
@@ -1341,5 +1421,83 @@ fn format_assign_error(error: &AssignError) -> Vec<String> {
         AssignError::RackTooSmall { minimal, capacity } => vec![format!(
             "Rack too small: needs {minimal} tools but {capacity} usable slot(s) — see the Tooling tab."
         )],
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn key(context: u64, data: u64) -> PlanKey {
+        PlanKey { context, data }
+    }
+
+    fn marker(note: &str) -> MachiningPlan {
+        MachiningPlan { steps: Vec::new(), note: Some(note.to_string()) }
+    }
+
+    /// The reason the cache exists: the views re-render for reasons that have nothing to
+    /// do with the job, and planning a dense board is expensive enough to be felt.
+    #[test]
+    fn a_repeated_ask_for_the_same_job_plans_once() {
+        let cache = PlanCache::default();
+        let builds = AtomicUsize::new(0);
+        let build = || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            marker("planned")
+        };
+
+        let first = cache.get_or_build(key(1, 1), build);
+        let second = cache.get_or_build(key(1, 1), build);
+
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "the second ask must not re-plan");
+        assert!(Arc::ptr_eq(&first, &second), "and must hand back the very same plan");
+    }
+
+    /// Either store moving is a job that may have changed. Counting them separately is
+    /// what catches an edit made straight into the datastore, which never touches the
+    /// context and so would leave its revision standing still.
+    #[test]
+    fn a_move_in_either_store_re_plans() {
+        let cache = PlanCache::default();
+        cache.get_or_build(key(1, 1), || marker("first"));
+
+        let after_context = cache.get_or_build(key(2, 1), || marker("second"));
+        assert_eq!(after_context.note.as_deref(), Some("second"));
+
+        let after_data = cache.get_or_build(key(2, 2), || marker("third"));
+        assert_eq!(after_data.note.as_deref(), Some("third"));
+    }
+
+    /// The property the whole design rests on. A clone of the context is a *snapshot*,
+    /// taken on every render; if each carried its own cache the hit rate would be zero
+    /// and this would be an elaborate way to plan exactly as often as before.
+    #[test]
+    fn a_cloned_context_shares_the_cache_rather_than_copying_it() {
+        let cache = PlanCache::default();
+        let first = cache.get_or_build(key(1, 1), || marker("planned"));
+
+        let snapshot = cache.clone();
+        let builds = AtomicUsize::new(0);
+        let second = snapshot.get_or_build(key(1, 1), || {
+            builds.fetch_add(1, Ordering::SeqCst);
+            marker("re-planned")
+        });
+
+        assert_eq!(builds.load(Ordering::SeqCst), 0, "the snapshot must see the same cell");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// A stale snapshot must not be able to file its plan under the current revision.
+    /// The revision is a field carried by the snapshot for exactly this reason, and if it
+    /// ever became a global read at call time this test is what would fail.
+    #[test]
+    fn a_stale_snapshot_cannot_pass_its_plan_off_as_current() {
+        let cache = PlanCache::default();
+        cache.get_or_build(key(1, 1), || marker("from the old snapshot"));
+
+        let current = cache.get_or_build(key(2, 1), || marker("from the current one"));
+        assert_eq!(current.note.as_deref(), Some("from the current one"));
     }
 }

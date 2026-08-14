@@ -48,6 +48,8 @@ impl AppCtx {
             job_references,
             status,
             catalogs_loaded: false,
+            revision: 0,
+            plan_cache: Default::default(),
         }
     }
 
@@ -83,6 +85,12 @@ impl AppCtx {
         }
 
         self.job_references = collect_job_references(&self.app);
+        // Everything the machining plan reads out of this context is settled by now — the
+        // board is stitched, the references collected — so this is where the snapshot
+        // becomes a new one as far as derived caches are concerned. Before
+        // `report_generation_started` below, so the plan it builds is filed under the
+        // revision the UI is about to be handed rather than under the one it replaced.
+        self.revision = self.revision.wrapping_add(1);
         let change_set = collect_mutation_changes(previous_app, &self.app);
 
         // Keep the viewed step inside the profile. Removing a step, or switching to a
@@ -342,7 +350,7 @@ impl AppCtx {
         // The resolved drill plan plus one program context per step (`steps[i]` matches
         // `plan.steps[i]`) and the tool→feed/speed lookup. Built here on the main thread;
         // the worker only renders.
-        let plan = machining_plan::plan_machining(self);
+        let plan = machining_plan::cached_plan(self);
         let profile_id = process.and_then(|profile| Uuid::parse_str(&profile.id).ok());
         let steps = profile_id
             .map(|profile_id| {

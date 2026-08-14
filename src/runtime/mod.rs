@@ -228,6 +228,19 @@ pub struct AppCtx {
     pub job_references: JobReferences,
     pub status: BTreeMap<String, String>,
     pub catalogs_loaded: bool,
+    /// How many mutations this context has been through, stamped on every snapshot.
+    ///
+    /// A *field*, not a global counter read on demand, and that is the whole point: the
+    /// UI holds snapshots that outlive the state they were taken from, and a cache asking
+    /// "what is the revision now?" would happily file a plan computed from a stale
+    /// snapshot under the current revision — then serve it as though it were fresh.
+    pub revision: u64,
+    /// The last machining plan, shared by every clone of this context.
+    ///
+    /// Deliberately behind an `Arc` that clones by *sharing* rather than copying: a
+    /// snapshot is taken far more often than the job changes, and a per-snapshot cache
+    /// would miss on every one of them.
+    pub plan_cache: machining_plan::PlanCache,
 }
 
 include!("orchestration.rs");

@@ -24,7 +24,10 @@ pub struct GenerationInput {
     // Everything the program layer needs lives in `steps` rather than out here, because
     // a step owns its CNC and its fixture: the header's templates, its `z_safe` retract
     // and its work coordinate system all differ between steps of the same job.
-    pub plan: crate::gcode::plan::MachiningPlan,
+    /// Shared, not copied. The plan is the largest thing in this snapshot — a dense
+    /// board's runs to hundreds of thousands of points — and the enqueue happens inside
+    /// the context write lock, where a deep copy of it is felt.
+    pub plan: std::sync::Arc<crate::gcode::plan::MachiningPlan>,
     pub steps: Vec<crate::gcode::program::ProgramRender>,
     /// The machining profile's own `steps` array, in order, as the program templates read
     /// it — every step's record, not just the one being rendered, so a header can say
@@ -467,10 +470,10 @@ mod tests {
             operations: vec!["Drill PTH".to_string(), "Route outline".to_string()],
             filename: "demo.kicad_pcb".to_string(),
             timestamp: "2026-01-01 00:00:00".to_string(),
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0)],
+                    note: None,
+                }),
             steps: vec![sample_program_render()],
             step_values: vec![sample_step_value("Drill PTH")],
             tool_feeds: std::collections::BTreeMap::new(),
@@ -560,7 +563,7 @@ mod tests {
         );
 
         let input =
-            GenerationInput { plan, steps: vec![render], tool_feeds, ..sample_input() };
+            GenerationInput { plan: std::sync::Arc::new(plan), steps: vec![render], tool_feeds, ..sample_input() };
         let cancel = Arc::new(AtomicBool::new(false));
         let out = run_generation(&input, &cancel).ok().unwrap();
         let g = text(&out, 0);
@@ -607,10 +610,10 @@ mod tests {
             ..sample_program_render()
         };
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![numbered(), numbered()],
             ..sample_input()
         };
@@ -678,10 +681,10 @@ mod tests {
             ..sample_program_render()
         };
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![header(), header()],
             step_values: vec![sample_step_value("Drill PTH"), sample_step_value("Route outline")],
             ..sample_input()
@@ -779,10 +782,10 @@ mod tests {
             ..sample_program_render()
         };
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![inches, no_mode],
             ..sample_input()
         };
@@ -811,10 +814,10 @@ mod tests {
             ..sample_program_render()
         };
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![fixture(5.0, "G54"), fixture(22.0, "G56")],
             ..sample_input()
         };
@@ -847,10 +850,10 @@ mod tests {
             ..sample_program_render()
         };
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![face(None), face(Some("Board back face up?"))],
             ..sample_input()
         };
@@ -899,10 +902,10 @@ mod tests {
         broken.blocks = vec![block];
 
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![broken, empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![broken, empty_step(1)],
+                    note: None,
+                }),
             steps: vec![sample_program_render(), sample_program_render()],
             ..sample_input()
         };
@@ -1005,10 +1008,10 @@ mod tests {
     #[test]
     fn a_step_with_no_render_context_reports_rather_than_vanishing() {
         let input = GenerationInput {
-            plan: crate::gcode::plan::MachiningPlan {
-                steps: vec![empty_step(0), empty_step(1)],
-                note: None,
-            },
+            plan: std::sync::Arc::new(crate::gcode::plan::MachiningPlan {
+                    steps: vec![empty_step(0), empty_step(1)],
+                    note: None,
+                }),
             steps: vec![sample_program_render()], // only one context for two steps
             ..sample_input()
         };
