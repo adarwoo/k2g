@@ -555,18 +555,27 @@ fn plan_step(
     // and has nothing to say about a channel width. `None` here means no bit in stock can
     // cut the width asked for, which is a note rather than a failure — the step's other
     // work is still worth doing.
-    let engraver = raw
-        .engraves_copper()
-        .then(|| pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width))
-        .flatten();
-    if raw.engraves_copper() && engraver.is_none() {
-        notes.push(format!(
-            "No V-bit in stock can cut a {} isolation channel: every tip is either wider \
-             than that, or would have to be sunk shallower than it is rated for. Nothing \
-             is engraved on this step.",
-            fmt_len(ctx, raw.engrave_copper.width),
-        ));
-    }
+    // Fails the step rather than noting it, and the Tooling adapter fails the same way
+    // with the same wording — which is what puts it in the diagnostics banner and shuts
+    // the generation gate. A program that drilled and routed and quietly did not engrave
+    // would look finished to anyone who ran it.
+    let engraver = if raw.engraves_copper() {
+        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width) {
+            Some(picked) => Some(picked),
+            None => {
+                return failed(
+                    index,
+                    name,
+                    vec![crate::runtime::tooling::no_engraver_reason(
+                        ctx,
+                        raw.engrave_copper.width,
+                    )],
+                )
+            }
+        }
+    } else {
+        None
+    };
 
     // Nothing to assign *and* nothing to route. Cutouts count as work in their own right:
     // a step that only cuts interior openings has no holes, no outline and no pins, and
@@ -1039,12 +1048,9 @@ fn plan_engrave_spans(
         board_epoch: ctx.board_epoch,
         layer_id: if raw.machines_back { pcb::BACK_COPPER } else { pcb::FRONT_COPPER },
         width_nm: (raw.engrave_copper.width.as_mm() * 1e6).round() as i64,
-        // The bit's tip is the narrowest channel it can cut, so it is the floor of every
-        // width the pass may fall back to.
-        min_width_nm: bit
-            .tip_diameter
-            .map(|tip| (tip.as_mm() * 1e6).round() as i64)
-            .unwrap_or(0),
+        // The bit's diameter is its tip — the narrowest channel it can cut — so it is
+        // the floor of every width the pass may fall back to.
+        min_width_nm: (bit.diameter.as_mm() * 1e6).round() as i64,
     };
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
@@ -1108,11 +1114,8 @@ fn plan_engrave_spans(
 /// mechanism: on a V-bit a shallower cut is a narrower one, so the pass that decided to
 /// squeeze through a tight gap is carried out by lifting the tool.
 fn span_depth_mm(bit: &Tool, width_nm: i64, full_depth: Length) -> f64 {
-    let Some(tip) = bit.tip_diameter else {
-        return full_depth.as_mm();
-    };
     assigner::engrave_depth_mm(
-        tip.as_mm(),
+        bit.diameter.as_mm(),
         bit.point_angle.as_degrees(),
         width_nm as f64 / 1e6,
     )

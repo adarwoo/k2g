@@ -82,7 +82,6 @@ fn catalog_to_stock_catalog(
                 kind,
                 diameter: core.diameter,
                 point_angle: core.point_angle,
-                tip_diameter: core.tip_diameter,
                 z_min_depth: core.z_min_depth,
                 flute_length: core.flute_length,
                 table_feed: core.table_feed,
@@ -131,12 +130,12 @@ mod catalog_projection_tests {
         ToolEntry {
             id: "id".into(),
             tool_type: ToolType::Vbit,
-            diameter: Length::from_mm(3.175),
+            // The diameter of a V-bit is its tip, not its shank.
+            diameter: Length::from_mm(0.1),
             flute_length: Some(Length::from_mm(12.0)),
             sku: Some("test-vbit".into()),
             point_angle: units::Angle::from_degrees(30.0),
             z_min_depth: Length::from_mm(0.0),
-            tip_diameter: Some(Length::from_mm(0.1)),
             spindle_rpm: None,
             z_feed: None,
             table_feed: None,
@@ -158,18 +157,18 @@ mod catalog_projection_tests {
         }
     }
 
-    /// The bug this exists to prevent: the tip diameter was dropped at every layer between
-    /// the catalogue file and the stock tool — four of them — and `pick_engraver` chooses
-    /// a bit *by* its tip, so every V-bit ever added was unusable and the engrave
-    /// operation planned nothing. The whole chain is walked here because no single layer
-    /// was at fault.
+    /// The bug this exists to prevent: a V-bit's cutting geometry was dropped at every
+    /// layer between the catalogue file and the stock tool — four of them — and
+    /// `pick_engraver` chooses a bit *by* it, so every V-bit ever added was unusable and
+    /// the engrave operation planned nothing. The whole chain is walked here because no
+    /// single layer was at fault.
     #[test]
-    fn a_v_bit_keeps_its_tip_all_the_way_from_the_catalogue_into_stock() {
+    fn a_v_bit_keeps_its_cutting_geometry_from_the_catalogue_into_stock() {
         let catalog = catalog_with(vbit_entry());
         let projected = catalog_to_stock_catalog("test", "Test", &catalog, true);
 
         let listed = &projected.sections[0].tools[0];
-        assert_eq!(listed.tip_diameter, Some(Length::from_mm(0.1)), "the picker's own list");
+        assert_eq!(listed.diameter, Length::from_mm(0.1), "the tip, in the picker's list");
         assert_eq!(listed.flute_length, Some(Length::from_mm(12.0)));
         assert_eq!(listed.z_min_depth, Some(Length::from_mm(0.0)));
 
@@ -185,23 +184,26 @@ mod catalog_projection_tests {
 
         assert_eq!(added.len(), 1, "one tool selected, one added");
         assert_eq!(
-            added[0].tip_diameter,
-            Some(Length::from_mm(0.1)),
-            "and it arrives in stock with the tip it was chosen for"
+            added[0].diameter,
+            Length::from_mm(0.1),
+            "and it arrives in stock with the tip it will be chosen for"
         );
         assert_eq!(added[0].flute_length, Some(Length::from_mm(12.0)));
+        assert_eq!(added[0].z_min_depth, Some(Length::from_mm(0.0)));
     }
 
-    /// A tool with no tip stays `None` rather than defaulting to zero. A zero tip would
-    /// let `engrave_depth_mm` report that any width is reachable at some depth, which is a
-    /// confident wrong answer where absence is an honest one.
+    /// The rating a bit is held to survives the same trip. It is the other half of what
+    /// `pick_engraver` decides on, and a bit that lost it would be accepted at any depth
+    /// however shallow.
     #[test]
-    fn a_tool_without_a_tip_does_not_acquire_one() {
-        let mut drill = vbit_entry();
-        drill.tool_type = ToolType::Drillbit;
-        drill.tip_diameter = None;
+    fn the_depth_rating_survives_the_trip_too() {
+        let mut deep = vbit_entry();
+        deep.z_min_depth = Length::from_mm(0.05);
 
-        let projected = catalog_to_stock_catalog("test", "Test", &catalog_with(drill), true);
-        assert_eq!(projected.sections[0].tools[0].tip_diameter, None);
+        let projected = catalog_to_stock_catalog("test", "Test", &catalog_with(deep), true);
+        assert_eq!(
+            projected.sections[0].tools[0].z_min_depth,
+            Some(Length::from_mm(0.05))
+        );
     }
 }

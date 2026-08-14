@@ -1899,17 +1899,25 @@ mod tests {
         assert_eq!(listed[0].0, id);
     }
 
-    /// Every V-bit the bundled catalogues ship must reach the parsed model with its tip
-    /// diameter intact.
+    /// A V-bit's diameter must be its **tip**, not its shank.
     ///
-    /// `ToolEntry` had no `tip_diameter` field at all while the schema required one of
-    /// every V-bit, so the catalogue stated it, the file validated, and serde dropped it
-    /// without a word — and a tool that is chosen *by* its tip could then never be chosen.
-    /// Reading the shipped files rather than a fixture is the point: the gap was between
-    /// what the schema demanded and what the struct accepted, and only real data spans it.
+    /// `diameter` means one thing everywhere in k2g: the width the tool cuts. For a V-bit
+    /// that is the flat at its tip, which is the narrowest channel it can make and the
+    /// number `pick_engraver` chooses on. The catalogue used to carry the 1/8" shank there
+    /// and the tip in a field of its own, which is one number too many for a value only
+    /// one of them can be — and the wrong one of the two silently made every V-bit look
+    /// far too coarse to isolate anything.
+    ///
+    /// Guarded by size because that is the shape the mistake takes: a shank is millimetres
+    /// where a tip is tenths, so anything over a millimetre here is a shank that has crept
+    /// back in. Read from the shipped files rather than a fixture, since the catalogue is
+    /// the thing being asserted about.
     #[test]
-    fn bundled_v_bits_arrive_with_their_tip_diameters() {
+    fn a_bundled_v_bits_diameter_is_its_tip_and_not_its_shank() {
         use crate::data::model::catalog::{Catalog, ToolType};
+
+        /// No engraving tip is this wide; every V-bit shank is wider.
+        const TIP_CEILING_MM: f64 = 1.0;
 
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("catalogs");
         let mut checked = 0usize;
@@ -1936,13 +1944,15 @@ mod tests {
                         continue;
                     }
                     assert!(
-                        tool.tip_diameter.is_some(),
-                        "{} in {} lost its tip diameter on the way through the model",
+                        tool.diameter.as_mm() <= TIP_CEILING_MM,
+                        "{} in {} has a {}mm diameter — that is a shank, and the diameter \
+                         of a V-bit is its tip",
                         tool.sku.clone().unwrap_or_default(),
                         path.display(),
+                        tool.diameter.as_mm(),
                     );
                     // And through the projection every stock adapter goes via.
-                    assert!(tool.to_tool_core().tip_diameter.is_some());
+                    assert_eq!(tool.to_tool_core().diameter, tool.diameter);
                     checked += 1;
                 }
             }
@@ -2433,8 +2443,7 @@ mod tests {
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
                 flute_length: None,
-                tip_diameter: None,
-                z_min_depth: None,
+                    z_min_depth: None,
                 table_feed: Some(FeedRate::from_mm_per_min(1200.0)),
                 catalog_table_feed: Some(FeedRate::from_mm_per_min(1200.0)),
                 z_feed: Some(FeedRate::from_mm_per_min(1200.0)),
@@ -2457,8 +2466,7 @@ mod tests {
                 point_angle: Angle::from_degrees(118.0),
                 catalog_point_angle: Some(Angle::from_degrees(118.0)),
                 flute_length: None,
-                tip_diameter: None,
-                z_min_depth: None,
+                    z_min_depth: None,
                 table_feed: None,
                 catalog_table_feed: None,
                 z_feed: None,

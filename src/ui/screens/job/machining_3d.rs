@@ -656,7 +656,6 @@ mod legend_tests {
             point_angle: units::Angle::from_degrees(118.0),
             catalog_point_angle: None,
             flute_length: None,
-            tip_diameter: None,
             z_min_depth: None,
             table_feed: None,
             catalog_table_feed: None,

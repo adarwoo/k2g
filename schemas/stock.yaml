@@ -76,13 +76,11 @@ $defs:
 
       # Geometry.
       diameter:
-        description: Nominal tool diameter.
+        description: >-
+          The width the tool cuts: a drill's hole, a router's kerf, and for a
+          V-bit or engraver the flat at its tip — the narrowest channel it can
+          make, which widens as it is sunk deeper.
         $ref: "units.yaml#/$defs/size"
-      tip_diameter:
-        anyOf:
-          - $ref: "units.yaml#/$defs/size"
-          - type: "null"
-        description: Tip diameter, important for engravers and V-bits.
       flute_length:
         anyOf:
           - $ref: "units.yaml#/$defs/size"

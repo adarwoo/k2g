@@ -1259,10 +1259,25 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
     // Chosen here as well as in the machining plan, and by the same function, because the
     // rack has to come out identical: this view is where the operator reads which bit goes
     // in which slot.
-    let engraver = raw
-        .engraves_copper()
-        .then(|| pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width))
-        .flatten();
+    //
+    // A step that asks to engrave and has nothing to engrave with **fails**, rather than
+    // planning its other work and mentioning the gap. The program would otherwise come
+    // out looking complete — drilled, routed, and not isolated — and be run by someone
+    // who had no reason to doubt it. Refused for the reason a missing locating-pin drill
+    // is refused: there is no degraded output worth having.
+    let engraver = if raw.engraves_copper() {
+        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width) {
+            Some(picked) => Some(picked),
+            None => {
+                return StepOutcome::Failed(vec![no_engraver_reason(
+                    ctx,
+                    raw.engrave_copper.width,
+                )])
+            }
+        }
+    } else {
+        None
+    };
 
     if groups.is_empty() && !has_route && engraver.is_none() && pin_tool.is_none() {
         return StepOutcome::Empty;
@@ -1793,9 +1808,10 @@ pub(crate) fn pick_engraver(
     width: Length,
 ) -> Option<(String, Length)> {
     let suits = |tool: &&Tool| -> Option<(String, Length)> {
-        let tip = tool.tip_diameter?;
+        // The bit's diameter *is* its tip: the narrowest channel it can cut, widening
+        // from there with depth. See the V-bit note in the generic catalogue.
         let depth_mm = crate::gcode::assigner::engrave_depth_mm(
-            tip.as_mm(),
+            tool.diameter.as_mm(),
             tool.point_angle.as_degrees(),
             width.as_mm(),
         )?;
@@ -1822,7 +1838,7 @@ pub(crate) fn pick_engraver(
         .filter(|t| is_engraver_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
         .collect();
     let widest_tip_first = |a: &&Tool, b: &&Tool| {
-        let tip = |t: &Tool| std::cmp::Reverse(t.tip_diameter.map(micron).unwrap_or(0));
+        let tip = |t: &Tool| std::cmp::Reverse(micron(t.diameter));
         let angle = |t: &Tool| (t.point_angle.as_degrees() * 1e3) as i64;
         tip(a)
             .cmp(&tip(b))
@@ -1990,6 +2006,21 @@ impl RouterPlan {
         ids.extend(self.corner_drills.values().flatten().flatten().cloned());
         ids.into_iter().collect()
     }
+}
+
+/// Why a step that asks to engrave cannot.
+///
+/// One wording, used by both the Tooling tab and the machining plan, so the operator does
+/// not meet two accounts of one fault. It names the way out, which a blocking error owes
+/// the reader: this one is fixed by stocking a finer bit or by asking for a wider channel,
+/// and nothing about the board or the profile will help.
+pub(crate) fn no_engraver_reason(ctx: &AppState, width: Length) -> String {
+    format!(
+        "No V-bit in stock can cut a {} isolation channel: every tip is either wider than \
+         that, or would have to be sunk shallower than the bit is rated for. Stock a finer \
+         V-bit, or widen the channel on this step.",
+        fmt_len(ctx, width),
+    )
 }
 
 /// The band of drill diameters that relieves a corner of interior angle `θ` cut by a
@@ -2961,7 +2992,6 @@ mod tests {
             point_angle: units::Angle::from_degrees(180.0),
             catalog_point_angle: None,
             flute_length: Some(Length::from_mm(30.0)),
-            tip_diameter: None,
             z_min_depth: None,
             table_feed: None,
             catalog_table_feed: None,
@@ -3805,10 +3835,10 @@ mod engraver_tests {
 
     /// A V-bit: a tip flat of `tip_mm` on a cone of `angle_deg`.
     fn vbit(id: &str, tip_mm: f64, angle_deg: f64) -> Tool {
-        let mut tool = super::tests::router(id, 3.175);
+        // The diameter *is* the tip — the narrowest channel the bit can cut.
+        let mut tool = super::tests::router(id, tip_mm);
         tool.kind = "V-bit".to_string();
         tool.name = format!("V-bit {tip_mm}mm/{angle_deg}deg");
-        tool.tip_diameter = Some(Length::from_mm(tip_mm));
         tool.point_angle = units::Angle::from_degrees(angle_deg);
         tool
     }
@@ -3868,6 +3898,19 @@ mod engraver_tests {
 
         assert_eq!(id, "shallow");
         assert!(depth.as_mm() > 0.3, "and it gets there by cutting deeper: {}", depth.as_mm());
+    }
+
+    /// A width no bit can reach yields nothing, and it is on that `None` that the step is
+    /// refused rather than planned without its engraving. A program that drilled and
+    /// routed and quietly did not isolate would look finished to whoever ran it.
+    #[test]
+    fn a_width_no_bit_can_reach_yields_nothing_to_engrave_with() {
+        let tools = vec![vbit("coarse", 0.5, 30.0), vbit("coarser", 0.8, 30.0)];
+        assert!(
+            pick_engraver(&tools, &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.3))
+                .is_none(),
+            "every tip is wider than the channel asked for"
+        );
     }
 
     /// A router has one width whatever it is asked for, so letting one into this list

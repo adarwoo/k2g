@@ -1354,12 +1354,9 @@ impl AppState {
                         point_angle: tool.point_angle,
                         catalog_point_angle: Some(tool.point_angle),
                         // Carried through from the catalogue, which is the only place
-                        // they are stated. A V-bit that arrived without its tip could
-                        // never be chosen to engrave, since the tip is what the choice is
-                        // made on — and a router without its flute length silently passed
-                        // the check that it can reach through the board.
+                        // they are stated. A router without its flute length silently
+                        // passed the check that it can reach through the board.
                         flute_length: tool.flute_length,
-                        tip_diameter: tool.tip_diameter,
                         z_min_depth: tool.z_min_depth,
                         table_feed: tool.table_feed,
                         catalog_table_feed: tool.table_feed,

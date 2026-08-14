@@ -82,13 +82,6 @@ pub struct ToolCore {
     pub z_feed: Option<FeedRate>,
     pub spindle_speed: Option<RotationalSpeed>,
     pub sku: Option<String>,
-    /// The flat at the very tip of a V-bit or engraver — the one width it always cuts,
-    /// and with `point_angle` what turns a requested isolation width into a depth.
-    ///
-    /// `None` for the tools that have a single diameter instead, and `None` rather than
-    /// zero when unknown: a zero tip would let `engrave_depth_mm` claim any width is
-    /// reachable, which is a wrong answer where absence is an honest one.
-    pub tip_diameter: Option<Length>,
     /// The shallowest cut the tool is rated to hold.
     pub z_min_depth: Option<Length>,
     /// Usable cutting length, for the check that a cutter can reach through the board.

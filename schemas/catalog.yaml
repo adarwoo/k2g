@@ -114,7 +114,11 @@ $defs:
 
       # Geometry.
       diameter:
-        description: Nominal tool diameter.
+        description: >-
+          The width the tool cuts: a drill's hole, a router's kerf, and for a
+          V-bit or engraver the flat at its tip — the narrowest channel it can
+          make, which widens as it is sunk deeper. Never the shank, which
+          nothing in the generator acts on and so is not recorded.
         $ref: "units.yaml#/$defs/size"
       flute_length:
         description: Flute length.
@@ -124,9 +128,6 @@ $defs:
         $ref: "units.yaml#/$defs/angle"
       z_min_depth:
         description: Minimum recommended/useful depth.
-        $ref: "units.yaml#/$defs/size"
-      tip_diameter:
-        description: Tip diameter, important for engravers and V-bits.
         $ref: "units.yaml#/$defs/size"
 
       # Recommended machining parameters.
@@ -166,4 +167,4 @@ $defs:
               enum: [engraver, vbit]
           required: [type]
         then:
-          required: [spindle_rpm, z_feed, table_feed, tip_diameter]
+          required: [spindle_rpm, z_feed, table_feed]

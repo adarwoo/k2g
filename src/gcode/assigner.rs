@@ -929,7 +929,6 @@ mod tests {
             point_angle: Angle::from_degrees(if kind == "Drill" { 118.0 } else { 180.0 }),
             catalog_point_angle: None,
             flute_length: flute_mm.map(Length::from_mm),
-            tip_diameter: None,
             z_min_depth: None,
             table_feed: None,
             catalog_table_feed: None,

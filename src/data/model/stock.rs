@@ -70,13 +70,6 @@ pub struct Tool {
     /// tool-selection Z-feasibility check to confirm the bit can reach through
     /// the board; the lossy legacy projection historically dropped it.
     pub flute_length: Option<Length>,
-    /// The flat at the very tip of a V-bit or engraver, in the plane of the cut.
-    ///
-    /// A V-bit has no single diameter: it cuts as wide as it is deep. This is the one
-    /// width it always cuts, and with `point_angle` it is what turns a requested
-    /// isolation width into a depth — see `assigner::engrave_depth_mm`. Absent for the
-    /// tools that do have one diameter.
-    pub tip_diameter: Option<Length>,
     /// The shallowest cut the tool is rated for.
     ///
     /// Declared in the catalogue and, until now, dropped on the way in. It matters for
@@ -134,7 +127,6 @@ fn tool_values_map(
     table_feed: Option<FeedRate>,
     z_feed: Option<FeedRate>,
     flute_length: Option<Length>,
-    tip_diameter: Option<Length>,
     z_min_depth: Option<Length>,
 ) -> serde_json::Map<String, Value> {
     let mut m = serde_json::Map::new();
@@ -169,9 +161,6 @@ fn tool_values_map(
     // Written even though nothing but engraving reads them, because the stock editor
     // enumerates the *document's* keys rather than the schema's: a field this map never
     // emits is a field the operator can never set.
-    if let Some(tip_diameter) = tip_diameter {
-        m.insert("tip_diameter".into(), json!(tip_diameter));
-    }
     if let Some(z_min_depth) = z_min_depth {
         m.insert("z_min_depth".into(), json!(z_min_depth));
     }
@@ -202,7 +191,6 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.catalog_table_feed.or(tool.table_feed),
                 tool.catalog_z_feed.or(tool.z_feed),
                 tool.flute_length,
-                tool.tip_diameter,
                 tool.z_min_depth,
             );
             let effective_name = if tool.name.trim().is_empty() {
@@ -221,7 +209,6 @@ pub fn stock_value_from_tools(tools: &[Tool]) -> Value {
                 tool.table_feed,
                 tool.z_feed,
                 tool.flute_length,
-                tool.tip_diameter,
                 tool.z_min_depth,
             );
 
@@ -339,7 +326,6 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 .or(catalog_spindle_speed);
 
             let flute_length = effective.get("flute_length").and_then(value_to_length);
-            let tip_diameter = effective.get("tip_diameter").and_then(value_to_length);
             let z_min_depth = effective.get("z_min_depth").and_then(value_to_length);
 
             let source_catalog = item
@@ -370,7 +356,6 @@ pub fn tools_from_stock_value(stock: &Value) -> Vec<Tool> {
                 point_angle,
                 catalog_point_angle,
                 flute_length,
-                tip_diameter,
                 z_min_depth,
                 table_feed,
                 catalog_table_feed,
@@ -475,7 +460,6 @@ mod tests {
             point_angle: Angle::from_degrees(118.0),
             catalog_point_angle: Some(Angle::from_degrees(118.0)),
             flute_length: None,
-            tip_diameter: None,
             z_min_depth: None,
             table_feed: Some(FeedRate::from_mm_per_min(300.0)),
             catalog_table_feed: Some(FeedRate::from_mm_per_min(200.0)),
