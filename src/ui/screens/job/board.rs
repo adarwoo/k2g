@@ -11,6 +11,7 @@
 //! whose router is a per-step choice this view cannot see).
 
 use dioxus::prelude::*;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use pcb::{BoardEdgeShape, BoardSnapshot, Contour, HoleKind};
@@ -197,6 +198,69 @@ fn drill_symbol_from_index(index: usize) -> (DrillBaseShape, DrillModifier, f64)
     let rotation = ROTATIONS[(index / (BASE_SHAPES.len() * MODIFIERS.len())) % ROTATIONS.len()];
 
     (base, modifier, rotation)
+}
+
+/// A thing the legend names and the operator can switch off.
+///
+/// Only the rows that name a *layer* — something drawn as its own group with its own
+/// colour. The drill-size and slot-size rows are deliberately absent: they classify
+/// symbols by diameter rather than naming a layer, so a tickbox there would be a size
+/// filter, which is a different feature and would put a dozen more boxes on a dense board.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum BoardLayer {
+    CopperFront,
+    CopperBack,
+    Via,
+    Pth,
+    Npth,
+    OutsideRoute,
+    EdgeCut,
+}
+
+impl BoardLayer {
+    /// The layer a hole kind belongs to. One row governs both the drilled markers and the
+    /// routed slots of its kind, which is what the "Hole type colours" row already meant —
+    /// a PTH slot is hatched in the PTH colour.
+    fn of_hole(kind: &HoleKind) -> Self {
+        match kind {
+            HoleKind::Via => Self::Via,
+            HoleKind::PadPth => Self::Pth,
+            HoleKind::PadNpth => Self::Npth,
+        }
+    }
+}
+
+/// Whether `layer` is drawn, given the set the operator has switched off.
+///
+/// Hidden rather than shown, so "everything visible" is the empty set and a layer added
+/// later is visible without anyone having to remember to list it.
+fn layer_visible(hidden: &BTreeSet<BoardLayer>, layer: BoardLayer) -> bool {
+    !hidden.contains(&layer)
+}
+
+/// The tickbox at the head of a legend row that names a layer.
+///
+/// The legend is the layer control, so the row that explains a thing is the row that
+/// switches it off — rather than a separate panel of toggles the reader has to match up
+/// against it by name.
+#[component]
+fn LegendToggle(layer: BoardLayer, hidden: Signal<BTreeSet<BoardLayer>>) -> Element {
+    let shown = layer_visible(&hidden.read(), layer);
+    rsx! {
+        input {
+            r#type: "checkbox",
+            class: "board-legend-check",
+            checked: shown,
+            onchange: move |_| {
+                hidden
+                    .with_mut(|set| {
+                        if !set.remove(&layer) {
+                            set.insert(layer);
+                        }
+                    });
+            },
+        }
+    }
 }
 
 fn hole_marker_class(kind: &HoleKind) -> &'static str {
@@ -624,9 +688,14 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let mut board_pan_x = use_signal(|| 0.0_f64);
     let mut board_pan_y = use_signal(|| 0.0_f64);
     let mut board_is_panning = use_signal(|| false);
-    // On by default: the copper is most of what a PCB *is*, and a board view that hides
-    // it until asked is a board view of the drill file.
-    let mut show_copper = use_signal(|| true);
+    // What the operator has switched off in the legend. Hidden rather than shown, so
+    // everything starts visible — the copper included, since it is most of what a PCB is
+    // and a board view that omits it until asked is a board view of the drill file.
+    //
+    // Local to this view, like zoom and pan, and forgotten on leaving it for the same
+    // reason: it is how the picture is being looked at, not something about the job.
+    let hidden_layers = use_signal(BTreeSet::<BoardLayer>::new);
+    let hidden = hidden_layers.read().clone();
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let board_view_width = BOARD_VIEW_WIDTH;
     let board_view_height = {
@@ -793,12 +862,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     // Memoized, not built inline: it is the most expensive thing here and none of it
     // moves with zoom or pan. It rebuilds when the context does — which is when the board
     // is re-read — and when the layer is switched on.
-    let copper_svg = use_memo(move || {
-        if !*show_copper.read() {
-            return CopperSvg::default();
-        }
-        build_copper_svg(&state.read())
-    });
+    // Built whenever the board has copper, whatever is switched on. Keying it on the
+    // toggles instead would rebuild most of a megabyte of path data every time one was
+    // ticked; the render skips a hidden layer, which costs nothing.
+    let copper_svg = use_memo(move || build_copper_svg(&state.read()));
     let copper_svg = copper_svg.read();
 
     // The stitched contours, in view units — the source for the outside-route band.
@@ -876,21 +943,6 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     board_pan_y.set(0.0);
                                                 },
                                                 "Reset"
-                                            }
-                                            // Absent, not disabled, when there is no copper
-                                            // to show: a greyed tickbox invites the
-                                            // operator to look for what would ungrey it,
-                                            // and for a board KiCad would not hand over
-                                            // its copper there is nothing.
-                                            if !snapshot.copper.is_empty() {
-                                                label { class: "board-view-toggle",
-                                                    input {
-                                                        r#type: "checkbox",
-                                                        checked: *show_copper.read(),
-                                                        onchange: move |evt| show_copper.set(evt.checked()),
-                                                    }
-                                                    "Copper"
-                                                }
                                             }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
                                             span { class: "board-view-status",
@@ -1020,11 +1072,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     // equal strength would make a board
                                                     // that is dense on both sides
                                                     // unreadable on either.
-                                                    for (layer , class) in [
-                                                        (copper_svg.back.as_ref(), "board-copper-back"),
-                                                        (copper_svg.front.as_ref(), "board-copper-front"),
+                                                    for (layer , class , which) in [
+                                                        (copper_svg.back.as_ref(), "board-copper-back", BoardLayer::CopperBack),
+                                                        (copper_svg.front.as_ref(), "board-copper-front", BoardLayer::CopperFront),
                                                     ] {
-                                                        if let Some(layer) = layer {
+                                                        if let Some(layer) = layer.filter(|_| layer_visible(&hidden, which)) {
                                                             g { class: "{class}",
                                                                 for (zone_idx , zone) in layer.zones.iter().enumerate() {
                                                                     path {
@@ -1059,7 +1111,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     // specificity, so whichever the sheet declares last wins and
                                                     // the ghost is silently ignored. The slot and marker groups
                                                     // below take this shape for the same reason.
-                                                    g { class: if routes_outline { "" } else { "board-step-ghost" },
+                                                    g {
+                                                        class: if routes_outline { "" } else { "board-step-ghost" },
+                                                        // Hidden by emptying the group rather than by dropping it,
+                                                        // so the ghost class above keeps its place in the tree.
+                                                        if layer_visible(&hidden, BoardLayer::OutsideRoute) {
                                                         if let Some(outline) = stitched_outline.as_ref() {
                                                             {
                                                                 let double_kerf = outline_band_width * 2.0;
@@ -1081,14 +1137,27 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                                 )}
                                                             }
                                                         }
+                                                        }
                                                     }
-                                                    for shape in board_edge_shapes_svg.iter() {
-                                                        {edge_shape_element(shape, "board-edge-shape", None)}
+                                                    // The visible edge pass only. The identical loop inside the
+                                                    // mask above must NOT be gated: it defines where the kerf band
+                                                    // is allowed to draw, so hiding it there would move the band
+                                                    // rather than hide a line.
+                                                    if layer_visible(&hidden, BoardLayer::EdgeCut) {
+                                                        for shape in board_edge_shapes_svg.iter() {
+                                                            {edge_shape_element(shape, "board-edge-shape", None)}
+                                                        }
                                                     }
 
                                                     // Routed slots: the hatched stadium is the swept material,
                                                     // the dashed centreline the cutter's own path through it.
-                                                    for (idx , slot) in board_slot_features.iter().enumerate() {
+                                                    for (idx , slot) in board_slot_features
+                                                        .iter()
+                                                        .enumerate()
+                                                        .filter(|(_, slot)| {
+                                                            layer_visible(&hidden, BoardLayer::of_hole(&slot.kind))
+                                                        })
+                                                    {
                                                         {
                                                             let kind_class = hole_kind_class(&slot.kind);
                                                             let band_class = format!("board-route-band-{}", hole_kind_slug(&slot.kind));
@@ -1119,7 +1188,13 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     }
 
-                                                    for (idx , marker) in board_hole_markers.iter().enumerate() {
+                                                    for (idx , marker) in board_hole_markers
+                                                        .iter()
+                                                        .enumerate()
+                                                        .filter(|(_, marker)| {
+                                                            layer_visible(&hidden, BoardLayer::of_hole(&marker.kind))
+                                                        })
+                                                    {
                                                         {
                                                             let r = marker.marker_radius;
                                                             let stroke_width = 1.0_f64;
@@ -1276,6 +1351,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                             let sw = 1.2_f64;
                                                             rsx! {
                                                                 div { key: "drill-legend-entry-{legend_idx}", class: "board-drill-legend-item",
+                                                                    span { class: "board-legend-check-gap" }
                                                                     svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
                                                                         g { transform: "translate(12 12) rotate({entry.rotation_deg})",
                                                                             if matches!(entry.base, DrillBaseShape::Circle) {
@@ -1451,6 +1527,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                                 div {
                                                                     key: "slot-legend-entry-{slot_idx}",
                                                                     class: "board-drill-legend-item",
+                                                                    span { class: "board-legend-check-gap" }
                                                                     svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
                                                                         g { transform: "translate(12 12)",
                                                                             path { d: "{outline}", class: "{band_class}" }
@@ -1466,7 +1543,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     }
                                                 }
-                                                div { class: "board-drill-legend-item",
+                                                label { class: "board-drill-legend-item",
+                                                    LegendToggle { layer: BoardLayer::OutsideRoute, hidden: hidden_layers }
                                                     svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
                                                         // The kerf sits wholly on one side of the cut line, as it
                                                         // does on the board.
@@ -1481,7 +1559,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 }
 
                                                 div { class: "board-drill-legend-note", "Hole type colors" }
-                                                div { class: "board-drill-legend-item",
+                                                label { class: "board-drill-legend-item",
+                                                    LegendToggle { layer: BoardLayer::Via, hidden: hidden_layers }
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1496,7 +1575,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "Via" }
                                                 }
-                                                div { class: "board-drill-legend-item",
+                                                label { class: "board-drill-legend-item",
+                                                    LegendToggle { layer: BoardLayer::Pth, hidden: hidden_layers }
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1511,7 +1591,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "PTH" }
                                                 }
-                                                div { class: "board-drill-legend-item",
+                                                label { class: "board-drill-legend-item",
+                                                    LegendToggle { layer: BoardLayer::Npth, hidden: hidden_layers }
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1526,7 +1607,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "NPTH" }
                                                 }
-                                                div { class: "board-drill-legend-item",
+                                                label { class: "board-drill-legend-item",
+                                                    LegendToggle { layer: BoardLayer::EdgeCut, hidden: hidden_layers }
                                                     svg { class: "board-legend-icon", view_box: "0 0 24 24",
                                                         path {
                                                             d: "M 3 12 L 9 4 L 21 4 L 21 20 L 3 20 Z",
@@ -1534,6 +1616,42 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     }
                                                     span { "Edge cut line" }
+                                                }
+
+                                                // Copper last, and only when there is any:
+                                                // a heading over two rows that explain
+                                                // nothing would be worse than no heading.
+                                                // KiCad's own colours, so an operator
+                                                // reading this against the layout has
+                                                // nothing to translate.
+                                                if !snapshot.copper.is_empty() {
+                                                    h4 { "Copper" }
+                                                    div { class: "board-drill-legend-note",
+                                                        "Shaded beneath everything else, as it is on the board. The far side is drawn fainter."
+                                                    }
+                                                    for (layer , label , swatch) in [
+                                                        (BoardLayer::CopperFront, "Top copper (F.Cu)", "board-copper-front"),
+                                                        (BoardLayer::CopperBack, "Bottom copper (B.Cu)", "board-copper-back"),
+                                                    ] {
+                                                        label {
+                                                            key: "copper-legend-{label}",
+                                                            class: "board-drill-legend-item",
+                                                            LegendToggle { layer, hidden: hidden_layers }
+                                                            svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                                g { class: "{swatch}",
+                                                                    rect {
+                                                                        x: "3",
+                                                                        y: "5",
+                                                                        width: "18",
+                                                                        height: "14",
+                                                                        rx: "2",
+                                                                        class: "board-copper-fill",
+                                                                    }
+                                                                }
+                                                            }
+                                                            span { "{label}" }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -1668,3 +1786,64 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    fn hidden(layers: &[BoardLayer]) -> BTreeSet<BoardLayer> {
+        layers.iter().copied().collect()
+    }
+
+    /// The default has to be "everything", and it has to stay that way when a layer is
+    /// added later. Tracking what is *hidden* is what guarantees both — a set of what is
+    /// shown would leave a new layer invisible until someone remembered to list it.
+    #[test]
+    fn nothing_hidden_shows_everything() {
+        let none = hidden(&[]);
+        for layer in [
+            BoardLayer::CopperFront,
+            BoardLayer::CopperBack,
+            BoardLayer::Via,
+            BoardLayer::Pth,
+            BoardLayer::Npth,
+            BoardLayer::OutsideRoute,
+            BoardLayer::EdgeCut,
+        ] {
+            assert!(layer_visible(&none, layer), "{layer:?} should start visible");
+        }
+    }
+
+    /// One row, one layer. Switching a hole type off must not take its neighbours with it
+    /// — the whole point of a per-row control is that the rest of the picture stays put.
+    #[test]
+    fn hiding_one_layer_leaves_the_others_alone() {
+        let only_pth = hidden(&[BoardLayer::Pth]);
+
+        assert!(!layer_visible(&only_pth, BoardLayer::Pth));
+        assert!(layer_visible(&only_pth, BoardLayer::Via));
+        assert!(layer_visible(&only_pth, BoardLayer::Npth));
+        assert!(layer_visible(&only_pth, BoardLayer::CopperFront));
+        assert!(layer_visible(&only_pth, BoardLayer::EdgeCut));
+    }
+
+    /// A hole type governs both the drilled markers and the routed slots of that kind,
+    /// because that is what the row has always meant: a PTH slot is hatched in the PTH
+    /// colour. Both the marker loop and the slot loop reach the layer through this, so
+    /// one mapping keeps them from disagreeing.
+    #[test]
+    fn a_hole_kind_maps_to_the_row_that_names_its_colour() {
+        assert_eq!(BoardLayer::of_hole(&HoleKind::Via), BoardLayer::Via);
+        assert_eq!(BoardLayer::of_hole(&HoleKind::PadPth), BoardLayer::Pth);
+        assert_eq!(BoardLayer::of_hole(&HoleKind::PadNpth), BoardLayer::Npth);
+    }
+
+    /// The two copper layers are independent: seeing the far side alone is the reason to
+    /// have two rows rather than one.
+    #[test]
+    fn the_two_copper_sides_switch_independently() {
+        let front_off = hidden(&[BoardLayer::CopperFront]);
+        assert!(!layer_visible(&front_off, BoardLayer::CopperFront));
+        assert!(layer_visible(&front_off, BoardLayer::CopperBack));
+    }
+}

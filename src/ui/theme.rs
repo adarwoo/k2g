@@ -3292,15 +3292,16 @@ th {
 }
 
 /*
- * Copper. Both outer layers are drawn, and the *back* one is dimmed hard — seen from
- * above it is behind the substrate, and drawing the two at equal strength makes a board
- * that is dense on both sides unreadable on either.
+ * Copper, in KiCad's own layer colours — red for the top, blue for the bottom — so an
+ * operator reading this against the layout they just drew has nothing to translate.
  *
- * Colour comes from the group, fill from the shape, so one rule paints tracks, pads,
- * vias and pours alike. Not a theme accent: copper is copper, and an operator comparing
- * this against KiCad should not have to translate. It is muted well below full strength
- * regardless, because everything that matters — the holes, the outline, the toolpaths —
- * is drawn on top of it and has to win.
+ * Both are held well below full strength, because everything that matters (the holes,
+ * the outline, the toolpaths) is drawn on top of copper and has to win. The back is
+ * fainter still, now only because it is the far side: telling the two apart is the hue's
+ * job, which is the whole reason for taking KiCad's pair rather than one copper tone.
+ *
+ * Colour comes from the group and fill from the shape, so one rule paints tracks, pads,
+ * vias and pours alike — and the legend swatch takes the same pair for free.
  */
 .board-copper-fill {
     fill: currentColor;
@@ -3308,26 +3309,37 @@ th {
 }
 
 .board-copper-front {
-    color: color-mix(in srgb, #b87333 62%, transparent);
+    color: color-mix(in srgb, #c83434 58%, transparent);
 }
 
 .board-copper-back {
-    color: color-mix(in srgb, #b87333 22%, transparent);
+    color: color-mix(in srgb, #4d7fc4 38%, transparent);
 }
 
-.board-view-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-subtle);
+/*
+ * The legend is the layer control, so a row that names a layer is clickable along its
+ * whole length — the label element does that for free, and the pointer says so.
+ */
+label.board-drill-legend-item {
+    cursor: pointer;
     user-select: none;
+}
+
+.board-legend-check {
+    margin: 0;
+    flex: 0 0 13px;
+    width: 13px;
+    height: 13px;
     cursor: pointer;
 }
 
-.board-view-toggle input {
-    margin: 0;
-    cursor: pointer;
+/*
+ * The size-class rows carry no checkbox — they classify symbols by diameter rather than
+ * naming a layer — so they take a spacer of the same width instead, and the swatch column
+ * stays straight down the panel.
+ */
+.board-legend-check-gap {
+    flex: 0 0 13px;
 }
 
 .board-hole-cross {
