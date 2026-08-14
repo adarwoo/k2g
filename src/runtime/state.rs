@@ -1353,7 +1353,11 @@ impl AppState {
                         catalog_diameter: Some(tool.diameter),
                         point_angle: tool.point_angle,
                         catalog_point_angle: Some(tool.point_angle),
-                        flute_length: None,
+                        // Not carried by `CatalogStockTool`, like `flute_length` beside it: the
+            // catalogue knows them, the add-from-catalogue projection does not.
+            flute_length: None,
+            tip_diameter: None,
+            z_min_depth: None,
                         table_feed: tool.table_feed,
                         catalog_table_feed: tool.table_feed,
                         z_feed: tool.z_feed,

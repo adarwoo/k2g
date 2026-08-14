@@ -285,6 +285,55 @@ fn point_length_mm(diameter_mm: f64, point_angle_deg: f64) -> f64 {
     (diameter_mm / 2.0) / tangent
 }
 
+/// How wide a V-bit cuts at a given depth.
+///
+/// The bit is a cone of included angle `point_angle` standing on a flat tip, so sinking it
+/// by `depth` exposes `depth·tan(angle/2)` of cone on each side:
+///
+/// ```text
+///     w = tip + 2·depth·tan(angle/2)
+/// ```
+///
+/// This is the whole reason isolation engraving is done with a V-bit rather than a
+/// straight cutter: the same tool cuts a 0.1 mm channel or a 0.4 mm one, and the operator
+/// picks by dialling depth rather than by changing tools. It is also why depth accuracy
+/// matters so much more here than elsewhere — the board's flatness is directly the
+/// tolerance on trace width.
+pub fn engrave_width_mm(tip_diameter_mm: f64, point_angle_deg: f64, depth_mm: f64) -> f64 {
+    if depth_mm <= 0.0 {
+        return tip_diameter_mm.max(0.0);
+    }
+    // A flat-ended tool cuts its own width however deep it goes.
+    if point_angle_deg >= 180.0 {
+        return tip_diameter_mm.max(0.0);
+    }
+    let half = (point_angle_deg / 2.0).to_radians();
+    (tip_diameter_mm + 2.0 * depth_mm * half.tan()).max(0.0)
+}
+
+/// How deep to sink a V-bit to cut a channel `width_mm` across — [`engrave_width_mm`]
+/// inverted, and the direction the operator actually works in.
+///
+/// They ask for an isolation width, which is an electrical requirement they can reason
+/// about; depth is a consequence of the bit in the spindle. `None` when no depth achieves
+/// it: a channel narrower than the tip is not something this bit can cut, and a flat tool
+/// has only one width there is.
+pub fn engrave_depth_mm(tip_diameter_mm: f64, point_angle_deg: f64, width_mm: f64) -> Option<f64> {
+    if width_mm < tip_diameter_mm {
+        return None; // the tip alone is already wider than asked for
+    }
+    if point_angle_deg >= 180.0 {
+        // Flat: the only width it cuts is its own, so a wider one is unreachable.
+        return (width_mm - tip_diameter_mm).abs().le(&1e-9).then_some(0.0);
+    }
+    let half = (point_angle_deg / 2.0).to_radians();
+    let tangent = half.tan();
+    if tangent <= 1e-9 {
+        return None;
+    }
+    Some((width_mm - tip_diameter_mm) / (2.0 * tangent))
+}
+
 /// The plunge a **router** must reach to cut through: `T + m`.
 ///
 /// A router is flat-ended, so unlike a twist drill there is no point length to clear —
@@ -880,6 +929,8 @@ mod tests {
             point_angle: Angle::from_degrees(if kind == "Drill" { 118.0 } else { 180.0 }),
             catalog_point_angle: None,
             flute_length: flute_mm.map(Length::from_mm),
+            tip_diameter: None,
+            z_min_depth: None,
             table_feed: None,
             catalog_table_feed: None,
             z_feed: None,
@@ -1203,5 +1254,76 @@ mod tests {
         let holes = vec![round_hole("h1", 1.0)];
         let out = assign(&holes, &[over, under], &config(false), &rack(4), &roomy_setup()).unwrap();
         assert_eq!(out.holes[0].tool_id, "over");
+    }
+
+    /// Sinking a V-bit deeper cuts wider, by the cone it exposes.
+    ///
+    /// This is the whole reason isolation engraving uses a V-bit: one tool cuts any
+    /// channel width, chosen by depth. A 60 degree bit has `tan(30) = 0.5774`, so every
+    /// millimetre of depth adds 1.1547mm of width.
+    #[test]
+    fn a_v_bit_cuts_wider_the_deeper_it_goes() {
+        // 0.1mm tip, 60 degrees, 0.1mm deep: 0.1 + 2*0.1*tan(30).
+        let w = engrave_width_mm(0.1, 60.0, 0.1);
+        assert!((w - 0.21547).abs() < 1e-5, "got {w}");
+
+        // Twice the depth adds twice the cone, not twice the width — the tip is a floor.
+        let deeper = engrave_width_mm(0.1, 60.0, 0.2);
+        assert!((deeper - 0.33094).abs() < 1e-5, "got {deeper}");
+
+        // At zero depth only the tip is in the work.
+        assert!((engrave_width_mm(0.1, 60.0, 0.0) - 0.1).abs() < 1e-9);
+        // A flat tool cuts its own width however deep it goes.
+        assert!((engrave_width_mm(2.0, 180.0, 5.0) - 2.0).abs() < 1e-9);
+    }
+
+    /// Depth is derived from the width the operator asked for, and refused when no depth
+    /// achieves it.
+    ///
+    /// The operator thinks in isolation width, which is an electrical requirement; depth
+    /// is a consequence of whichever bit is in the spindle. Asking for a channel narrower
+    /// than the tip has no answer, and returning some clamped depth instead of `None`
+    /// would cut a wider channel than requested through a trace gap chosen to be tight.
+    #[test]
+    fn the_depth_for_a_width_inverts_the_width_for_a_depth() {
+        for depth in [0.05, 0.1, 0.25, 0.4] {
+            let w = engrave_width_mm(0.1, 60.0, depth);
+            let back = engrave_depth_mm(0.1, 60.0, w).expect("a width it can cut");
+            assert!((back - depth).abs() < 1e-9, "{depth} -> {w} -> {back}");
+        }
+
+        assert_eq!(
+            engrave_depth_mm(0.2, 60.0, 0.15),
+            None,
+            "0.15mm is narrower than the 0.2mm tip: no depth cuts it"
+        );
+        assert_eq!(
+            engrave_depth_mm(2.0, 180.0, 3.0),
+            None,
+            "a flat tool cuts its own width and no other"
+        );
+    }
+
+    /// A V-bit enters the work sideways, so a missing plunge rating derates like a
+    /// router's — not like a drill's.
+    ///
+    /// `RatedFeeds::for_tool` fills in an absent `z_feed` from the lateral feed, and
+    /// whether it derates turns on this one predicate. A drill gets the full rate because
+    /// plunging is all it does; a side-cutting tool gets a third of it. Answer that
+    /// wrongly for a V-bit and an unrated engraver drives its tip straight down at
+    /// cutting speed, which breaks the tip on the first hole.
+    #[test]
+    fn an_unrated_v_bit_plunges_at_a_milling_feed_not_a_drilling_one() {
+        use crate::runtime::tooling::tool_mills;
+
+        let mut vbit = router("v", 3.175);
+        vbit.kind = "V-Bit".to_string();
+        let mut engraver = router("e", 3.175);
+        engraver.kind = "Engraver".to_string();
+        let bit = drill("d", 1.0);
+
+        assert!(tool_mills(&vbit), "a V-bit cuts with its flank");
+        assert!(tool_mills(&engraver), "so does an engraver");
+        assert!(!tool_mills(&bit), "a drill only goes down");
     }
 }

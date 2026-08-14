@@ -1666,9 +1666,6 @@ fn pick_outline_router(
 
 /// Whether a tool can mill (as opposed to drill).
 ///
-/// Also decides how a missing plunge rating is filled in — see
-/// [`RatedFeeds::for_tool`](crate::gcode::feeds::RatedFeeds::for_tool) — which is why it
-/// is reachable outside this module as [`tool_mills`].
 fn is_router_tool(tool: &Tool) -> bool {
     matches!(
         ToolKind::from_kind_label(&tool.kind),
@@ -1676,10 +1673,26 @@ fn is_router_tool(tool: &Tool) -> bool {
     )
 }
 
-/// Whether `tool` cuts with its flutes rather than its point, for callers outside this
-/// module. A thin alias for the private predicate, so the answer has one definition.
+/// Whether `tool` cuts with its flutes rather than its point.
+///
+/// **Not the same question as [`is_router_tool`]**, though it was the same predicate until
+/// V-bits arrived, and the difference is a broken tool.
+///
+/// `is_router_tool` answers "may this be *chosen* to route an outline or a slot", where a
+/// V-bit is the wrong answer — it cuts a vee, not a channel of its own diameter.
+///
+/// This one answers "does it enter the work sideways", which decides how
+/// [`RatedFeeds::for_tool`](crate::gcode::feeds::RatedFeeds::for_tool) fills in a missing
+/// plunge rating: a side-cutting tool gets the derated
+/// [`PLUNGE_FEED_FRACTION`](crate::gcode::routing), a drill gets the full lateral feed
+/// because plunging is the only thing it does. Answer that wrongly for a V-bit and an
+/// unrated engraver drives its tip straight down at cutting speed — which is how you
+/// discover the two questions were never the same one.
 pub(crate) fn tool_mills(tool: &Tool) -> bool {
-    is_router_tool(tool)
+    matches!(
+        ToolKind::from_kind_label(&tool.kind),
+        ToolKind::Routerbit | ToolKind::Endmill | ToolKind::Vbit | ToolKind::Engraver
+    )
 }
 
 /// Routers pinned in the toolset's slots, in slot order. These are already in the rack,
@@ -2828,6 +2841,8 @@ mod tests {
             point_angle: units::Angle::from_degrees(180.0),
             catalog_point_angle: None,
             flute_length: Some(Length::from_mm(30.0)),
+            tip_diameter: None,
+            z_min_depth: None,
             table_feed: None,
             catalog_table_feed: None,
             z_feed: None,
