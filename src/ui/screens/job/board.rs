@@ -58,6 +58,10 @@ const HATCH_PITCH_LEGEND: f64 = 3.0;
 /// hole's symbol does.
 const HOLE_KIND_SLUGS: [&str; 3] = ["via", "pth", "npth"];
 
+/// Width of the SVG user space the board is drawn into. The height follows from the
+/// board's aspect, so this one number sets the scale for everything in the view.
+const BOARD_VIEW_WIDTH: f64 = 1000.0;
+
 fn board_display_label(board_filename: &str) -> String {
     Path::new(board_filename)
         .file_name()
@@ -468,6 +472,100 @@ fn edge_shape_element(shape: &SvgShape, class: &str, stroke_width: Option<f64>) 
 /// Given three points (start, mid, end) that lie on a circular arc, return
 /// an SVG path string `M ... A ... ` for that arc.  Falls back to a straight
 /// line if the points are collinear.
+/// One copper layer flattened into as few SVG paths as it can honestly be.
+#[derive(Clone, PartialEq)]
+struct CopperLayerSvg {
+    /// Everything with no holes — tracks, pads, vias — as one path.
+    ///
+    /// One element rather than one per feature, because a dense board has well over a
+    /// thousand of them and the DOM is the cost here, not the geometry. They are all in
+    /// one path under the **nonzero** rule, which is what makes overlaps union: a track
+    /// running across its own pad must read as copper, and under `evenodd` the overlap
+    /// would come out as a hole.
+    solid: String,
+    /// The poured zones, one path each, filled **evenodd** so their clearance cut-outs
+    /// and thermal reliefs read as holes.
+    ///
+    /// Not folded into the path above for exactly that reason — the two need opposite
+    /// fill rules — and separate from each other because evenodd across two overlapping
+    /// zones would punch a hole where they meet.
+    zones: Vec<String>,
+}
+
+/// Both outer layers as SVG, in the view's coordinates.
+#[derive(Clone, Default, PartialEq)]
+struct CopperSvg {
+    front: Option<CopperLayerSvg>,
+    back: Option<CopperLayerSvg>,
+}
+
+/// The board's copper as paths, or nothing when there is no copper or no bounds.
+///
+/// Pulled out of the component and memoized on the context, because it is the most
+/// expensive thing the view builds and **none of it depends on zoom or pan** — those
+/// move the `viewBox`, not the geometry. Rebuilt inline it would regenerate and re-diff
+/// most of a megabyte of path data on every frame of a drag.
+fn build_copper_svg(ctx: &AppCtx) -> CopperSvg {
+    let Some(bbox) = ctx.board.as_ref().and_then(|board| board.bounding_box.as_ref()) else {
+        return CopperSvg::default();
+    };
+    let (min_x, min_y) = (bbox.x.as_mm(), bbox.y.as_mm());
+    let (width, height) = (bbox.width.as_mm(), bbox.height.as_mm());
+    if width <= 0.0 || height <= 0.0 {
+        return CopperSvg::default();
+    }
+    let view_height = BOARD_VIEW_WIDTH * (height / width);
+
+    // Unclamped, unlike the edge shapes: copper legitimately sits outside the board's own
+    // bounding box (a pad's clearance, a pour run right to the edge), and clamping would
+    // smear it along the border instead of letting the frame clip it.
+    let tx = move |px: f64| ((px - min_x) / width) * BOARD_VIEW_WIDTH;
+    let ty = move |py: f64| ((py - min_y) / height) * view_height;
+
+    CopperSvg {
+        front: ctx.copper.front.as_ref().map(|layer| copper_layer_svg(layer, tx, ty)),
+        back: ctx.copper.back.as_ref().map(|layer| copper_layer_svg(layer, tx, ty)),
+    }
+}
+
+/// Turns a layer's copper into paths, mapping board mm through `tx`/`ty`.
+fn copper_layer_svg(
+    copper: &pcb::CopperSnapshot,
+    tx: impl Fn(f64) -> f64,
+    ty: impl Fn(f64) -> f64,
+) -> CopperLayerSvg {
+    let ring = |out: &mut String, ring: &[(i64, i64)]| {
+        for (i, &(x, y)) in ring.iter().enumerate() {
+            let (x, y) = (tx(x as f64 / 1e6), ty(y as f64 / 1e6));
+            out.push_str(if i == 0 { "M" } else { "L" });
+            out.push_str(&format!("{x:.2} {y:.2} "));
+        }
+        out.push_str("Z ");
+    };
+
+    let mut solid = String::new();
+    let mut zones = Vec::new();
+    for feature in &copper.features {
+        if feature.source == pcb::CopperSource::Zone {
+            let mut path = String::new();
+            for polygon in &feature.polygons {
+                ring(&mut path, &polygon.outline);
+                for hole in &polygon.holes {
+                    ring(&mut path, hole);
+                }
+            }
+            if !path.is_empty() {
+                zones.push(path);
+            }
+            continue;
+        }
+        for polygon in &feature.polygons {
+            ring(&mut solid, &polygon.outline);
+        }
+    }
+    CopperLayerSvg { solid, zones }
+}
+
 fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String {
     let d = 2.0 * (sx * (my - ey) + mx * (ey - sy) + ex * (sy - my));
     if d.abs() < 1e-9 {
@@ -526,8 +624,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let mut board_pan_x = use_signal(|| 0.0_f64);
     let mut board_pan_y = use_signal(|| 0.0_f64);
     let mut board_is_panning = use_signal(|| false);
+    // On by default: the copper is most of what a PCB *is*, and a board view that hides
+    // it until asked is a board view of the drill file.
+    let mut show_copper = use_signal(|| true);
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
-    let board_view_width = 1000.0_f64;
+    let board_view_width = BOARD_VIEW_WIDTH;
     let board_view_height = {
         let aspect = snapshot.board.as_ref()
             .and_then(|b| b.bounding_box.as_ref())
@@ -689,6 +790,17 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
         Vec::new()
     };
 
+    // Memoized, not built inline: it is the most expensive thing here and none of it
+    // moves with zoom or pan. It rebuilds when the context does — which is when the board
+    // is re-read — and when the layer is switched on.
+    let copper_svg = use_memo(move || {
+        if !*show_copper.read() {
+            return CopperSvg::default();
+        }
+        build_copper_svg(&state.read())
+    });
+    let copper_svg = copper_svg.read();
+
     // The stitched contours, in view units — the source for the outside-route band.
     // Only a clean stitch is usable: with errors the contours are not closed, so there
     // is no reliable inside to keep the band out of.
@@ -765,9 +877,27 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 },
                                                 "Reset"
                                             }
+                                            // Absent, not disabled, when there is no copper
+                                            // to show: a greyed tickbox invites the
+                                            // operator to look for what would ungrey it,
+                                            // and for a board KiCad would not hand over
+                                            // its copper there is nothing.
+                                            if !snapshot.copper.is_empty() {
+                                                label { class: "board-view-toggle",
+                                                    input {
+                                                        r#type: "checkbox",
+                                                        checked: *show_copper.read(),
+                                                        onchange: move |evt| show_copper.set(evt.checked()),
+                                                    }
+                                                    "Copper"
+                                                }
+                                            }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
                                             span { class: "board-view-status",
                                                 "{board_hole_markers.len()} drilled · {board_slot_features.len()} routed slots · {board.edge_shapes.len()} edges"
+                                                if !snapshot.copper.is_empty() {
+                                                    " · {snapshot.copper.feature_count()} copper"
+                                                }
                                             }
                                         }
                                         div { class: "board-preview-layout",
@@ -877,6 +1007,42 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         width: "{board_view_width}",
                                                         height: "{board_view_height}",
                                                         class: "board-svg-frame",
+                                                    }
+
+                                                    // Copper first, so everything else is
+                                                    // drawn on top of it — which is how it
+                                                    // sits on the board, and what lets a
+                                                    // hole read as a hole *through* a pad.
+                                                    //
+                                                    // The back layer under the front, and
+                                                    // dimmed: seen from above, it is behind
+                                                    // the substrate. Drawing the two at
+                                                    // equal strength would make a board
+                                                    // that is dense on both sides
+                                                    // unreadable on either.
+                                                    for (layer , class) in [
+                                                        (copper_svg.back.as_ref(), "board-copper-back"),
+                                                        (copper_svg.front.as_ref(), "board-copper-front"),
+                                                    ] {
+                                                        if let Some(layer) = layer {
+                                                            g { class: "{class}",
+                                                                for (zone_idx , zone) in layer.zones.iter().enumerate() {
+                                                                    path {
+                                                                        key: "{class}-zone-{zone_idx}",
+                                                                        d: "{zone}",
+                                                                        class: "board-copper-fill",
+                                                                        fill_rule: "evenodd",
+                                                                    }
+                                                                }
+                                                                if !layer.solid.is_empty() {
+                                                                    path {
+                                                                        d: "{layer.solid}",
+                                                                        class: "board-copper-fill",
+                                                                        fill_rule: "nonzero",
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                     }
 
                                                     // Outside routing: the kerf the outline cutter sweeps. It lies
@@ -1501,3 +1667,4 @@ mod tests {
         assert!(!features.holes[1].machined, "the non-plated one is not");
     }
 }
+

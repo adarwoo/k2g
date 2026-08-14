@@ -3291,6 +3291,45 @@ th {
     stroke-width: 1;
 }
 
+/*
+ * Copper. Both outer layers are drawn, and the *back* one is dimmed hard — seen from
+ * above it is behind the substrate, and drawing the two at equal strength makes a board
+ * that is dense on both sides unreadable on either.
+ *
+ * Colour comes from the group, fill from the shape, so one rule paints tracks, pads,
+ * vias and pours alike. Not a theme accent: copper is copper, and an operator comparing
+ * this against KiCad should not have to translate. It is muted well below full strength
+ * regardless, because everything that matters — the holes, the outline, the toolpaths —
+ * is drawn on top of it and has to win.
+ */
+.board-copper-fill {
+    fill: currentColor;
+    stroke: none;
+}
+
+.board-copper-front {
+    color: color-mix(in srgb, #b87333 62%, transparent);
+}
+
+.board-copper-back {
+    color: color-mix(in srgb, #b87333 22%, transparent);
+}
+
+.board-view-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-subtle);
+    user-select: none;
+    cursor: pointer;
+}
+
+.board-view-toggle input {
+    margin: 0;
+    cursor: pointer;
+}
+
 .board-hole-cross {
     stroke: currentColor;
     /* Non-scaling, so this is screen pixels at any zoom. 2px swamped the small

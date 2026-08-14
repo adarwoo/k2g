@@ -16,6 +16,8 @@ pub struct UiLaunchData {
     pub kicad_status: String,
     /// The board collected at startup (the reachable KiCad's open PCB), if any.
     pub board_snapshot: Option<BoardSnapshot>,
+    /// Its outer copper, read on the same connection.
+    pub copper: crate::runtime::BoardCopper,
 }
 
 /// Top-level screens available in the application shell.

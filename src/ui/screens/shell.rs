@@ -224,10 +224,13 @@ fn SettingsCogIcon() -> Element {
 /// startup) and update the status. Setting a changed board re-stitches once and
 /// triggers regeneration (see `sync_after_mutation`).
 fn do_refresh(state: Signal<crate::runtime::AppCtx>) {
-    let (status, board) = crate::runtime::acquire_board();
-    super::mutate_ctx(state, |s| {
-        s.kicad_status = status;
-        s.board = board;
+    let acquired = crate::runtime::acquire_board();
+    super::mutate_ctx(state, |ctx| {
+        ctx.kicad_status = acquired.status;
+        ctx.board = acquired.board;
+        // Replaced together with the board, never independently: copper from one revision
+        // of a file drawn under the outline of another is a picture of no board at all.
+        ctx.copper = acquired.copper;
     });
 }
 

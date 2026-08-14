@@ -241,6 +241,11 @@ pub struct AppCtx {
     /// name is what it always was while every track may have moved. Anything caching work
     /// derived from the board keys on this instead.
     pub board_epoch: u64,
+    /// The copper on the board's two outer layers, as read when the board was.
+    ///
+    /// On the context rather than in [`AppState`] for the reason its neighbours are: that
+    /// is deep-cloned before every mutation, and this is tens of thousands of points.
+    pub copper: BoardCopper,
     /// Isolation contours for copper engraving, and whether any are being worked out.
     ///
     /// On the context rather than in [`AppState`], which is deep-cloned before every
@@ -502,7 +507,68 @@ pub fn initialize_ctx(boot: UiLaunchData) {
 /// UI tests for this rather than enumerating the failures and missing a new one.
 pub const KICAD_STATUS_OK_PREFIX: &str = "KiCad ";
 
-pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
+/// The copper on the two layers a mill can reach, as it was when the board was read.
+///
+/// Read with the board and replaced with it, so it cannot describe a different revision
+/// of the same file. Behind `Arc`s because the context is cloned on every snapshot and a
+/// dense board's copper is tens of thousands of points.
+///
+/// Only the outer two. This is what the Board view draws, and the view draws what can be
+/// machined — an inner layer is not reachable by any tool k2g drives.
+#[derive(Clone, Debug, Default)]
+pub struct BoardCopper {
+    pub front: Option<std::sync::Arc<pcb::CopperSnapshot>>,
+    pub back: Option<std::sync::Arc<pcb::CopperSnapshot>>,
+}
+
+impl PartialEq for BoardCopper {
+    /// By identity, not by contents.
+    ///
+    /// The only question anyone asks of this is "is this the same read as before", and
+    /// two reads of an unchanged board would answer it identically either way — but the
+    /// contents comparison walks tens of thousands of points to get there, on a type that
+    /// sits in a component's props and is therefore compared on renders.
+    fn eq(&self, other: &Self) -> bool {
+        fn same(a: &Option<std::sync::Arc<pcb::CopperSnapshot>>, b: &Option<std::sync::Arc<pcb::CopperSnapshot>>) -> bool {
+            match (a, b) {
+                (None, None) => true,
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                _ => false,
+            }
+        }
+        same(&self.front, &other.front) && same(&self.back, &other.back)
+    }
+}
+
+impl BoardCopper {
+    pub fn is_empty(&self) -> bool {
+        self.front.is_none() && self.back.is_none()
+    }
+
+    /// Total copper features across both layers, for the view's status line.
+    pub fn feature_count(&self) -> usize {
+        [self.front.as_ref(), self.back.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|layer| layer.features.len())
+            .sum()
+    }
+}
+
+/// Everything one read of KiCad yields.
+pub struct BoardAcquisition {
+    pub status: String,
+    pub board: Option<BoardSnapshot>,
+    pub copper: BoardCopper,
+}
+
+impl BoardAcquisition {
+    fn disconnected(status: &str) -> Self {
+        Self { status: status.to_string(), board: None, copper: BoardCopper::default() }
+    }
+}
+
+pub fn acquire_board() -> BoardAcquisition {
     // The connection is attempted only here — at startup and from the status-bar
     // Refresh button. Every failure below is otherwise invisible (the return type
     // is a display string + optional board), so log the underlying `PcbError`: it
@@ -512,7 +578,7 @@ pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
         Ok(client) => client,
         Err(err) => {
             warn!("KiCad connect failed: {err}");
-            return ("not connected".to_string(), None);
+            return BoardAcquisition::disconnected("not connected");
         }
     };
 
@@ -525,31 +591,62 @@ pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
         Ok(version) => format!("{KICAD_STATUS_OK_PREFIX}{version}"),
         Err(err) => {
             warn!("KiCad socket dialled but the version query failed: {err}");
-            return ("not responding".to_string(), None);
+            return BoardAcquisition::disconnected("not responding");
         }
     };
 
-    let board = match client.enumerate_pcbs() {
-        Ok(pcbs) => match pcbs.into_iter().next() {
-            Some(pcb) => match client.collect_snapshot(&pcb) {
-                Ok(snapshot) => Some(snapshot),
-                Err(err) => {
-                    warn!("KiCad board snapshot collection failed: {err}");
-                    None
-                }
-            },
-            None => {
-                log::info!("KiCad connected but no PCB is open");
-                None
-            }
-        },
+    let open = match client.enumerate_pcbs() {
+        Ok(pcbs) => pcbs.into_iter().next(),
         Err(err) => {
             warn!("KiCad PCB enumeration failed: {err}");
             None
         }
     };
+    let Some(pcb) = open else {
+        log::info!("KiCad connected but no PCB is open");
+        return BoardAcquisition { status, board: None, copper: BoardCopper::default() };
+    };
 
-    (status, board)
+    let board = match client.collect_snapshot(&pcb) {
+        Ok(snapshot) => Some(snapshot),
+        Err(err) => {
+            warn!("KiCad board snapshot collection failed: {err}");
+            None
+        }
+    };
+
+    // On the same connection and in the same breath as the board, so the two cannot come
+    // from different revisions of the file, and so the copper is invalidated by exactly
+    // the thing that invalidates the board.
+    //
+    // **Without a refill**, unlike the engraving read. This is a picture, and asking KiCad
+    // to re-pour every zone would block it on a refresh the operator pressed to look at
+    // something. A zone left unfilled draws as absent, which is what it is.
+    let copper = BoardCopper {
+        front: collect_copper_layer(&client, &pcb, pcb::FRONT_COPPER),
+        back: collect_copper_layer(&client, &pcb, pcb::BACK_COPPER),
+    };
+
+    BoardAcquisition { status, board, copper }
+}
+
+/// One layer's copper, or `None` with a log line.
+///
+/// Never fatal to the acquisition. The copper is what the Board view shades; the board is
+/// what k2g machines, and refusing the second because the first would not read would be a
+/// poor trade.
+fn collect_copper_layer(
+    client: &KiCad,
+    pcb: &pcb::PcbInfo,
+    layer_id: i32,
+) -> Option<std::sync::Arc<pcb::CopperSnapshot>> {
+    match client.collect_copper(pcb, layer_id, false) {
+        Ok(snapshot) => Some(std::sync::Arc::new(snapshot)),
+        Err(err) => {
+            warn!("KiCad copper collection failed for layer {layer_id}: {err}");
+            None
+        }
+    }
 }
 
 #[allow(dead_code)]

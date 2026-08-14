@@ -48,6 +48,7 @@ impl AppCtx {
             job_references,
             status,
             catalogs_loaded: false,
+            copper: boot.copper.clone(),
             board_epoch: 0,
             isolation: Default::default(),
             revision: 0,
@@ -458,6 +459,7 @@ impl AppCtx {
         let boot = UiLaunchData {
             kicad_status: self.app.kicad_status.clone(),
             board_snapshot: self.app.board.clone(),
+            copper: self.copper.clone(),
         };
         let events = std::mem::take(&mut self.app.events);
         self.app = AppState::new(&boot);
@@ -1163,6 +1165,7 @@ mod orchestration_tests {
         AppState::new(&UiLaunchData {
             kicad_status: String::new(),
             board_snapshot: None,
+            copper: Default::default(),
         })
     }
 

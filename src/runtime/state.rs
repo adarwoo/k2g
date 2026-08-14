@@ -2463,6 +2463,7 @@ mod gcode_save_tests {
         let mut app = AppState::new(&UiLaunchData {
             kicad_status: String::new(),
             board_snapshot: None,
+            copper: Default::default(),
         });
         app.board = Some(pcb::BoardSnapshot {
             name: name.to_string(),
@@ -2646,7 +2647,7 @@ mod readiness_gate_tests {
     }
 
     fn bare_app() -> AppState {
-        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None })
+        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None, copper: Default::default() })
     }
 
     /// A no-go reason becomes a standing diagnostic, and stops being one when it is fixed.

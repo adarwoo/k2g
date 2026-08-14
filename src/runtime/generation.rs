@@ -418,7 +418,7 @@ mod tests {
     /// An `AppState` with nothing loaded — enough to exercise the diagnostics list, which
     /// is the only part of it these tests touch.
     fn bare_app() -> AppState {
-        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None })
+        AppState::new(&UiLaunchData { kicad_status: String::new(), board_snapshot: None, copper: Default::default() })
     }
 
     /// One step's program context, from the shared template fixtures. Production sources

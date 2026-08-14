@@ -65,10 +65,11 @@ fn main() {
     // `KICAD_API_TOKEN` in our environment, and `kicad-ipc-rs` prefers both over its
     // temp-directory guess — so this connects straight back to the instance that
     // started us, with no discovery involved.
-    let (kicad_status, board_snapshot) = runtime::acquire_board();
+    let acquired = runtime::acquire_board();
 
     ui::launch(UiLaunchData {
-        kicad_status,
-        board_snapshot,
+        kicad_status: acquired.status,
+        board_snapshot: acquired.board,
+        copper: acquired.copper,
     });
 }
