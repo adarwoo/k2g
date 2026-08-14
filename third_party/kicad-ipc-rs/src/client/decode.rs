@@ -416,6 +416,45 @@ pub(crate) fn decode_pcb_item(item: prost_types::Any) -> Result<PcbItem, KiCadEr
             .map(layer_to_model)
             .collect::<Vec<_>>();
 
+        // The fill KiCad computed, kept rather than counted. Each entry is one layer's
+        // `SHAPE_POLY_SET` with clearance, thermal relief and island removal already
+        // applied — the thing a caller would otherwise have to reimplement KiCad's
+        // filler to obtain.
+        let filled_polygons = zone
+            .filled_polygons
+            .iter()
+            .map(|entry| {
+                Ok(PcbZoneFilledPolygons {
+                    layer: layer_to_model(entry.layer),
+                    shapes: entry
+                        .shapes
+                        .iter()
+                        .flat_map(|set| set.polygons.iter())
+                        .map(|polygon| map_polygon_with_holes(polygon.clone()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, KiCadError>>()?;
+
+        let outline_polygon_count = zone.outline.as_ref().map_or(0, |o| o.polygons.len());
+        let outline = zone
+            .outline
+            .iter()
+            .flat_map(|set| set.polygons.iter())
+            .map(|polygon| map_polygon_with_holes(polygon.clone()))
+            .collect::<Result<Vec<_>, KiCadError>>()?;
+
+        // Only a copper zone pours a net; a rule area or a graphical zone has none.
+        let net = match &zone.settings {
+            Some(board_types::zone::Settings::CopperSettings(copper)) => {
+                copper.net.as_ref().map(|net| BoardNet {
+                    code: net.code.as_ref().map(|c| c.value).unwrap_or_default(),
+                    name: net.name.clone(),
+                })
+            }
+            _ => None,
+        };
+
         return Ok(PcbItem::Zone(PcbZone {
             id: zone.id.map(|id| id.value),
             name: zone.name,
@@ -425,8 +464,11 @@ pub(crate) fn decode_pcb_item(item: prost_types::Any) -> Result<PcbItem, KiCadEr
             priority: zone.priority,
             locked: map_lock_state(zone.locked),
             filled: zone.filled,
-            polygon_count: zone.filled_polygons.len(),
-            outline_polygon_count: zone.outline.map_or(0, |outline| outline.polygons.len()),
+            polygon_count: filled_polygons.len(),
+            outline_polygon_count,
+            filled_polygons,
+            outline,
+            net,
             has_copper_settings,
             has_rule_area_settings,
             border_style,

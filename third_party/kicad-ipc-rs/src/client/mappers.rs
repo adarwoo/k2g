@@ -1101,6 +1101,19 @@ pub(crate) fn map_pad_stack(pad_stack: Option<&board_types::PadStack>) -> Option
         drill: pad_stack.drill.map(map_padstack_drill),
         angle_degrees: pad_stack.angle.map(|angle| angle.value_degrees),
         unconnected_layer_removal: Some(unconnected_layer_removal),
+        copper_layers: pad_stack
+            .copper_layers
+            .iter()
+            .map(|entry| PcbPadStackLayer {
+                layer: layer_to_model(entry.layer),
+                shape: board_types::PadStackShape::try_from(entry.shape)
+                    .map(|value| value.as_str_name().to_string())
+                    .ok(),
+                size_nm: entry.size.map(map_vector2_nm),
+                offset_nm: entry.offset.map(map_vector2_nm),
+                corner_rounding_ratio: entry.corner_rounding_ratio,
+            })
+            .collect(),
         copper_layer_count: pad_stack.copper_layers.len(),
         has_front_outer_layers: pad_stack.front_outer_layers.is_some(),
         has_back_outer_layers: pad_stack.back_outer_layers.is_some(),

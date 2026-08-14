@@ -512,6 +512,15 @@ pub struct PcbPadStack {
     /// `drill.diameter` (x, y) is expressed in the pad's own, unrotated frame.
     pub angle_degrees: Option<f64>,
     pub unconnected_layer_removal: Option<String>,
+    /// The copper pad on each layer: shape and size.
+    ///
+    /// Upstream keeps only `copper_layer_count`. For a *pad* that loss does not matter —
+    /// `GetPadShapeAsPolygon` resolves the final shape far better than reconstructing it
+    /// from here would. For a **via** it matters entirely: there is no polygon RPC for
+    /// vias, so without this the annular ring has no size and a via is a drill with no
+    /// copper around it. Anything isolating copper would leave every via shorted to
+    /// whatever it sits in.
+    pub copper_layers: Vec<PcbPadStackLayer>,
     pub copper_layer_count: usize,
     pub has_front_outer_layers: bool,
     pub has_back_outer_layers: bool,
@@ -736,6 +745,35 @@ pub struct PcbField {
     pub text: Option<String>,
 }
 
+/// A padstack's copper on one layer.
+///
+/// Deliberately a subset: shape, size and offset, which is what a via's annular ring
+/// needs. The elaborate cases — custom outlines, chamfers, trapezoid deltas — are left
+/// alone because the shapes that reach them are pads, and pads have a better route in
+/// `GetPadShapeAsPolygon`.
+// No `Eq`: `corner_rounding_ratio` is a float. `PcbPadStack` above is in the same
+// position and drops `Eq` for the same reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PcbPadStackLayer {
+    pub layer: BoardLayerInfo,
+    /// KiCad's `PadStackShape` spelling, e.g. `PSS_CIRCLE`.
+    pub shape: Option<String>,
+    /// Pad size on this layer. For a round via, x and y are the outer diameter.
+    pub size_nm: Option<Vector2Nm>,
+    /// Shape centre relative to the hole centre.
+    pub offset_nm: Option<Vector2Nm>,
+    /// Corner rounding as a fraction of `min(size.x, size.y)`; round-rect shapes only.
+    pub corner_rounding_ratio: f64,
+}
+
+/// One layer's worth of a zone's computed fill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PcbZoneFilledPolygons {
+    pub layer: BoardLayerInfo,
+    /// The filled copper on that layer, holes as explicit inner rings.
+    pub shapes: Vec<PolygonWithHolesNm>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PcbZone {
     pub id: Option<String>,
@@ -748,6 +786,22 @@ pub struct PcbZone {
     pub filled: bool,
     pub polygon_count: usize,
     pub outline_polygon_count: usize,
+    /// What KiCad's filler actually produced, per layer.
+    ///
+    /// Upstream keeps only `polygon_count` and drops this. It is the most valuable
+    /// geometry on the board for anything that machines copper: the pour *after*
+    /// clearance, thermal relief and island removal have been applied, which is a
+    /// computation no consumer should be reimplementing. Empty when `filled` is false —
+    /// an unfilled zone has no fill to report.
+    pub filled_polygons: Vec<PcbZoneFilledPolygons>,
+    /// The zone as drawn, before filling.
+    pub outline: Vec<PolygonWithHolesNm>,
+    /// The net this zone pours, when it is a copper zone.
+    ///
+    /// Dropped upstream along with the rest of the copper settings. Without it a pour is
+    /// just an anonymous island of copper, and isolating one net from another is exactly
+    /// the question being asked of it.
+    pub net: Option<BoardNet>,
     pub has_copper_settings: bool,
     pub has_rule_area_settings: bool,
     pub border_style: Option<String>,

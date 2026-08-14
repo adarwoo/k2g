@@ -35,9 +35,14 @@ members = [
     "xtask",
 ]
 
-# Vendored fork of kicad-ipc-rs (Milind220/kicad-ipc-rs 0.5.1). Two changes, both
-# recovering geometry upstream maps away, both kept until they land upstream; see
+# Vendored fork of kicad-ipc-rs (Milind220/kicad-ipc-rs 0.5.1). Four changes, all of
+# them recovering geometry upstream maps away, all kept until they land upstream; see
 # third_party/kicad-ipc-rs.
+#
+# The pattern is worth naming, because it has now caught us four times: upstream
+# decodes a shape down to a *count* of its parts and drops the parts. Nothing errors —
+# the board simply arrives with less on it than KiCad has, and whatever we do next is
+# quietly wrong rather than loudly broken.
 #
 #   * `PcbPadStack.angle_degrees` — the pad-stack orientation, which we need to
 #     machine rotated oblong/slot drills.
@@ -45,6 +50,14 @@ members = [
 #     shape, where upstream keeps only how many there are. A cutout drawn with
 #     KiCad's polygon tool is otherwise invisible to us: it has no geometry to
 #     stitch, so it silently never gets machined.
+#   * `PcbZone.filled_polygons` / `.outline` / `.net` — the copper a pour actually
+#     puts down, after KiCad's filler has applied clearance, thermal relief and
+#     island removal, plus the net it belongs to. This is the one piece of board
+#     geometry we could not reasonably recompute: reproducing it means reproducing
+#     the filler.
+#   * `PcbPadStack.copper_layers` — shape and size of the pad on each layer. Pads
+#     have a better route (`GetPadShapeAsPolygon`), but a **via** has none, so
+#     without this a via is a hole with no copper around it.
 [patch.crates-io]
 kicad-ipc-rs = { path = "third_party/kicad-ipc-rs" }
 
