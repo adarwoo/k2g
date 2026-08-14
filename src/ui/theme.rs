@@ -3563,17 +3563,48 @@ label.board-drill-legend-item {
 }
 
 /* Syntax-highlighted, read-only program listing (the Code tab). */
+/*
+ * The listing is virtualised: only the rows on screen exist in the DOM, positioned by
+ * arithmetic on the scroll offset. Three rules follow from that and none of them are
+ * cosmetic.
+ *
+ * `line-height` is a fixed pixel count, matching LINE_HEIGHT_PX in code.rs, because that
+ * number is what turns a scroll offset into a line index. A row a pixel off and the
+ * gutter drifts from the code by a line every few hundred rows.
+ *
+ * There is no vertical padding: it would offset every row from where the arithmetic puts
+ * it. The breathing space goes inside the first and last rows instead — or nowhere, which
+ * is what a code listing usually wants.
+ *
+ * And lines no longer wrap. A wrapped row is two rows tall, which breaks the fixed height
+ * everything else depends on; a G-code line that overruns now scrolls sideways, which is
+ * also the easier of the two to read against a line-number gutter.
+ */
 .gcode-view {
     flex: 1;
     min-height: 280px;
     overflow: auto;
+    position: relative;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: var(--bg);
     font-family: "Cascadia Code", "Consolas", monospace;
     font-size: 12px;
-    line-height: 1.55;
-    padding: 8px 0;
+    line-height: 18px;
+}
+
+/* Carries the whole program's height, so the scrollbar tells the truth about its length. */
+.gcode-listing {
+    position: relative;
+}
+
+/* The rows that exist, slid down to where they belong. */
+.gcode-window {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    will-change: transform;
 }
 
 .gcode-line {
@@ -3581,6 +3612,7 @@ label.board-drill-legend-item {
     align-items: baseline;
     gap: 12px;
     padding: 0 12px;
+    height: 18px;
 }
 
 .gcode-line:hover {
@@ -3598,8 +3630,7 @@ label.board-drill-legend-item {
 }
 
 .gcode-line-content {
-    white-space: pre-wrap;
-    word-break: break-word;
+    white-space: pre;
     color: var(--text);
     font-family: inherit;
 }
