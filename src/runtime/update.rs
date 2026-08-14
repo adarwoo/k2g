@@ -595,6 +595,13 @@ mod tests {
         assert!(check_is_due(true, Some(""), None, now));
     }
 
+    /// A real release carries every platform's installer, so the fixture does too.
+    ///
+    /// It used to carry only the Windows ones, which made the test unrunnable anywhere
+    /// else: `pick_installer` correctly found no `.AppImage` and the `expect` below blew
+    /// up on the Linux CI job and on any developer's Linux machine. Listing one asset per
+    /// platform fixes that and buys the thing that was actually missing — the Linux and
+    /// macOS choices were never asserted at all, on a program that ships on Linux.
     #[test]
     fn the_installer_is_picked_by_extension_and_never_the_signature() {
         let asset = |name: &str| ReleaseAsset {
@@ -608,6 +615,12 @@ mod tests {
             asset("k2g-0.9.1.msi"),
             asset("k2g-0.9.1.msi.minisig"),
             asset("k2g-0.9.1-portable.zip"),
+            asset("k2g-0.9.1.AppImage"),
+            asset("k2g-0.9.1.AppImage.minisig"),
+            asset("k2g-0.9.1.deb"),
+            asset("k2g-0.9.1.deb.minisig"),
+            asset("k2g-0.9.1.dmg"),
+            asset("k2g-0.9.1.dmg.minisig"),
         ];
 
         let picked = pick_installer(&assets).expect("an installer should be found");
@@ -616,8 +629,16 @@ mod tests {
             "a signature file must never be chosen as the installer"
         );
 
-        #[cfg(target_os = "windows")]
-        assert_eq!(picked.name, "k2g-0.9.1.msi", "the MSI upgrades in place");
+        // `cfg!` rather than `#[cfg]`, so every branch is compiled on every platform and
+        // a rename that breaks one of them cannot hide behind not being built.
+        let expected = if cfg!(target_os = "windows") {
+            "k2g-0.9.1.msi" // the MSI upgrades an existing install in place
+        } else if cfg!(target_os = "macos") {
+            "k2g-0.9.1.dmg"
+        } else {
+            "k2g-0.9.1.AppImage" // preferred over the .deb: it runs on any distribution
+        };
+        assert_eq!(picked.name, expected);
     }
 
     #[test]
