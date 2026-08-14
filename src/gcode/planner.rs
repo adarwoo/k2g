@@ -342,6 +342,95 @@ pub fn plan_outline(
     })
 }
 
+/// One isolation cut: a channel round a piece of copper, or a stretch of one.
+///
+/// Like an [`OutlineSpan`] it arrives **already placed** — the isolation geometry is a
+/// polygon operation in board space and each point is mapped through the placement by the
+/// caller. Unlike one, it brings its own depth.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngraveSpan {
+    /// Net name and, where a contour had to be broken up, which piece — for the view.
+    pub source: String,
+    /// Cutter-centre polyline in **machine** coordinates.
+    pub path: Vec<Point>,
+    /// Whether the path is a closed loop, in which case it must return to its start.
+    pub closed: bool,
+    /// How deep this stretch is cut, as a negative machine Z.
+    ///
+    /// Per span, not per block: a V-bit's width *is* its depth, and the isolation pass
+    /// narrows across a tight gap, so one contour can want two depths.
+    pub z_bottom: Length,
+}
+
+/// Plans the isolation pass: one block for the engraver, its spans ordered by travel.
+///
+/// One block, because one bit cuts all of it and the step should pay a single tool change
+/// however many nets the board has. `None` when there is nothing to cut, so no empty block
+/// — and so no pointless tool change — reaches the program.
+///
+/// **Not [`plan_outline`]**, though both lay down [`OpKind::RouteContour`] ops, and the
+/// three differences are each a wrong board if fudged:
+///
+/// 1. **A contour is a closed loop.** Its last point must be its first, or the copper
+///    stays joined along the one stretch between them — an isolation pass that isolates
+///    nothing, and looks right on screen.
+/// 2. **Depth is per span.** `plan_outline` cuts a whole block at one depth, which for a
+///    V-bit would mean one width for a board the pass deliberately narrowed in places.
+/// 3. [`Phase::Engrave`], not [`Phase::Route`].
+///
+/// Entry stays at `path[0]`. A closed loop could be entered anywhere, and choosing where
+/// is a real travel saving — and a separate piece of work from getting the cut right.
+pub fn plan_engrave(
+    spans: &[EngraveSpan],
+    tool_id: &str,
+    tool_diameter: Length,
+    z_retract: Length,
+    start: Point,
+    slots: &BTreeMap<String, u8>,
+) -> Option<ToolBlock> {
+    let usable: Vec<&EngraveSpan> = spans.iter().filter(|s| s.path.len() >= 2).collect();
+    if usable.is_empty() {
+        return None;
+    }
+
+    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
+    let order = tsp_order(start, &entries);
+    let travel_mm = route_length(start, &entries, &order);
+
+    let ops: Vec<AtomicOp> = order
+        .iter()
+        .map(|&i| {
+            let span = usable[i];
+            let mut path = span.path.clone();
+            // Close the loop. The geometry stores a ring as its distinct vertices, so the
+            // segment from the last back to the first is implied — and an implied cut is
+            // an uncut one.
+            if span.closed && path.first() != path.last() {
+                path.push(path[0]);
+            }
+            let exit = path[path.len() - 1];
+            AtomicOp {
+                phase: Phase::Engrave,
+                kind: OpKind::RouteContour { path },
+                tool_id: tool_id.to_string(),
+                entry: span.path[0],
+                exit,
+                z: ZProfile { z_bottom: span.z_bottom, z_retract, z_feed: None },
+                primitive: "route_contour",
+                source: span.source.clone(),
+            }
+        })
+        .collect();
+
+    Some(ToolBlock {
+        slot: slots.get(tool_id).copied(),
+        tool_id: tool_id.to_string(),
+        diameter: tool_diameter,
+        ops,
+        travel_mm,
+    })
+}
+
 /// A length quantised to whole micrometres (matches the assigner's precision), for
 /// deterministic diameter ordering.
 fn micron(length: Length) -> i64 {
@@ -734,3 +823,99 @@ mod tests {
         assert_eq!(blocks[0].op_count(), 2);
     }
 }
+
+#[cfg(test)]
+mod engrave_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> Point {
+        Point { x: Length::from_mm(x), y: Length::from_mm(y) }
+    }
+
+    fn span(source: &str, path: Vec<Point>, closed: bool, depth_mm: f64) -> EngraveSpan {
+        EngraveSpan {
+            source: source.to_string(),
+            path,
+            closed,
+            z_bottom: Length::from_mm(depth_mm),
+        }
+    }
+
+    fn square() -> Vec<Point> {
+        vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 1.0)]
+    }
+
+    fn block(spans: &[EngraveSpan]) -> Option<ToolBlock> {
+        plan_engrave(
+            spans,
+            "v1",
+            Length::from_mm(3.175),
+            Length::from_mm(2.0),
+            pt(0.0, 0.0),
+            &BTreeMap::new(),
+        )
+    }
+
+    /// The geometry stores a ring as its distinct vertices, so the segment from the last
+    /// back to the first is implied — and an implied cut is an uncut one. Leaving it out
+    /// yields a board whose nets are still joined along one stretch of every loop, which
+    /// looks perfectly right on screen.
+    #[test]
+    fn a_closed_contour_comes_back_to_where_it_started() {
+        let block = block(&[span("GND", square(), true, -0.1)]).expect("one span, one block");
+        let OpKind::RouteContour { path } = &block.ops[0].kind else {
+            panic!("an engrave op is a contour");
+        };
+
+        assert_eq!(path.len(), 5, "four corners and the return");
+        assert_eq!(path.first(), path.last());
+        assert_eq!(block.ops[0].exit, block.ops[0].entry, "a loop ends where it began");
+    }
+
+    /// An open span is a stretch the pass had to narrow, and joining its ends would cut
+    /// straight across the copper it was routed around.
+    #[test]
+    fn an_open_span_is_left_open() {
+        let path = vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(2.0, 0.0)];
+        let block = block(&[span("SDA", path, false, -0.05)]).expect("one span");
+        let OpKind::RouteContour { path } = &block.ops[0].kind else {
+            panic!("an engrave op is a contour");
+        };
+
+        assert_eq!(path.len(), 3, "nothing added");
+        assert_ne!(block.ops[0].exit, block.ops[0].entry);
+    }
+
+    /// The whole reason this is not `plan_outline`: a V-bit's width is its depth, and the
+    /// isolation pass narrows only across the tight stretches. One depth for the block
+    /// would cut every one of them to the same width the board had no room for.
+    #[test]
+    fn spans_keep_their_own_depths_inside_one_block() {
+        let far = vec![pt(10.0, 10.0), pt(11.0, 10.0)];
+        let block = block(&[
+            span("GND", square(), true, -0.20),
+            span("GND.narrow", far, false, -0.08),
+        ])
+        .expect("two spans");
+
+        assert_eq!(block.ops.len(), 2, "one block, one tool change");
+        let depths: Vec<f64> = block.ops.iter().map(|op| op.z.z_bottom.as_mm()).collect();
+        assert!(depths.contains(&-0.20) && depths.contains(&-0.08));
+    }
+
+    /// A block costs a tool change whether or not it cuts anything, so a step with no
+    /// copper to engrave must produce none at all.
+    #[test]
+    fn nothing_to_cut_yields_no_block_and_so_no_tool_change() {
+        assert!(block(&[]).is_none());
+        assert!(block(&[span("stub", vec![pt(0.0, 0.0)], false, -0.1)]).is_none());
+    }
+
+    /// The phase is what says this happens while the board is whole, flat and undrilled.
+    #[test]
+    fn engraving_is_its_own_phase() {
+        let block = block(&[span("GND", square(), true, -0.1)]).expect("one span");
+        assert_eq!(block.ops[0].phase, Phase::Engrave);
+    }
+}
+

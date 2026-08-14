@@ -87,6 +87,18 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         short_label: "Mill",
         once_per_face: true,
     },
+    // Repeatable, as the note above anticipated: passes at different depths, or over
+    // different regions, are all legitimately engraving.
+    //
+    // Last in the list, and that placement is load-bearing. `AppData::add_step` gives a new
+    // step the first operation that is repeatable *or* unclaimed, so a repeatable entry
+    // placed any earlier would become the default for every step past the fourth.
+    MachiningOperation {
+        key: "engrave_copper",
+        label: "Engrave copper isolation",
+        short_label: "Engrave",
+        once_per_face: false,
+    },
 ];
 
 /// The operation `key` describes, if it is one this build knows.

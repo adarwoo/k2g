@@ -40,6 +40,7 @@ $defs:
       - route_cutouts
       - drill_locating_pins
       - mill_board
+      - engrave_copper
 
   allowance:
     description: >-
@@ -360,6 +361,43 @@ $defs:
     additionalProperties: false
 
   # -------------------------------------------------------------------------
+  # engrave_copper — isolation routing: separate the nets by cutting a channel
+  # round every piece of copper.
+  #
+  # The board starts as solid copper and this takes a groove out around each
+  # net, leaving its traces standing as islands. So the cut width is the only
+  # thing worth asking about, and depth is *not* asked for at all: a V-bit cuts
+  # as wide as it is deep, so the depth follows from the width and the bit that
+  # happens to be in the rack (`assigner::engrave_depth_mm`). Asking for both
+  # would be asking the operator to solve for a tool they have not chosen yet.
+  #
+  # Where the board is too cramped for the requested width — two nets closer
+  # together than the cut — the pass narrows only across that stretch and says
+  # which nets it narrowed, in the step's notes. It never widens, and it never
+  # cuts into a neighbour.
+  #
+  # Only the outer copper: a mill reaches F.Cu and B.Cu and no others. Which of
+  # the two is the step's own `board_face`.
+  # -------------------------------------------------------------------------
+  engrave_copper:
+    type: object
+    default:
+      width: 0.25mm
+    properties:
+      width:
+        title: Isolation width
+        description: >-
+          How wide a channel to cut between the nets. This is an electrical
+          decision, not a tooling one — wider is a better-isolated board and a
+          slower, deeper cut. The bit is chosen to suit, and the depth it needs
+          is worked out from it; a width narrower than every V-bit tip in stock
+          cannot be cut and is reported rather than approximated.
+        $ref: "units.yaml#/$defs/size"
+        default: 0.25mm
+    required: [width]
+    additionalProperties: false
+
+  # -------------------------------------------------------------------------
   # step — one machining setup within the profile's ordered sequence.
   #
   # Each step references **exactly one** CNC, fixture and toolset profile.
@@ -541,6 +579,11 @@ $defs:
             retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
           kerf: 2.0mm
           finishing: 0.1mm
+
+      engrave_copper:
+        $ref: "#/$defs/engrave_copper"
+        default:
+          width: 0.25mm
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it

@@ -20,15 +20,19 @@
 //! let spec = IsolationSpec { .. };
 //! match ctx.isolation.matching(&spec) {
 //!     Some(ready) => use_it(ready),
-//!     None => request_isolation(spec),   // and draw nothing until it lands
+//!     None => request_isolation(spec),   // and say so until it lands
 //! }
 //! ```
 //!
-//! The `matching` check is what stops the obvious infinite loop: the worker publishes
-//! through `with_ctx_mut`, which re-runs the post-mutation sync, which is where the ask
-//! comes from. A publish that satisfies the spec ends the cycle; one that does not would
-//! spin, which is why [`IsolationState::matching`] compares the *whole* spec and not just
-//! the board.
+//! Callers need no guard around that request. Asking twice for the same thing is free —
+//! [`request_isolation`] drops a repeat of what it is already working on — and that is
+//! what stops the obvious runaway: the worker publishes through `with_ctx_mut`, which
+//! re-runs the post-mutation sync, which is where the ask comes from. Without the dedupe
+//! each ask would cancel the run about to answer it and nothing would ever finish.
+//!
+//! The cycle then closes on `matching`, which compares the **whole** spec. A publish that
+//! satisfies the ask ends it; one that does not would keep asking, which is correct — a
+//! near-match is a wrong answer, not a cheap one.
 //!
 //! [`request_isolation`] is safe to call from inside `with_ctx_mut` — it takes no context
 //! lock, exactly like `enqueue_generation`. Taking one there would deadlock silently,
@@ -57,17 +61,18 @@ pub struct IsolationSpec {
     /// The board as KiCad names it. Not a handle: the worker reconnects, because the
     /// connection is not held anywhere and a board can be closed between ask and answer.
     pub board_name: String,
+    /// Which acquisition of that board — [`AppCtx::board_epoch`](crate::runtime::AppCtx).
+    ///
+    /// The name alone is not identity. Edit the board in KiCad, press Reload PCB, and the
+    /// name is exactly what it was; without this the held contours would match and the
+    /// operator would be shown, and would machine, the board they had just changed.
+    pub board_epoch: u64,
     /// KiCad layer id — `pcb::FRONT_COPPER` or `pcb::BACK_COPPER`.
     pub layer_id: i32,
     /// The cut width the operator asked for, nm.
     pub width_nm: i64,
     /// The narrowest cut the tool can make, nm: a V-bit's tip.
     pub min_width_nm: i64,
-    /// Whether to have KiCad re-pour its zones first.
-    ///
-    /// Worth doing before cutting metal and worth *not* doing on the way to a preview: it
-    /// blocks KiCad, which answers `AS_BUSY` to everything until the fill completes.
-    pub refill: bool,
 }
 
 /// Contours for one layer, and what was wrong with the copper they came from.
@@ -79,14 +84,17 @@ pub struct Isolation {
     /// with no ring. Kept apart from `result.warnings` because they are answerable by
     /// different people: these by whoever drew the board, those by whoever picked the bit.
     pub copper_warnings: Vec<String>,
+    /// How many copper layers the board has.
+    ///
+    /// A mill reaches the two outer ones and no others, so a four-layer board engraved
+    /// this way is two layers short of the design. That is a thing to say plainly rather
+    /// than leave the operator to notice.
+    pub copper_layer_count: u32,
 }
 
 /// What the context knows about isolation right now.
 #[derive(Clone, Debug, Default)]
 pub struct IsolationState {
-    /// What the worker is computing, if anything. Present so a view can say "working"
-    /// rather than "nothing here".
-    pub pending: Option<IsolationSpec>,
     /// The last finished result, whatever it was computed for.
     pub ready: Option<Arc<Isolation>>,
     /// Why the last run produced nothing, if it failed.
@@ -101,15 +109,6 @@ impl IsolationState {
     pub fn matching(&self, spec: &IsolationSpec) -> Option<&Arc<Isolation>> {
         self.ready.as_ref().filter(|held| held.spec == *spec)
     }
-
-    /// Whether this spec is neither answered nor already being worked on.
-    ///
-    /// Callers gate [`request_isolation`] on this. Without the `pending` half, every sync
-    /// while the worker ran would enqueue the same job again and cancel the run that was
-    /// about to answer it — a queue that never finishes anything.
-    pub fn wants(&self, spec: &IsolationSpec) -> bool {
-        self.matching(spec).is_none() && self.pending.as_ref() != Some(spec)
-    }
 }
 
 struct IsolationRequest {
@@ -122,6 +121,19 @@ static ISO_TX: OnceLock<std::sync::mpsc::Sender<IsolationRequest>> = OnceLock::n
 static ISO_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static ISO_LATEST_ID: AtomicU64 = AtomicU64::new(0);
 static ISO_CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+/// What the worker is computing, if anything.
+///
+/// Here rather than on the context because [`request_isolation`] cannot take the context
+/// lock — it is called from inside `with_ctx_mut`, where that guard is already held. This
+/// is what makes the request self-deduplicating, which is the only thing standing between
+/// the ask-on-every-sync pattern and a queue that cancels its own answer forever.
+static ISO_IN_FLIGHT: Mutex<Option<IsolationSpec>> = Mutex::new(None);
+
+/// The question the worker is busy with, for a view that wants to say "working".
+pub fn in_flight() -> Option<IsolationSpec> {
+    ISO_IN_FLIGHT.lock().ok().and_then(|held| held.clone())
+}
 
 /// Start the worker. Called once from `initialize_ctx`, beside the generation service.
 pub fn start_isolation_service() {
@@ -141,13 +153,15 @@ fn isolation_worker(rx: std::sync::mpsc::Receiver<IsolationRequest>) {
             continue; // superseded before it started
         }
         let outcome = run_isolation(&request.spec, &request.cancel);
-        // Committing a superseded run would put the wrong contours on screen and, worse,
-        // clear the `pending` marker for a request that is still coming.
+        // Committing a superseded run would put contours for the wrong question on screen.
+        // The in-flight marker is *not* cleared here: a newer request already overwrote it
+        // with its own spec, and clearing would let the next ask enqueue a duplicate.
         if request.id != ISO_LATEST_ID.load(Ordering::SeqCst)
             || request.cancel.load(Ordering::SeqCst)
         {
             continue;
         }
+        clear_in_flight(&request.spec);
         match outcome {
             Ok(isolation) => publish_isolation(isolation),
             Err(message) => publish_isolation_failure(&request.spec, message),
@@ -158,12 +172,26 @@ fn isolation_worker(rx: std::sync::mpsc::Receiver<IsolationRequest>) {
 
 /// Ask for contours, cancelling whatever the worker was doing.
 ///
+/// **Asking twice for the same thing is free.** Callers ask on every plan, and a plan runs
+/// again every time the context moves — including when this very worker publishes. Were
+/// the repeat ask to enqueue, it would cancel the run that was about to answer it and the
+/// queue would never finish anything. So a request identical to the one in flight is
+/// dropped, and callers need no guard of their own.
+///
 /// Takes no context lock, so it is safe from inside `with_ctx_mut` — see the module note.
 /// Silent when the service was never started, which is how the headless tests run.
 pub fn request_isolation(spec: IsolationSpec) {
     let Some(tx) = ISO_TX.get() else {
         return;
     };
+    {
+        let mut in_flight = ISO_IN_FLIGHT.lock().expect("isolation in-flight mutex poisoned");
+        if in_flight.as_ref() == Some(&spec) {
+            return;
+        }
+        *in_flight = Some(spec.clone());
+    }
+
     let id = ISO_NEXT_ID.fetch_add(1, Ordering::SeqCst);
     ISO_LATEST_ID.store(id, Ordering::SeqCst);
 
@@ -178,12 +206,24 @@ pub fn request_isolation(spec: IsolationSpec) {
     let _ = tx.send(IsolationRequest { id, cancel, spec });
 }
 
+/// Forget the in-flight question, so the next ask for it goes through.
+///
+/// Called once a run has finished with it — answered or failed. A failure must clear it
+/// too, or a board that was briefly unreachable would never be asked about again.
+fn clear_in_flight(spec: &IsolationSpec) {
+    if let Ok(mut in_flight) = ISO_IN_FLIGHT.lock() {
+        if in_flight.as_ref() == Some(spec) {
+            *in_flight = None;
+        }
+    }
+}
+
 /// Read the copper and isolate it. Runs on the worker; touches no context.
 fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isolation, String> {
     if cancel.load(Ordering::SeqCst) {
         return Err("cancelled".into());
     }
-    let copper = collect_copper(spec)?;
+    let (copper, copper_layer_count) = collect_copper(spec)?;
     // Between the two halves is the only place a cancel can land: reading the board is one
     // IPC round trip and isolating is one call, neither of which reports progress.
     if cancel.load(Ordering::SeqCst) {
@@ -201,15 +241,26 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
         result.narrowed.len(),
     );
 
-    Ok(Isolation { spec: spec.clone(), result, copper_warnings: copper.warnings })
+    Ok(Isolation {
+        spec: spec.clone(),
+        result,
+        copper_warnings: copper.warnings,
+        copper_layer_count,
+    })
 }
 
-/// The copper on the spec's layer, reconnecting to KiCad to get it.
+/// The copper on the spec's layer, and how many copper layers the board has.
 ///
 /// A fresh connection per run, like [`acquire_board`](crate::runtime::acquire_board): no
 /// client is held anywhere, and a board that has been closed since the ask must fail here
 /// rather than return the copper it used to have.
-fn collect_copper(spec: &IsolationSpec) -> Result<CopperSnapshot, String> {
+///
+/// **The zones are re-poured first, every time.** A fill that has gone stale is copper
+/// that is not there, and engraving against it cuts a board nobody drew. It costs a pause
+/// in KiCad, which answers `AS_BUSY` until the fill completes — affordable because the
+/// spec is keyed on the board's epoch, so this runs when the board is re-acquired or the
+/// width changes, not on the way to every repaint.
+fn collect_copper(spec: &IsolationSpec) -> Result<(CopperSnapshot, u32), String> {
     let client = KiCad::connect().map_err(|err| format!("KiCad is not reachable: {err}"))?;
     let pcbs = client
         .enumerate_pcbs()
@@ -219,14 +270,18 @@ fn collect_copper(spec: &IsolationSpec) -> Result<CopperSnapshot, String> {
         .find(|pcb| pcb.display_name() == spec.board_name)
         .ok_or_else(|| format!("{} is no longer open in KiCad.", spec.board_name))?;
 
-    client
-        .collect_copper(&board, spec.layer_id, spec.refill)
-        .map_err(|err| format!("The copper on layer {} could not be read: {err}", spec.layer_id))
+    // Not fatal: a board whose layer count will not come back is still engravable, it just
+    // cannot be warned about for having more copper than a mill can reach.
+    let copper_layer_count = client.copper_layer_count(&board).unwrap_or(0);
+
+    let copper = client
+        .collect_copper(&board, spec.layer_id, true)
+        .map_err(|err| format!("The copper on layer {} could not be read: {err}", spec.layer_id))?;
+    Ok((copper, copper_layer_count))
 }
 
 fn publish_isolation(isolation: Isolation) {
     with_ctx_mut(|ctx| {
-        ctx.isolation.pending = None;
         ctx.isolation.error = None;
         ctx.isolation.ready = Some(Arc::new(isolation));
     });
@@ -235,7 +290,6 @@ fn publish_isolation(isolation: Isolation) {
 fn publish_isolation_failure(spec: &IsolationSpec, message: String) {
     log::warn!("Isolation failed for layer {} — {message}", spec.layer_id);
     with_ctx_mut(|ctx| {
-        ctx.isolation.pending = None;
         // The previous result is *not* cleared. It was correct for what it was computed
         // for, and `matching` will refuse it for anything else anyway — so keeping it
         // costs nothing and spares the operator a view that empties every time KiCad is
@@ -251,20 +305,20 @@ mod tests {
     fn spec(width_nm: i64) -> IsolationSpec {
         IsolationSpec {
             board_name: "demo".into(),
+            board_epoch: 1,
             layer_id: pcb::FRONT_COPPER,
             width_nm,
             min_width_nm: 100_000,
-            refill: false,
         }
     }
 
     fn ready(spec: IsolationSpec) -> IsolationState {
         IsolationState {
-            pending: None,
             ready: Some(Arc::new(Isolation {
                 spec,
                 result: IsolationResult::default(),
                 copper_warnings: Vec::new(),
+                copper_layer_count: 2,
             })),
             error: None,
         }
@@ -280,30 +334,21 @@ mod tests {
         assert!(state.matching(&spec(200_000)).is_none(), "a different width is a different job");
     }
 
-    /// The guard against a queue that never finishes: every post-mutation sync asks again
-    /// while the worker runs, and each ask cancels the run that was about to answer it.
+    /// The board's *name* does not change when the operator edits it and reloads, so the
+    /// name alone would hand back contours for copper that has since moved. Only the epoch
+    /// tells one acquisition from the next.
     #[test]
-    fn a_question_already_being_worked_on_is_not_asked_again() {
-        let state = IsolationState { pending: Some(spec(400_000)), ..Default::default() };
-        assert!(!state.wants(&spec(400_000)));
-        assert!(state.wants(&spec(200_000)), "but a different question still needs asking");
+    fn held_contours_are_refused_after_the_board_is_re_read() {
+        let state = ready(spec(400_000));
+        let reloaded = IsolationSpec { board_epoch: 2, ..spec(400_000) };
+        assert!(state.matching(&reloaded).is_none());
     }
 
-    /// The other half of the same loop: once the answer lands, the ask has to stop.
-    #[test]
-    fn an_answered_question_is_not_asked_again() {
-        assert!(!ready(spec(400_000)).wants(&spec(400_000)));
-    }
-
-    /// A failed run must not leave the spec looking answered, or the operator would be
+    /// A failed run must not leave the question looking answered, or the operator would be
     /// stuck with no contours and no way to provoke another attempt.
     #[test]
-    fn a_failure_leaves_the_question_open() {
-        let state = IsolationState {
-            pending: None,
-            ready: None,
-            error: Some("KiCad is not reachable".into()),
-        };
-        assert!(state.wants(&spec(400_000)));
+    fn a_failure_leaves_the_question_unanswered() {
+        let state = IsolationState { ready: None, error: Some("KiCad is not reachable".into()) };
+        assert!(state.matching(&spec(400_000)).is_none());
     }
 }

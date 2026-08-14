@@ -127,6 +127,19 @@ impl KiCad {
         Ok(crate::copper::collect_copper(&client, layer_id, refill))
     }
 
+    /// How many copper layers the board's stack-up has.
+    ///
+    /// Worth asking because a mill only ever reaches the two outer ones: a four-layer
+    /// board engraved this way is two layers short of what was designed, and that is a
+    /// sentence the operator should read rather than a discovery they should make.
+    pub fn copper_layer_count(&self, pcb: &PcbInfo) -> Result<u32, PcbError> {
+        let client = self.resolve_client(pcb);
+        client
+            .get_board_enabled_layers()
+            .map(|layers| layers.copper_layer_count)
+            .map_err(|e| PcbError::Connection(e.to_string()))
+    }
+
     /// Convenience for startup: collect the first open PCB, or `None` if no
     /// board is open anywhere.
     pub fn collect_first_snapshot(&self) -> Result<Option<BoardSnapshot>, PcbError> {

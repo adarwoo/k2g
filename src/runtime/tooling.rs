@@ -173,6 +173,7 @@ pub(crate) struct StepRaw {
     pub(crate) drill: DrillConfigRaw,
     pub(crate) route_board: EdgeConfigRaw,
     pub(crate) route_cutouts: CutoutConfigRaw,
+    pub(crate) engrave_copper: EngraveConfigRaw,
     /// `board_face == "back"`. Read per step rather than taken from the profile
     /// projection (which only carries `steps[0]`), because a later step may be the
     /// back-face one — which is exactly the step whose geometry the placement has to
@@ -214,6 +215,11 @@ impl StepRaw {
     /// The interior openings, cut on their own terms rather than with the edge kerf.
     pub(crate) fn routes_cutouts(&self) -> bool {
         self.enabled("route_cutouts")
+    }
+
+    /// Isolation engraving: a channel cut round every net so they come apart.
+    pub(crate) fn engraves_copper(&self) -> bool {
+        self.enabled("engrave_copper")
     }
 
     /// Registration pins: two holes on the fixture's flip line, drilled through the
@@ -348,6 +354,28 @@ fn read_cutout_config(root: &Node, base: &str) -> CutoutConfigRaw {
             .unwrap_or(default.tab_ratio),
         drill_sharp_corners: node_bool(root, &format!("{base}/drill_sharp_corners"))
             .unwrap_or(default.drill_sharp_corners),
+    }
+}
+
+/// The step's `engrave_copper` config, defaulted when absent.
+///
+/// One setting, and depth is deliberately not among them: a V-bit cuts as wide as it is
+/// deep, so depth follows from this width and whichever bit the rack can offer.
+pub(crate) struct EngraveConfigRaw {
+    pub(crate) width: Length,
+}
+
+impl Default for EngraveConfigRaw {
+    fn default() -> Self {
+        // The schema's own default for `engrave_copper`.
+        Self { width: Length::from_mm(0.25) }
+    }
+}
+
+fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
+    let default = EngraveConfigRaw::default();
+    EngraveConfigRaw {
+        width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
     }
 }
 
@@ -812,6 +840,8 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                 };
                 let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}"));
                 let route_cutouts = read_cutout_config(root, &format!("/steps/{i}/route_cutouts"));
+                let engrave_copper =
+                    read_engrave_config(root, &format!("/steps/{i}/engrave_copper"));
 
                 // Only when the step actually drills pins. The per-operation config
                 // objects are materialised by the loader whether or not their operation
@@ -845,6 +875,7 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     drill,
                     route_board,
                     route_cutouts,
+                    engrave_copper,
                     machines_back: node_str(root, &format!("/steps/{i}/board_face"))
                         .is_some_and(|face| face.eq_ignore_ascii_case("back")),
                     pin_diameter,
@@ -1225,7 +1256,15 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
         );
     }
 
-    if groups.is_empty() && !has_route && pin_tool.is_none() {
+    // Chosen here as well as in the machining plan, and by the same function, because the
+    // rack has to come out identical: this view is where the operator reads which bit goes
+    // in which slot.
+    let engraver = raw
+        .engraves_copper()
+        .then(|| pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width))
+        .flatten();
+
+    if groups.is_empty() && !has_route && engraver.is_none() && pin_tool.is_none() {
         return StepOutcome::Empty;
     }
 
@@ -1246,9 +1285,12 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
     let mut mandatory = routers.mandatory_ids();
     if let Some(tool) = pin_tool.as_ref() {
         mandatory.push(tool.id().to_string());
-        mandatory.sort();
-        mandatory.dedup();
     }
+    if let Some((tool_id, _)) = engraver.as_ref() {
+        mandatory.push(tool_id.clone());
+    }
+    mandatory.sort();
+    mandatory.dedup();
     let rack = build_rack_spec(toolset, atc_slots, &mandatory);
 
     match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
@@ -1713,6 +1755,74 @@ fn stock_routers(tools: &[Tool]) -> impl Iterator<Item = &Tool> {
     tools
         .iter()
         .filter(|t| is_router_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
+}
+
+/// Whether `tool` is a bit that cuts a vee — the only kind isolation engraving uses.
+///
+/// The opposite side of the split [`tool_mills`] describes: a router has one width and a
+/// V-bit has a width per depth, and that is exactly why engraving wants the V-bit. Asked
+/// separately from `is_router_tool` so neither list can quietly acquire the other's tools.
+fn is_engraver_tool(tool: &Tool) -> bool {
+    matches!(
+        ToolKind::from_kind_label(&tool.kind),
+        ToolKind::Vbit | ToolKind::Engraver
+    )
+}
+
+/// The V-bit that cuts an isolation channel `width` across, and how deep to sink it.
+///
+/// Two constraints, both hard. The tip must be **no wider than the channel** — a bit
+/// already broader than the cut it is asked for cannot make it at any depth — and the
+/// depth that arithmetic asks for must be one the bit is **rated to hold**
+/// (`z_min_depth`); a cut shallower than the tool's rating is a cut whose width nobody can
+/// promise, and width is the whole product here.
+///
+/// Among the bits that qualify, **the largest tip wins**. At a given channel width a
+/// bigger tip sits shallower, which is stiffer and — the reason that matters — far less
+/// sensitive to how flat the board is: on a steep cone a tenth of a millimetre of bow
+/// swings the trace width, on a broad one it barely moves. Toolset-fixed bits are tried
+/// first because they cost no rack slot, the same tie-break [`pick_slot_router`] makes.
+pub(crate) fn pick_engraver(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    width: Length,
+) -> Option<(String, Length)> {
+    let suits = |tool: &&Tool| -> Option<(String, Length)> {
+        let tip = tool.tip_diameter?;
+        let depth_mm = crate::gcode::assigner::engrave_depth_mm(
+            tip.as_mm(),
+            tool.point_angle.as_degrees(),
+            width.as_mm(),
+        )?;
+        if depth_mm <= 0.0 {
+            return None;
+        }
+        if tool.z_min_depth.is_some_and(|min| depth_mm < min.as_mm()) {
+            return None;
+        }
+        Some((tool.id.clone(), Length::from_mm(depth_mm)))
+    };
+
+    // Widest tip first, so the first that suits is the best that suits. Ties break on the
+    // tool id, which keeps the choice a total function of the stock list.
+    let mut fixed: Vec<&Tool> = toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_ref())
+        .filter_map(|id| tools.iter().find(|t| &t.id == id && is_engraver_tool(t)))
+        .collect();
+    let mut stock: Vec<&Tool> = tools
+        .iter()
+        .filter(|t| is_engraver_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
+        .collect();
+    let widest_tip_first = |a: &&Tool, b: &&Tool| {
+        let key = |t: &Tool| std::cmp::Reverse(t.tip_diameter.map(micron).unwrap_or(0));
+        key(a).cmp(&key(b)).then_with(|| a.id.cmp(&b.id))
+    };
+    fixed.sort_by(widest_tip_first);
+    stock.sort_by(widest_tip_first);
+
+    fixed.iter().find_map(suits).or_else(|| stock.iter().find_map(suits))
 }
 
 /// The router that mills a slot `width` across: the **largest** cutter that still fits.
@@ -3103,6 +3213,7 @@ mod tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
+            engrave_copper: Default::default(),
             machines_back,
             pin_diameter: None,
         }
@@ -3295,6 +3406,7 @@ mod tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
+            engrave_copper: Default::default(),
             machines_back: false,
             pin_diameter: None,
         };
@@ -3674,5 +3786,87 @@ mod cutout_router_tests {
         assert!((min - ideal / (1.0 + 0.5_f64.sqrt())).abs() < 1e-9);
         // A straight edge is not a corner and wants no drill.
         assert!(corner_relief_band(2.0, std::f64::consts::PI).is_none());
+    }
+}
+
+#[cfg(test)]
+mod engraver_tests {
+    use super::*;
+
+    /// A V-bit: a tip flat of `tip_mm` on a cone of `angle_deg`.
+    fn vbit(id: &str, tip_mm: f64, angle_deg: f64) -> Tool {
+        let mut tool = super::tests::router(id, 3.175);
+        tool.kind = "V-bit".to_string();
+        tool.name = format!("V-bit {tip_mm}mm/{angle_deg}deg");
+        tool.tip_diameter = Some(Length::from_mm(tip_mm));
+        tool.point_angle = units::Angle::from_degrees(angle_deg);
+        tool
+    }
+
+    /// At one channel width a broader tip sits shallower, and a shallower cut is far less
+    /// sensitive to how flat the board is: on a steep cone a tenth of a millimetre of bow
+    /// swings the trace width, on a broad one it barely moves. Width *is* the product
+    /// here, so that sensitivity is the thing being chosen against.
+    #[test]
+    fn the_widest_tip_that_still_reaches_the_width_is_chosen() {
+        let tools = vec![vbit("fine", 0.1, 30.0), vbit("broad", 0.2, 30.0)];
+        let (id, depth) = pick_engraver(&tools, &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.4))
+            .expect("both bits can cut 0.4mm");
+
+        assert_eq!(id, "broad");
+        // 0.2mm of tip leaves 0.2mm to open out, at tan(15°) per side.
+        let expected = 0.1 / (15.0_f64.to_radians().tan());
+        assert!((depth.as_mm() - expected).abs() < 1e-6, "depth was {}", depth.as_mm());
+    }
+
+    /// A bit whose tip is already broader than the channel cannot cut it at any depth —
+    /// the tip is the narrowest thing it makes. Substituting the nearest would hand back a
+    /// cut wider than asked for, straight through a neighbouring net.
+    #[test]
+    fn a_tip_broader_than_the_channel_is_refused() {
+        let tools = vec![vbit("broad", 0.5, 30.0)];
+        assert!(
+            pick_engraver(&tools, &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.3))
+                .is_none()
+        );
+    }
+
+    /// Depth here is arrived at by arithmetic from a width, and arithmetic will happily
+    /// ask for less than the tool is rated to hold. A cut shallower than its rating is a
+    /// cut whose width nobody can promise.
+    #[test]
+    fn a_depth_under_the_bit_rating_is_refused() {
+        let mut shallow = vbit("rated", 0.1, 30.0);
+        shallow.z_min_depth = Some(Length::from_mm(0.5));
+        // 0.2mm across needs ~0.19mm of depth — well under the 0.5mm rating.
+        assert!(
+            pick_engraver(&[shallow], &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.2))
+                .is_none()
+        );
+    }
+
+    /// A router has one width whatever it is asked for, so letting one into this list
+    /// would cut a channel of its own diameter and call it isolation.
+    #[test]
+    fn a_router_is_never_picked_to_engrave() {
+        let tools = vec![super::tests::router("r", 0.2)];
+        assert!(
+            pick_engraver(&tools, &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.4))
+                .is_none()
+        );
+    }
+
+    /// A bit already pinned in the toolset costs no rack slot, so it wins a tie — the same
+    /// preference every other tool pick here makes.
+    #[test]
+    fn a_bit_already_in_the_rack_beats_an_equal_one_in_stock() {
+        let tools = vec![vbit("stock", 0.1, 30.0), vbit("racked", 0.1, 30.0)];
+        let (id, _) = pick_engraver(
+            &tools,
+            &super::tests::toolset_with_fixed(&["racked"]),
+            Length::from_mm(0.4),
+        )
+        .expect("either would do");
+        assert_eq!(id, "racked");
     }
 }

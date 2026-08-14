@@ -36,18 +36,20 @@ use uuid::Uuid;
 
 use units::{Length, UserUnitDisplay};
 
-use crate::data::model::{FixtureProfile, TabContour};
+use crate::data::model::{FixtureProfile, TabContour, Tool};
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
 use crate::gcode::placement::{BoardFlip, BoardOrigin, Margin, Placement, PlacementSpec};
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
 use crate::gcode::planner::{
-    plan_drilling, plan_outline, plan_routing, DrillTarget, OutlineSpan, RouteShape, RouteTarget,
+    plan_drilling, plan_engrave, plan_outline, plan_routing, DrillTarget, EngraveSpan, OutlineSpan,
+    RouteShape, RouteTarget,
 };
 use crate::gcode::{oblong, outline, pins, scene};
+use crate::runtime::isolation::IsolationSpec;
 use crate::runtime::tooling::{
-    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_pin_tool,
-    plan_routers, read_steps, HoleGroup, PinTool, RouterPlan, StepRaw,
+    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_engraver,
+    pick_pin_tool, plan_routers, read_steps, HoleGroup, PinTool, RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
 
@@ -549,11 +551,34 @@ fn plan_step(
         None => None,
     };
 
+    // The V-bit, chosen the way the pin tool is: outside the assigner, which scores holes
+    // and has nothing to say about a channel width. `None` here means no bit in stock can
+    // cut the width asked for, which is a note rather than a failure — the step's other
+    // work is still worth doing.
+    let engraver = raw
+        .engraves_copper()
+        .then(|| pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width))
+        .flatten();
+    if raw.engraves_copper() && engraver.is_none() {
+        notes.push(format!(
+            "No V-bit in stock can cut a {} isolation channel: every tip is either wider \
+             than that, or would have to be sunk shallower than it is rated for. Nothing \
+             is engraved on this step.",
+            fmt_len(ctx, raw.engrave_copper.width),
+        ));
+    }
+
     // Nothing to assign *and* nothing to route. Cutouts count as work in their own right:
     // a step that only cuts interior openings has no holes, no outline and no pins, and
     // before they were an operation of their own that combination could only mean an empty
-    // step.
-    if groups.is_empty() && !has_route && !raw.routes_cutouts() && pin_tool.is_none() {
+    // step. Engraving is the same case again — the copper is work no hole or contour
+    // accounts for.
+    if groups.is_empty()
+        && !has_route
+        && !raw.routes_cutouts()
+        && engraver.is_none()
+        && pin_tool.is_none()
+    {
         return StepPlan {
             index,
             name,
@@ -580,9 +605,15 @@ fn plan_step(
     let mut mandatory = routers.mandatory_ids();
     if let Some(tool) = pin_tool.as_ref() {
         mandatory.push(tool.id().to_string());
-        mandatory.sort();
-        mandatory.dedup();
     }
+    // The engraver too, and for the same reason: a step that only engraves demands no
+    // holes at all, so nothing else would reserve it a slot and the one bit the step
+    // exists to use would be the one bit the rack does not hold.
+    if let Some((tool_id, _)) = engraver.as_ref() {
+        mandatory.push(tool_id.clone());
+    }
+    mandatory.sort();
+    mandatory.dedup();
     let rack = build_rack_spec(toolset, atc_slots, &mandatory);
 
     let assignment = match assigner::assign(&demands, &ctx.tools, &cfg, &rack, &setup) {
@@ -819,7 +850,27 @@ fn plan_step(
         cutout_spans = spans;
     }
 
-    let mut blocks = plan_drilling(&drill_targets, &placement, start, &slots);
+    // The isolation pass, first of all the blocks. `Phase` is never read — block order is
+    // push order — and the copper is engraved while the board is whole, flat and
+    // undrilled: every hole made first is a place the surface can lift or the bit can
+    // catch, and the engraving is the one operation whose quality is a depth tolerance.
+    let mut blocks = Vec::new();
+    if let Some((tool_id, depth)) = engraver.as_ref() {
+        if let Some(bit) = ctx.tools.iter().find(|t| &t.id == tool_id) {
+            let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, *depth, &placement);
+            notes.extend(warnings);
+            blocks.extend(plan_engrave(
+                &spans,
+                tool_id,
+                bit.diameter,
+                placement.z_retract(),
+                start,
+                &slots,
+            ));
+        }
+    }
+
+    blocks.extend(plan_drilling(&drill_targets, &placement, start, &slots));
     blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
     if let Some(outline_router) = routers.outline.as_deref() {
         let tool = ctx.tools.iter().find(|t| t.id == outline_router);
@@ -953,6 +1004,160 @@ fn plan_step(
 /// Per-contour shortfalls — a contour that vanishes under the kerf, tabs the sides have
 /// no room for — come back as warnings alongside the spans, because the rest of the
 /// outline is still worth cutting.
+/// How many net pairs a note names before it gives up and counts the rest.
+///
+/// A board laid out to one clearance rule narrows in dozens of places at once — 89 on the
+/// board this was built against — and a step whose notes are ninety lines long is a step
+/// whose notes nobody reads.
+const NARROWED_PAIRS_NAMED: usize = 5;
+
+/// The isolation cuts for this step's copper face, and what the operator should know.
+///
+/// Asks the [isolation worker](crate::runtime::isolation) rather than computing anything:
+/// reading a board's copper and working out where a mill has to run takes seconds, and
+/// this is called from a plan. When the answer for this exact question is not in hand yet
+/// it asks for it and says so — the worker publishes through the context, which invalidates
+/// the plan, which brings us back here with an answer. Asking twice is free, so there is no
+/// guard around the request; see the worker's own note.
+fn plan_engrave_spans(
+    ctx: &AppCtx,
+    raw: &StepRaw,
+    bit: &Tool,
+    depth: Length,
+    placement: &Placement,
+) -> (Vec<EngraveSpan>, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+    let Some(board) = ctx.board.as_ref() else {
+        return (Vec::new(), warnings);
+    };
+
+    // A mill reaches the surface, so the face the step machines decides the layer. The
+    // placement already mirrors a back-face step, and copper arrives in the same board
+    // coordinates the holes do, so B.Cu needs nothing further.
+    let spec = IsolationSpec {
+        board_name: board.name.clone(),
+        board_epoch: ctx.board_epoch,
+        layer_id: if raw.machines_back { pcb::BACK_COPPER } else { pcb::FRONT_COPPER },
+        width_nm: (raw.engrave_copper.width.as_mm() * 1e6).round() as i64,
+        // The bit's tip is the narrowest channel it can cut, so it is the floor of every
+        // width the pass may fall back to.
+        min_width_nm: bit
+            .tip_diameter
+            .map(|tip| (tip.as_mm() * 1e6).round() as i64)
+            .unwrap_or(0),
+    };
+
+    let Some(isolation) = ctx.isolation.matching(&spec) else {
+        crate::runtime::isolation::request_isolation(spec);
+        if let Some(error) = ctx.isolation.error.as_ref() {
+            warnings.push(format!("The copper could not be read: {error}"));
+        } else {
+            warnings.push(
+                "Working out the isolation contours — reading the board's copper and \
+                 re-pouring its zones. This step's engraving appears when that finishes."
+                    .into(),
+            );
+        }
+        return (Vec::new(), warnings);
+    };
+
+    warnings.extend(isolation.copper_warnings.iter().cloned());
+    warnings.extend(isolation.result.warnings.iter().cloned());
+    if isolation.copper_layer_count > 2 {
+        warnings.push(format!(
+            "This board has {} copper layers and a mill reaches two of them. Only the \
+             outer face is engraved; the inner layers are not made by this process at all.",
+            isolation.copper_layer_count,
+        ));
+    }
+    warnings.extend(narrowing_notes(ctx, &isolation.result.narrowed));
+
+    let spans = isolation
+        .result
+        .contours
+        .iter()
+        .enumerate()
+        .map(|(n, contour)| EngraveSpan {
+            source: format!("{}#{n}", contour.net),
+            path: contour
+                .path
+                .iter()
+                .map(|&(x, y)| {
+                    placement.xy(&pcb::BoardPoint {
+                        x: Length::from_mm(x as f64 / 1e6),
+                        y: Length::from_mm(y as f64 / 1e6),
+                    })
+                })
+                .collect(),
+            closed: contour.closed,
+            // Negative machine-Z depth (board top is Z0; op-planner §6). Scaled from the
+            // width this stretch actually achieved, not from the width that was asked for:
+            // a narrowed stretch is a shallower cut, and that is the whole mechanism.
+            z_bottom: Length::from_mm(-span_depth_mm(bit, contour.width_nm, depth)),
+        })
+        .collect();
+
+    (spans, warnings)
+}
+
+/// How deep to sink `bit` to cut a channel `width_nm` across.
+///
+/// `full_depth` is what the requested width needs and what a uniform contour takes. A
+/// narrowed stretch is re-derived from the width it actually got — the same arithmetic
+/// that chose the bit, run again on a smaller number. That re-derivation *is* the
+/// mechanism: on a V-bit a shallower cut is a narrower one, so the pass that decided to
+/// squeeze through a tight gap is carried out by lifting the tool.
+fn span_depth_mm(bit: &Tool, width_nm: i64, full_depth: Length) -> f64 {
+    let Some(tip) = bit.tip_diameter else {
+        return full_depth.as_mm();
+    };
+    assigner::engrave_depth_mm(
+        tip.as_mm(),
+        bit.point_angle.as_degrees(),
+        width_nm as f64 / 1e6,
+    )
+    .unwrap_or(full_depth.as_mm())
+}
+
+/// What to tell the operator about the pairs the board had no room for.
+///
+/// Two notes, because they are two different facts. A narrowed pair is *still isolated* —
+/// worth knowing, not worth stopping for. A pair that got nothing is copper still joined,
+/// which is a board that will not work, and it is named however many there are.
+fn narrowing_notes(ctx: &AppCtx, narrowed: &[pcb::NarrowedPair]) -> Vec<String> {
+    let mut notes = Vec::new();
+    let name = |pair: &pcb::NarrowedPair| format!("{} / {}", pair.nets.0, pair.nets.1);
+
+    let uncut: Vec<&pcb::NarrowedPair> = narrowed.iter().filter(|p| p.width_nm == 0).collect();
+    if !uncut.is_empty() {
+        notes.push(format!(
+            "Not isolated — closer together than the narrowest cut this bit can make, so \
+             no channel was cut between them and they stay joined: {}. Separate them by \
+             hand, or re-lay the board.",
+            uncut.iter().map(|p| name(p)).collect::<Vec<_>>().join(", "),
+        ));
+    }
+
+    let tightened: Vec<&pcb::NarrowedPair> = narrowed.iter().filter(|p| p.width_nm > 0).collect();
+    if let Some(tightest) = tightened.iter().min_by_key(|p| p.width_nm) {
+        let named: Vec<String> = tightened
+            .iter()
+            .take(NARROWED_PAIRS_NAMED)
+            .map(|p| format!("{} at {}", name(p), fmt_len(ctx, Length::from_mm(p.width_nm as f64 / 1e6))))
+            .collect();
+        let rest = tightened.len().saturating_sub(named.len());
+        notes.push(format!(
+            "{} net pair(s) are closer together than the requested channel, so it was \
+             narrowed across those stretches only — the tightest to {}. {}{}",
+            tightened.len(),
+            fmt_len(ctx, Length::from_mm(tightest.width_nm as f64 / 1e6)),
+            named.join(", "),
+            if rest > 0 { format!(", and {rest} more.") } else { ".".into() },
+        ));
+    }
+    notes
+}
+
 /// The cut spans for the board's interior openings, grouped by the router that cuts them,
 /// plus the drills they need pushed onto `drill_targets`.
 ///

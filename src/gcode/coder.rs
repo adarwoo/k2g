@@ -501,6 +501,10 @@ fn sample_steps() -> Vec<StepValue> {
                 ]),
             ),
             ("mill_board".into(), mill_board.clone()),
+            (
+                "engrave_copper".into(),
+                StepValue::Map(vec![("width".into(), StepValue::Text("0.25mm".into()))]),
+            ),
             ("cnc_name".into(), StepValue::Text(cnc.into())),
             ("fixture_name".into(), StepValue::Text("Vacuum bed".into())),
             ("toolset_name".into(), StepValue::Text("PCB rack".into())),

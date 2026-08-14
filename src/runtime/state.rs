@@ -2054,6 +2054,10 @@ fn default_operation_setup_value(op: ProductionOperation) -> Value {
                 "direction": "climb",
             }
         }),
+        ProductionOperation::EngraveCopper => json!({
+            "enabled": false,
+            "width": "0.25mm",
+        }),
     }
 }
 
@@ -2212,6 +2216,7 @@ fn operation_to_key(operation: ProductionOperation) -> &'static str {
         ProductionOperation::RouteBoard => "route_board",
         ProductionOperation::RouteCutouts => "route_cutouts",
         ProductionOperation::MillBoard => "mill_board",
+        ProductionOperation::EngraveCopper => "engrave_copper",
     }
 }
 
@@ -2223,6 +2228,7 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
         "route_board" => Some(ProductionOperation::RouteBoard),
         "route_cutouts" => Some(ProductionOperation::RouteCutouts),
         "mill_board" => Some(ProductionOperation::MillBoard),
+        "engrave_copper" => Some(ProductionOperation::EngraveCopper),
         _ => None,
     }
 }

@@ -123,11 +123,12 @@ pub enum ProductionOperation {
     RouteBoard,
     RouteCutouts,
     MillBoard,
+    EngraveCopper,
 }
 
 impl ProductionOperation {
     /// In the same "most likely first" order the UI and `operation_key` use.
-    pub fn all() -> [Self; 6] {
+    pub fn all() -> [Self; 7] {
         [
             Self::DrillPth,
             Self::DrillNpth,
@@ -135,6 +136,7 @@ impl ProductionOperation {
             Self::RouteCutouts,
             Self::DrillLocatingPins,
             Self::MillBoard,
+            Self::EngraveCopper,
         ]
     }
 
@@ -146,6 +148,7 @@ impl ProductionOperation {
             Self::RouteBoard => "Route Board Outline",
             Self::RouteCutouts => "Route Interior Cutouts",
             Self::MillBoard => "Mill Board Outline",
+            Self::EngraveCopper => "Engrave Copper Isolation",
         }
     }
 }

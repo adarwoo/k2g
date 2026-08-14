@@ -235,6 +235,12 @@ pub struct AppCtx {
     /// "what is the revision now?" would happily file a plan computed from a stale
     /// snapshot under the current revision — then serve it as though it were fresh.
     pub revision: u64,
+    /// Which acquisition of the board this is, counting from launch.
+    ///
+    /// The board's *name* is not its identity: edit it in KiCad, press Reload PCB, and the
+    /// name is what it always was while every track may have moved. Anything caching work
+    /// derived from the board keys on this instead.
+    pub board_epoch: u64,
     /// Isolation contours for copper engraving, and whether any are being worked out.
     ///
     /// On the context rather than in [`AppState`], which is deep-cloned before every

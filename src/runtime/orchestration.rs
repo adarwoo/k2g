@@ -48,6 +48,7 @@ impl AppCtx {
             job_references,
             status,
             catalogs_loaded: false,
+            board_epoch: 0,
             isolation: Default::default(),
             revision: 0,
             plan_cache: Default::default(),
@@ -79,6 +80,10 @@ impl AppCtx {
                 .board
                 .as_ref()
                 .map(|board| stitch_edge_shapes(&board.edge_shapes));
+            // What tells one acquisition of a board from the next. A re-read board keeps
+            // its name, so anything cached against the board — the isolation contours
+            // above all — would otherwise still look current.
+            self.board_epoch = self.board_epoch.wrapping_add(1);
         }
 
         if !self.app.catalogs.is_empty() {
