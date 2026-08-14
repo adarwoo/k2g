@@ -1899,6 +1899,57 @@ mod tests {
         assert_eq!(listed[0].0, id);
     }
 
+    /// Every V-bit the bundled catalogues ship must reach the parsed model with its tip
+    /// diameter intact.
+    ///
+    /// `ToolEntry` had no `tip_diameter` field at all while the schema required one of
+    /// every V-bit, so the catalogue stated it, the file validated, and serde dropped it
+    /// without a word — and a tool that is chosen *by* its tip could then never be chosen.
+    /// Reading the shipped files rather than a fixture is the point: the gap was between
+    /// what the schema demanded and what the struct accepted, and only real data spans it.
+    #[test]
+    fn bundled_v_bits_arrive_with_their_tip_diameters() {
+        use crate::data::model::catalog::{Catalog, ToolType};
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("catalogs");
+        let mut checked = 0usize;
+        for entry in fs::read_dir(&dir).expect("assets/catalogs is readable") {
+            let path = entry.expect("readable dir entry").path();
+            if !is_yaml(&path) {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("catalog");
+            let text = fs::read_to_string(&path).expect("catalog file is readable");
+            let mut value = parse_yaml_value(&text).expect("catalog is valid YAML");
+            // Both passes, in the order a catalogue actually meets them: seeding injects
+            // the fields a hand-written file omits, and loading canonicalises what is
+            // then on disk. One pass alone does not deserialise — the legacy `sku_name`
+            // survives it and collides with `sku`.
+            crate::catalog_io::normalize_catalog_fields(&mut value, stem, true, false);
+            crate::catalog_io::normalize_catalog_fields(&mut value, stem, false, true);
+            let catalog: Catalog =
+                serde_json::from_value(value).expect("catalog deserialises into the model");
+
+            for section in &catalog.sections {
+                for tool in &section.tools {
+                    if !matches!(tool.tool_type, ToolType::Vbit | ToolType::Engraver) {
+                        continue;
+                    }
+                    assert!(
+                        tool.tip_diameter.is_some(),
+                        "{} in {} lost its tip diameter on the way through the model",
+                        tool.sku.clone().unwrap_or_default(),
+                        path.display(),
+                    );
+                    // And through the projection every stock adapter goes via.
+                    assert!(tool.to_tool_core().tip_diameter.is_some());
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the bundled catalogues ship no V-bits to check");
+    }
+
     /// What a factory reset relies on: emptied of its configuration, the store comes
     /// back with the shipped defaults rather than with nothing — and, the part that was
     /// actually broken, without the profiles and stock that were just deleted.

@@ -1353,11 +1353,14 @@ impl AppState {
                         catalog_diameter: Some(tool.diameter),
                         point_angle: tool.point_angle,
                         catalog_point_angle: Some(tool.point_angle),
-                        // Not carried by `CatalogStockTool`, like `flute_length` beside it: the
-            // catalogue knows them, the add-from-catalogue projection does not.
-            flute_length: None,
-            tip_diameter: None,
-            z_min_depth: None,
+                        // Carried through from the catalogue, which is the only place
+                        // they are stated. A V-bit that arrived without its tip could
+                        // never be chosen to engrave, since the tip is what the choice is
+                        // made on — and a router without its flute length silently passed
+                        // the check that it can reach through the board.
+                        flute_length: tool.flute_length,
+                        tip_diameter: tool.tip_diameter,
+                        z_min_depth: tool.z_min_depth,
                         table_feed: tool.table_feed,
                         catalog_table_feed: tool.table_feed,
                         z_feed: tool.z_feed,

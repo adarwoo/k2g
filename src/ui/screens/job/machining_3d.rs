@@ -232,17 +232,35 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       });
     }
 
-    // The toolpaths, from the payload Rust built. One Line2 per (tool, run) — the
-    // extraction merges consecutive moves of the same kind, so this is a handful of
-    // objects per tool rather than one per move.
+    // The toolpaths, from the payload Rust built. **Two objects per tool** — one for
+    // everything it cuts and one for everything it travels — rather than one per run.
+    //
+    // A run used to be its own Line2, which was fine while a step was a few hundred
+    // plunges. An isolation pass is 900 runs on one layer, and 900 draw calls a frame is
+    // felt immediately on a machine falling back to software rendering, which is where
+    // this runs when the GPU driver is not trusted (see WEBKIT_DISABLE_DMABUF_RENDERER).
+    //
+    // The geometry is the same either way: LineGeometry expands a polyline into segment
+    // pairs internally, so pre-expanding them here and handing the lot to one
+    // LineSegments2 costs no extra memory — it only stops the scene graph carrying a
+    // thousand objects that all draw with the same two materials.
     function addTraces(traces) {
       (traces || []).forEach(function (trace) {
+        const bucket = { feed: [], rapid: [] };
         trace.moves.forEach(function (run) {
-          const flat = [];
-          run.points.forEach(function (p) { flat.push(p.x, p.y, p.z); });
+          const into = run.kind === "rapid" ? bucket.rapid : bucket.feed;
+          const pts = run.points;
+          for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1], b = pts[i];
+            into.push(a.x, a.y, a.z, b.x, b.y, b.z);
+          }
+        });
+
+        ["feed", "rapid"].forEach(function (kind) {
+          const flat = bucket[kind];
           if (flat.length < 6) return;
 
-          const geometry = new T.LineGeometry();
+          const geometry = new T.LineSegmentsGeometry();
           geometry.setPositions(flat);
           // Both kinds carry the tool's colour, so the legend identifies every line on
           // screen. What separates them is the dash: a rapid is the tool travelling, a
@@ -250,7 +268,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
           // grey — but on a drilling step the cuts are only the short vertical plunges and
           // every transit between holes is a rapid, so the picture was almost entirely
           // grey and told you nothing about which tool was where.
-          const rapid = run.kind === "rapid";
+          const rapid = kind === "rapid";
           const material = new T.LineMaterial({
             color: trace.colour,
             linewidth: rapid ? 1.5 : 3.5,
@@ -262,9 +280,12 @@ const BOOTSTRAP_SCRIPT: &str = r#"
             worldUnits: false,
           });
           materials.push(material);
-          const line = new T.Line2(geometry, material);
+          const line = new T.LineSegments2(geometry, material);
           // Dashes come out of the line's own distance attribute, and without this the
-          // material's `dashed` flag renders a solid line and reports nothing.
+          // material's `dashed` flag renders a solid line and reports nothing. Across a
+          // batch the phase carries on from one segment to the next, including over the
+          // jump between two separate transits — which shifts where a dash falls and
+          // nothing else.
           if (rapid) line.computeLineDistances();
           content.add(line);
         });

@@ -73,6 +73,14 @@ pub struct ToolEntry {
     pub sku: Option<String>,
     pub point_angle: Angle,
     pub z_min_depth: Length,
+    /// The flat at the very tip of a V-bit or engraver.
+    ///
+    /// Absent from this struct until isolation engraving needed it, while the schema had
+    /// required it of every V-bit all along — so the catalogue stated it, the file
+    /// validated, and serde dropped it here without a word. A tool chosen *by* its tip
+    /// then had none, and every V-bit in stock was unusable.
+    #[serde(default)]
+    pub tip_diameter: Option<Length>,
     pub spindle_rpm: Option<RotationalSpeed>,
     pub z_feed: Option<FeedRate>,
     pub table_feed: Option<FeedRate>,
@@ -94,6 +102,11 @@ impl ToolEntry {
             z_feed: self.z_feed.or(self.table_feed),
             spindle_speed: self.spindle_rpm,
             sku: self.sku.clone(),
+            tip_diameter: self.tip_diameter,
+            // The catalogue always states one; the stock model treats it as optional
+            // because a hand-entered tool need not.
+            z_min_depth: Some(self.z_min_depth),
+            flute_length: self.flute_length,
         }
     }
 }
@@ -215,6 +228,15 @@ pub struct CatalogStockTool {
     pub kind: String,
     pub diameter: Length,
     pub point_angle: Angle,
+    /// Carried through to stock, along with the two below, because a tool added from a
+    /// catalogue has to arrive complete. They were absent here until isolation engraving
+    /// made the first of them load-bearing: `pick_engraver` selects a bit *by* its tip,
+    /// so a V-bit that lost it on the way in could never be chosen.
+    pub tip_diameter: Option<Length>,
+    pub z_min_depth: Option<Length>,
+    /// Absent from every tool ever added from a catalogue until now, which quietly
+    /// passed the "cutter cannot reach through the board" check for all of them.
+    pub flute_length: Option<Length>,
     /// Lateral (XY) cutting feed.
     pub table_feed: Option<FeedRate>,
     /// Plunge (Z-only) feed — its own rating, carried through to stock rather than
