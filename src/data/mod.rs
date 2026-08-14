@@ -796,6 +796,35 @@ pub fn appdata_ready() -> bool {
     APP_DATA.get().is_some()
 }
 
+/// Re-reads the whole store from disk, replacing what is held in memory.
+///
+/// For a factory reset, which deletes the configuration out from under a store that is
+/// still holding every document it parsed. Without this the app carries on showing
+/// profiles and stock that no longer exist — the files are gone and the screens are not.
+///
+/// **Flush before deleting the files, not after.** The writer drains its queue when it is
+/// dropped, so the old store replaced here will write anything still queued — into the
+/// directory that was just emptied. [`crate::runtime::data_lifecycle::factory_reset`]
+/// owns that ordering.
+///
+/// The fresh store is built before the lock is taken: loading reads and parses every file,
+/// which is not work to do with the UI blocked behind it.
+pub fn reload_appdata() -> Vec<DataError> {
+    let Some(lock) = APP_DATA.get() else {
+        return Vec::new();
+    };
+    let Ok(dirs) = crate::paths::ensure_app_dirs() else {
+        return Vec::new();
+    };
+    let (fresh, errors) = AppData::load(&dirs);
+    if let Ok(mut guard) = lock.write() {
+        // The old store drops here, joining its writer thread. Cheap, because the queue
+        // was drained before the delete.
+        *guard = fresh;
+    }
+    errors
+}
+
 /// Runs `f` with a shared read lock on the global store. Panics if the store has
 /// not been initialized by [`init_appdata`].
 pub fn with_appdata<R>(f: impl FnOnce(&AppData) -> R) -> R {
@@ -1868,6 +1897,44 @@ mod tests {
         let listed = data.list(Profile::Cnc);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, id);
+    }
+
+    /// What a factory reset relies on: emptied of its configuration, the store comes
+    /// back with the shipped defaults rather than with nothing — and, the part that was
+    /// actually broken, without the profiles and stock that were just deleted.
+    ///
+    /// The reload is the whole fix. Deleting the files while the store holds every
+    /// document it parsed resets the disk and nothing the operator can see.
+    #[test]
+    fn a_store_reloaded_over_an_emptied_directory_comes_back_shipped() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+
+        let (mut data, _) = load_temp(dir.path());
+        let profile = data.create(Profile::Cnc).expect("create a CNC profile");
+        data.set_stock_str("/thickness", "2.4mm");
+        data.flush();
+        assert!(data.get(profile).is_some(), "the profile is there to begin with");
+        drop(data);
+
+        // Exactly what `factory_reset` does to the disk.
+        fs::remove_dir_all(&data_dir).unwrap();
+
+        let (fresh, errors) = load_temp(dir.path());
+        assert!(errors.is_empty(), "a re-seeded store must load clean: {errors:?}");
+        assert!(fresh.get(profile).is_none(), "the deleted profile must not come back");
+        assert!(
+            fresh.stock().is_some(),
+            "stock is re-seeded from the schema, not left absent — an app with no stock \
+             document at all is a different broken state from a reset one"
+        );
+        assert_ne!(
+            fresh
+                .stock()
+                .and_then(|doc| doc.to_value().get("thickness").and_then(Value::as_str).map(str::to_string)),
+            Some("2.4mm".to_string()),
+            "and it is the shipped default, not what was set before the reset"
+        );
     }
 
     #[test]

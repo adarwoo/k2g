@@ -477,8 +477,8 @@ pub fn SettingsDialog(
                             div { class: "settings-danger-copy",
                                 strong { "Reset settings to defaults" }
                                 p { class: "settings-toggle-detail",
-                                    "Deletes your settings, profiles, stock and job, and re-creates the "
-                                    "shipped defaults on the next start. Your tool catalogs and the "
+                                    "Deletes your settings, profiles, stock and job, and puts the "
+                                    "shipped defaults back straight away. Your tool catalogs and the "
                                     "security log are kept."
                                 }
                             }
@@ -488,17 +488,26 @@ pub fn SettingsDialog(
                                     spawn(async move {
                                         if !super::profiles_common::confirm(
                                             "Reset settings",
-                                            "Reset all settings, profiles, stock and the job to their shipped defaults?\n\nYour tool catalogs and the security log are kept.\n\nk2g must be restarted afterwards.",
+                                            "Reset all settings, profiles, stock and the job to their shipped defaults?\n\nYour tool catalogs and the security log are kept. The board stays loaded.",
                                         ).await {
                                             return;
                                         }
-                                        let message = match crate::runtime::data_lifecycle::factory_reset() {
-                                            Ok(path) => {
-                                                format!("Settings reset. Restart k2g to finish. ({})", path.display())
-                                            }
-                                            Err(err) => format!("Reset failed: {err}"),
-                                        };
-                                        super::mutate_ctx(state, |s| s.log_event(message));
+                                        // Two halves, and the second is not optional. The
+                                        // reset clears the files and re-seeds the store;
+                                        // without adopting it here the screens would carry
+                                        // on rendering the profiles and stock that are gone,
+                                        // which reads as the button having done nothing.
+                                        match crate::runtime::data_lifecycle::factory_reset() {
+                                            Ok(_) => super::mutate_ctx(state, |ctx| {
+                                                ctx.adopt_reset_configuration();
+                                                ctx.log_event(
+                                                    "Settings, profiles, stock and the job reset to their shipped defaults.".to_string(),
+                                                );
+                                            }),
+                                            Err(err) => super::mutate_ctx(state, |ctx| {
+                                                ctx.log_event(format!("Reset failed: {err}"))
+                                            }),
+                                        }
                                         probe.set(probe() + 1);
                                     });
                                 },

@@ -436,6 +436,41 @@ impl AppCtx {
         });
     }
 
+    /// Rebuild the application state from a store that has just been reset.
+    ///
+    /// The other half of [`factory_reset`](crate::runtime::data_lifecycle::factory_reset),
+    /// which puts the shipped defaults back on disk and in the store but cannot reach the
+    /// context. Without this the screens keep rendering the profiles and stock the reset
+    /// deleted, and the operator's reasonable conclusion is that the button does nothing.
+    ///
+    /// **The board and the KiCad connection survive.** They are facts about this session,
+    /// not configuration: the operator asked to reset their settings, not to put the board
+    /// away. Everything else is re-read from the store, so a value the reset did not
+    /// actually change comes back identical rather than being preserved by hand.
+    ///
+    /// The event log survives too, for the plainest of reasons — the message saying the
+    /// reset happened is about to be appended to it.
+    pub fn adopt_reset_configuration(&mut self) {
+        if let Some(state) = persistence_state_from_appdata() {
+            set_persistence_state(state);
+        }
+
+        let boot = UiLaunchData {
+            kicad_status: self.app.kicad_status.clone(),
+            board_snapshot: self.app.board.clone(),
+        };
+        let events = std::mem::take(&mut self.app.events);
+        self.app = AppState::new(&boot);
+        self.app.events = events;
+
+        // `catalogs_loaded` is deliberately left alone. The catalogs are reference data a
+        // reset keeps, the index built from them holds nothing about the stock that was
+        // just cleared, and `sync_after_mutation` carries the loaded copy across a
+        // whole-state replacement like this one. Clearing the flag would throw away a
+        // list that is still correct and make the Stock screen re-read the library to
+        // arrive back at it.
+    }
+
     pub fn ensure_catalogs_loaded(&mut self) {
         if self.catalogs_loaded {
             return;

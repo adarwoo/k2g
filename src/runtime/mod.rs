@@ -297,7 +297,16 @@ pub mod security_log;
 pub mod data_lifecycle;
 
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
-static PERSISTENCE_STATE: OnceLock<PersistenceState> = OnceLock::new();
+
+/// The persisted state the launch-time hydrate reads, replaceable because a factory
+/// reset has to be able to hand it a *different* one and re-hydrate from that.
+///
+/// Leaked rather than guarded. Every one of its readers wants a plain `&PersistenceState`
+/// for the length of one field lookup, and threading a guard type through all of them
+/// would be a good deal of ceremony for a value that is replaced at most a handful of
+/// times in a process's life — once at launch, once per reset. The leak is bounded by how
+/// often a person presses that button.
+static PERSISTENCE_STATE: RwLock<Option<&'static PersistenceState>> = RwLock::new(None);
 
 /// The subset of persisted state the launch-time hydrate consumes. Formerly built
 /// by the legacy `load_all_configs` loader; it is now sourced from
@@ -422,7 +431,7 @@ pub fn initialize_ctx(boot: UiLaunchData) {
     }
 
     if let Some(state) = persistence_state_from_appdata() {
-        let _ = PERSISTENCE_STATE.set(state);
+        set_persistence_state(state);
     }
 
     let _ = GLOBAL_CTX.set(RwLock::new(AppCtx::from_launch(&boot)));
@@ -545,7 +554,14 @@ pub fn acquire_board() -> (String, Option<BoardSnapshot>) {
 
 #[allow(dead_code)]
 fn persistence_state() -> Option<&'static PersistenceState> {
-    PERSISTENCE_STATE.get()
+    PERSISTENCE_STATE.read().ok().and_then(|held| *held)
+}
+
+/// Publishes a freshly-read persisted state for the next hydrate to use.
+fn set_persistence_state(state: PersistenceState) {
+    if let Ok(mut held) = PERSISTENCE_STATE.write() {
+        *held = Some(Box::leak(Box::new(state)));
+    }
 }
 
 pub fn ctx_snapshot() -> AppCtx {

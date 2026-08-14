@@ -3,7 +3,7 @@
 //! Two operations that sound similar and differ in exactly one way: what survives.
 //!
 //! - [`factory_reset`] clears the *configuration* — settings, profiles, stock, the
-//!   job — and lets the next start re-seed the bundled defaults. Catalogs and the
+//!   job — and re-seeds the bundled defaults in place, without a restart. Catalogs and the
 //!   security record are kept, because they are reference data and history, not
 //!   configuration. This is EU CRA Annex I (2)(b), "the possibility to reset the
 //!   product to its original state".
@@ -56,12 +56,29 @@ pub fn data_dir() -> Option<PathBuf> {
 /// settings" is not a request to throw them away. Deleting them is what
 /// [`delete_all_data`] is for.
 ///
-/// Requires a restart: `AppData` holds the parsed store in memory and is the sole
-/// writer of these files, so a live re-seed would race its background flush and could
-/// write the old state straight back over the new one.
+/// Takes effect immediately, and the three steps must happen in this order.
+///
+/// `AppData` holds the parsed store in memory and is the sole writer of these files, so
+/// deleting them alone resets the disk and nothing else: the app carries on showing
+/// profiles and stock that are gone, which reads as the reset having failed. So the store
+/// is re-read afterwards and the shipped defaults are re-seeded into it.
+///
+/// **The flush comes first.** The store's writer drains its queue when it is dropped, and
+/// dropping it is exactly what replacing it does — so a write still queued when the files
+/// go would land *after* the delete and put part of the old configuration back. Emptying
+/// the queue while the files are still there costs nothing and closes that window.
+///
+/// The caller still has to rebuild the context from the re-seeded store; see
+/// [`AppCtx::adopt_reset_configuration`](crate::runtime::AppCtx::adopt_reset_configuration).
 pub fn factory_reset() -> Result<PathBuf, LifecycleError> {
     let root = data_dir().ok_or(LifecycleError::NoDataDir)?;
+
+    crate::data::flush_appdata();
     let configs = factory_reset_in(&root)?;
+    for problem in crate::data::reload_appdata() {
+        info!("Factory reset, re-seeding: {problem}");
+    }
+
     info!("Factory reset: removed {}", configs.display());
     Ok(configs)
 }
