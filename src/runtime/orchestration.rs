@@ -48,6 +48,7 @@ impl AppCtx {
             job_references,
             status,
             catalogs_loaded: false,
+            isolation_epoch: 0,
             copper: boot.copper.clone(),
             board_epoch: 0,
             isolation: Default::default(),
@@ -60,7 +61,7 @@ impl AppCtx {
     /// captured *before* the mutation ran (see `with_ctx_mut`), so the diff against
     /// the now-current `self.app` is real — this is what drives board re-stitching
     /// and the regeneration trigger.
-    fn sync_after_mutation(&mut self, previous_app: &AppState) {
+    fn sync_after_mutation(&mut self, previous_app: &AppState, previous_isolation: u64) {
         let previous_references = self.job_references.clone();
         let board_changed = previous_app.board != self.app.board;
 
@@ -149,13 +150,21 @@ impl AppCtx {
         // banner goes with the last of them.
         self.app.set_readiness_errors(&readiness.nogo_reasons);
 
+        // The contours arriving is a change to the plan that no diff of the app state or
+        // the references can see — they are worked out on a thread and land on the
+        // context. Checked here rather than inside `detect_generation_trigger`, which is
+        // given only the two app states and would have to be handed this as well to say
+        // anything about it.
+        let isolation_arrived = self.isolation_epoch != previous_isolation;
         if let Some(trigger) = detect_generation_trigger(
             previous_app,
             &self.app,
             &previous_references,
             &self.job_references,
             &change_set,
-        ) {
+        )
+        .or(isolation_arrived.then_some(GenerationTriggerCause::IsolationContoursReady))
+        {
             let modified = change_set.modified_uuid_entries().join(",");
             log::info!(
                 "Generation trigger detected: cause={} readiness={} modified=[{}]",
@@ -557,6 +566,7 @@ enum GenerationTriggerCause {
     JobConfigurationChanged,
     StockChanged,
     ReferencedDependencyChanged,
+    IsolationContoursReady,
 }
 
 impl GenerationTriggerCause {
@@ -567,6 +577,7 @@ impl GenerationTriggerCause {
             Self::JobConfigurationChanged => "job_config_change",
             Self::StockChanged => "stock_change",
             Self::ReferencedDependencyChanged => "dependency_change",
+            Self::IsolationContoursReady => "isolation_ready",
         }
     }
 
@@ -577,6 +588,7 @@ impl GenerationTriggerCause {
             Self::JobConfigurationChanged => "job configuration changed",
             Self::StockChanged => "stock changed",
             Self::ReferencedDependencyChanged => "referenced dependency changed",
+            Self::IsolationContoursReady => "isolation contours arrived",
         }
     }
 }
@@ -1261,6 +1273,46 @@ mod orchestration_tests {
             &MutationChangeSet::default()
         )
         .is_some());
+    }
+
+    /// The isolation contours arriving re-triggers generation, and the program that
+    /// results must not re-trigger it again.
+    ///
+    /// The contours are worked out on a thread and land on the context, where no diff of
+    /// the app state or the references can see them — so a program generated before they
+    /// existed would stand for ever, with engraving in the plan and the 3D view and none
+    /// in the G-code. An epoch on the context is what makes the arrival visible, and this
+    /// pins the other half: the publish that follows must be a dead end, or the two
+    /// workers would hand work back and forth without stopping.
+    #[test]
+    fn a_published_program_is_not_itself_a_reason_to_generate() {
+        let before = empty_app();
+        let mut after = before.clone();
+        after.programs = vec![StepProgram {
+            index: 0,
+            name: "Drill".into(),
+            cnc_name: "My cnc".into(),
+            outcome: ProgramOutcome::Ready(Program {
+                text: "G21\nG90\n".into(),
+                extension: "nc".into(),
+                block_count: 1,
+                op_count: 2,
+            }),
+        }];
+        after.generation_state = GenerationState::Idle;
+
+        let refs = JobReferences::default();
+        assert!(
+            detect_generation_trigger(
+                &before,
+                &after,
+                &refs,
+                &refs,
+                &MutationChangeSet::default()
+            )
+            .is_none(),
+            "publishing a program must not ask for another one"
+        );
     }
 
     /// A profile referenced only by a later step is still a dependency.

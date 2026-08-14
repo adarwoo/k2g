@@ -284,6 +284,9 @@ fn publish_isolation(isolation: Isolation) {
     with_ctx_mut(|ctx| {
         ctx.isolation.error = None;
         ctx.isolation.ready = Some(Arc::new(isolation));
+        // What tells the regeneration trigger that this happened. It diffs the app state
+        // and the job's references, and this is on neither.
+        ctx.isolation_epoch = ctx.isolation_epoch.wrapping_add(1);
     });
 }
 

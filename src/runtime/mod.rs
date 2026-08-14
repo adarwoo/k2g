@@ -246,6 +246,14 @@ pub struct AppCtx {
     /// On the context rather than in [`AppState`] for the reason its neighbours are: that
     /// is deep-cloned before every mutation, and this is tens of thousands of points.
     pub copper: BoardCopper,
+    /// How many times the isolation contours have been replaced.
+    ///
+    /// The regeneration trigger diffs [`AppState`] and the job's references, and the
+    /// contours are on neither — they are worked out on a thread and land here later. So
+    /// the arrival is invisible to it, and a program generated before they existed would
+    /// stand for ever: engraving in the plan and the 3D view, and none in the G-code.
+    /// Counting the arrivals is what makes it something to diff.
+    pub isolation_epoch: u64,
     /// Isolation contours for copper engraving, and whether any are being worked out.
     ///
     /// On the context rather than in [`AppState`], which is deep-cloned before every
@@ -686,8 +694,9 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
     // old→new diff. (Cloning after `f` would compare the mutated state to itself,
     // which silently disabled board re-stitching and the regeneration trigger.)
     let previous_app = guard.app.clone();
+    let previous_isolation = guard.isolation_epoch;
     let result = f(&mut guard);
-    guard.sync_after_mutation(&previous_app);
+    guard.sync_after_mutation(&previous_app, previous_isolation);
     result
 }
 
