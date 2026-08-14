@@ -41,6 +41,7 @@
 
 mod copper;
 mod error;
+mod isolation;
 mod kicad;
 mod snapshot;
 mod stitching;
@@ -54,6 +55,9 @@ pub use snapshot::{
 pub use copper::{
     is_copper_layer, CopperFeature, CopperSnapshot, CopperSource, Polygon,
     BACK_COPPER, COPPER_LAYER_IDS, FRONT_COPPER,
+};
+pub use isolation::{
+    isolate, IsolationContour, IsolationResult, NarrowedPair, LADDER_STEP_NM,
 };
 pub use stitching::corners::{convex_corners, corner_fillet_area_nm2, Corner, MIN_CORNER_TURN_RAD};
 pub use stitching::{

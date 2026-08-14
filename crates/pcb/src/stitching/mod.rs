@@ -802,7 +802,7 @@ fn signed_area_nm2(pts: &[(i64, i64)]) -> i128 {
 /// so a path is no coarser after offsetting than it was before. Pinned rather than left
 /// at Clipper's proportional default because [`fit_cutout`] measures areas across two
 /// offsets and needs a stated error bound rather than a floating one.
-const OFFSET_ARC_TOLERANCE_NM: f64 = tessellate::SAGITTA_TOLERANCE_NM;
+pub(crate) const OFFSET_ARC_TOLERANCE_NM: f64 = tessellate::SAGITTA_TOLERANCE_NM;
 
 /// Every path that offsetting `paths` by `delta_nm` produces, as one group.
 ///
@@ -812,7 +812,7 @@ const OFFSET_ARC_TOLERANCE_NM: f64 = tessellate::SAGITTA_TOLERANCE_NM;
 ///
 /// Returned largest-area-first with ties broken by Clipper's own order, so the result is
 /// a total function of the input: two runs on the same board give the same program.
-fn offset_group(paths: &[Vec<(i64, i64)>], delta_nm: f64) -> Vec<Vec<(i64, i64)>> {
+pub(crate) fn offset_group(paths: &[Vec<(i64, i64)>], delta_nm: f64) -> Vec<Vec<(i64, i64)>> {
     use clipper2_rust::{
         core::Paths64,
         inflate_paths_64,
