@@ -19,6 +19,13 @@ pub const GENERATION_ERROR_DOMAIN: &str = "generation";
 /// evaluated. Sharing a domain would have each clearing the other's entries.
 pub const READINESS_ERROR_DOMAIN: &str = "readiness";
 
+/// Faults found while working out where a mill has to cut for the nets to come apart.
+///
+/// Its own domain, and deliberately **not** one of the two the generation gate ignores:
+/// a width that fits almost nowhere is a configuration fault like any other, and a
+/// program engraved to it would be thousands of disconnected slivers.
+pub const ISOLATION_ERROR_DOMAIN: &str = "isolation";
+
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(boot: &UiLaunchData) -> Self {
@@ -396,6 +403,28 @@ impl AppState {
         self.clear_runtime_errors(GENERATION_ERROR_DOMAIN);
         for (message, details) in failures {
             self.push_runtime_error_quiet(GENERATION_ERROR_DOMAIN, None, message, details);
+        }
+    }
+
+    /// Replaces the standing isolation diagnostics, and clears them when handed nothing.
+    ///
+    /// Set from the isolation worker's publish, which is the only place that knows how
+    /// the contours came out. It cannot go through the tooling check that reports every
+    /// other tool fault: that runs off [`AppState`] alone, and the contours live on the
+    /// context because they are worked out on a thread.
+    pub fn set_isolation_errors(&mut self, faults: Vec<(String, Option<String>)>) {
+        let unchanged = self
+            .errors
+            .iter()
+            .filter(|error| error.domain == ISOLATION_ERROR_DOMAIN)
+            .map(|error| (error.message.clone(), error.details.clone()))
+            .eq(faults.iter().cloned());
+        if unchanged {
+            return; // avoid re-posting an identical standing condition
+        }
+        self.clear_runtime_errors(ISOLATION_ERROR_DOMAIN);
+        for (message, details) in faults {
+            self.push_runtime_error_quiet(ISOLATION_ERROR_DOMAIN, None, message, details);
         }
     }
 

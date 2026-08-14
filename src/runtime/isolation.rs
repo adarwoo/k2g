@@ -48,6 +48,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use pcb::{CopperSnapshot, IsolationResult, KiCad};
+#[cfg(test)]
+use pcb::IsolationContour;
 
 use crate::runtime::{wake_ui, with_ctx_mut};
 
@@ -280,9 +282,59 @@ fn collect_copper(spec: &IsolationSpec) -> Result<(CopperSnapshot, u32), String>
     Ok((copper, copper_layer_count))
 }
 
+/// How much of a board must take the requested channel for the width to be sensible.
+///
+/// A contour only stays a whole loop if nothing forced it to narrow, so this is really
+/// "did the width fit". A third is a low bar deliberately — a board with genuinely tight
+/// corners still clears it comfortably (0.25 mm on the board this was built against comes
+/// out at two thirds) while a width the layout cannot take anywhere falls far below it
+/// (0.8 mm on the same board: one fortieth).
+const MIN_INTACT_FRACTION: f64 = 1.0 / 3.0;
+
+/// What is wrong with a set of contours, if anything, as a standing diagnostic.
+///
+/// One fault, and it is about the *width* rather than the board: asked for a channel the
+/// layout cannot take, the pass narrows nearly everything and returns thousands of short
+/// fragments instead of outlines. That is not a wrong answer — it is the honest one — but
+/// it is not a board anybody meant to cut, and nothing else about the result says so. The
+/// contour count goes *up*, which reads like more work rather than less.
+fn isolation_faults(isolation: &Isolation) -> Vec<(String, Option<String>)> {
+    let result = &isolation.result;
+    let intact = result.intact_fraction();
+    if result.contours.is_empty() || intact >= MIN_INTACT_FRACTION {
+        return Vec::new();
+    }
+
+    let closed = result.contours.iter().filter(|c| c.closed).count();
+    let asked = isolation.spec.width_nm as f64 / 1e6;
+    let advice = match result.widest_workable_nm() {
+        Some(fits) => format!(
+            "The widest channel this board's clearances allow throughout is about \
+             {:.2} mm. Set the isolation width to that.",
+            fits as f64 / 1e6,
+        ),
+        None => "Reduce the isolation width.".to_string(),
+    };
+
+    vec![(
+        format!("An isolation channel of {asked:.2} mm does not fit this board."),
+        Some(format!(
+            "Only {closed} of {} contours could take it; the rest were broken into \
+             narrowed fragments, which is thousands of short cuts rather than an outline \
+             round each net. {advice}",
+            result.contours.len(),
+        )),
+    )]
+}
+
 fn publish_isolation(isolation: Isolation) {
+    let faults = isolation_faults(&isolation);
+    for (headline, _) in &faults {
+        log::warn!("{headline}");
+    }
     with_ctx_mut(|ctx| {
         ctx.isolation.error = None;
+        ctx.app.set_isolation_errors(faults);
         ctx.isolation.ready = Some(Arc::new(isolation));
         // What tells the regeneration trigger that this happened. It diffs the app state
         // and the job's references, and this is on neither.
@@ -325,6 +377,82 @@ mod tests {
             })),
             error: None,
         }
+    }
+
+    fn contour(closed: bool) -> IsolationContour {
+        IsolationContour {
+            net: "GND".into(),
+            path: vec![(0, 0), (1000, 0), (1000, 1000)],
+            closed,
+            width_nm: 200_000,
+        }
+    }
+
+    fn outcome(closed: usize, open: usize, narrowed: &[i64]) -> Isolation {
+        Isolation {
+            spec: spec(800_000),
+            result: IsolationResult {
+                layer_id: pcb::FRONT_COPPER,
+                contours: std::iter::repeat_with(|| contour(true))
+                    .take(closed)
+                    .chain(std::iter::repeat_with(|| contour(false)).take(open))
+                    .collect(),
+                narrowed: narrowed
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| pcb::NarrowedPair {
+                        nets: (format!("A{i}"), format!("B{i}")),
+                        width_nm: *w,
+                    })
+                    .collect(),
+                warnings: Vec::new(),
+            },
+            copper_warnings: Vec::new(),
+            copper_layer_count: 2,
+        }
+    }
+
+    /// The fault this exists to catch. Asked for a channel the layout cannot take, the
+    /// pass narrows nearly everything and returns thousands of short fragments — which is
+    /// the honest answer to the question asked, and not a board anyone meant to cut. The
+    /// contour count goes *up*, so nothing else about the result reads as a problem.
+    #[test]
+    fn a_width_that_shatters_the_board_is_reported_as_a_fault() {
+        let faults = isolation_faults(&outcome(89, 3327, &[200_000, 250_000]));
+
+        assert_eq!(faults.len(), 1);
+        let (headline, detail) = &faults[0];
+        assert!(headline.contains("0.80 mm"), "the width asked for: {headline}");
+        let detail = detail.clone().unwrap_or_default();
+        assert!(detail.contains("89 of 3416"), "how little fit: {detail}");
+        assert!(
+            detail.contains("0.20 mm"),
+            "and the width that would, which is the tightest fallback: {detail}"
+        );
+    }
+
+    /// A board with genuinely tight corners is not the same thing as a width that does not
+    /// fit, and must not be refused. Two thirds intact is what a sensible width looks like
+    /// on the board this was built against.
+    #[test]
+    fn a_board_that_mostly_takes_the_width_is_not_a_fault() {
+        assert!(isolation_faults(&outcome(234, 115, &[200_000])).is_empty());
+    }
+
+    /// Nothing narrowed means nothing to suggest, and no fault to raise either.
+    #[test]
+    fn a_clean_pass_raises_nothing() {
+        assert!(isolation_faults(&outcome(349, 0, &[])).is_empty());
+    }
+
+    /// A pair that can take no width at all must not be offered as the answer: it would
+    /// suggest setting the channel to nothing.
+    #[test]
+    fn a_pair_that_fits_nothing_is_not_suggested_as_the_width() {
+        let faults = isolation_faults(&outcome(10, 990, &[0, 150_000]));
+        let detail = faults[0].1.clone().unwrap_or_default();
+        assert!(detail.contains("0.15 mm"), "{detail}");
+        assert!(!detail.contains("0.00 mm"), "{detail}");
     }
 
     /// Contours cut to one width describe a different board than contours cut to another.

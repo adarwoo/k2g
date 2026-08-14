@@ -73,6 +73,37 @@ pub struct IsolationResult {
     pub warnings: Vec<String>,
 }
 
+impl IsolationResult {
+    /// The share of contours that took the requested width the whole way round, 0..=1.
+    ///
+    /// The one number that says whether a width suits a board. A contour only stays a
+    /// closed loop if nothing forced it to narrow, so when this collapses the pass has
+    /// stopped drawing outlines and started emitting fragments: ask a 0.2 mm board for a
+    /// 0.8 mm channel and 349 tidy loops become 3416 slivers with a rapid between each.
+    /// The geometry is right in both cases, which is exactly why the count is worth
+    /// looking at — nothing else about the result announces that the width was absurd.
+    pub fn intact_fraction(&self) -> f64 {
+        if self.contours.is_empty() {
+            return 1.0;
+        }
+        let closed = self.contours.iter().filter(|c| c.closed).count();
+        closed as f64 / self.contours.len() as f64
+    }
+
+    /// The widest channel every crowded pair on this board could still take, nm.
+    ///
+    /// The tightest of the widths the pass had to fall back to — so setting the requested
+    /// width to it makes every one of those pairs fit at full width, and the fragments
+    /// become loops again. `None` when nothing was narrowed, which is when there is
+    /// nothing to suggest.
+    ///
+    /// Pairs that got *nothing* are skipped: no width helps them, and letting a zero in
+    /// here would suggest a channel of no width at all.
+    pub fn widest_workable_nm(&self) -> Option<i64> {
+        self.narrowed.iter().map(|p| p.width_nm).filter(|w| *w > 0).min()
+    }
+}
+
 /// The step between rungs of the width ladder.
 ///
 /// 25 µm is a step no operator would notice against a width they chose in hundredths of a
