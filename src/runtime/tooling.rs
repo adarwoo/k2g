@@ -1777,11 +1777,16 @@ fn is_engraver_tool(tool: &Tool) -> bool {
 /// (`z_min_depth`); a cut shallower than the tool's rating is a cut whose width nobody can
 /// promise, and width is the whole product here.
 ///
-/// Among the bits that qualify, **the largest tip wins**. At a given channel width a
-/// bigger tip sits shallower, which is stiffer and — the reason that matters — far less
-/// sensitive to how flat the board is: on a steep cone a tenth of a millimetre of bow
-/// swings the trace width, on a broad one it barely moves. Toolset-fixed bits are tried
-/// first because they cost no rack slot, the same tie-break [`pick_slot_router`] makes.
+/// Among the bits that qualify, **the largest tip wins, then the shallowest cone**. Both
+/// halves are the same argument, which is that depth error is width error here: a wide tip
+/// spends less of the channel on cone, and a shallow cone opens out more slowly per unit
+/// of depth. On a 90° bit a tenth of a millimetre of board bow moves the trace width by
+/// two tenths; on a 15° one it moves it by two hundredths. Width is the product, so that
+/// sensitivity is what is being chosen against — not stiffness, which would argue the
+/// other way on the angle.
+///
+/// Toolset-fixed bits are tried first because they cost no rack slot, the same tie-break
+/// [`pick_slot_router`] makes.
 pub(crate) fn pick_engraver(
     tools: &[Tool],
     toolset: &crate::data::model::ToolsetProfile,
@@ -1803,8 +1808,9 @@ pub(crate) fn pick_engraver(
         Some((tool.id.clone(), Length::from_mm(depth_mm)))
     };
 
-    // Widest tip first, so the first that suits is the best that suits. Ties break on the
-    // tool id, which keeps the choice a total function of the stock list.
+    // Widest tip first and shallowest cone next, so the first that suits is the best that
+    // suits. The final tie breaks on the tool id, which keeps the choice a total function
+    // of the stock list rather than of the order it happens to be stored in.
     let mut fixed: Vec<&Tool> = toolset
         .slots
         .values()
@@ -1816,8 +1822,12 @@ pub(crate) fn pick_engraver(
         .filter(|t| is_engraver_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
         .collect();
     let widest_tip_first = |a: &&Tool, b: &&Tool| {
-        let key = |t: &Tool| std::cmp::Reverse(t.tip_diameter.map(micron).unwrap_or(0));
-        key(a).cmp(&key(b)).then_with(|| a.id.cmp(&b.id))
+        let tip = |t: &Tool| std::cmp::Reverse(t.tip_diameter.map(micron).unwrap_or(0));
+        let angle = |t: &Tool| (t.point_angle.as_degrees() * 1e3) as i64;
+        tip(a)
+            .cmp(&tip(b))
+            .then_with(|| angle(a).cmp(&angle(b)))
+            .then_with(|| a.id.cmp(&b.id))
     };
     fixed.sort_by(widest_tip_first);
     stock.sort_by(widest_tip_first);
@@ -3843,6 +3853,21 @@ mod engraver_tests {
             pick_engraver(&[shallow], &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.2))
                 .is_none()
         );
+    }
+
+    /// Between two bits with the same tip, the shallower cone is the one whose width moves
+    /// least when the board is not perfectly flat: at 90° a tenth of a millimetre of bow
+    /// costs two tenths of trace width, at 15° it costs two hundredths. Left to the tool
+    /// id this would come out arbitrary, and the generic catalogue ships three bits
+    /// sharing a 0.2 mm tip — so it would come out arbitrary in practice, not in theory.
+    #[test]
+    fn among_equal_tips_the_shallowest_cone_wins() {
+        let tools = vec![vbit("steep", 0.2, 60.0), vbit("shallow", 0.2, 30.0)];
+        let (id, depth) = pick_engraver(&tools, &super::tests::toolset_with_fixed(&[]), Length::from_mm(0.4))
+            .expect("both can cut 0.4mm");
+
+        assert_eq!(id, "shallow");
+        assert!(depth.as_mm() > 0.3, "and it gets there by cutting deeper: {}", depth.as_mm());
     }
 
     /// A router has one width whatever it is asked for, so letting one into this list

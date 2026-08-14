@@ -44,3 +44,31 @@ sections:
       - { type: routerbit, diameter: '2.40mm',  spindle_rpm: '14000rpm', table_feed:  '840mm/min', z_feed: '300mm/min', sku_name: 'generic-Routerbits-R2.40', point_angle: '180deg' }
       - { type: routerbit, diameter: '3.00mm',  spindle_rpm: '11000rpm', table_feed:  '880mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R3.00', point_angle: '180deg' }
       - { type: routerbit, diameter: '3.175mm', spindle_rpm: '10000rpm', table_feed:  '800mm/min', z_feed: '200mm/min', sku_name: 'generic-Routerbits-R3.175', point_angle: '180deg' }
+
+  # V-bits are listed by the two numbers that decide what they cut: the flat at the
+  # very tip, and the included angle of the cone above it. `diameter` is the shank —
+  # 3.175mm (1/8") throughout — and is not a cutting width at all, because a V-bit has
+  # no single width. It cuts `tip + 2·depth·tan(angle/2)`, so the width is chosen by
+  # how deep it is sunk.
+  #
+  # That is what makes them the tool for isolation engraving: one bit cuts a 0.1mm
+  # channel or a 0.4mm one. It is also why they are unforgiving — the depth is the
+  # width, so how flat the board is *is* the tolerance on the trace. A shallower cone
+  # opens out more slowly and is therefore the more controllable choice at a given
+  # width; the steep ones are here for wider channels and for chamfering.
+  #
+  # `z_min_depth` is zero on purpose. A drill has a real floor (the depth its point is
+  # buried at) but a V-bit cuts from the tip down and has none — the constraint that
+  # matters is the tip diameter, which is a channel it cannot cut narrower than.
+  - name: V-bits
+    default_flute_length_unit: mm
+    description: Conical engraving bits for isolation routing — 1/8" shank, tip and angle as listed
+    tools:
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.10mm', point_angle: '10deg', spindle_rpm: '24000rpm', table_feed: '200mm/min', z_feed:  '60mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V10-T0.10' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.10mm', point_angle: '15deg', spindle_rpm: '24000rpm', table_feed: '250mm/min', z_feed:  '70mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V15-T0.10' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.10mm', point_angle: '20deg', spindle_rpm: '24000rpm', table_feed: '300mm/min', z_feed:  '80mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V20-T0.10' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.10mm', point_angle: '30deg', spindle_rpm: '20000rpm', table_feed: '350mm/min', z_feed:  '90mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V30-T0.10' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.20mm', point_angle: '30deg', spindle_rpm: '20000rpm', table_feed: '400mm/min', z_feed: '100mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V30-T0.20' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.20mm', point_angle: '45deg', spindle_rpm: '18000rpm', table_feed: '450mm/min', z_feed: '110mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V45-T0.20' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.20mm', point_angle: '60deg', spindle_rpm: '16000rpm', table_feed: '500mm/min', z_feed: '120mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V60-T0.20' }
+      - { type: vbit, diameter: '3.175mm', tip_diameter: '0.30mm', point_angle: '90deg', spindle_rpm: '14000rpm', table_feed: '500mm/min', z_feed: '150mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V90-T0.30' }

@@ -210,7 +210,7 @@ pub fn normalize_catalog_fields(
             if !obj.contains_key("z_min_depth") {
                 if inject_missing {
                     let z_min_depth = diameter
-                        .map(|value| default_z_min_depth(value, point_angle))
+                        .map(|value| default_z_min_depth(&tool_type, value, point_angle))
                         .unwrap_or_else(|| format_length_with_unit(0.0, &diameter_unit));
                     obj.insert("z_min_depth".to_string(), Value::String(z_min_depth));
                     changed = true;
@@ -255,7 +255,26 @@ fn default_point_angle(stem: &str, tool_type: &str, diameter: f64) -> i64 {
     }
 }
 
-fn default_z_min_depth(diameter: Length, point_angle: f64) -> String {
+/// A conservative minimum useful depth, when the catalogue does not state one.
+///
+/// For a drill this is the depth at which the point is fully buried and the bit is cutting
+/// on its full diameter — below that the hole is a cone.
+///
+/// **For a V-bit or engraver it is zero, and the drill formula is not merely inexact here
+/// but backwards.** Those tools are a cone standing on a small flat, and applying
+/// `(d/2)/tan(θ/2)` to the *shank* diameter returns the depth at which the whole cone is
+/// buried — a maximum dressed up as a minimum, and one deep enough that every sane
+/// engraving pass would be judged too shallow to attempt. They cut from the tip down, so
+/// there is no floor to state; the real constraint is the tip diameter, which the caller
+/// reads directly.
+fn default_z_min_depth(tool_type: &str, diameter: Length, point_angle: f64) -> String {
+    if matches!(tool_type, "vbit" | "engraver") {
+        return match diameter.unit() {
+            LengthUnit::In | LengthUnit::Inch => Length::from_inch(0.0).to_string(),
+            _ => Length::from_mm(0.0).to_string(),
+        };
+    }
+
     let diameter_mm = diameter.as_mm();
     if diameter_mm <= 0.0 || point_angle >= 179.999 {
         return match diameter.unit() {
