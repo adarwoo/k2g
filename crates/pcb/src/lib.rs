@@ -39,6 +39,7 @@
 //! # Ok::<(), pcb::PcbError>(())
 //! ```
 
+mod copper;
 mod error;
 mod kicad;
 mod snapshot;
@@ -49,6 +50,10 @@ pub use kicad::{KiCad, PcbInfo};
 pub use snapshot::{
     BoardBoundingBox, BoardEdgeShape, BoardHole, BoardPoint, BoardSnapshot, HoleKind, PolyNode,
     PolyRing, Slot,
+};
+pub use copper::{
+    is_copper_layer, CopperFeature, CopperSnapshot, CopperSource, Polygon,
+    BACK_COPPER, COPPER_LAYER_IDS, FRONT_COPPER,
 };
 pub use stitching::corners::{convex_corners, corner_fillet_area_nm2, Corner, MIN_CORNER_TURN_RAD};
 pub use stitching::{

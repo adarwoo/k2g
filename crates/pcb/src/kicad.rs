@@ -110,6 +110,23 @@ impl KiCad {
         Ok(snapshot)
     }
 
+    /// The copper on one layer, resolved into net-tagged polygons.
+    ///
+    /// Separate from [`Self::collect_snapshot`] and deliberately not folded into it: the
+    /// board record is read on every refresh and is cheap, while this reads every track,
+    /// pad, via and zone fill on the board and — with `refill` — can block KiCad while it
+    /// re-pours. It is asked for when something is about to machine copper, not on the
+    /// chance that something might.
+    pub fn collect_copper(
+        &self,
+        pcb: &PcbInfo,
+        layer_id: i32,
+        refill: bool,
+    ) -> Result<crate::CopperSnapshot, PcbError> {
+        let client = self.resolve_client(pcb);
+        Ok(crate::copper::collect_copper(&client, layer_id, refill))
+    }
+
     /// Convenience for startup: collect the first open PCB, or `None` if no
     /// board is open anywhere.
     pub fn collect_first_snapshot(&self) -> Result<Option<BoardSnapshot>, PcbError> {

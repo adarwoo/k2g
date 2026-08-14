@@ -951,6 +951,42 @@ pub fn fit_cutout(contour: &Contour, tool_radius_nm: i64) -> Option<CutoutFit> {
     })
 }
 
+/// An open polyline given a body: the area a pen of width `2·half_width_nm` would ink.
+///
+/// This is what turns a track into copper. A track is stored as a centreline and a width,
+/// and every question worth asking about copper — how far is it from its neighbour, where
+/// does a cutter go to isolate it — is a question about area, not about a line.
+///
+/// Round ends and round joins, because that is how KiCad draws a track: square ends would
+/// invent copper past the end of the trace and make the isolation pass cut a corner that
+/// is not on the board.
+pub fn stroke_open_path(points: &[(i64, i64)], half_width_nm: f64) -> Vec<Vec<(i64, i64)>> {
+    use clipper2_rust::{
+        core::Paths64,
+        inflate_paths_64,
+        offset::{EndType, JoinType},
+    };
+
+    if points.len() < 2 || half_width_nm <= 0.0 {
+        return Vec::new();
+    }
+    let input: Paths64 =
+        vec![points.iter().map(|&(x, y)| Point64 { x, y }).collect::<Path64>()];
+
+    inflate_paths_64(
+        &input,
+        half_width_nm,
+        JoinType::Round,
+        EndType::Round,
+        2.0,
+        OFFSET_ARC_TOLERANCE_NM,
+    )
+    .iter()
+    .map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect::<Vec<(i64, i64)>>())
+    .filter(|p| p.len() >= 3)
+    .collect()
+}
+
 /// Perimeter of a closed polygon, in nanometres.
 pub fn path_perimeter_nm(path: &[(i64, i64)]) -> f64 {
     if path.len() < 2 {
@@ -1381,6 +1417,43 @@ mod tests {
         assert!(
             (perimeter_mm - 72.0).abs() < 0.2,
             "expected a 4 x 18mm slug perimeter, got {perimeter_mm}"
+        );
+    }
+
+    /// A track becomes copper of its own width, with round ends.
+    ///
+    /// A track is stored as a centreline and a width, and every question isolation asks —
+    /// how far is this from its neighbour, where does the cutter go — is about area. The
+    /// ends must be round because that is how KiCad draws them: square ends invent copper
+    /// past the end of the trace, and the isolation pass would cut a corner that is not on
+    /// the board.
+    #[test]
+    fn stroking_a_track_gives_it_its_width_and_rounds_its_ends() {
+        // A 10mm run at 1mm wide: 10 x 1 in the body, plus a half-circle at each end.
+        let path = vec![(0, 0), (nm(10.0), 0)];
+        let stroked = stroke_open_path(&path, nm(0.5) as f64);
+        assert_eq!(stroked.len(), 1, "one track, one polygon");
+
+        let area_mm2 = signed_area_nm2(&stroked[0]).unsigned_abs() as f64 / 1e12;
+        let expected = 10.0 * 1.0 + std::f64::consts::PI * 0.5 * 0.5;
+        assert!(
+            (area_mm2 - expected).abs() < 0.02,
+            "expected ~{expected:.3}mm^2 (body + two round ends), got {area_mm2:.3}"
+        );
+
+        let (xmin, _, xmax, _) = bbox_nm(&stroked[0]);
+        assert!(xmin <= nm(-0.49), "the round end reaches back past the start: {xmin}");
+        assert!(xmax >= nm(10.49), "and past the end: {xmax}");
+    }
+
+    /// A zero-width or single-point track strokes to nothing rather than to a degenerate
+    /// polygon that Clipper would later hand back as an empty offset.
+    #[test]
+    fn a_track_with_no_length_or_no_width_strokes_to_nothing() {
+        assert!(stroke_open_path(&[(0, 0)], 500_000.0).is_empty(), "one point is not a run");
+        assert!(
+            stroke_open_path(&[(0, 0), (nm(5.0), 0)], 0.0).is_empty(),
+            "a zero-width track has no body"
         );
     }
 
