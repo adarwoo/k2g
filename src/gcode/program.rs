@@ -41,6 +41,10 @@ pub struct StepRender {
     /// cut (plunge + radial), and the arc for each full circle.
     pub move_rapid_tpl: String,
     pub cut_linear_tpl: String,
+    /// The Z-only feed into the material. Blank means this machine has no separate word
+    /// for it, and the plunge goes out through `cut_linear` restating X and Y — see
+    /// [`render_route_move`].
+    pub cut_plunge_tpl: String,
     pub cut_arc_tpl: String,
     /// How far the emitted path may depart from the true curve
     /// (`machine.curve_tolerance`). Governs arc fitting and arc flattening alike, so one
@@ -491,10 +495,16 @@ fn render_route_move(
     mv: &RouteMove,
     fs: FeedsSpeeds,
 ) -> Result<String, BodyError> {
-    /// `linear_cut` for a feed move, at the given feed.
+    /// A feed move at the given feed, through `primitive`/`tpl`.
+    ///
+    /// The same five variables serve `cut_linear` and `cut_plunge`, which is what lets
+    /// one fall back to the other: a plunge's x and y are the entry point the rapid
+    /// already reached, so a template that names them gets the right numbers and one
+    /// that does not is simply saying the move in fewer words.
     fn linear(
         coder: &Coder,
-        render: &StepRender,
+        primitive: &'static str,
+        tpl: &str,
         (x, y, z): (units::Length, units::Length, units::Length),
         feed: FeedRate,
         fs: FeedsSpeeds,
@@ -506,7 +516,7 @@ fn render_route_move(
         s.push("feedrate", feed);
         // Legacy: templates that restate the spindle speed on the cut line.
         s.push("s", fs.rpm);
-        render_one(coder, "linear_cut", &render.cut_linear_tpl, &mut s)
+        render_one(coder, primitive, tpl, &mut s)
     }
 
     match *mv {
@@ -520,8 +530,17 @@ fn render_route_move(
         // The tool's own rated plunge feed, not a fraction of its lateral one. The
         // fraction survives only as the fallback inside `feeds::resolve`, for a catalogue
         // that states no plunge rating at all.
-        RouteMove::Plunge { x, y, z } => linear(coder, render, (x, y, z), fs.z, fs),
-        RouteMove::Cut { x, y, z } => linear(coder, render, (x, y, z), fs.table, fs),
+        //
+        // Through `cut_plunge` where the machine has one — a plunge changes Z and nothing
+        // else, and saying so takes one word. A blank template is the schema's declared
+        // `x-fallback: cut_linear`, which restates the entry point the rapid just reached.
+        RouteMove::Plunge { x, y, z } => match render.cut_plunge_tpl.trim() {
+            "" => linear(coder, "linear_cut", &render.cut_linear_tpl, (x, y, z), fs.z, fs),
+            _ => linear(coder, "cut_plunge", &render.cut_plunge_tpl, (x, y, z), fs.z, fs),
+        },
+        RouteMove::Cut { x, y, z } => {
+            linear(coder, "linear_cut", &render.cut_linear_tpl, (x, y, z), fs.table, fs)
+        }
         RouteMove::Arc { x, y, i, j, ccw } => {
             let mut s = Scope::new();
             // The direction, not the word for it: which G-code names a clockwise arc is
@@ -631,6 +650,7 @@ pub(crate) fn sample_step_render(is_atc: bool) -> StepRender {
         spindle_stop_tpl: "`M05".to_string(),
         move_rapid_tpl: "`G0 X{x} Y{y} Z{z}".to_string(),
         cut_linear_tpl: "`G1 X{x} Y{y} Z{z} F{feedrate}".to_string(),
+        cut_plunge_tpl: "`G1 Z{z} F{feedrate}".to_string(),
         cut_arc_tpl: r#"`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}"#
             .to_string(),
         curve_tolerance: units::Length::from_mm(0.01),
@@ -952,7 +972,7 @@ mod tests {
 
         let body = render_step_body(&coder, &step, &render_ctx(true), &tf).expect("renders");
         assert!(
-            body.contains("G1 X0 Y0 Z-2.1 F400"),
+            body.contains("G1 Z-2.1 F400"),
             "the plunge takes the rated z_feed, not a third of 1100:
 {body}"
         );
@@ -1037,7 +1057,7 @@ mod tests {
 
         assert!(body.contains("G0 X5 Y5 Z5"), "rapid to centre above the work:\n{body}");
         assert!(
-            body.contains("G1 X5 Y5 Z-2.1 F200"),
+            body.contains("G1 Z-2.1 F200"),
             "plunge at the centre (no island), at a third of the 600 lateral feed:\n{body}"
         );
         // Spiral: a G3 full circle ending on the wall (reach = (3.2-1.0)/2 = 1.1 → X6.1).
@@ -1076,7 +1096,7 @@ mod tests {
         };
         let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
 
-        assert!(body.contains("G1 X0 Y0 Z-2.1 F200"), "plunge on the axis:\n{body}");
+        assert!(body.contains("G1 Z-2.1 F200"), "plunge on the axis:\n{body}");
         assert!(body.contains("G1 X4 Y0 Z-2.1 F600"), "the axis pass clears the core:\n{body}");
         // Wall at (2.0 − 1.0)/2 = 0.5 either side; the caps are half circles about the
         // axis ends, so their I/J is ±0.5 in Y.
@@ -1123,7 +1143,7 @@ mod tests {
 
         let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
         let cut = lines.iter().position(|l| l.starts_with("G0 X1 Y0 Z5")).expect("rapid to the span start");
-        assert_eq!(lines[cut + 1], "G1 X1 Y0 Z-2.1 F200", "plunge at the start");
+        assert_eq!(lines[cut + 1], "G1 Z-2.1 F200", "plunge at the start");
         assert_eq!(lines[cut + 2], "G1 X10 Y0 Z-2.1 F600");
         assert_eq!(lines[cut + 3], "G1 X10 Y5 Z-2.1 F600", "every vertex is cut through");
         assert_eq!(lines[cut + 4], "G0 X10 Y5 Z5", "lifts off, leaving the tab uncut");

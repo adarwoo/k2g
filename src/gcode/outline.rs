@@ -330,10 +330,16 @@ pub fn cut_spans(loop_: &Loop, tabs: &[f64], tab_width_mm: f64) -> Vec<Vec<Point
         .filter(|_| tab_width_mm >= MIN_TAB_MM)
         .collect();
     if tabs.is_empty() {
-        // Closed loop: back to the start, so nothing is left joined.
-        let mut span = loop_.sub_path(0.0, total);
-        span.push(loop_.point_at(0.0));
-        return vec![span];
+        // The whole loop, taken from the loop itself: `points` already repeats the first
+        // vertex at the end, which *is* "closed, back to the start, nothing left joined".
+        //
+        // **Not** `sub_path(0.0, total)`. That asks for a span whose start and end are the
+        // same point, and `(end - start).rem_euclid(total)` reads the full turn as a
+        // length of zero — so the span collapsed to its start point, repeated. Three
+        // identical points cleared the planner's `path.len() >= 2` guard and came out of
+        // the coder as a rapid, a plunge and a lift over one corner of the board: a
+        // program that drilled a single hole where an outline should have been.
+        return vec![loop_.points.clone()];
     }
     if tab_width_mm * tabs.len() as f64 >= total {
         return Vec::new();
@@ -558,6 +564,10 @@ mod tests {
     }
 
     /// With no tabs the board is cut free in one closed pass — `retention: none`.
+    ///
+    /// The length assertion is the point of the test, not decoration: this once returned
+    /// the start point repeated three times, which closes on itself perfectly and cuts
+    /// nothing at all.
     #[test]
     fn no_tabs_cuts_one_closed_loop() {
         let r = rectangle();
@@ -565,6 +575,10 @@ mod tests {
         assert_eq!(spans.len(), 1);
         let span = &spans[0];
         assert_eq!(span[0], span[span.len() - 1], "the pass closes on itself");
+
+        let cut: f64 = span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum();
+        assert!((cut - 120.0).abs() < 1e-6, "the whole loop is cut, got {cut} mm of 120");
+        assert_eq!(span.len(), 5, "four corners, the first repeated to close");
     }
 
     /// Every tab is a gap of exactly the asked-for width, and the spans between them cover

@@ -307,6 +307,7 @@ impl AppCtx {
                 spindle_stop_tpl: m.spindle_stop_tpl.clone(),
                 move_rapid_tpl: m.move_rapid_tpl.clone(),
                 cut_linear_tpl: m.cut_linear_tpl.clone(),
+                cut_plunge_tpl: m.cut_plunge_tpl.clone(),
                 cut_arc_tpl: m.cut_arc_tpl.clone(),
                 curve_tolerance: m.curve_tolerance,
                 limits: MachineLimits {
@@ -326,6 +327,7 @@ impl AppCtx {
                 spindle_stop_tpl: String::new(),
                 move_rapid_tpl: String::new(),
                 cut_linear_tpl: String::new(),
+                cut_plunge_tpl: String::new(),
                 cut_arc_tpl: String::new(),
                 // The schema's own default, so a step with no resolvable CNC fits curves
                 // the way a freshly created profile would rather than to some other number.

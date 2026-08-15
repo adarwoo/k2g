@@ -57,6 +57,9 @@ pub struct MachineProfile {
     pub spindle_stop_tpl: String,
     pub move_rapid_tpl: String,
     pub cut_linear_tpl: String,
+    /// The Z-only feed move into the material. Blank falls back to `cut_linear` with
+    /// x, y and z, which is what every profile emitted before this primitive existed.
+    pub cut_plunge_tpl: String,
     pub cut_arc_tpl: String,
     pub drill_tpl: String,
     /// The operator callables. Nothing emits these — a template calls `comment("…")`,
@@ -100,6 +103,7 @@ impl Default for MachineProfile {
             spindle_stop_tpl: String::new(),
             move_rapid_tpl: String::new(),
             cut_linear_tpl: String::new(),
+            cut_plunge_tpl: String::new(),
             cut_arc_tpl: String::new(),
             drill_tpl: String::new(),
             comment_tpl: String::new(),

@@ -125,8 +125,8 @@ $defs:
 
   # ---------------------------------------------------------------------------
   # retention — how a through-cut contour holds on until the operator breaks it
-  # out. Shared by the board outline and by interior cutouts, because the problem
-  # is the same one; only the sensible number of tabs differs.
+  # out. The board's own boundary; a cutout's slug is held by `route_cutouts`,
+  # which does not offer the choice (a slug is held or it is a projectile).
   #
   # `mouse_bites` is a property OF a tab, not an alternative to one: a mouse bite
   # is a tab perforated so it snaps cleanly and files down to nothing. (It was
@@ -182,9 +182,6 @@ $defs:
       outline:
         cut: route
         retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
-      cutouts:
-        enabled: true
-        retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
       kerf: 2.0mm
       finishing: 0.1mm
     properties:
@@ -220,26 +217,18 @@ $defs:
         required: [cut]
         additionalProperties: false
 
-      # Interior openings — anything the board loses from the middle. These are
-      # always cut right through (there is no scoring a hole), and the slug wants
-      # holding for the same reason the board does: a loose one gets thrown by the
-      # cutter. Its own tab count, because a small slug needs one or two, not four.
-      cutouts:
-        type: object
-        default:
-          enabled: true
-          retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
-        properties:
-          enabled:
-            description: Route the interior openings as well as the boundary.
-            type: boolean
-            default: true
-          retention:
-            $ref: "#/$defs/retention"
-            default: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
-            x-show-when: { enabled: [true] }
-        required: [enabled]
-        additionalProperties: false
+      # There was a `cutouts: {enabled, retention}` block here, and this operation
+      # cut the interior openings with the edge kerf when it was on. It is gone:
+      # `route_cutouts` cuts them, with a cutter chosen to fit each opening rather
+      # than the one the boundary asked for, and with the slug held and the sharp
+      # corners relieved — none of which this operation could do. Two ways to cut
+      # the same opening meant a flag on each to stop them both doing it, and an
+      # operator who could turn both off and lose the openings silently.
+      #
+      # `normalize_edge_block` drops the block from a profile that still carries it
+      # (`additionalProperties: false` would otherwise refuse the file). The
+      # openings are then cut by adding `route_cutouts` to the step, and the
+      # outline pass says so when a board has openings and the step does not.
 
       # -----------------------------------------------------------------------
       # kerf — the width of the channel routed around the board, and therefore
@@ -259,10 +248,9 @@ $defs:
       # a fraction of the time, with nothing the operator could set to say
       # otherwise.
       #
-      # The board outline and its interior cutouts share this one cutter (see
-      # `plan_outline` — a step should pay one tool change for the whole
-      # outline), so a cutout narrower than the kerf is reported as vanishing
-      # rather than cut with something else.
+      # The boundary only. Interior openings are `route_cutouts`' business and
+      # take a cutter chosen to fit each one, which is why this kerf can be
+      # matched exactly without a 1.5mm opening becoming uncuttable.
       #
       # 2mm by default: a common PCB routing cutter, stiff enough to cut an
       # outline quickly and small enough to get round the corners of most
@@ -297,14 +285,14 @@ $defs:
   # -------------------------------------------------------------------------
   # route_cutouts — the interior openings, cut on their own terms.
   #
-  # `route_board` cuts the boundary and, optionally, the cutouts with ONE cutter:
-  # the edge kerf. That is right for the boundary, where the kerf IS a dimension
-  # of the finished job and so is matched exactly. It is wrong for a cutout,
-  # which is a hole in the middle of the board whose only requirement is that the
-  # cutter reaches everywhere the drawing says is gone. A 2mm edge cutter cannot
-  # enter a 1.5mm opening, and under `route_board` that opening is reported as
-  # vanishing under the kerf rather than cut with the 1mm router already in the
-  # rack.
+  # `route_board` once cut the boundary and, optionally, the cutouts with ONE
+  # cutter: the edge kerf. That is right for the boundary, where the kerf IS a
+  # dimension of the finished job and so is matched exactly. It is wrong for a
+  # cutout, which is a hole in the middle of the board whose only requirement is
+  # that the cutter reaches everywhere the drawing says is gone. A 2mm edge
+  # cutter cannot enter a 1.5mm opening, and under `route_board` that opening was
+  # reported as vanishing under the kerf rather than cut with the 1mm router
+  # already in the rack.
   #
   # So: a separate operation, with a cutter chosen by **fit** rather than by
   # request, plus the two things a cutout needs and a boundary does not — the
@@ -315,8 +303,8 @@ $defs:
   # the operator's to choose (the fit decides it), and "no retention" is not a
   # choice worth offering for a slug: it is either held or it is a projectile.
   #
-  # When this operation runs on a face, `route_board`/`mill_board` on that face
-  # leave the cutouts alone, so an opening is never cut twice.
+  # This is now the ONLY operation that cuts an interior opening.
+  # `route_board`/`mill_board` cut the boundary and nothing else.
   # -------------------------------------------------------------------------
   route_cutouts:
     type: object
@@ -538,9 +526,6 @@ $defs:
           outline:
             cut: route
             retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
-          cutouts:
-            enabled: true
-            retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
           kerf: 2.0mm
           finishing: 0.1mm
 
@@ -553,7 +538,7 @@ $defs:
 
       # `mill_board` is `route_board` done with an area-clearing strategy rather
       # than a contour cut, so it takes the SAME configuration — the same edge
-      # kerf, the same retention, the same cutouts and finishing.
+      # kerf, the same retention and the same finishing.
       #
       # It used to have a shape all its own (`finishing: {clearance, direction}`
       # and nothing else), while `read_edge_config` in src/runtime/tooling.rs
@@ -574,9 +559,6 @@ $defs:
           outline:
             cut: mill
             retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
-          cutouts:
-            enabled: true
-            retention: { mode: tabs, count: 2, width: 2.0mm, mouse_bites: false }
           kerf: 2.0mm
           finishing: 0.1mm
 

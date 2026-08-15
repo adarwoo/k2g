@@ -1497,8 +1497,9 @@ fn normalize_machining_value(value: &mut Value) {
 /// Four things changed, and all four would be rejected by `additionalProperties: false`
 /// if left alone:
 ///
-/// - `edge` became `outline`, with interior `cutouts` beside it — the boundary is not
-///   the only thing routed out of a board.
+/// - `edge` became `outline`. An interior `cutouts` block sat beside it for a while; it
+///   has since gone to `route_cutouts`, so a profile carrying either shape ends up with
+///   the boundary alone.
 /// - `retention` grew from a bare enum into an object, and its two mouse-bite values
 ///   folded into a `mouse_bites` flag on a tab. A mouse bite is a perforated *tab*, not
 ///   an alternative to one.
@@ -1546,6 +1547,13 @@ fn normalize_edge_block(step: &mut serde_json::Map<String, Value>, key: &str) {
 
         route_board.insert("outline".into(), Value::Object(edge));
     }
+
+    // The interior openings moved out to `route_cutouts` entirely, so the block that said
+    // whether this operation cut them — and how it held their slugs — has nothing left to
+    // decide. Dropped rather than migrated: there is no field on `route_cutouts` it maps
+    // onto (the fit picks the cutter, and a slug is always held), and leaving it would
+    // have the file refused by `additionalProperties: false`.
+    route_board.remove("cutouts");
 
     // `{clearance, direction}` → the clearance alone. `direction` goes with it: climb is
     // picked from the geometry, so it was a setting that changed nothing.
@@ -1897,6 +1905,45 @@ mod tests {
         let listed = data.list(Profile::Cnc);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].0, id);
+    }
+
+    /// **A CNC profile saved before `cut_plunge` existed gets the primitive.**
+    ///
+    /// The renderer reads `/primitives/cut_plunge` and falls back to `cut_linear` when it
+    /// is blank, so a profile that never receives the default is not broken — it simply
+    /// keeps emitting the plunge with the entry point restated, and the operator has no
+    /// field anywhere to change that. Every CNC profile already on disk is in exactly
+    /// that position, which makes this, not the freshly-created profile, the case that
+    /// decides whether the change is visible at all.
+    #[test]
+    fn a_cnc_profile_saved_before_the_plunge_existed_still_gets_it() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let cnc_dir = data_dir.join("cnc_profiles");
+        fs::create_dir_all(&cnc_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        // The motion block as every profile carried it: a rapid, a cut, an arc.
+        let saved = format!(
+            "schema_version: 1\n\
+             id: \"{id}\"\n\
+             name: Before the plunge\n\
+             primitives:\n\
+             \x20 move_rapid: \"`G0 X{{x}} Y{{y}} Z{{z}}\"\n\
+             \x20 cut_linear: \"`G1 X{{x}} Y{{y}} Z{{z}} F{{feedrate}}\"\n"
+        );
+        fs::write(cnc_dir.join(format!("{id}.yaml")), saved).unwrap();
+
+        let (data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        let doc = data.get(id).expect("the profile loads");
+        let node = doc
+            .root
+            .get_pointer("/primitives/cut_plunge")
+            .expect("materialised on load, or the primitive editor shows no field for it");
+        assert_eq!(
+            node.value,
+            NodeValue::Str("`G1 Z{z} F{feedrate}".to_string()),
+            "and it carries the schema default"
+        );
     }
 
     /// A V-bit's diameter must be its **tip**, not its shank.
@@ -2289,6 +2336,14 @@ mod tests {
             other => panic!("route_board should be an object, got {other:?}"),
         };
         assert!(keys.contains(&"kerf"), "the form would list: {keys:?}");
+        // The same saved profile carries a `cutouts` block, from when the edge pass cut
+        // the interior openings. `additionalProperties: false` would refuse the whole
+        // file over it — so this is not a tidiness assertion, it is the reason the
+        // profile above loaded at all.
+        assert!(
+            !keys.contains(&"cutouts"),
+            "the openings belong to route_cutouts now: {keys:?}"
+        );
     }
     /// **A milling step configures the same things a routing step does.**
     ///

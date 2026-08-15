@@ -74,6 +74,11 @@ primitives:
     `G0 Z{z_safe}
   move_rapid: "`G0 X{x} Y{y} Z{z}"
   cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
+
+  # Z only: the rapid before it already put the cutter over the entry point, so
+  # restating X and Y says nothing the controller does not already know. Same F
+  # rule as above - this one carries the tool's rated plunge feed.
+  cut_plunge: "`G1 Z{z} F{feedrate}"
   spindle_start: |
     `S{rpm}
     `M3

@@ -256,12 +256,15 @@ pub(crate) struct RetentionRaw {
 }
 
 impl RetentionRaw {
-    /// The schema's defaults, with `count` varying by what is being held: an outline
-    /// wants four tabs, a cutout's slug one or two.
-    fn defaults(count: usize) -> Self {
+    /// The schema's defaults for the board's boundary — four tabs, one a side.
+    ///
+    /// It used to take a `count`, because a cutout's slug wanted one or two rather than
+    /// four. Slugs are `route_cutouts`' business now and it holds them its own way, so
+    /// there is only ever one answer left to give.
+    fn defaults() -> Self {
         Self {
             tabs: true,
-            count,
+            count: 4,
             width: Length::from_mm(2.0),
             mouse_bites: false,
         }
@@ -270,37 +273,27 @@ impl RetentionRaw {
 
 /// The step's `route_board` config — the board-routing **policy**, defaulted when absent.
 ///
-/// Only the policy: how the boundary is cut, whether interior cutouts are routed too, and
-/// how each is retained. Where the tabs actually sit is not here and cannot be — a
-/// machining profile is reused across boards, and a tab position means nothing without one
-/// specific outline. That lives on the job (`job.yaml#/edge_tabs`).
+/// Only the policy: how the boundary is cut and how it is retained. Where the tabs
+/// actually sit is not here and cannot be — a machining profile is reused across boards,
+/// and a tab position means nothing without one specific outline. That lives on the job
+/// (`job.yaml#/edge_tabs`).
+///
+/// **The boundary and nothing else.** There were `cutouts` and `cutout_retention` fields
+/// here, and the outline pass cut the interior openings with the edge kerf. Both are gone
+/// with the schema block behind them: `route_cutouts` owns the openings now.
 pub(crate) struct EdgeConfigRaw {
     /// How the boundary is made: `route | mill | score | vgroove`.
     pub(crate) cut: String,
     /// Retention for the board's own boundary.
     pub(crate) outline: RetentionRaw,
-    /// Whether interior openings are routed as well as the boundary.
-    pub(crate) cutouts: bool,
-    /// Retention for those interior openings.
-    pub(crate) cutout_retention: RetentionRaw,
     /// Width of the channel routed around the board — and so, exactly, the diameter of
-    /// the cutter that routes it. The outline and its cutouts share one router, so this
-    /// governs both.
+    /// the cutter that routes it.
     pub(crate) kerf: Length,
     /// Material left on the wall for a finishing pass; zero means none.
     pub(crate) finishing: Length,
 }
 
 impl EdgeConfigRaw {
-    /// The retention policy for one contour kind.
-    pub(crate) fn retention(&self, is_cutout: bool) -> RetentionRaw {
-        if is_cutout {
-            self.cutout_retention
-        } else {
-            self.outline
-        }
-    }
-
     /// Whether the boundary is cut right through by a router — the only mode the outline
     /// phase plans today. Scoring and V-grooving cut partway and need a depth model and
     /// a V-bit, which the tool stock does not carry yet.
@@ -314,9 +307,7 @@ impl Default for EdgeConfigRaw {
         // The schema's own defaults for `route_board`.
         Self {
             cut: "route".to_string(),
-            outline: RetentionRaw::defaults(4),
-            cutouts: true,
-            cutout_retention: RetentionRaw::defaults(2),
+            outline: RetentionRaw::defaults(),
             kerf: Length::from_mm(2.0),
             finishing: Length::from_mm(0.1),
         }
@@ -955,12 +946,6 @@ fn read_edge_config(root: &Node, base: &str) -> EdgeConfigRaw {
     EdgeConfigRaw {
         cut: node_str(root, &format!("{base}/outline/cut")).unwrap_or(default.cut),
         outline: read_retention(root, &format!("{base}/outline/retention"), default.outline),
-        cutouts: node_bool(root, &format!("{base}/cutouts/enabled")).unwrap_or(default.cutouts),
-        cutout_retention: read_retention(
-            root,
-            &format!("{base}/cutouts/retention"),
-            default.cutout_retention,
-        ),
         kerf: node_length(root, &format!("{base}/kerf")).unwrap_or(default.kerf),
         finishing: node_length(root, &format!("{base}/finishing")).unwrap_or(default.finishing),
     }

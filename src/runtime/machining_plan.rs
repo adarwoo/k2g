@@ -419,16 +419,6 @@ fn plan_step(
     let has_route = raw.routes_outline();
     let has_locating = raw.drills_locating_pins();
 
-    // `route_cutouts` takes the openings off the edge operation on this step, so an
-    // operator who has both selected sees why the edge pass no longer touches them.
-    if raw.routes_cutouts() && has_route && raw.route_board.cutouts {
-        notes.push(
-            "The interior openings are cut by 'Route interior cutouts', each with a cutter \
-             chosen to fit it, so the edge pass leaves them alone."
-                .to_string(),
-        );
-    }
-
     // Every binding is required to plan. Defaulting a missing CNC to "no ATC, unity
     // scaling" or a missing fixture to nominal heights would produce a plausible-looking
     // program for hardware the operator does not have, so an unset binding stops the
@@ -1400,6 +1390,8 @@ fn plan_outline_spans(
     let mut vanished = 0usize;
     // Tabs the outline had no room for, at the clearance the distribution keeps.
     let mut crowded = 0usize;
+    // Interior openings this step leaves in the board, because nothing on it cuts them.
+    let mut uncut_openings = 0usize;
     // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
     let (mut outer_n, mut cutout_n) = (0usize, 0usize);
 
@@ -1417,11 +1409,15 @@ fn plan_outline_spans(
         let (kind_index, label) = (*index, kind.as_str());
         *index += 1;
 
-        // An interior opening this pass does not own: either the step chooses not to
-        // route its cutouts at all, or `route_cutouts` has claimed them and will cut
-        // them with a cutter chosen to fit rather than with the edge kerf. Cutting them
-        // here as well would put the cutter round each opening twice.
-        if contour.is_hole && (!edge.cutouts || raw.routes_cutouts()) {
+        // An interior opening is not this pass's to cut. `route_cutouts` owns them, with
+        // a cutter chosen to fit each one rather than the kerf the boundary asked for.
+        //
+        // There was a `cutouts` flag on the edge operation that decided this, and so two
+        // operations that could each cut the same opening; the flag is gone with it. A
+        // board whose openings nothing is cutting is reported below rather than left to
+        // come off the machine still solid in the middle.
+        if contour.is_hole {
+            uncut_openings += !raw.routes_cutouts() as usize;
             continue;
         }
 
@@ -1442,7 +1438,7 @@ fn plan_outline_spans(
             continue;
         };
 
-        let retention = edge.retention(contour.is_hole);
+        let retention = edge.outline;
         let width_mm = retention.width.as_mm();
 
         // Where the tabs go. Distribution runs on the contour's own **straight
@@ -1512,6 +1508,13 @@ fn plan_outline_spans(
     }
 
     let mut warnings: Vec<String> = Vec::new();
+    if uncut_openings > 0 {
+        warnings.push(format!(
+            "{uncut_openings} interior opening(s) are left in the board: the edge pass cuts \
+             the boundary only. Add 'Route interior cutouts' to this step to cut them, each \
+             with a cutter chosen to fit."
+        ));
+    }
     if crowded > 0 {
         warnings.push(format!(
             "{crowded} retaining tab(s) could not be placed: the outline's straight sides \

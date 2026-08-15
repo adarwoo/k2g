@@ -175,30 +175,34 @@ mod tests {
         assert!(vgroove.matches(Some(&json!("vgroove"))));
         assert!(!vgroove.matches(Some(&json!("route"))), "hidden for a routed edge");
 
-        // Shared `$defs` are keyed by `<block>/<field>`, so one declaration serves the
-        // retention block wherever it is used.
-        for parent in ["outline", "cutouts"] {
-            let count = show_when(&format!("{base}/{parent}/retention/count")).expect("declared");
-            assert_eq!(count.sibling, "mode");
-            assert!(count.matches(Some(&json!("tabs"))));
-            assert!(!count.matches(Some(&json!("none"))));
-        }
+        // Shared `$defs` are keyed by `<block>/<field>`, so the one declaration inside
+        // `$defs/retention` serves the block wherever it is used.
+        let count = show_when(&format!("{base}/outline/retention/count")).expect("declared");
+        assert_eq!(count.sibling, "mode");
+        assert!(count.matches(Some(&json!("tabs"))));
+        assert!(!count.matches(Some(&json!("none"))));
     }
 
-    /// The same field name declared at two use sites keeps its own condition — the
-    /// reason the key carries the parent as well as the name.
+    /// The key carries the parent as well as the field name, so a declaration answers
+    /// only for the block it was written in.
+    ///
+    /// `retention` used to appear twice under `route_board` — once for the outline and
+    /// once for the interior cutouts, each following a different sibling — which is what
+    /// the parent-qualified key was for. The cutouts block has since moved out to
+    /// `route_cutouts`, so the property is now asserted by the miss: the same field name
+    /// under a block that does not declare it resolves to nothing rather than borrowing
+    /// the outline's condition.
     #[test]
     fn a_shared_field_name_resolves_per_use_site() {
-        let base = "/steps/0/route_board";
-        let outline = show_when(&format!("{base}/outline/retention")).expect("declared");
+        let outline = show_when("/steps/0/route_board/outline/retention").expect("declared");
         assert_eq!(outline.sibling, "cut", "the outline's retention follows how it is cut");
         assert!(outline.matches(Some(&json!("route"))));
         assert!(!outline.matches(Some(&json!("score"))), "a scored board is not cut free");
 
-        let cutouts = show_when(&format!("{base}/cutouts/retention")).expect("declared");
-        assert_eq!(cutouts.sibling, "enabled", "a cutout's follows whether it is routed");
-        assert!(cutouts.matches(Some(&json!(true))));
-        assert!(!cutouts.matches(Some(&json!(false))));
+        assert!(
+            show_when("/steps/0/route_cutouts/retention").is_none(),
+            "another block's field of the same name does not inherit the declaration"
+        );
     }
 
     /// A field with no declaration is always shown — the overwhelmingly common case.

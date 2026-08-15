@@ -632,6 +632,38 @@ properties:
           - { name: s, type: rpm, description: "Spindle speed, for controllers that want it restated on the cut line. Normally already set by spindle_start." }
         default: "`G1 X{x} Y{y} Z{z} F{feedrate}"
 
+      # Plunge: the feed move that takes the cutter down into the material, at the
+      # start of a routed span and at the centre of a pocket.
+      #
+      # It is a Z-only move. The rapid before it has already placed the cutter over
+      # the entry point, so X and Y do not change - which is why this exists as a
+      # primitive rather than going out through cut_linear:
+      #
+      #   G0 X103.114 Y108.021 Z5
+      #   G1 X103.114 Y108.021 Z-2.08 F600     <- what cut_linear must emit
+      #   G1 Z-2.08 F600                       <- what the machine is being asked to do
+      #
+      # Restating the coordinates is not wrong, just noise, and there is a lot of it
+      # in a program with one plunge per contour. The entry point is in scope anyway
+      # (x, y) for a controller that wants the words, or wants a peck cycle, or wants
+      # a different word entirely for entering material.
+      #
+      # Blank falls back to cut_linear with all three words, which is exactly what
+      # every profile emitted before this primitive existed.
+      cut_plunge:
+        description: Feed move down into the material. Z-only; the rapid before it set X and Y.
+        type: string
+        x-kind: generator
+        x-category: motion
+        x-fallback: cut_linear
+        x-variables:
+          - { name: x, type: length, description: "Entry point X. Unchanged from the rapid that preceded this move — in scope for a controller that restates it, not because it moves." }
+          - { name: y, type: length, description: "Entry point Y. Unchanged, as x." }
+          - { name: z, type: length, description: "Depth to plunge to." }
+          - { name: feedrate, type: feed, description: "The tool's rated plunge (Z) feed." }
+          - { name: s, type: rpm, description: "Spindle speed, for controllers that want it restated on the cut line. Normally already set by spindle_start." }
+        default: "`G1 Z{z} F{feedrate}"
+
       # Arc cutting move.
       #
       # Direction arrives as a BOOLEAN, not as a ready-made word: the application

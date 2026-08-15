@@ -215,6 +215,11 @@ primitives:
   # plunge feed, which a routing move must never inherit.
   cut_linear: "`G1 X{x} Y{y} Z{z} F{feedrate}"
 
+  # Z only: the rapid before it already put the cutter over the entry point, so
+  # restating X and Y says nothing the controller does not already know. Same F
+  # rule as above - this one carries the tool's rated plunge feed.
+  cut_plunge: "`G1 Z{z} F{feedrate}"
+
   # IJK centre-offset form (the R form cannot express a full circle, and round
   # pads/slot ends are full circles).
   cut_arc: '`{if clockwise { "G2" } else { "G3" }} X{x} Y{y} I{i} J{j} F{xy_feedrate}'
