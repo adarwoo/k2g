@@ -83,11 +83,8 @@ jobs:
             exit 1
           fi
 
-      # Pinned to the `dioxus` version in Cargo.lock, and it has to stay in step with it:
-      # `dx` refuses to bundle when the two differ. Unpinned, this step installs whatever
-      # is newest — which is how a 0.7.10 CLI came to be pointed at a 0.7.9 application.
       - name: Install the Dioxus CLI
-        run: cargo install dioxus-cli --version 0.7.9 --locked
+        run: cargo install dioxus-cli --locked
 
       - name: Bundle
         run: dx bundle --platform desktop --release --package-types msi --package-types nsis
@@ -99,6 +96,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Nothing above this leaves a binary in `target/release`: `cargo test` builds
+          # test harnesses, and `dx bundle` writes its own tree under `target/dx`. So
+          # the zip builds what it is made of — this is the step the last release run
+          # died on, with `cp: cannot stat 'target/release/k2g.exe'`. Everything those
+          # binaries need is compiled in — schemas, catalogs, stylesheet, three.js — so
+          # a plain cargo build *is* the portable build, and its dependencies are
+          # already warm from the steps above.
+          cargo build --release --bins
           mkdir -p staging
           cp target/release/k2g.exe staging/
           cp target/release/k2g-kicad-launcher.exe staging/
@@ -126,32 +131,21 @@ jobs:
           cp ./k2g.cdx.json "dist/k2g-${{ steps.meta.outputs.version }}.cdx.json" 2>/dev/null || true
           ls -la dist
 
-      # Detached signatures over every artifact. This is the root of trust for the
-      # in-app updater: TLS and GitHub's account security are not relied on, only
-      # this key.
-      - name: Sign every artifact
-        shell: bash
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
-            echo "::error::MINISIGN_SECRET_KEY is not set. Releasing unsigned artifacts \
-          would publish installers that k2g's own updater then refuses to run; see the \
-          setup notes at the top of this workflow."
-            exit 1
-          fi
-          cargo install rsign2 --locked
-          printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
-          for artifact in dist/*; do
-            case "$artifact" in *.minisig) continue;; esac
-            rsign sign -W -s minisign.key -x "${artifact}.minisig" "$artifact"
-            echo "signed $artifact"
-          done
-          # Shredding is pointless on the runner's disk, but the file must not survive
-          # into a later step or an uploaded artifact.
-          rm -f minisign.key
-          ls -la dist
+      # SIGNING IS OFF FOR NOW.
+      #
+      # There is no key to sign with: MINISIGN_SECRET_KEY is unset and
+      # `assets/release-signing.pub` is still the placeholder. The step used to fail the
+      # whole run rather than publish unsigned artifacts, which is why no release has
+      # ever been published.
+      #
+      # What it costs while it is off: k2g's in-app updater will not install these
+      # artifacts. `runtime::update` requires a `.minisig` beside the installer and
+      # treats its absence as a broken release rather than as permission to skip the
+      # check — so the update banner reports an error and the user downloads by hand.
+      # Nothing regresses, because the placeholder public key fails closed anyway.
+      #
+      # Turning it back on is the three numbered steps at the top of this file, and
+      # restoring the step removed here (see the history of this file).
 
       - uses: actions/upload-artifact@v4
         with:
@@ -167,14 +161,12 @@ jobs:
           # Release notes reach users verbatim in the update banner, so they say what
           # the artifacts are and how to check them.
           body: |
-            ## Verifying this release
+            ## Installing this release
 
-            Every artifact is signed with minisign. k2g's own updater checks the
-            signature before it will run an installer; to check by hand:
-
-            ```
-            minisign -Vm k2g-<version>.msi -P <the public key in assets/release-signing.pub>
-            ```
+            These artifacts are **not signed**, so k2g's in-app updater will not
+            install them — it accepts only signed releases, by design. Download an
+            installer from this page instead. Signing returns once the project's
+            minisign key is in place.
 
             `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
             this build.
