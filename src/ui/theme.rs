@@ -3160,6 +3160,74 @@ th {
     }
 }
 
+/*
+ * Shown over the canvas while the isolation contours are being worked out — a couple of
+ * seconds on a dense board, during which the step's other toolpaths are already drawn
+ * and worth looking at. Hence an overlay in a corner rather than a curtain over the
+ * whole view: it says a piece is still coming, not that there is nothing there.
+ *
+ * It replaces a step note that said the same thing. A note was the wrong instrument
+ * twice over — work in progress is not a shortcoming of the job, and a note written
+ * while it was true would still be sitting there once it was not.
+ */
+.machining-3d-busy {
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    max-width: calc(100% - 24px);
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+    font-size: 12px;
+    pointer-events: none;
+}
+
+.machining-3d-busy-title {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.machining-3d-busy-detail {
+    color: var(--text-subtle);
+    /* Its own line under the title, which the flex gap above would otherwise sit beside. */
+    flex-basis: 100%;
+    margin-left: 26px;
+}
+
+.machining-3d-spinner {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    border-radius: 50%;
+    /* A ring with one quarter in the accent colour; spinning it reads as motion without
+       needing a sprite or an SVG. */
+    border: 2px solid color-mix(in srgb, var(--border) 70%, transparent);
+    border-top-color: var(--accent);
+    animation: k2g-spin 0.9s linear infinite;
+}
+
+@keyframes k2g-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/*
+ * Motion is decoration here — the words carry the meaning — so it goes away for anyone
+ * who has asked the system for less of it, leaving the ring as a static mark.
+ */
+@media (prefers-reduced-motion: reduce) {
+    .machining-3d-spinner {
+        animation: none;
+    }
+}
+
 .machining-3d {
     position: relative;
     width: 100%;

@@ -560,6 +560,17 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
 
     let legend = payload().legend;
 
+    // Whether the contours this view is waiting on are still being worked out.
+    //
+    // Read **after** the payload, and that order matters: building the payload is what
+    // plans the step, and planning a step whose contours are not in hand is what asks for
+    // them. Read first, this would miss the request it is reporting on and the widget
+    // would appear one render late.
+    //
+    // It clears without anything watching it: the worker wakes the UI when it publishes,
+    // the context re-syncs, and this renders again with nothing in flight.
+    let working_on = crate::runtime::isolation::in_flight();
+
     rsx! {
         div { class: "machining-3d-layout",
             // The canvas keeps `.machining-3d` as its **direct parent**: the script finds
@@ -571,6 +582,26 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
                 // styling mistake.
                 div { class: "machining-3d-placeholder", "3D toolpath — starting renderer…" }
                 canvas { id: CANVAS_ID, class: "machining-3d-canvas" }
+
+                // Over the canvas rather than instead of it: the rest of the step — the
+                // drilling, the outline — is already drawn and worth looking at while the
+                // engraving is worked out. This says a piece is still coming, not that
+                // there is nothing there.
+                if let Some(spec) = working_on.as_ref() {
+                    div { class: "machining-3d-busy",
+                        div { class: "machining-3d-spinner" }
+                        div { class: "machining-3d-busy-title", "Working out the isolation contours" }
+                        div { class: "machining-3d-busy-detail",
+                            {
+                                let face = if spec.layer_id == pcb::BACK_COPPER { "bottom" } else { "top" };
+                                let width = spec.width_nm as f64 / 1e6;
+                                format!(
+                                    "Reading the {face} copper and re-pouring its zones, for a {width:.2} mm channel.",
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             if !legend.is_empty() {

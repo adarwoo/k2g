@@ -1055,14 +1055,12 @@ fn plan_engrave_spans(
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
         crate::runtime::isolation::request_isolation(spec);
+        // Only a failure is worth a note. Work still in progress is not a shortcoming of
+        // the job and does not belong in a list of them — the views say so themselves,
+        // while it is happening, and stop saying it when it stops being true. A note
+        // would have to be written now and would still be sitting there afterwards.
         if let Some(error) = ctx.isolation.error.as_ref() {
             warnings.push(format!("The copper could not be read: {error}"));
-        } else {
-            warnings.push(
-                "Working out the isolation contours — reading the board's copper and \
-                 re-pouring its zones. This step's engraving appears when that finishes."
-                    .into(),
-            );
         }
         return (Vec::new(), warnings);
     };
