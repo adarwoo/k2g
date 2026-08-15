@@ -83,8 +83,11 @@ jobs:
             exit 1
           fi
 
+      # Pinned to the `dioxus` version in Cargo.lock, and it has to stay in step with it:
+      # `dx` refuses to bundle when the two differ. Unpinned, this step installs whatever
+      # is newest — which is how a 0.7.10 CLI came to be pointed at a 0.7.9 application.
       - name: Install the Dioxus CLI
-        run: cargo install dioxus-cli --locked
+        run: cargo install dioxus-cli --version 0.7.9 --locked
 
       - name: Bundle
         run: dx bundle --platform desktop --release --package-types msi --package-types nsis

@@ -31,4 +31,9 @@ icon_path = "assets/icons/icon.png"
 #  2. k2g writes its KiCad plugin registration into the user's own Documents folder
 #     and reads per-user configuration. A machine-wide install would put the
 #     executable somewhere shared while everything around it stayed per-user.
-install_mode = "currentUser"
+#
+# Spelled in the CLI's own casing. `dx` deserialises this into an enum whose variants are
+# `CurrentUser`, `PerMachine` and `Both`, with no rename — so the camelCase spelling
+# tauri's own configuration uses is a parse error here, and one that only surfaces at
+# `dx bundle`, which nothing but the release job runs.
+install_mode = "CurrentUser"
