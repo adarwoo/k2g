@@ -3318,11 +3318,22 @@ th {
 
 /*
  * The legend is the layer control, so a row that names a layer is clickable along its
- * whole length — the label element does that for free, and the pointer says so.
+ * whole length: the tickbox shows and hides it, the rest of the row brings it to the
+ * front of the drawing.
+ *
+ * The raised row is marked by a bar down its leading edge rather than by a colour, since
+ * every one of these rows already carries a colour of its own and a second one would read
+ * as part of the key. The bar is drawn inside the existing padding so nothing shifts when
+ * it appears.
  */
-label.board-drill-legend-item {
+.board-drill-legend-item.is-layer {
     cursor: pointer;
     user-select: none;
+}
+
+.board-drill-legend-item.is-top {
+    box-shadow: inset 2px 0 0 var(--accent);
+    color: var(--text);
 }
 
 .board-legend-check {

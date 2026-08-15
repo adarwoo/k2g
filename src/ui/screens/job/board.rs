@@ -238,6 +238,38 @@ fn layer_visible(hidden: &BTreeSet<BoardLayer>, layer: BoardLayer) -> bool {
     !hidden.contains(&layer)
 }
 
+/// The order the layers are painted in, bottom first.
+///
+/// Copper underneath because that is where it is on the board, then the kerf band, the
+/// edge line, and the drilled and routed features on top of everything — those are what
+/// the view is read for, and they are small marks that must not be buried.
+const DEFAULT_DRAW_ORDER: [BoardLayer; 7] = [
+    BoardLayer::CopperBack,
+    BoardLayer::CopperFront,
+    BoardLayer::OutsideRoute,
+    BoardLayer::EdgeCut,
+    BoardLayer::Via,
+    BoardLayer::Pth,
+    BoardLayer::Npth,
+];
+
+/// The paint order with `raised` moved to the end, so it lands on top of the rest.
+///
+/// SVG paints in document order and honours neither `z-index` nor `order`, so bringing a
+/// layer to the front means genuinely emitting it last — which is why the marks are built
+/// per layer and shuffled rather than written out in a fixed sequence.
+///
+/// Everything else keeps its relative order. Raising the bottom copper should slide it
+/// over the top copper and nothing else; it should not also rearrange the drill marks.
+fn draw_order(raised: Option<BoardLayer>) -> Vec<BoardLayer> {
+    let mut order: Vec<BoardLayer> = DEFAULT_DRAW_ORDER.to_vec();
+    if let Some(raised) = raised {
+        order.retain(|layer| *layer != raised);
+        order.push(raised);
+    }
+    order
+}
+
 /// The tickbox at the head of a legend row that names a layer.
 ///
 /// The legend is the layer control, so the row that explains a thing is the row that
@@ -251,6 +283,10 @@ fn LegendToggle(layer: BoardLayer, hidden: Signal<BTreeSet<BoardLayer>>) -> Elem
             r#type: "checkbox",
             class: "board-legend-check",
             checked: shown,
+            // The row around this raises the layer to the front; the box switches it off.
+            // Two meanings on one row, so the click must not reach both — ticking a box
+            // would otherwise also reorder the drawing, which is not what the tick says.
+            onclick: move |event| event.stop_propagation(),
             onchange: move |_| {
                 hidden
                     .with_mut(|set| {
@@ -259,6 +295,38 @@ fn LegendToggle(layer: BoardLayer, hidden: Signal<BTreeSet<BoardLayer>>) -> Elem
                         }
                     });
             },
+        }
+    }
+}
+
+/// A legend row for a layer: a tickbox that shows and hides it, and a body that brings it
+/// to the front.
+///
+/// The legend is the layer control, so the row that explains a thing is the row that
+/// arranges it. Clicking the row again puts the drawing back in its natural order rather
+/// than leaving the reader to hunt for how to undo it.
+#[component]
+fn LegendLayerRow(
+    layer: BoardLayer,
+    hidden: Signal<BTreeSet<BoardLayer>>,
+    top: Signal<Option<BoardLayer>>,
+    children: Element,
+) -> Element {
+    let raised = *top.read() == Some(layer);
+    rsx! {
+        div {
+            class: if raised {
+                "board-drill-legend-item is-layer is-top"
+            } else {
+                "board-drill-legend-item is-layer"
+            },
+            title: if raised { "Click to restore the drawing order" } else { "Click to draw this layer on top" },
+            onclick: move |_| {
+                let mut top = top;
+                top.set((!raised).then_some(layer));
+            },
+            LegendToggle { layer, hidden }
+            {children}
         }
     }
 }
@@ -671,6 +739,184 @@ fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String 
 
 /// The PCB board-preview view: document selector, zoom/pan controls, the SVG
 /// board render (edge shapes + hole markers), and the drill-size legend.
+/// One drilled hole's symbol, placed and rotated.
+///
+/// Lifted out of the view so the listing can be reordered: the marks are now emitted per
+/// layer and shuffled by which one the reader has brought to the front, and a 150-line
+/// block inlined in the middle of the tree cannot be moved about.
+fn hole_marker_element(idx: usize, marker: &BoardHoleMarker) -> Element {
+    let r = marker.marker_radius;
+    let stroke_width = 1.0_f64;
+    let symbol_class = hole_marker_class(&marker.kind);
+    let half_fill_w = r;
+    let quarter_fill_w = r;
+    let quarter_fill_h = r;
+    rsx! {
+        g {
+            key: "hole-marker-{idx}",
+            class: if marker.machined { "" } else { "board-step-ghost" },
+            transform: "translate({marker.x} {marker.y}) rotate({marker.rotation_deg})",
+
+            // Base outline.
+            if matches!(marker.base, DrillBaseShape::Circle) {
+                circle {
+                    cx: "0",
+                    cy: "0",
+                    r: "{r}",
+                    fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.base, DrillBaseShape::Square) {
+                rect {
+                    x: "{-r * 0.95}",
+                    y: "{-r * 0.95}",
+                    width: "{r * 1.9}",
+                    height: "{r * 1.9}",
+                    fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.base, DrillBaseShape::Diamond) {
+                polygon {
+                    points: "0 {-r}, {r} 0, 0 {r}, {-r} 0",
+                    fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.base, DrillBaseShape::Triangle) {
+                polygon {
+                    points: "0 {-r}, {r} {r * 0.85}, {-r} {r * 0.85}",
+                    fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.base, DrillBaseShape::Hexagon) {
+                polygon {
+                    points: "0 {-r}, {r * 0.83} {-r * 0.48}, {r * 0.83} {r * 0.48}, 0 {r}, {-r * 0.83} {r * 0.48}, {-r * 0.83} {-r * 0.48}",
+                    fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+
+            // Interior modifier.
+            if matches!(marker.modifier, DrillModifier::Dot) {
+                circle {
+                    cx: "0",
+                    cy: "0",
+                    r: "{r * (10.0 / 42.0)}",
+                    class: "{symbol_class}",
+                    fill: "currentColor",
+                }
+            }
+            if matches!(marker.modifier, DrillModifier::Plus) {
+                line {
+                    x1: "0",
+                    y1: "{-r * 0.75}",
+                    x2: "0",
+                    y2: "{r * 0.75}",
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+                line {
+                    x1: "{-r * 0.75}",
+                    y1: "0",
+                    x2: "{r * 0.75}",
+                    y2: "0",
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.modifier, DrillModifier::X) {
+                line {
+                    x1: "{-r * 0.66}",
+                    y1: "{-r * 0.66}",
+                    x2: "{r * 0.66}",
+                    y2: "{r * 0.66}",
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+                line {
+                    x1: "{-r * 0.66}",
+                    y1: "{r * 0.66}",
+                    x2: "{r * 0.66}",
+                    y2: "{-r * 0.66}",
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.modifier, DrillModifier::Bullseye) {
+                circle {
+                    cx: "0",
+                    cy: "0",
+                    r: "{r * (16.0 / 42.0)}",
+                    fill: "none",
+                    class: "{symbol_class}",
+                    stroke_width: "{stroke_width}",
+                }
+            }
+            if matches!(marker.modifier, DrillModifier::HalfFill) {
+                rect {
+                    x: "{-half_fill_w}",
+                    y: "{-r}",
+                    width: "{half_fill_w}",
+                    height: "{2.0 * r}",
+                    class: "{symbol_class}",
+                    fill: "currentColor",
+                    fill_opacity: "0.75",
+                }
+            }
+            if matches!(marker.modifier, DrillModifier::QuarterFill) {
+                rect {
+                    x: "{-quarter_fill_w}",
+                    y: "{-r}",
+                    width: "{quarter_fill_w}",
+                    height: "{quarter_fill_h}",
+                    class: "{symbol_class}",
+                    fill: "currentColor",
+                    fill_opacity: "0.75",
+                }
+            }
+
+        }
+    }
+}
+
+/// One routed slot: the hatched stadium it sweeps, and the cutter's line through it.
+fn slot_element(idx: usize, slot: &BoardSlotFeature) -> Element {
+    let kind_class = hole_kind_class(&slot.kind);
+    let band_class = format!("board-route-band-{}", hole_kind_slug(&slot.kind));
+    let travel_start = -slot.half_travel;
+    let travel_end = slot.half_travel;
+    rsx! {
+        g {
+            key: "board-slot-{idx}",
+            class: if slot.machined { "" } else { "board-step-ghost" },
+            transform: "translate({slot.x} {slot.y}) rotate({slot.rotation_deg})",
+
+            path { d: "{slot.outline_path}", class: "{band_class}" }
+            path {
+                d: "{slot.outline_path}",
+                class: "board-route-outline {kind_class}",
+            }
+            if slot.half_travel > 0.0 {
+                line {
+                    x1: "{travel_start}",
+                    y1: "0",
+                    x2: "{travel_end}",
+                    y2: "0",
+                    class: "board-route-centerline {kind_class}",
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
@@ -695,6 +941,9 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     // Local to this view, like zoom and pan, and forgotten on leaving it for the same
     // reason: it is how the picture is being looked at, not something about the job.
     let hidden_layers = use_signal(BTreeSet::<BoardLayer>::new);
+    // Which layer the reader has brought to the front, if any. Also local to the view:
+    // it is how the picture is being looked at, not a fact about the job.
+    let top_layer = use_signal(|| Option::<BoardLayer>::None);
     let hidden = hidden_layers.read().clone();
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let board_view_width = BOARD_VIEW_WIDTH;
@@ -868,6 +1117,52 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let copper_svg = use_memo(move || build_copper_svg(&state.read()));
     let copper_svg = copper_svg.read();
 
+    // Each layer's marks, built up front so they can be emitted in whatever order the
+    // reader has asked for. Hidden layers build nothing at all rather than building
+    // something empty, which keeps the cost of a switched-off copper layer at zero.
+    let copper_marks = |which: BoardLayer, class: &'static str, layer: Option<&CopperLayerSvg>| {
+        let layer = layer.filter(|_| layer_visible(&hidden, which))?;
+        Some(rsx! {
+            g { class: "{class}",
+                for (zone_idx , zone) in layer.zones.iter().enumerate() {
+                    path {
+                        key: "{class}-zone-{zone_idx}",
+                        d: "{zone}",
+                        class: "board-copper-fill",
+                        fill_rule: "evenodd",
+                    }
+                }
+                if !layer.solid.is_empty() {
+                    path { d: "{layer.solid}", class: "board-copper-fill", fill_rule: "nonzero" }
+                }
+            }
+        })
+    };
+
+    // The features of one hole kind: the slots it routes and the holes it drills, as one
+    // layer, because that is what the legend row governs and what raising it should move.
+    let hole_marks = |which: BoardLayer| {
+        if !layer_visible(&hidden, which) {
+            return None;
+        }
+        Some(rsx! {
+            for (idx , slot) in board_slot_features
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| BoardLayer::of_hole(&slot.kind) == which)
+            {
+                {slot_element(idx, slot)}
+            }
+            for (idx , marker) in board_hole_markers
+                .iter()
+                .enumerate()
+                .filter(|(_, marker)| BoardLayer::of_hole(&marker.kind) == which)
+            {
+                {hole_marker_element(idx, marker)}
+            }
+        })
+    };
+
     // The stitched contours, in view units — the source for the outside-route band.
     // Only a clean stitch is usable: with errors the contours are not closed, so there
     // is no reliable inside to keep the band out of.
@@ -889,6 +1184,70 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                 )
             })
         });
+
+    // Outside routing: the kerf the outline cutter sweeps. It lies wholly beyond the edge
+    // cut, so the finished board keeps its nominal size. Without a clean stitch there is
+    // no inside to keep out of, so fall back to a band centred on the raw edge fragments —
+    // still "this edge is routed", just unsided.
+    //
+    // Ghosted when the selected step does not cut the outline: the kerf is drawn so the
+    // board still reads as a board, but it is plainly another step's work. The ghost class
+    // goes on a wrapping group, never beside `board-outline-band` on the band itself —
+    // that class sets its own `opacity`, and two single-class rules have equal
+    // specificity, so whichever the sheet declares last wins and the ghost is silently
+    // ignored.
+    let outline_marks = layer_visible(&hidden, BoardLayer::OutsideRoute).then(|| {
+        rsx! {
+            g { class: if routes_outline { "" } else { "board-step-ghost" },
+                if let Some(outline) = stitched_outline.as_ref() {
+                    {
+                        let double_kerf = outline_band_width * 2.0;
+                        rsx! {
+                            path {
+                                d: "{outline}",
+                                class: "board-outline-band",
+                                stroke_width: "{double_kerf}",
+                                mask: "url(#board-outside-route-mask)",
+                            }
+                        }
+                    }
+                } else {
+                    for shape in board_edge_shapes_svg.iter() {
+                        {edge_shape_element(shape, "board-outline-band", Some(outline_band_width))}
+                    }
+                }
+            }
+        }
+    });
+
+    // The visible edge pass only. The identical loop inside the mask must NOT be gated: it
+    // defines where the kerf band is allowed to draw, so hiding it there would move the
+    // band rather than hide a line.
+    let edge_marks = layer_visible(&hidden, BoardLayer::EdgeCut).then(|| {
+        rsx! {
+            for shape in board_edge_shapes_svg.iter() {
+                {edge_shape_element(shape, "board-edge-shape", None)}
+            }
+        }
+    });
+
+    let layer_marks: Vec<(BoardLayer, Element)> = draw_order(*top_layer.read())
+        .into_iter()
+        .filter_map(|layer| {
+            let marks = match layer {
+                BoardLayer::CopperBack => {
+                    copper_marks(layer, "board-copper-back", copper_svg.back.as_ref())
+                }
+                BoardLayer::CopperFront => {
+                    copper_marks(layer, "board-copper-front", copper_svg.front.as_ref())
+                }
+                BoardLayer::OutsideRoute => outline_marks.clone(),
+                BoardLayer::EdgeCut => edge_marks.clone(),
+                BoardLayer::Via | BoardLayer::Pth | BoardLayer::Npth => hole_marks(layer),
+            }?;
+            Some((layer, marks))
+        })
+        .collect();
 
     rsx! {
                             div { class: "board-preview",
@@ -1061,283 +1420,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         class: "board-svg-frame",
                                                     }
 
-                                                    // Copper first, so everything else is
-                                                    // drawn on top of it — which is how it
-                                                    // sits on the board, and what lets a
-                                                    // hole read as a hole *through* a pad.
-                                                    //
-                                                    // The back layer under the front, and
-                                                    // dimmed: seen from above, it is behind
-                                                    // the substrate. Drawing the two at
-                                                    // equal strength would make a board
-                                                    // that is dense on both sides
-                                                    // unreadable on either.
-                                                    for (layer , class , which) in [
-                                                        (copper_svg.back.as_ref(), "board-copper-back", BoardLayer::CopperBack),
-                                                        (copper_svg.front.as_ref(), "board-copper-front", BoardLayer::CopperFront),
-                                                    ] {
-                                                        if let Some(layer) = layer.filter(|_| layer_visible(&hidden, which)) {
-                                                            g { class: "{class}",
-                                                                for (zone_idx , zone) in layer.zones.iter().enumerate() {
-                                                                    path {
-                                                                        key: "{class}-zone-{zone_idx}",
-                                                                        d: "{zone}",
-                                                                        class: "board-copper-fill",
-                                                                        fill_rule: "evenodd",
-                                                                    }
-                                                                }
-                                                                if !layer.solid.is_empty() {
-                                                                    path {
-                                                                        d: "{layer.solid}",
-                                                                        class: "board-copper-fill",
-                                                                        fill_rule: "nonzero",
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // Outside routing: the kerf the outline cutter sweeps. It lies
-                                                    // wholly beyond the edge cut, so the finished board keeps its
-                                                    // nominal size. Without a clean stitch there is no inside to
-                                                    // keep out of, so fall back to a band centred on the raw edge
-                                                    // fragments — still "this edge is routed", just unsided.
-                                                    // Ghosted when the selected step does not cut the outline: the
-                                                    // kerf is drawn so the board still reads as a board, but it is
-                                                    // plainly another step's work.
-                                                    // The ghost class goes on a wrapping group, never beside
-                                                    // `board-outline-band` on the band itself: that class sets its
-                                                    // own `opacity`, and two single-class rules have equal
-                                                    // specificity, so whichever the sheet declares last wins and
-                                                    // the ghost is silently ignored. The slot and marker groups
-                                                    // below take this shape for the same reason.
-                                                    g {
-                                                        class: if routes_outline { "" } else { "board-step-ghost" },
-                                                        // Hidden by emptying the group rather than by dropping it,
-                                                        // so the ghost class above keeps its place in the tree.
-                                                        if layer_visible(&hidden, BoardLayer::OutsideRoute) {
-                                                        if let Some(outline) = stitched_outline.as_ref() {
-                                                            {
-                                                                let double_kerf = outline_band_width * 2.0;
-                                                                rsx! {
-                                                                    path {
-                                                                        d: "{outline}",
-                                                                        class: "board-outline-band",
-                                                                        stroke_width: "{double_kerf}",
-                                                                        mask: "url(#board-outside-route-mask)",
-                                                                    }
-                                                                }
-                                                            }
-                                                        } else {
-                                                            for shape in board_edge_shapes_svg.iter() {
-                                                                {edge_shape_element(
-                                                                    shape,
-                                                                    "board-outline-band",
-                                                                    Some(outline_band_width),
-                                                                )}
-                                                            }
-                                                        }
-                                                        }
-                                                    }
-                                                    // The visible edge pass only. The identical loop inside the
-                                                    // mask above must NOT be gated: it defines where the kerf band
-                                                    // is allowed to draw, so hiding it there would move the band
-                                                    // rather than hide a line.
-                                                    if layer_visible(&hidden, BoardLayer::EdgeCut) {
-                                                        for shape in board_edge_shapes_svg.iter() {
-                                                            {edge_shape_element(shape, "board-edge-shape", None)}
-                                                        }
-                                                    }
-
-                                                    // Routed slots: the hatched stadium is the swept material,
-                                                    // the dashed centreline the cutter's own path through it.
-                                                    for (idx , slot) in board_slot_features
-                                                        .iter()
-                                                        .enumerate()
-                                                        .filter(|(_, slot)| {
-                                                            layer_visible(&hidden, BoardLayer::of_hole(&slot.kind))
-                                                        })
-                                                    {
-                                                        {
-                                                            let kind_class = hole_kind_class(&slot.kind);
-                                                            let band_class = format!("board-route-band-{}", hole_kind_slug(&slot.kind));
-                                                            let travel_start = -slot.half_travel;
-                                                            let travel_end = slot.half_travel;
-                                                            rsx! {
-                                                                g {
-                                                                    key: "board-slot-{idx}",
-                                                                    class: if slot.machined { "" } else { "board-step-ghost" },
-                                                                    transform: "translate({slot.x} {slot.y}) rotate({slot.rotation_deg})",
-
-                                                                    path { d: "{slot.outline_path}", class: "{band_class}" }
-                                                                    path {
-                                                                        d: "{slot.outline_path}",
-                                                                        class: "board-route-outline {kind_class}",
-                                                                    }
-                                                                    if slot.half_travel > 0.0 {
-                                                                        line {
-                                                                            x1: "{travel_start}",
-                                                                            y1: "0",
-                                                                            x2: "{travel_end}",
-                                                                            y2: "0",
-                                                                            class: "board-route-centerline {kind_class}",
-                                                                        }
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    for (idx , marker) in board_hole_markers
-                                                        .iter()
-                                                        .enumerate()
-                                                        .filter(|(_, marker)| {
-                                                            layer_visible(&hidden, BoardLayer::of_hole(&marker.kind))
-                                                        })
-                                                    {
-                                                        {
-                                                            let r = marker.marker_radius;
-                                                            let stroke_width = 1.0_f64;
-                                                            let symbol_class = hole_marker_class(&marker.kind);
-                                                            let half_fill_w = r;
-                                                            let quarter_fill_w = r;
-                                                            let quarter_fill_h = r;
-                                                            rsx! {
-                                                                g {
-                                                                    key: "hole-marker-{idx}",
-                                                                    class: if marker.machined { "" } else { "board-step-ghost" },
-                                                                    transform: "translate({marker.x} {marker.y}) rotate({marker.rotation_deg})",
-
-                                                                    // Base outline.
-                                                                    if matches!(marker.base, DrillBaseShape::Circle) {
-                                                                        circle {
-                                                                            cx: "0",
-                                                                            cy: "0",
-                                                                            r: "{r}",
-                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.base, DrillBaseShape::Square) {
-                                                                        rect {
-                                                                            x: "{-r * 0.95}",
-                                                                            y: "{-r * 0.95}",
-                                                                            width: "{r * 1.9}",
-                                                                            height: "{r * 1.9}",
-                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.base, DrillBaseShape::Diamond) {
-                                                                        polygon {
-                                                                            points: "0 {-r}, {r} 0, 0 {r}, {-r} 0",
-                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.base, DrillBaseShape::Triangle) {
-                                                                        polygon {
-                                                                            points: "0 {-r}, {r} {r * 0.85}, {-r} {r * 0.85}",
-                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.base, DrillBaseShape::Hexagon) {
-                                                                        polygon {
-                                                                            points: "0 {-r}, {r * 0.83} {-r * 0.48}, {r * 0.83} {r * 0.48}, 0 {r}, {-r * 0.83} {r * 0.48}, {-r * 0.83} {-r * 0.48}",
-                                                                            fill: if matches!(marker.modifier, DrillModifier::Filled) { "currentColor" } else { "none" },
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-
-                                                                    // Interior modifier.
-                                                                    if matches!(marker.modifier, DrillModifier::Dot) {
-                                                                        circle {
-                                                                            cx: "0",
-                                                                            cy: "0",
-                                                                            r: "{r * (10.0 / 42.0)}",
-                                                                            class: "{symbol_class}",
-                                                                            fill: "currentColor",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.modifier, DrillModifier::Plus) {
-                                                                        line {
-                                                                            x1: "0",
-                                                                            y1: "{-r * 0.75}",
-                                                                            x2: "0",
-                                                                            y2: "{r * 0.75}",
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                        line {
-                                                                            x1: "{-r * 0.75}",
-                                                                            y1: "0",
-                                                                            x2: "{r * 0.75}",
-                                                                            y2: "0",
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.modifier, DrillModifier::X) {
-                                                                        line {
-                                                                            x1: "{-r * 0.66}",
-                                                                            y1: "{-r * 0.66}",
-                                                                            x2: "{r * 0.66}",
-                                                                            y2: "{r * 0.66}",
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                        line {
-                                                                            x1: "{-r * 0.66}",
-                                                                            y1: "{r * 0.66}",
-                                                                            x2: "{r * 0.66}",
-                                                                            y2: "{-r * 0.66}",
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.modifier, DrillModifier::Bullseye) {
-                                                                        circle {
-                                                                            cx: "0",
-                                                                            cy: "0",
-                                                                            r: "{r * (16.0 / 42.0)}",
-                                                                            fill: "none",
-                                                                            class: "{symbol_class}",
-                                                                            stroke_width: "{stroke_width}",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.modifier, DrillModifier::HalfFill) {
-                                                                        rect {
-                                                                            x: "{-half_fill_w}",
-                                                                            y: "{-r}",
-                                                                            width: "{half_fill_w}",
-                                                                            height: "{2.0 * r}",
-                                                                            class: "{symbol_class}",
-                                                                            fill: "currentColor",
-                                                                            fill_opacity: "0.75",
-                                                                        }
-                                                                    }
-                                                                    if matches!(marker.modifier, DrillModifier::QuarterFill) {
-                                                                        rect {
-                                                                            x: "{-quarter_fill_w}",
-                                                                            y: "{-r}",
-                                                                            width: "{quarter_fill_w}",
-                                                                            height: "{quarter_fill_h}",
-                                                                            class: "{symbol_class}",
-                                                                            fill: "currentColor",
-                                                                            fill_opacity: "0.75",
-                                                                        }
-                                                                    }
-
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                    // Every layer's marks, emitted in the order the reader has chosen. SVG paints
+                                                    // in document order and honours no z-index, so "bring this to the front" has to
+                                                    // mean genuinely last — hence a list of elements that gets shuffled rather than
+                                                    // a fixed sequence written out in the tree.
+                                                    {layer_marks.into_iter().map(|(_, marks)| marks)}
                                                 }
                                             }
                                             aside { class: "board-drill-legend-panel",
@@ -1543,8 +1630,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     }
                                                 }
-                                                label { class: "board-drill-legend-item",
-                                                    LegendToggle { layer: BoardLayer::OutsideRoute, hidden: hidden_layers }
+                                                LegendLayerRow {
+                                                    layer: BoardLayer::OutsideRoute,
+                                                    hidden: hidden_layers,
+                                                    top: top_layer,
                                                     svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
                                                         // The kerf sits wholly on one side of the cut line, as it
                                                         // does on the board.
@@ -1559,8 +1648,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 }
 
                                                 div { class: "board-drill-legend-note", "Hole type colors" }
-                                                label { class: "board-drill-legend-item",
-                                                    LegendToggle { layer: BoardLayer::Via, hidden: hidden_layers }
+                                                LegendLayerRow {
+                                                    layer: BoardLayer::Via,
+                                                    hidden: hidden_layers,
+                                                    top: top_layer,
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1575,8 +1666,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "Via" }
                                                 }
-                                                label { class: "board-drill-legend-item",
-                                                    LegendToggle { layer: BoardLayer::Pth, hidden: hidden_layers }
+                                                LegendLayerRow {
+                                                    layer: BoardLayer::Pth,
+                                                    hidden: hidden_layers,
+                                                    top: top_layer,
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1591,8 +1684,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "PTH" }
                                                 }
-                                                label { class: "board-drill-legend-item",
-                                                    LegendToggle { layer: BoardLayer::Npth, hidden: hidden_layers }
+                                                LegendLayerRow {
+                                                    layer: BoardLayer::Npth,
+                                                    hidden: hidden_layers,
+                                                    top: top_layer,
                                                     svg {
                                                         class: "board-drill-legend-icon",
                                                         view_box: "0 0 24 24",
@@ -1607,8 +1702,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     }
                                                     span { "NPTH" }
                                                 }
-                                                label { class: "board-drill-legend-item",
-                                                    LegendToggle { layer: BoardLayer::EdgeCut, hidden: hidden_layers }
+                                                LegendLayerRow {
+                                                    layer: BoardLayer::EdgeCut,
+                                                    hidden: hidden_layers,
+                                                    top: top_layer,
                                                     svg { class: "board-legend-icon", view_box: "0 0 24 24",
                                                         path {
                                                             d: "M 3 12 L 9 4 L 21 4 L 21 20 L 3 20 Z",
@@ -1633,10 +1730,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         (BoardLayer::CopperFront, "Top copper (F.Cu)", "board-copper-front"),
                                                         (BoardLayer::CopperBack, "Bottom copper (B.Cu)", "board-copper-back"),
                                                     ] {
-                                                        label {
+                                                        LegendLayerRow {
                                                             key: "copper-legend-{label}",
-                                                            class: "board-drill-legend-item",
-                                                            LegendToggle { layer, hidden: hidden_layers }
+                                                            layer,
+                                                            hidden: hidden_layers,
+                                                            top: top_layer,
                                                             svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
                                                                 g { class: "{swatch}",
                                                                     rect {
@@ -1793,6 +1891,63 @@ mod layer_tests {
 
     fn hidden(layers: &[BoardLayer]) -> BTreeSet<BoardLayer> {
         layers.iter().copied().collect()
+    }
+
+    /// SVG paints in document order and honours no z-index, so bringing a layer to the
+    /// front means genuinely emitting it last. Nothing else may move: raising the bottom
+    /// copper should slide it over the top copper and leave the drill marks where they
+    /// were.
+    #[test]
+    fn raising_a_layer_moves_only_that_layer_to_the_end() {
+        let order = draw_order(Some(BoardLayer::CopperBack));
+
+        assert_eq!(order.last(), Some(&BoardLayer::CopperBack));
+        assert_eq!(order.len(), DEFAULT_DRAW_ORDER.len(), "nothing gained or lost");
+
+        let rest: Vec<BoardLayer> = order[..order.len() - 1].to_vec();
+        let expected: Vec<BoardLayer> = DEFAULT_DRAW_ORDER
+            .iter()
+            .copied()
+            .filter(|l| *l != BoardLayer::CopperBack)
+            .collect();
+        assert_eq!(rest, expected, "the others keep their order");
+    }
+
+    /// Copper underneath and the drilled marks on top is the natural reading of a board,
+    /// and it is what the view goes back to when nothing is raised.
+    #[test]
+    fn nothing_raised_is_the_natural_order() {
+        assert_eq!(draw_order(None), DEFAULT_DRAW_ORDER.to_vec());
+        assert_eq!(
+            DEFAULT_DRAW_ORDER.first(),
+            Some(&BoardLayer::CopperBack),
+            "copper is at the bottom, as it is on the board"
+        );
+        assert_eq!(DEFAULT_DRAW_ORDER.last(), Some(&BoardLayer::Npth));
+    }
+
+    /// Raising the layer that is already last is a no-op rather than a reshuffle.
+    #[test]
+    fn raising_the_topmost_layer_changes_nothing() {
+        assert_eq!(draw_order(Some(BoardLayer::Npth)), DEFAULT_DRAW_ORDER.to_vec());
+    }
+
+    /// Every layer the legend offers has a place in the order, or raising it from the
+    /// legend would drop it out of the drawing entirely.
+    #[test]
+    fn every_layer_the_legend_offers_is_painted() {
+        for layer in [
+            BoardLayer::CopperFront,
+            BoardLayer::CopperBack,
+            BoardLayer::Via,
+            BoardLayer::Pth,
+            BoardLayer::Npth,
+            BoardLayer::OutsideRoute,
+            BoardLayer::EdgeCut,
+        ] {
+            assert!(DEFAULT_DRAW_ORDER.contains(&layer), "{layer:?} is never painted");
+            assert_eq!(draw_order(Some(layer)).len(), DEFAULT_DRAW_ORDER.len());
+        }
     }
 
     /// The default has to be "everything", and it has to stay that way when a layer is
