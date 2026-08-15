@@ -107,10 +107,21 @@ face — and is being tested on real hardware. What is **not** done:
 
 ## Install
 
-Take the latest [release](https://github.com/adarwoo/k2g/releases): an `.msi` or
-`-setup.exe` (per-user, no admin rights) or a portable `.zip`. Every artifact is
-signed with [minisign](https://jedisct1.github.io/minisign/) and can be verified
-against `assets/release-signing.pub`.
+Take the latest [release](https://github.com/adarwoo/k2g/releases):
+
+| File | What it is |
+| --- | --- |
+| `K2G_<version>_x64-setup.exe` | Installs for you alone, into `%LOCALAPPDATA%`, with no administrator rights. The one to take. |
+| `K2G_<version>_x64.msi` | The same application, installed for every user on the machine. Needs administrator rights. |
+| `k2g-<version>-portable-windows-x64.zip` | Unzip and run — the executable embeds every schema, catalog, stylesheet and script it needs. Keep `k2g-kicad-launcher.exe` beside `k2g.exe` for the KiCad toolbar button. |
+| `k2g-<version>.cdx.json` | The CycloneDX software bill of materials for that build. |
+
+> [!NOTE]
+> **Releases are not signed yet.** k2g's updater installs only a release carrying a
+> [minisign](https://jedisct1.github.io/minisign/) signature, so it reports an error
+> instead of updating itself — take installers from the releases page by hand until
+> the project's signing key is in place. That refusal is the feature working: an
+> unverified installer is one k2g will not run.
 
 Full instructions — connecting to KiCad, registering the toolbar button, updates,
 and how to remove everything — are in
@@ -168,7 +179,8 @@ k2g makes exactly one network request — a once-a-day check of the GitHub relea
 API — and it can be switched off from the settings cog, after which k2g touches nothing but the
 local KiCad socket. There is no telemetry and no analytics. Updates are never
 installed without an explicit click, and every installer is signature-checked before
-it runs. Details in [PRIVACY.md](PRIVACY.md).
+it runs — which is exactly why the unsigned releases above have to be installed by
+hand. Details in [PRIVACY.md](PRIVACY.md).
 
 **On multiple KiCad instances:** KiCad serves one fixed API socket, and running instances
 are not individually addressable over it. With several KiCads open, k2g talks to whichever
