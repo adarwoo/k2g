@@ -113,7 +113,7 @@ fn build_registry() -> HashMap<String, ShowWhen> {
         else {
             continue;
         };
-        collect(&schema, None, None, &mut out);
+        collect(&schema, &mut Vec::new(), &mut out);
     }
     out
 }
@@ -123,23 +123,34 @@ fn build_registry() -> HashMap<String, ShowWhen> {
 ///
 /// Both `properties` and `$defs` name their children, which is what lets a condition
 /// written once inside `$defs/retention` resolve for every use of that block.
-fn collect(
-    node: &Value,
-    parent: Option<&str>,
-    property: Option<&str>,
-    out: &mut HashMap<String, ShowWhen>,
-) {
+///
+/// `named` is the chain of named ancestors, owned and pushed/popped as the walk descends.
+/// It used to be two `Option<&str>` parameters — the enclosing name and its parent —
+/// shuffled along at each call (`collect(child, property, Some(child_name))`), which is
+/// the same rule expressed as borrows. That form did not survive optimisation: built at
+/// `opt-level = 0` it produced `outline/retention`, and at 1 or above the parent was lost
+/// at every insert and the registry came out keyed by bare names. `show_when` then fell
+/// back to the bare name and every block borrowed every other block's condition —
+/// invisible in the UI, because the fallback still found *a* declaration.
+///
+/// It was caught by the one test that asserts the miss rather than the hit, and only in
+/// release: `cargo test` is a debug build, and the release job is the only thing that runs
+/// these optimised. Whatever the codegen fault is, an owned path cannot express it — and
+/// it reads more plainly besides.
+fn collect(node: &Value, named: &mut Vec<String>, out: &mut HashMap<String, ShowWhen>) {
     let Some(object) = node.as_object() else { return };
 
-    if let (Some(name), Some(condition)) = (property, object.get("x-show-when")) {
+    if let (Some(name), Some(condition)) = (named.last(), object.get("x-show-when")) {
         if let Some((sibling, values)) = condition.as_object().and_then(|c| c.iter().next()) {
             let values = match values {
                 Value::Array(items) => items.clone(),
                 single => vec![single.clone()],
             };
-            let key = match parent {
-                Some(parent) => format!("{parent}/{name}"),
-                None => name.to_string(),
+            // The last two names, which is what `show_when` looks up: the field and the
+            // block it was declared in.
+            let key = match named.len() {
+                0 | 1 => name.clone(),
+                len => format!("{}/{name}", named[len - 2]),
             };
             out.insert(key, ShowWhen { sibling: sibling.clone(), values });
         }
@@ -147,15 +158,17 @@ fn collect(
 
     for (key, child) in object {
         if key == "properties" || key == "$defs" {
-            if let Some(named) = child.as_object() {
-                for (child_name, child_node) in named {
-                    collect(child_node, property, Some(child_name), out);
+            if let Some(child_object) = child.as_object() {
+                for (child_name, child_node) in child_object {
+                    named.push(child_name.clone());
+                    collect(child_node, named, out);
+                    named.pop();
                 }
                 continue;
             }
         }
         // Anything else (`default`, `items`, …) keeps the enclosing names.
-        collect(child, parent, property, out);
+        collect(child, named, out);
     }
 }
 
@@ -202,6 +215,22 @@ mod tests {
         assert!(
             show_when("/steps/0/route_cutouts/retention").is_none(),
             "another block's field of the same name does not inherit the declaration"
+        );
+    }
+
+    /// Every declaration is keyed by the block it was written in, not by its bare name.
+    ///
+    /// Asserted on the registry itself, because the lookup hides the difference: with bare
+    /// keys, `show_when` misses on `outline/retention` and then *succeeds* on its `retention`
+    /// fallback, so every test that asserts a hit still passes and every block silently
+    /// inherits every other block's condition. Only a miss reveals it — and a miss is only
+    /// reachable through one carefully chosen pointer, in one profile.
+    #[test]
+    fn declarations_are_keyed_by_their_block() {
+        assert!(registry().contains_key("outline/retention"), "{:?}", registry().keys());
+        assert!(
+            !registry().contains_key("retention"),
+            "a bare key would be borrowed by every block with a field of that name"
         );
     }
 
