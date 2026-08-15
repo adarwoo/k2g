@@ -9,6 +9,7 @@ mod cnc;
 mod catalog;
 mod fixture;
 mod logs;
+mod manual;
 mod profile_manager;
 mod profiles_common;
 mod job;
@@ -24,6 +25,7 @@ use cnc::CncScreen;
 use catalog::CatalogScreen;
 use fixture::FixtureProfilesScreen;
 use logs::LogsScreen;
+use manual::ManualScreen;
 use job::{JobScreen, JobViewPanel};
 use machining::MachiningProfilesScreen;
 use settings::SettingsDialog;
@@ -175,6 +177,9 @@ pub fn AppRoot() -> Element {
                                 },
                                 Screen::Catalog => rsx! {
                                     CatalogScreen { state }
+                                },
+                                Screen::Manual => rsx! {
+                                    ManualScreen { state }
                                 },
                                 Screen::Logs => rsx! {
                                     LogsScreen { state }

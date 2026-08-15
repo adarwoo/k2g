@@ -30,9 +30,12 @@ desktop CNC.
 > k2g is supplied with no warranty of any kind (GPL-3.0, §§15–16). The operator owns
 > the outcome.
 
-Known limitations that matter for safety are listed under **Status** in the
-[README](../README.md) — most importantly, bottom-side machining is refused rather
-than mis-generated.
+Known limitations are listed under **Status** in the [README](../README.md). Where a
+job cannot be produced safely, k2g refuses to generate rather than emitting a
+plausible-looking program: a fixture naming a work origin the controller does not
+have, a back-face step with no locating pins registering the board, and an edge kerf
+no router in stock can cut are all blocked outright, because none of them has a
+degraded output worth falling back to.
 
 ## Manufacturer
 

@@ -498,6 +498,9 @@ pub fn NavigationRail(state: Signal<crate::runtime::AppCtx>) -> Element {
         Some(Screen::Stock),
         Some(Screen::Catalog),
         None,
+        // The manual opens the housekeeping group rather than trailing it: it is what an
+        // operator reaches for while working, where Logs and About are looked up once.
+        Some(Screen::Manual),
         Some(Screen::Logs),
         Some(Screen::About),
     ];
@@ -626,6 +629,22 @@ fn rail_icon(screen: Screen) -> Element {
                 path { d: "M12 6C9 4.5 6 4.5 4 6v12c2-1.5 5-1.5 8 0" }
                 path { d: "M12 6c3-1.5 6-1.5 8 0v12c-2-1.5-5-1.5-8 0" }
                 path { d: "M12 6v12" }
+            }
+        },
+        Screen::Manual => rsx! {
+            // A closed book with a bookmark hanging out of it — the manual.
+            //
+            // Deliberately not another open book: Catalog is one, two rows up, and at
+            // 20 px the difference between two open books is nothing. A filled cover with
+            // a spine and a ribbon is a different silhouette at a glance, which is the
+            // only thing an icon this size has to achieve.
+            svg {
+                class: "rail-icon-svg",
+                view_box: "0 0 24 24",
+                "aria-hidden": "true",
+                rect { x: "4", y: "3", width: "16", height: "18", rx: "2" }
+                path { d: "M8 3v18" }
+                path { d: "M13 3v7l2-1.6 2 1.6V3" }
             }
         },
         Screen::Logs => rsx! {

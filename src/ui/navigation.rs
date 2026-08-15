@@ -30,6 +30,7 @@ pub enum Screen {
     ToolsetProfiles,
     Stock,
     Catalog,
+    Manual,
     Logs,
     About,
 }
@@ -39,7 +40,7 @@ impl Screen {
     ///
     /// The profile and inventory screens only: those are what feed the plan, so
     /// seeing the Code/Tooling/Rack result react while editing them is the point.
-    /// `Job` already *is* the view, and `Logs`/`About` change nothing it shows.
+    /// `Job` already *is* the view, and `Manual`/`Logs`/`About` change nothing it shows.
     pub fn shows_pinned_job(self) -> bool {
         matches!(
             self,
@@ -61,6 +62,7 @@ impl Screen {
             Self::ToolsetProfiles => "Toolset",
             Self::Stock => "Stock",
             Self::Catalog => "Catalog",
+            Self::Manual => "Manual",
             Self::Logs => "Logs",
             Self::About => "About",
         }
@@ -75,6 +77,7 @@ impl Screen {
             Self::ToolsetProfiles => "toolset-profiles",
             Self::Stock => "stock",
             Self::Catalog => "catalog",
+            Self::Manual => "manual",
             Self::Logs => "logs",
             Self::About => "about",
         }

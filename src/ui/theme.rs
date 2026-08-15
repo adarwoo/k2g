@@ -4336,6 +4336,131 @@ summary {
     color: var(--text-subtle);
 }
 
+/* GFM alerts. The manual's safety warning is one of these, and it is the single
+   paragraph in the documentation an operator must not skim past, so it is coloured
+   rather than left as another quiet quotation. */
+.help-markdown blockquote.markdown-alert-warning,
+.help-markdown blockquote.markdown-alert-caution {
+    border-left-color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    color: var(--text);
+}
+
+.help-markdown blockquote.markdown-alert-note,
+.help-markdown blockquote.markdown-alert-tip,
+.help-markdown blockquote.markdown-alert-important {
+    border-left-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    color: var(--text);
+}
+
+/* ----------------------------------------------------------------- Manual --- */
+
+/* The document scrolls, the contents rail does not: a manual is read by jumping
+   between sections, and a list that scrolled away with the prose would be reachable
+   only from the top of the page. Both columns own their overflow, so `.screen-host`
+   never scrolls the pair as one.
+
+   The selector carries all three classes deliberately. `.screen.single` sets
+   `display: flex; flex-direction: column` and outranks a lone `.manual-screen`
+   whatever the declaration order — as a single class this rule lost the grid
+   silently and the contents rail stacked on top of the document. */
+.screen.single.manual-screen {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr);
+    gap: 20px;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    padding: 0;
+}
+
+.manual-toc {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    overflow: auto;
+    padding: 18px 4px 18px 18px;
+    border-right: 1px solid var(--border);
+}
+
+.manual-toc-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.manual-toc-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-subtle);
+    margin-bottom: 6px;
+}
+
+/* A button rather than an anchor, throughout: see `ui::help` — an href in this window
+   navigates the application itself. */
+.manual-toc-link {
+    appearance: none;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    text-align: left;
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1.35;
+    color: var(--text-subtle);
+    padding: 5px 8px;
+    cursor: pointer;
+}
+
+.manual-toc-link:hover {
+    background: var(--bg-elev);
+    color: var(--text);
+}
+
+.manual-toc-companions {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+}
+
+.manual-toc-link.is-external {
+    color: var(--accent);
+}
+
+/* The arrow says the click leaves k2g, which is the one thing that distinguishes these
+   from the section links above them. */
+.manual-toc-link.is-external::after {
+    content: " \2197";
+}
+
+/* Prose set to a readable measure and centred in what is left, rather than stretched
+   across a maximised window or stranded against the contents rail. The measure is
+   wider than prose alone would want because the manual argues in tables — the
+   troubleshooting list is three columns of sentences, and at a 70-character measure
+   every cell wraps to four lines. */
+.manual-doc {
+    overflow: auto;
+    min-height: 0;
+    max-width: 104ch;
+    margin-inline: auto;
+    padding: 18px 24px 48px;
+}
+
+@media (max-width: 900px) {
+    /* The contents rail is an aid, and the document is the point. */
+    .screen.single.manual-screen {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .manual-toc {
+        display: none;
+    }
+}
+
 /* ------------------------------------------------------------------ About --- */
 
 .about-screen {

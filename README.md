@@ -40,8 +40,29 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 
 - Board outline with breakaway tabs, distributed over the outline's sides (longest side
   gets the most), with optional mouse bites
-- Internal cutouts
+- Internal cutouts, each cut with a cutter chosen to fit it, its slug held and its sharp
+  corners relieved
 - Optional finishing pass
+- Curved edges come out as `G2`/`G3`: the offset runs on a polyline, and arcs are fitted
+  back to it within the profile's curve tolerance
+
+**Copper isolation**
+
+- Isolation routing at the channel width you ask for; the V-bit is chosen to suit and the
+  depth it needs derived from it, so depth is never asked for
+- Where two nets are closer together than that, the pass narrows across just that stretch
+  and names the nets it narrowed — it never widens, and never cuts into a neighbour
+- Contours are worked out on a thread of their own, so the views stay live while a dense
+  board is read
+
+**Two-sided work**
+
+- Locating pins drilled through the board and on into the backboard, on the fixture's
+  flip line
+- Back-face steps mirrored about that line, and the program opens by asking the operator
+  to confirm the board is turned over
+- The order is enforced rather than assumed: pins first, on the front, and no face change
+  without registration drilled before it
 
 **The machine is yours to describe**
 
@@ -57,23 +78,23 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 
 **Seeing it before you cut**
 
-- **Board** — the stitched outline, holes and slots
-- **3D** — the actual toolpath, coloured per tool, over a solid board
+- **Board** — the stitched outline, holes, slots and copper, with the legend doubling as
+  the layer control
+- **3D** — the actual toolpath, coloured per tool and switchable tool by tool, over a
+  solid board
 - **Code** — the generated program
 - **Tooling** and **Rack** — which tool makes which feature, and where it lives
 
 ## Status
 
-k2g does its main job — drill a board and cut it out — and is being tested on real
-hardware. What is **not** done:
+k2g does its main job — drill a board, cut it out, and isolate the copper, on either
+face — and is being tested on real hardware. What is **not** done:
 
 | Area | State |
 | --- | --- |
-| **Bottom-side machining** | Selectable per step, but **refused**: no geometry is mirrored yet, so k2g blocks generation for a bottom-side step rather than emit a top-side program for it. |
-| Copper isolation milling | Not started |
-| Engraving | Not started; planned for from the outset |
-| Tab nudging | Tabs land where the distribution algorithm puts them. The job stores per-tab offsets, but nothing sets them yet. |
-| Arc-preserving offsets | Outline offsets tessellate arcs |
+| Engraving | Not started. Copper *isolation* is done; cutting lettering, fiducials or any other mark is not. |
+| Tab nudging | Tabs land where the distribution algorithm puts them. The planner honours a stored per-tab offset, but nothing in the UI sets one yet. |
+| Arc-preserving offsets | The outline offset is a polygon operation, so it tessellates. Arcs are fitted back before emission, which is exact to the CNC profile's curve tolerance rather than to the original curve. |
 
 ## Requirements
 
@@ -157,6 +178,7 @@ one owns the socket.
 
 | Document | What it covers |
 | --- | --- |
+| [User manual](docs/user-manual.md) | Every screen and setting, from first run to saving a program |
 | [Install and security](docs/install-and-security.md) | Installing, connecting to KiCad, updating, uninstalling — and the safety warning |
 | [Privacy](PRIVACY.md) | What is stored, what leaves the machine (almost nothing) |
 | [Security policy](SECURITY.md) | Reporting a vulnerability; what is supported |
