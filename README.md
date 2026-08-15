@@ -98,16 +98,33 @@ face — and is being tested on real hardware. What is **not** done:
 
 ## Requirements
 
-- **Windows** — the UI renders in WebView2. Linux runs (the UI renders in
-  WebKitGTK) but is not covered by the release builds; see
-  [Linux](#linux) for the GPU caveat.
 - **KiCad 9 or later**, running, with a board open and the IPC API enabled.
   k2g can enable it for you — *settings cog → KiCad integration*.
-- **Rust** (stable) to build from source.
+- **A desktop platform with a webview**, one of:
+
+| | State | The UI renders in |
+| --- | --- | --- |
+| **Windows** | Packaged — the release builds are Windows | WebView2 |
+| **Linux** | Builds and runs, verified against the running application on Debian 13 (GTK 3 + WebKitGTK 2.52, KiCad 10 over IPC). Not packaged: [build it](#from-source). | WebKitGTK |
+| **macOS** | Should build and run — k2g knows where KiCad's configuration, its plugin directory and its own data live there — but nobody has built it yet. Reports welcome. | WKWebView |
+
+- **Rust** (stable) to build from source, which is the only route on Linux and macOS.
+
+Two features vary by platform, and both degrade rather than break. Saving straight to
+a removable medium and ejecting it needs the Win32 volume API, so on Linux and macOS
+the Save button behaves as though nothing is plugged in. And k2g can tell whether
+KiCad is running on Windows and Linux but not on macOS — no `/proc` there, and
+shelling out to `ps` to answer a question you can answer by looking at your dock is a
+poor trade — so on a Mac the KiCad integration card warns before editing KiCad's
+settings rather than refusing.
 
 ## Install
 
-Take the latest [release](https://github.com/adarwoo/k2g/releases):
+On Linux and macOS, [build from source](#from-source) — the releases are Windows
+only, and nothing else is planned until someone is running k2g on each often enough
+to say the packaging works.
+
+On Windows, take the latest [release](https://github.com/adarwoo/k2g/releases):
 
 | File | What it is |
 | --- | --- |
@@ -165,6 +182,17 @@ hardware compositing — worth doing for the 3D view. The open-source `nouveau`
 driver is known not to be one of the healthy stacks on recent NVIDIA cards: it
 was seen rejecting WebKit's GPU command submissions outright (`nouveau: kernel
 rejected pushbuf`), which is the failure this workaround exists for.
+
+#### macOS
+
+Nothing to install but the Xcode command-line tools and CMake — the webview is
+WKWebView, which is part of the system, so there is no equivalent of the package
+list above. k2g resolves the Mac locations for everything it touches: KiCad's
+configuration in `~/Library/Preferences/kicad`, its plugin directory under
+`~/Documents/KiCad`, and k2g's own data in `~/Library/Application Support/k2g`.
+
+Untested, though — this is the platform where the honest answer is that it should
+work and nobody has checked. If you build it, say how it went.
 
 | Environment variable | Effect |
 | --- | --- |
