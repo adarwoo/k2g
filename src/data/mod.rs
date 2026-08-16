@@ -401,7 +401,65 @@ impl AppData {
 
     /// Creates a new profile from schema defaults; returns its id.
     pub fn create(&mut self, profile: Profile) -> Result<Uuid, FactoryError> {
-        self.store.create_document(profile.schema_id())
+        let id = self.store.create_document(profile.schema_id())?;
+        if profile == Profile::Machining {
+            self.bind_sole_profiles(id, 0);
+        }
+        Ok(id)
+    }
+
+    /// The only profile of `kind`, when there is exactly one.
+    ///
+    /// Exactly one, never "the first of several". With two machines on the bench, which
+    /// one a step runs on is a decision only the operator can make, and a guess is how a
+    /// board gets cut on the wrong machine — the failure this whole binding exists to
+    /// prevent. One machine is not a choice, so nothing is being decided for them.
+    fn sole_profile(&self, kind: Profile) -> Option<Uuid> {
+        let mut ids = self.list(kind).into_iter().map(|(id, _)| id);
+        let only = ids.next()?;
+        ids.next().is_none().then_some(only)
+    }
+
+    /// The bindings a fresh machining step should arrive with: each of CNC, fixture and
+    /// toolset the user has exactly one of.
+    ///
+    /// Independently per field, so someone with one machine, one fixture and three
+    /// toolsets gets the two that are unambiguous and is asked only about the third.
+    fn sole_step_bindings(&self) -> Vec<(&'static str, Uuid)> {
+        [
+            ("cnc", Profile::Cnc),
+            ("fixture", Profile::Fixture),
+            ("toolset", Profile::Toolset),
+        ]
+        .into_iter()
+        .filter_map(|(field, kind)| self.sole_profile(kind).map(|id| (field, id)))
+        .collect()
+    }
+
+    /// Fills in `step`'s unambiguous bindings — the common case being the only user
+    /// there is, with one of each, for whom picking three profiles from three
+    /// single-entry lists is ceremony rather than a choice.
+    ///
+    /// Only ever *fills*: a field already bound is left alone, so this cannot overwrite
+    /// something the operator or a seed value chose.
+    fn bind_sole_profiles(&mut self, id: Uuid, step: usize) {
+        let bindings = self.sole_step_bindings();
+        if bindings.is_empty() {
+            return;
+        }
+        self.edit_document_value(id, |value| {
+            let Some(step_obj) = value
+                .pointer_mut(&format!("/steps/{step}"))
+                .and_then(Value::as_object_mut)
+            else {
+                return;
+            };
+            for (field, target) in &bindings {
+                step_obj
+                    .entry((*field).to_string())
+                    .or_insert_with(|| Value::String(target.to_string()));
+            }
+        });
     }
 
     /// Duplicates an existing profile (fresh ids); returns the new id.
@@ -532,7 +590,8 @@ impl AppData {
     }
 
     /// Appends a fresh default step with one operation (op-config objects materialize
-    /// on re-parse). Bindings are left absent until the user picks them.
+    /// on re-parse). Bindings are filled in where they are unambiguous — see
+    /// [`Self::bind_sole_profiles`] — and otherwise left absent until the user picks them.
     ///
     /// The operation is the first the new step is actually allowed to run: most of them
     /// may only be claimed by one step per board side, so defaulting to `drill_pth`
@@ -571,8 +630,27 @@ impl AppData {
             steps.push(serde_json::json!({
                 "name": crate::data::model::UNNAMED_STEP,
                 "operations": [operation],
+                // Merged below rather than written here: the bindings are read off the
+                // store, which this closure is in the middle of editing.
             }));
-        })
+        }) && {
+            // A step with no machine is as unrunnable as a profile with none, and the
+            // operator who has one of each has nothing to choose here either.
+            let added = self.step_count(id).saturating_sub(1);
+            self.bind_sole_profiles(id, added);
+            true
+        }
+    }
+
+    /// How many steps the machining profile `id` has.
+    fn step_count(&self, id: Uuid) -> usize {
+        self.get(id)
+            .and_then(|doc| doc.root.get_pointer("/steps"))
+            .map(|node| match &node.value {
+                datastore::NodeValue::Array(items) => items.len(),
+                _ => 0,
+            })
+            .unwrap_or(0)
     }
 
     /// Removes the step at `step`. A machining profile keeps at least one step, so
@@ -2261,7 +2339,116 @@ mod tests {
             doc.root.get_pointer("/steps/0/drill_pth/holes").is_some(),
             "per-op config materialized within the step"
         );
-        assert!(doc.root.get_pointer("/steps/0/cnc").is_none(), "binding absent until picked");
+        assert!(
+            doc.root.get_pointer("/steps/0/cnc").is_none(),
+            "nothing to bind to in an empty store, so absent until picked"
+        );
+    }
+
+    /// The common case, and the reason this exists: one machine, one fixture, one
+    /// toolset. Picking each of them from a list of one is ceremony, not a decision, and
+    /// it stands between the operator and a profile that can actually generate.
+    #[test]
+    fn a_new_machining_profile_binds_the_only_profiles_there_are() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let cnc = data.create(Profile::Cnc).expect("create cnc");
+        let fixture = data.create(Profile::Fixture).expect("create fixture");
+        let toolset = data.create(Profile::Toolset).expect("create toolset");
+
+        let id = data.create(Profile::Machining).expect("create machining");
+        let doc = data.get(id).expect("the profile exists");
+
+        for (field, expected) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
+            let bound = doc
+                .root
+                .get_pointer(&format!("/steps/0/{field}"))
+                .unwrap_or_else(|| panic!("{field} should be bound to the only one there is"));
+            assert!(
+                matches!(&bound.value, NodeValue::Ref(r) if r.raw == expected),
+                "{field} bound to {:?}, expected {expected}",
+                bound.value
+            );
+        }
+    }
+
+    /// Two machines is a question, not a default. Binding the first would produce a
+    /// profile that looks ready and cuts the board on whichever machine happened to be
+    /// created first — the exact failure the binding exists to prevent.
+    ///
+    /// The fields are independent, so the unambiguous ones are still filled in.
+    #[test]
+    fn a_second_machine_makes_it_a_choice_again() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        data.create(Profile::Cnc).expect("first cnc");
+        data.create(Profile::Cnc).expect("second cnc");
+        let fixture = data.create(Profile::Fixture).expect("create fixture");
+
+        let id = data.create(Profile::Machining).expect("create machining");
+        let doc = data.get(id).expect("the profile exists");
+
+        assert!(
+            doc.root.get_pointer("/steps/0/cnc").is_none(),
+            "with two machines, which one is the operator's to say"
+        );
+        let bound = doc.root.get_pointer("/steps/0/fixture").expect("the sole fixture binds");
+        assert!(
+            matches!(&bound.value, NodeValue::Ref(r) if r.raw == fixture),
+            "but the sole fixture is still not a choice"
+        );
+        assert!(
+            doc.root.get_pointer("/steps/0/toolset").is_none(),
+            "and a kind with none of them binds nothing"
+        );
+    }
+
+    /// A step added later starts as unrunnable as a fresh profile does, and the operator
+    /// with one of each has nothing to choose there either.
+    #[test]
+    fn an_added_step_is_bound_the_same_way() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let cnc = data.create(Profile::Cnc).expect("create cnc");
+        let id = data.create(Profile::Machining).expect("create machining");
+
+        assert!(data.add_step(id), "step added");
+        let doc = data.get(id).expect("the profile exists");
+        let bound = doc.root.get_pointer("/steps/1/cnc").expect("the added step is bound");
+        assert!(
+            matches!(&bound.value, NodeValue::Ref(r) if r.raw == cnc),
+            "the second step gets the same treatment as the first"
+        );
+    }
+
+    /// Only ever fills a gap. A profile seeded with its own bindings — an import, or a
+    /// clone — keeps them, even when the store happens to hold exactly one of something.
+    #[test]
+    fn an_existing_binding_is_never_overwritten() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let first = data.create(Profile::Cnc).expect("create cnc");
+        let id = data.create(Profile::Machining).expect("create machining");
+        assert!(
+            matches!(
+                &data.get(id).unwrap().root.get_pointer("/steps/0/cnc").unwrap().value,
+                NodeValue::Ref(r) if r.raw == first
+            ),
+            "bound to the only machine there was"
+        );
+
+        // The operator picks a different machine, then a second one is created so that
+        // `sole_profile` would have a different answer if it were asked again.
+        let second = data.create(Profile::Cnc).expect("second cnc");
+        assert!(data.set_step_reference(id, 0, "cnc", Some(second)));
+        data.bind_sole_profiles(id, 0);
+        assert!(
+            matches!(
+                &data.get(id).unwrap().root.get_pointer("/steps/0/cnc").unwrap().value,
+                NodeValue::Ref(r) if r.raw == second
+            ),
+            "the operator's pick stands"
+        );
     }
 
     #[test]
