@@ -7,6 +7,38 @@
 # possible if someone upstream is still there to remediate.
 yanked = "deny"
 
+# Every exemption is named, reasoned and reviewable — the point of keeping
+# `unmaintained` fatal is lost if the list is a blanket setting nobody re-reads.
+#
+# Each of these has **no upgrade to take**: the crate arrives through a dependency k2g
+# does not choose, and the fix is upstream moving off it. What this list buys is that a
+# *new* unmaintained crate still turns the workflow red, which is the signal worth
+# having. Re-check when dioxus/wry or rhai make a major move.
+ignore = [
+    # --- The GTK3 stack, on Linux only -------------------------------------------
+    # wry draws the webview with WebKitGTK, which is bound to GTK3, and gtk-rs archived
+    # its GTK3 bindings in favour of gtk4-rs. Nothing k2g does reaches these crates:
+    # they are the toolkit under the window, and they leave when wry moves to GTK4.
+    # Windows (WebView2) and macOS (WKWebView) do not pull them at all.
+    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0412", reason = "gdk — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0413", reason = "atk — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0414", reason = "gdkx11-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0416", reason = "atk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0418", reason = "gdk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros — GTK3 bindings, via wry/WebKitGTK on Linux" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
+
+    # --- Unmaintained utility crates, all transitive ------------------------------
+    # None is reachable from k2g's own code; each is an implementation detail of a
+    # crate that has not yet replaced it.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash — a hasher, pulled in transitively; no API of it is ours" },
+    { id = "RUSTSEC-2024-0436", reason = "paste — a proc-macro that runs at build time and ships nothing" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error — likewise build-time only" },
+    { id = "RUSTSEC-2026-0249", reason = "smartstring — rhai's string type, so it goes when rhai replaces it" },
+]
+
 [licenses]
 # k2g is GPL-3.0-only. Everything linked into it must be compatible with that.
 # Permissive licences are; a copyleft licence that is not GPL-compatible is not, and
@@ -17,12 +49,25 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "BSL-1.0",
+    # A *data* licence, on the Mozilla CA root bundle `webpki-roots` ships (it reaches
+    # here through reqwest, which is the update check). Permissive, and it governs the
+    # certificate list rather than any code linked into k2g.
+    "CDLA-Permissive-2.0",
     "CC0-1.0",
-    "GPL-3.0",
+    # `GPL-3.0-only`, not the bare `GPL-3.0`: SPDX deprecated the latter in favour of
+    # the explicit -only/-or-later pair, and cargo-deny matches identifiers exactly. The
+    # bare form here rejected **k2g's own crates**, every one of which declares
+    # `GPL-3.0-only` — the rule meant to keep the binary distributable refusing the
+    # thing it exists to protect.
+    "GPL-3.0-only",
     "ISC",
     "MIT",
     "MIT-0",
     "MPL-2.0",
+    # `libfuzzer-sys`, which arrives under `(MIT OR Apache-2.0) AND NCSA` through
+    # image → ravif → rav1e. Permissive and GPL-compatible; it is rav1e's fuzzing
+    # harness and is not built into anything k2g ships.
+    "NCSA",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
@@ -34,6 +79,11 @@ confidence-threshold = 0.9
 # are unavoidable, but each one is extra code to audit and worth seeing.
 multiple-versions = "warn"
 wildcards = "deny"
+# ...except between k2g's own crates. A path dependency carries no version requirement,
+# which reads as `*` and is exactly what `wildcards` is for — but the risk it guards
+# against is a *registry* dependency floating to whatever was published last. A sibling
+# directory in this repository cannot float: it is pinned by being the checkout.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

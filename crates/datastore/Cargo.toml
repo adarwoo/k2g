@@ -3,6 +3,9 @@ name = "datastore"
 version = "0.1.0"
 license = "GPL-3.0-only"
 edition = "2021"
+# Internal to k2g, never published to crates.io. Stated rather than assumed:
+# it is what lets cargo-deny accept the workspace's path dependencies.
+publish = false
 description = "Generic schema-driven data store: validate, default, type units/ids, and resolve references from JSON Schema."
 
 [dependencies]

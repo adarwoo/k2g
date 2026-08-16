@@ -28,6 +28,16 @@ env:
 jobs:
   advisories:
     runs-on: ubuntu-latest
+    # `rustsec/audit-check` publishes its findings as a check run, and the default token
+    # is read-only — so the job failed with "Resource not accessible by integration"
+    # while reporting zero vulnerabilities. It was failing on the report, not the audit.
+    #
+    # Dependabot's token is read-only whatever this says, so its pull requests still
+    # cannot publish the check; the same audit runs on every push to main, which is where
+    # the answer actually matters.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
