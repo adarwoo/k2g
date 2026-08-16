@@ -17,9 +17,12 @@ name: Release
 #      Unencrypted is deliberate. A passphrase protects a key at rest against someone
 #      who has the file; here the file *is* a repository secret, so the passphrase
 #      would have to be stored next to it and would protect nothing.
-#   2. Put the contents of `k2g.key` in the repository secret MINISIGN_SECRET_KEY.
-#      Keep an offline copy — losing it means every installed build stops accepting
-#      updates until users reinstall by hand.
+#   2. Put the contents of `k2g.key` in MINISIGN_SECRET_KEY — an **environment** secret
+#      on the `release` environment, not a repository one. That environment carries a
+#      required-reviewer rule, so every use of the key is authorised by a person; the
+#      `publish` job below is the only job that names the environment, and therefore the
+#      only place the key exists. Keep an offline copy — losing it means every installed
+#      build stops accepting updates until users reinstall by hand.
 #   3. Commit the contents of `k2g.pub` to `assets/release-signing.pub`. That file is
 #      compiled into the application, so it is the half that decides what an installed
 #      k2g will accept — and `.github/actions/sign-artifacts` verifies each signature
@@ -33,8 +36,9 @@ name: Release
 on:
   push:
     tags: [ "v*" ]
-  # Manual runs build and sign but do not publish, so the pipeline can be exercised
-  # without minting a release.
+  # Manual runs build, sign and verify but do not publish, so the whole pipeline —
+  # including the signing key and the approval that releases it — can be exercised
+  # without minting a release. The signed set is left as a run artifact to inspect.
   workflow_dispatch:
 
 env:
@@ -143,65 +147,12 @@ jobs:
           cp ./k2g.cdx.json "dist/k2g-${{ steps.meta.outputs.version }}.cdx.json" 2>/dev/null || true
           ls -la dist
 
-      # Detached signatures over every artifact. This is the root of trust for the in-app
-      # updater: TLS and GitHub's account security are not relied on, only this key.
-      - name: Sign every artifact
-        uses: ./.github/actions/sign-artifacts
-        with:
-          secret-key: ${{ secrets.MINISIGN_SECRET_KEY }}
-
+      # Unsigned, and not published from here: signing and publishing are the `publish`
+      # job's, behind the one approval gate. See its comment.
       - uses: actions/upload-artifact@v4
         with:
           name: k2g-windows
           path: dist/*
-
-      # This job owns the release notes; the macOS one only adds its files. Whichever
-      # finishes first creates the release, so the notes must not depend on the order.
-      - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-          # Release notes reach users verbatim in the update banner, so they say what
-          # the artifacts are and how to check them.
-          body: |
-            ## Installing this release
-
-            **Windows** — `.msi` or `-setup.exe` to install, or the portable `.zip`.
-
-            **macOS** — take the build for your Mac: `arm64` for Apple Silicon,
-            `x86_64` for Intel. Unsigned means Gatekeeper will refuse it on the first
-            open; clear the quarantine flag once with
-
-            ```
-            xattr -dr com.apple.quarantine /Applications/k2g.app
-            ```
-
-            or, for the portable tarball, on the extracted `k2g` binary.
-
-            `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
-            this build.
-
-            ## Verifying what you downloaded
-
-            Every artifact here is signed with minisign, and carries its detached
-            `.minisig` beside it. k2g's own updater checks that signature before it will
-            run an installer, and refuses one it cannot verify — so there is nothing you
-            have to do. To check by hand:
-
-            ```
-            minisign -Vm k2g-<version>.msi -P RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
-            ```
-
-            That key is also in the repository, at `assets/release-signing.pub` — which
-            is the copy compiled into the application, so a release signed with anything
-            else fails the build rather than reaching this page.
-
-            ## Safety
-
-            k2g emits programs that drive a physical CNC machine. Verify every program
-            against the actual fixture, stock and tooling before running it.
 
   # macOS, both architectures, each on its own silicon — see the matching job in
   # `rust.yml` for why these are not cross-compiled from one runner.
@@ -328,23 +279,103 @@ jobs:
           cp "./k2g-${VERSION}-portable-macos-${ARCH}.tar.gz" dist/
           ls -la dist
 
-      # As in the Windows job: every artifact this release publishes carries a signature
-      # the updater can check, whichever platform produced it.
-      - name: Sign every artifact
-        uses: ./.github/actions/sign-artifacts
-        with:
-          secret-key: ${{ secrets.MINISIGN_SECRET_KEY }}
-
       - uses: actions/upload-artifact@v4
         with:
           name: k2g-macos-${{ matrix.arch }}
           path: dist/*
 
-      # Files only: the notes belong to the Windows job, and this action leaves fields it
-      # is not given alone — so whichever job gets here first, the release ends up with
-      # both platforms' assets and one set of notes.
+  # Everything the signing key touches, in one place and behind one gate.
+  #
+  # The key is an *environment* secret on `release`, which carries a required-reviewer
+  # rule — so a human authorises every use of it. That rule is what shapes this job:
+  # a secret in an environment is invisible to any job that does not name the
+  # environment, and every job that names it stops for its own approval. Signing in each
+  # platform's job would therefore mean three approvals (the macOS matrix is two) and
+  # three chances to approve two of them and leave the third unsigned.
+  #
+  # It also removes a race that was here before: two jobs each calling the release action
+  # meant whichever finished first created the release, so the notes could not depend on
+  # the order. One publisher, one set of notes, one set of assets.
+  publish:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      # For `.github/actions/sign-artifacts` and, more to the point, for
+      # `assets/release-signing.pub` — the key each signature is checked against is the
+      # one in the tree being released, not one fetched from anywhere.
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Every platform's artifacts, flattened into one directory. Their names already
+      # carry the platform and architecture, so there is nothing to collide.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: k2g-*
+          merge-multiple: true
+
+      - name: What is being signed
+        shell: bash
+        run: ls -la dist
+
+      # Detached signatures over every artifact. This is the root of trust for the in-app
+      # updater: TLS and GitHub's account security are not relied on, only this key.
+      - name: Sign every artifact
+        uses: ./.github/actions/sign-artifacts
+        with:
+          secret-key: ${{ secrets.MINISIGN_SECRET_KEY }}
+
+      # The signed set, kept whole for a manual run — which never publishes, so this is
+      # the only way to inspect what a release *would* have contained.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k2g-release-signed
+          path: dist/*
+
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          generate_release_notes: true
+          # Release notes reach users verbatim in the update banner, so they say what
+          # the artifacts are and how to check them.
+          body: |
+            ## Installing this release
+
+            **Windows** — `.msi` or `-setup.exe` to install, or the portable `.zip`.
+
+            **macOS** — take the build for your Mac: `arm64` for Apple Silicon,
+            `x86_64` for Intel. These are not notarised, so Gatekeeper will refuse them
+            on the first open; clear the quarantine flag once with
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/k2g.app
+            ```
+
+            or, for the portable tarball, on the extracted `k2g` binary.
+
+            `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
+            this build.
+
+            ## Verifying what you downloaded
+
+            Every artifact here is signed with minisign, and carries its detached
+            `.minisig` beside it. k2g's own updater checks that signature before it will
+            run an installer, and refuses one it cannot verify — so there is nothing you
+            have to do. To check by hand:
+
+            ```
+            minisign -Vm k2g-<version>.msi -P RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
+            ```
+
+            That key is also in the repository, at `assets/release-signing.pub` — which
+            is the copy compiled into the application, so a release signed with anything
+            else fails the build rather than reaching this page.
+
+            ## Safety
+
+            k2g emits programs that drive a physical CNC machine. Verify every program
+            against the actual fixture, stock and tooling before running it.
