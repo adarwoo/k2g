@@ -83,7 +83,7 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
                         class: if *view == active_view { "project-view-tab active" } else { "project-view-tab" },
                         onclick: {
                             let target = *view;
-                            move |_| super::mutate_ctx(state, |s| s.selected_job_view = target)
+                            move |_| super::mutate_ctx(state, |s| s.select_job_view(target))
                         },
                         "{view.label()}"
                     }
@@ -117,7 +117,7 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
                                         (false, false) => "project-step-chip",
                                     },
                                     title: failed.clone().unwrap_or_else(|| step.cnc_name.clone()),
-                                    onclick: move |_| super::mutate_ctx(state, |s| s.selected_step = index),
+                                    onclick: move |_| super::mutate_ctx(state, |s| s.select_step(index)),
                                     span { class: "project-step-chip-index", "{index + 1}" }
                                     "{label}"
                                 }

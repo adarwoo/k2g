@@ -31,10 +31,23 @@ impl AppState {
     pub fn new(boot: &UiLaunchData) -> Self {
         let tools = vec![];
 
+        // Read once and used three times: whether to reopen where the last session left
+        // off. With it off the stored values are ignored rather than forgotten, so
+        // switching it back on restores the last session and not the last time it was on.
+        let reopen = load_persisted_flag("reopen_where_left_off", true);
+
         let mut state = Self {
-            selected_screen: Screen::Job,
-            selected_job_view: JobCenterView::Board,
-            selected_step: 0,
+            selected_screen: if reopen {
+                load_persisted_screen()
+            } else {
+                Screen::Job
+            },
+            selected_job_view: if reopen {
+                load_persisted_job_view()
+            } else {
+                JobCenterView::Board
+            },
+            selected_step: if reopen { load_persisted_selected_step() } else { 0 },
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -90,6 +103,7 @@ impl AppState {
                 MIN_WINDOW_HEIGHT,
             ),
             window_maximized: load_persisted_flag("window_maximized", false),
+            reopen_where_left_off: reopen,
             // Both default to `true` when the key is absent, so a settings file
             // written before these existed opts *in* rather than silently out.
             update_check_enabled: load_persisted_flag("update_check_enabled", true),
@@ -249,6 +263,14 @@ impl AppState {
         // it survives a restart (the singleton `job.yaml` is the source of truth).
         self.project_config.rotation_angle = persisted.job_board_orientation;
 
+        // The restored step has to be inside the profile that actually loaded — which is
+        // only known here, once the selection above has settled. This repeats the clamp in
+        // `sync_after_mutation` on purpose: that one runs on *mutations*, and the launch
+        // path performs none, so without this the first frame would index `programs` and
+        // the plan with a step the profile may no longer have.
+        let step_count = crate::runtime::tooling::step_headers(self).len();
+        self.selected_step = self.selected_step.min(step_count.saturating_sub(1));
+
         self.suppress_persistence = false;
     }
 
@@ -313,6 +335,13 @@ impl AppState {
             "window_width": self.window_width,
             "window_height": self.window_height,
             "window_maximized": self.window_maximized,
+            "reopen_where_left_off": self.reopen_where_left_off,
+            // Where the operator was. Written from live state whenever the document is
+            // written at all, which on an ordinary session is the close-time
+            // `persist_settings_now`.
+            "selected_screen": self.selected_screen.key(),
+            "selected_job_view": self.selected_job_view.key(),
+            "selected_step": self.selected_step,
             "update_check_enabled": self.update_check_enabled,
             "update_last_check": self.update_last_check,
             "update_skipped_version": self.update_skipped_version,
@@ -534,6 +563,20 @@ impl AppState {
             return;
         }
         self.theme = theme;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records whether the next launch reopens where this session left off.
+    ///
+    /// Persisted immediately, unlike the three values it governs: this one is a setting
+    /// the operator chose in a dialog, and a preference that survives only an orderly
+    /// close is not a preference. Equality-guarded so the switch can be wired straight to
+    /// it.
+    pub fn set_reopen_where_left_off(&mut self, enabled: bool) {
+        if self.reopen_where_left_off == enabled {
+            return;
+        }
+        self.reopen_where_left_off = enabled;
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
@@ -1451,8 +1494,35 @@ impl AppState {
         additions
     }
 
+    /// Moves the shell to `screen`.
+    ///
+    /// Deliberately does **not** persist. The value is written once as the window closes
+    /// (see [`crate::runtime::persist_settings_now`]), because nothing but the next launch
+    /// reads it and a settings write re-validates and re-resolves the whole store on the
+    /// calling thread — too much to spend on the most frequent click in the application.
     pub fn select_screen(&mut self, screen: Screen) {
         self.selected_screen = screen;
+    }
+
+    /// Opens `view` in the Job screen and in the docked column, which share it. Same
+    /// write-at-close contract as [`Self::select_screen`].
+    ///
+    /// `Rack` is accepted even when no step has a tool changer: `JobViewPanel` shows the
+    /// board for as long as that holds, and the tab returns by itself once an ATC machine
+    /// is selected again. Rewriting it here would turn a temporary fallback into a
+    /// permanent loss of the operator's choice.
+    pub fn select_job_view(&mut self, view: JobCenterView) {
+        self.selected_job_view = view;
+    }
+
+    /// Shows the machining step at `index` in every Job view. Same write-at-close contract
+    /// as [`Self::select_screen`].
+    ///
+    /// Callers may pass a step-chip index directly: the value is clamped to the profile's
+    /// step count by `sync_after_mutation` after every mutation, and at launch by
+    /// [`Self::hydrate_from_persistence`].
+    pub fn select_step(&mut self, index: usize) {
+        self.selected_step = index;
     }
 
     pub fn seed_rack_slots(&mut self, slot_count: u8) {
@@ -2410,6 +2480,36 @@ fn load_persisted_string(key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The screen the last session was left on.
+///
+/// An absent or unrecognised key opens on Job, which is what a fresh install does. Not an
+/// error worth surfacing: a settings file from a build with a screen this one does not
+/// have is a downgrade, and the right answer to it is to open somewhere sensible.
+fn load_persisted_screen() -> Screen {
+    load_persisted_string("selected_screen")
+        .and_then(|key| Screen::from_key(&key))
+        .unwrap_or(Screen::Job)
+}
+
+/// The Job tab the last session was left on. Falls back to Board on the same terms as
+/// [`load_persisted_screen`].
+fn load_persisted_job_view() -> JobCenterView {
+    load_persisted_string("selected_job_view")
+        .and_then(|key| JobCenterView::from_key(&key))
+        .unwrap_or(JobCenterView::Board)
+}
+
+/// The machining step the last session was left on.
+///
+/// Floored only. The real ceiling is the selected profile's step count, which is not known
+/// until the hydrate has settled on a profile — see the clamp at the end of
+/// [`AppState::hydrate_from_persistence`].
+fn load_persisted_selected_step() -> usize {
+    persistence_state()
+        .and_then(|state| state.global_settings.get("selected_step").and_then(Value::as_u64))
+        .unwrap_or(0) as usize
+}
+
 fn load_persisted_theme() -> Theme {
     let Some(state) = persistence_state() else {
         return Theme::Dark;
@@ -2638,6 +2738,58 @@ mod job_dock_tests {
         const { assert!(MIN_JOB_PIN_WIDTH < DEFAULT_JOB_PIN_WIDTH) };
         assert_eq!((-500i64).max(MIN_JOB_PIN_WIDTH), MIN_JOB_PIN_WIDTH);
         assert_eq!(99_999i64.max(MIN_JOB_PIN_WIDTH), 99_999, "no ceiling to hit");
+    }
+}
+
+#[cfg(test)]
+mod settings_payload_tests {
+    use super::*;
+
+    /// The settings document is written **whole**, so a property the payload does not
+    /// name is not merely un-persisted — the next unrelated write erases it. That is a
+    /// silent failure: a user's theme, or an opt-out, or where they were, simply stops
+    /// sticking, and nothing reports it.
+    ///
+    /// Comparing against the schema rather than against a hand-written list is what makes
+    /// this hold for the *next* property somebody adds.
+    #[test]
+    fn every_settings_property_is_written_by_the_payload() {
+        let schema: serde_yaml::Value =
+            serde_yaml::from_str(crate::data::settings_schema_text()).expect("schema parses");
+        let properties = schema["properties"]
+            .as_mapping()
+            .expect("the settings schema declares properties");
+
+        let app = AppState::new(&UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+            copper: Default::default(),
+        });
+        let payload = app.make_global_settings_payload();
+        let payload = payload.as_object().expect("the payload is an object");
+
+        for key in properties.keys() {
+            let key = key.as_str().expect("property names are strings");
+            assert!(
+                payload.contains_key(key),
+                "`{key}` is declared in schemas/settings.yaml but absent from \
+                 make_global_settings_payload, so the next settings write will erase it"
+            );
+        }
+    }
+
+    /// The step restored from the settings file is an index into a profile that may have
+    /// changed since — or gone. The launch path runs no mutation, so `sync_after_mutation`
+    /// does not get a chance to clamp it; `hydrate_from_persistence` does it instead, and
+    /// this pins the arithmetic that expression relies on.
+    #[test]
+    fn the_restored_step_is_clamped_to_the_profiles_steps() {
+        let clamp = |step: usize, step_count: usize| step.min(step_count.saturating_sub(1));
+
+        assert_eq!(clamp(0, 0), 0, "a profile with no steps must not underflow");
+        assert_eq!(clamp(7, 0), 0, "nor with a step index left over from one that had them");
+        assert_eq!(clamp(99, 3), 2, "a shortened profile reopens on its last step");
+        assert_eq!(clamp(1, 3), 1, "a step that still exists is left alone");
     }
 }
 

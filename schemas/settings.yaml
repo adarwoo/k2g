@@ -121,6 +121,68 @@ properties:
     type: boolean
     default: false
 
+  # --- Where the operator was ----------------------------------------------
+  # These restore the workspace rather than configure it, and the three navigation
+  # keys are written when the window closes rather than as the user navigates:
+  # nothing but the next launch reads them, and every settings write re-validates
+  # and re-resolves the whole store on the calling thread.
+
+  reopen_where_left_off:
+    description: |
+      Whether k2g reopens on the screen, Job tab and machining step the last session
+      ended on. With this off the three keys below are still recorded but ignored at
+      launch, so turning it back on takes effect immediately rather than after a
+      session of relearning. Absent means on, so a settings file written before this
+      existed opts in.
+    type: boolean
+    default: true
+
+  selected_screen:
+    description: |
+      The navigation-rail screen the last session was left on, as its stable key. A
+      key this build does not recognise — a file from a newer version, or edited by
+      hand — opens on `job` rather than on nothing.
+    type: string
+    enum:
+      [
+        job,
+        cnc-profiles,
+        fixture-profiles,
+        machining-profiles,
+        toolset-profiles,
+        stock,
+        catalog,
+        manual,
+        logs,
+        about,
+      ]
+    default: job
+
+  selected_job_view:
+    description: |
+      The Job screen's open tab, as its stable key. Shared with the column docked
+      beside the profile screens, so both reopen on the tab that was left open.
+      `rack` is stored even when the current job has no tool changer: the view falls
+      back to `board` for as long as that holds and returns by itself once an ATC
+      machine is selected again. Normalising it away here would discard the
+      operator's choice permanently the first time they opened a profile without a
+      changer.
+    type: string
+    enum: [board, machining, code, tooling, rack]
+    default: board
+
+  selected_step:
+    description: |
+      Zero-based index of the machining step every Job view shows. The real ceiling
+      is the selected machining profile's step count, which this file cannot know, so
+      the value is clamped to it at launch — a profile that has since lost steps
+      reopens on its last one rather than on nothing. The bound below is only a
+      sanity rail against a hand-edited file.
+    type: integer
+    minimum: 0
+    maximum: 999
+    default: 0
+
   # --- Updates and security recording -------------------------------------
   # Both switches below default to `true` and are user-disableable. That
   # direction is deliberate and is what EU CRA Annex I (2)(c) and (2)(l) ask

@@ -660,6 +660,13 @@ The **⚙ cog** in the top bar. Everything here takes effect immediately.
 light/dark schedule: a job runs for hours, and a window that repaints itself at dusk
 mid-cut is a surprise rather than a convenience.
 
+**Workspace** — *Reopen where I left off*, on by default. k2g reopens on the screen,
+the Job tab and the machining step you were last on. With it off, every launch starts
+on the Job screen's Board tab at the first step. Either way the window size, the theme
+and the unit system come back, and nothing about the job itself changes — this is only
+where the application starts looking. A step that no longer exists (the profile lost
+steps since) reopens on the last one rather than on nothing.
+
 **KiCad integration** — one card per detected KiCad version, each stating exactly
 which file it will touch before it touches it:
 

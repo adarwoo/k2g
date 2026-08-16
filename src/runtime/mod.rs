@@ -107,13 +107,26 @@ pub struct AppEvent {
 /// Canonical runtime application state.
 #[derive(Clone)]
 pub struct AppState {
+    /// Which screen the shell is showing, restored at launch when
+    /// [`AppState::reopen_where_left_off`] is set.
+    ///
+    /// Written to the settings document **once, as the window closes** rather than on
+    /// every navigation — see [`persist_settings_now`]. That is not a shortcut: a
+    /// settings write re-validates and re-resolves every loaded document on the calling
+    /// thread, and nothing but the next launch reads this.
     pub selected_screen: Screen,
+    /// The Job screen's open tab, shared with the docked column. Same write contract as
+    /// [`AppState::selected_screen`]. `Rack` is kept even for a job with no tool changer:
+    /// the view falls back to Board while that holds (see `JobViewPanel`) and the tab
+    /// comes back on its own, so normalising it here would lose the choice for good.
     pub selected_job_view: JobCenterView,
-    /// Which machining step every Job view is showing. In-memory only, like
-    /// [`AppState::selected_job_view`], and deliberately absent from the regeneration
-    /// fingerprint: looking at another step is not a change to the job. Clamped to the
-    /// profile's step count on every mutation (see `sync_after_mutation`), so a removed
-    /// step cannot leave it dangling.
+    /// Which machining step every Job view is showing. Same write contract as
+    /// [`AppState::selected_screen`], and deliberately absent from the regeneration
+    /// fingerprint: looking at another step is not a change to the job.
+    ///
+    /// Clamped to the profile's step count on every mutation (see `sync_after_mutation`)
+    /// so a removed step cannot leave it dangling — and once more at launch
+    /// (`hydrate_from_persistence`), which is the one moment no mutation has run.
     pub selected_step: usize,
     pub unit_system: UserUnitSystem,
     pub theme: Theme,
@@ -167,6 +180,13 @@ pub struct AppState {
     pub window_height: i64,
     /// Whether the window was maximized when it was last closed.
     pub window_maximized: bool,
+    /// Whether the launch restores [`AppState::selected_screen`],
+    /// [`AppState::selected_job_view`] and [`AppState::selected_step`].
+    ///
+    /// Gates the *read*, not the write: the three keep being recorded with this off, so
+    /// turning it back on restores from the last session rather than from whenever it
+    /// was last switched on. "Off" means do not reopen there, not do not remember.
+    pub reopen_where_left_off: bool,
     /// Whether k2g may ask GitHub for a newer release. On by default with a user
     /// opt-out, per EU CRA Annex I (2)(c). This gates the application's *only*
     /// outbound network request — with it off, k2g touches nothing but the local
@@ -422,6 +442,10 @@ fn default_global_settings() -> Value {
         "window_width": DEFAULT_WINDOW_WIDTH,
         "window_height": DEFAULT_WINDOW_HEIGHT,
         "window_maximized": false,
+        "reopen_where_left_off": true,
+        "selected_screen": Screen::Job.key(),
+        "selected_job_view": JobCenterView::Board.key(),
+        "selected_step": 0,
         "update_check_enabled": true,
         "update_last_check": Value::Null,
         "update_skipped_version": Value::Null,
@@ -718,6 +742,29 @@ pub fn store_window_geometry(size: Option<(i64, i64)>, maximized: bool) {
         return;
     };
     guard.app.set_window_geometry(size, maximized);
+}
+
+/// Writes the settings document once, now, from whatever the state currently holds.
+///
+/// The counterpart to the eager setters. Where the operator was — screen, Job tab, step —
+/// is mutated in memory as they work and written only here, on the way out: a settings
+/// write re-validates and re-resolves every loaded document on the calling thread, which
+/// is not something clicking a tab should provoke, and nothing but the next launch reads
+/// those values. Any *other* settings write during the session carries them along anyway,
+/// because the payload is built from live state; this is the guarantee, not the mechanism.
+///
+/// A **read** lock is enough — `persist_realms` takes `&self`. Routing this through
+/// [`with_ctx_mut`] would clone the whole state and run the post-mutation reconciliation
+/// for a call that mutates nothing. Silent when the ctx is not live, so a close arriving
+/// before the app is up cannot panic the event loop.
+pub fn persist_settings_now() {
+    let Some(lock) = GLOBAL_CTX.get() else {
+        return;
+    };
+    let Ok(guard) = lock.read() else {
+        return;
+    };
+    guard.app.persist_realms(&[PersistRealm::GlobalSettings]);
 }
 
 pub fn apply_ui_command(command: UiCommand) {

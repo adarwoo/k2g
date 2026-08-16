@@ -8,6 +8,12 @@
 //! with the rest of the settings. That is not incidental: the settings document is
 //! written *whole* (see `AppState::make_global_settings_payload`), so a key written
 //! behind AppState's back would be dropped by the next unrelated settings write.
+//!
+//! One thing here is not about geometry: the `CloseRequested` arm is also where the
+//! session's **navigation** state is written (`persist_settings_now`). It lives here
+//! because this is the only place in the application that knows the window is going away,
+//! and because both are the same kind of value — a fact about the workspace, saved once
+//! on the way out rather than as the user works.
 
 use std::time::{Duration, Instant};
 
@@ -79,8 +85,14 @@ pub fn use_window_geometry() {
             // The last word on the session's geometry, and the only chance to get it to
             // disk: the write is queued on a background thread the process is about to
             // exit out from under, hence the flush.
+            //
+            // The order is load-bearing. `save` puts the final geometry into `AppState`
+            // first, so the settings write that follows carries the geometry *and* the
+            // navigation state in one document; the flush goes last, once nothing else
+            // will queue.
             WindowEvent::CloseRequested => {
                 save(&desktop);
+                crate::runtime::persist_settings_now();
                 crate::data::flush_appdata();
             }
             _ => {}

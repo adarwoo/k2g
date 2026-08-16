@@ -36,6 +36,33 @@ pub enum Screen {
 }
 
 impl Screen {
+    /// Every screen, in rail order.
+    ///
+    /// Exists so [`Self::from_key`] can be written once and proved total by a test,
+    /// rather than as a second `match` that has to be read beside [`Self::key`] to see
+    /// whether the two still agree.
+    pub const ALL: [Self; 10] = [
+        Self::Job,
+        Self::CncProfiles,
+        Self::FixtureProfiles,
+        Self::MachiningProfiles,
+        Self::ToolsetProfiles,
+        Self::Stock,
+        Self::Catalog,
+        Self::Manual,
+        Self::Logs,
+        Self::About,
+    ];
+
+    /// The inverse of [`Self::key`], for the screen the last session was left on.
+    ///
+    /// `None` for a key this build does not know — a settings file written by a newer
+    /// version, or edited by hand. The caller supplies the fallback, because "open on
+    /// the Job screen" is a decision about launch rather than about decoding.
+    pub fn from_key(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|screen| screen.key() == value)
+    }
+
     /// Whether the docked Job view may appear beside this screen.
     ///
     /// The profile and inventory screens only: those are what feed the plan, so
@@ -95,6 +122,20 @@ pub enum JobCenterView {
 }
 
 impl JobCenterView {
+    /// Every tab, in tab-bar order. See [`Screen::ALL`].
+    pub const ALL: [Self; 5] = [
+        Self::Board,
+        Self::Machining,
+        Self::Code,
+        Self::Tooling,
+        Self::Rack,
+    ];
+
+    /// The inverse of [`Self::key`]. See [`Screen::from_key`].
+    pub fn from_key(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|view| view.key() == value)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Board => "Board",
@@ -151,4 +192,78 @@ pub enum GenerationState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PersistRealm {
     GlobalSettings,
+}
+
+#[cfg(test)]
+mod key_codec_tests {
+    use super::*;
+
+    /// The keys are what the settings file stores, so a variant whose key does not come
+    /// back reopens the application somewhere the user never was. Neither enum derives
+    /// `Debug`, so failures name the key.
+    #[test]
+    fn every_screen_and_job_view_key_round_trips() {
+        for screen in Screen::ALL {
+            assert!(
+                Screen::from_key(screen.key()) == Some(screen),
+                "Screen::from_key did not return the screen that produced {:?}",
+                screen.key()
+            );
+        }
+        for view in JobCenterView::ALL {
+            assert!(
+                JobCenterView::from_key(view.key()) == Some(view),
+                "JobCenterView::from_key did not return the view that produced {:?}",
+                view.key()
+            );
+        }
+
+        assert!(
+            Screen::from_key("teleporter").is_none(),
+            "an unknown key must decline rather than guess — the caller opens on Job"
+        );
+        assert!(JobCenterView::from_key("").is_none());
+    }
+
+    /// The schema's `enum` and these keys must be the same set. If a screen is added
+    /// without extending the schema, every settings write made from that screen fails
+    /// validation — and `persist_global_settings` only *logs* that, so the first symptom
+    /// would be a user's settings quietly ceasing to save.
+    #[test]
+    fn the_schema_enumerates_exactly_the_keys_the_codecs_produce() {
+        let schema: serde_yaml::Value =
+            serde_yaml::from_str(crate::data::settings_schema_text()).expect("schema parses");
+
+        let listed = |property: &str| -> Vec<String> {
+            schema["properties"][property]["enum"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{property} declares an enum"))
+                .iter()
+                .map(|value| value.as_str().expect("enum entries are strings").to_string())
+                .collect()
+        };
+
+        let mut schema_screens = listed("selected_screen");
+        let mut code_screens: Vec<String> =
+            Screen::ALL.iter().map(|s| s.key().to_string()).collect();
+        schema_screens.sort();
+        code_screens.sort();
+        assert_eq!(
+            schema_screens, code_screens,
+            "schemas/settings.yaml#/properties/selected_screen/enum has drifted from Screen::key"
+        );
+
+        let mut schema_views = listed("selected_job_view");
+        let mut code_views: Vec<String> = JobCenterView::ALL
+            .iter()
+            .map(|v| v.key().to_string())
+            .collect();
+        schema_views.sort();
+        code_views.sort();
+        assert_eq!(
+            schema_views, code_views,
+            "schemas/settings.yaml#/properties/selected_job_view/enum has drifted from \
+             JobCenterView::key"
+        );
+    }
 }

@@ -203,6 +203,7 @@ pub fn SettingsDialog(
 
     let update_checks_on = snapshot.update_check_enabled;
     let security_log_on = snapshot.security_log_enabled;
+    let reopen_where_left_off = snapshot.reopen_where_left_off;
 
     // Surfacing the *state* of a postpone/skip matters as much as offering the action:
     // a user who skipped a version months ago and then wonders why they see nothing
@@ -308,6 +309,24 @@ pub fn SettingsDialog(
                                 "and a window that repaints itself at dusk mid-cut is a surprise "
                                 "rather than a convenience."
                             }
+                        }
+                    }
+
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "Workspace" }
+
+                        ToggleRow {
+                            label: "Reopen where I left off",
+                            detail: "k2g reopens on the screen, the Job tab and the machining step \
+                                     you were last on. With this off it always opens on the Job \
+                                     screen's Board tab at the first step. Either way the window \
+                                     size, the theme and the unit system are restored, and nothing \
+                                     about the job itself changes — this is only where the \
+                                     application starts looking.",
+                            checked: reopen_where_left_off,
+                            on_toggle: move |enabled| {
+                                super::mutate_ctx(state, |s| s.set_reopen_where_left_off(enabled));
+                            },
                         }
                     }
 

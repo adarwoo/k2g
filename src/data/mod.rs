@@ -53,6 +53,21 @@ const SCHEMAS: &[(&str, &str)] = &[
     ("catalog.yaml", include_str!("../../schemas/catalog.yaml")),
 ];
 
+/// The embedded `settings.yaml` schema text.
+///
+/// Exposed because two tests need to read the schema rather than trust a copy of it:
+/// one proves `make_global_settings_payload` names every property (a key it omits is
+/// not merely un-persisted — the document is replaced whole, so it is *erased* on the
+/// next write), the other proves the `selected_screen` enum lists exactly the keys
+/// `Screen::key` can produce.
+pub(crate) fn settings_schema_text() -> &'static str {
+    SCHEMAS
+        .iter()
+        .find(|(id, _)| *id == "settings.yaml")
+        .expect("the settings schema is embedded above")
+        .1
+}
+
 /// Bundled CNC templates: `(key, embedded YAML)`. Each is a `cnc.yaml`-shaped
 /// seed with no `id`; see [`AppData::create_cnc_from_template`].
 pub(crate) const CNC_TEMPLATES: &[(&str, &str)] = &[
@@ -3215,6 +3230,91 @@ mod tests {
         assert!(
             matches!(read("/update_last_check"), Some(NodeValue::Str(ref s)) if s.starts_with("2026-08-11")),
             "the last-check stamp must survive a reload"
+        );
+    }
+
+    /// Where the operator was — screen, Job tab, step — and whether to reopen there.
+    ///
+    /// Same whole-document hazard as the preferences above: these are written only when
+    /// the window closes, so they ride on a payload that must name every one of them or
+    /// the next unrelated write erases them. The half that starts from a settings file
+    /// predating the keys is the one that proves they were added compatibly.
+    #[test]
+    fn the_screen_setup_round_trips() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // A settings file from before any of these keys existed.
+        let previous = "schema_version: 1\n\
+                        units: mm\n\
+                        theme: Dark\n\
+                        selected_process_profile_id: null\n\
+                        selected_cnc_profile_id: null\n\
+                        selected_fixture_profile_id: null\n\
+                        selected_toolset_profile_id: null\n";
+        fs::write(data_dir.join(SETTINGS_FILE), previous).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "settings without the keys should load: {errors:#?}");
+
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["selected_screen"] = Value::String("stock".to_string());
+        value["selected_job_view"] = Value::String("tooling".to_string());
+        value["selected_step"] = Value::from(2);
+        value["reopen_where_left_off"] = Value::Bool(false);
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| p.is_empty()),
+            "recording where the operator was should not error"
+        );
+        data.flush();
+
+        let (reloaded, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "reload should be clean: {errors:#?}");
+        let read = |pointer: &str| {
+            reloaded
+                .settings()
+                .and_then(|doc| doc.root.get_pointer(pointer))
+                .map(|node| node.value.clone())
+        };
+        assert!(
+            matches!(read("/selected_screen"), Some(NodeValue::Str(ref s)) if s == "stock"),
+            "the screen must survive a reload, got {:?}",
+            read("/selected_screen")
+        );
+        assert!(
+            matches!(read("/selected_job_view"), Some(NodeValue::Str(ref s)) if s == "tooling"),
+            "the Job tab must survive a reload, got {:?}",
+            read("/selected_job_view")
+        );
+        assert!(
+            matches!(read("/selected_step"), Some(NodeValue::Int(2))),
+            "the step must survive a reload, got {:?}",
+            read("/selected_step")
+        );
+        assert!(
+            matches!(read("/reopen_where_left_off"), Some(NodeValue::Bool(false))),
+            "the opt-out must survive a reload — a preference that needs re-setting each \
+             launch is not a preference"
+        );
+    }
+
+    /// The screen key is a closed set, and the schema is what closes it. Without this
+    /// the enum could drift open and a settings file could name a screen no build has.
+    #[test]
+    fn an_unknown_screen_key_is_rejected_by_the_schema() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "a fresh store should load: {errors:#?}");
+
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["selected_screen"] = Value::String("teleporter".to_string());
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| !p.is_empty()),
+            "a screen key outside the schema's enum must be reported"
         );
     }
 
