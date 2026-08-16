@@ -258,3 +258,7 @@ be GPLv3 and its source must be available.
 Bundled third-party components keep their own licences —
 [kicad-ipc-rs](third_party/kicad-ipc-rs) (MIT, vendored fork) and
 [three.js](assets/vendor) (MIT).
+
+## Signing key
+untrusted comment: minisign public key 06B8B6495DD89857
+RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
