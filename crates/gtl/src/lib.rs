@@ -406,10 +406,26 @@ while z > z_bottom {
             other => panic!("expected Runaway, got {other:?}"),
         }
         assert!(
-            elapsed < std::time::Duration::from_millis(750),
-            "the ceiling must stop it fast enough not to be felt: took {elapsed:?}"
+            elapsed < RUNAWAY_MUST_STOP_WITHIN,
+            "the ceiling did not stop the loop in any reasonable time: took {elapsed:?}. \
+             Either MAX_OPERATIONS has been raised a long way or the ceiling is gone."
         );
     }
+
+    /// How long a runaway may take to be stopped before the test calls it broken.
+    ///
+    /// Deliberately loose, because the ceiling counts **operations, not time** — which is
+    /// the right unit for it (a template that renders on one machine must render on
+    /// every machine, so the budget cannot depend on how fast the CPU is), but it means
+    /// the wall clock here measures the runner, not the code. This was 750 ms and failed
+    /// on a macOS CI runner at 1.2 s: an unoptimised build of Rhai on a shared box,
+    /// which says nothing about the shipped article.
+    ///
+    /// The number that is still worth asserting is the one that separates "stopped" from
+    /// "not stopped": 200,000 operations is milliseconds in a release build and a second
+    /// or so in the worst debug case seen, while a ceiling raised tenfold — or removed,
+    /// which is a hang — blows straight through this.
+    const RUNAWAY_MUST_STOP_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
     /// The message has to send the author somewhere. "Too many operations" — Rhai's own
     /// wording — describes the symptom to someone who did not know operations were being

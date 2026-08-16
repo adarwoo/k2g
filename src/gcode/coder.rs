@@ -1386,9 +1386,20 @@ mod tests {
             result.unwrap_err().to_string().contains("did not finish"),
             "and must say why, in terms the author can act on"
         );
+        // The assertion that carries the property is the one above: the preview *returned*,
+        // stopped by the operation ceiling, instead of spinning with the UI thread. This
+        // one only catches a ceiling that has been removed or raised out of all proportion.
+        //
+        // It is loose on purpose, and was not: at one second it failed on a macOS CI runner
+        // at 1.21 s. The ceiling counts operations rather than time — deliberately, since a
+        // template must render the same on every machine — so a wall-clock bound here
+        // measures the runner. An unoptimised build on a shared box is not the thing the
+        // "must not stall" claim is about; that claim is about the release build in front of
+        // an operator, where 200,000 operations is a few milliseconds.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "a keystroke must not stall: took {:?}",
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "the preview did not come back in any reasonable time: took {:?} — the \
+             operation ceiling is gone or has been raised a long way",
             started.elapsed()
         );
     }
