@@ -42,24 +42,53 @@ pub struct ToolingPlan {
     pub steps: Vec<StepPlan>,
     /// A top-level note when there is nothing to plan (no profile / no board).
     pub note: Option<String>,
-    /// The cross-step rack schedule (slots × steps) driving the Rack view. `None` when
-    /// no step resolves to a rack. Built once across all resolved steps so each tool
-    /// keeps a stable slot and inter-step changes are minimised.
-    pub rack_schedule: Option<RackSchedule>,
+    /// The rack schedules driving the Rack view — **one per rack the job uses**, not one
+    /// per job. See [`RackSchedule`]. Empty when no step runs on a machine with a rack.
+    pub racks: Vec<RackSchedule>,
 }
 
-/// The rack across the whole job: physical slots × resolved steps, each cell the tool
-/// loaded and whether that slot must change before that step.
+impl ToolingPlan {
+    /// The rack the step at `step_index` runs against, as it stands for that step.
+    ///
+    /// `None` when the step has no rack to describe: it resolved nothing, it loads no
+    /// tools, or its machine has no tool changer at all. Searching every rack rather than
+    /// indexing one is what makes a two-machine job work — a step belongs to exactly one
+    /// rack, and which one is a fact about its CNC, not about its position in the job.
+    pub fn rack_for_step(&self, step_index: usize) -> Option<RackStepView> {
+        self.racks
+            .iter()
+            .find_map(|rack| rack.step_view(step_index))
+    }
+}
+
+/// One physical rack across the job: its slots × the steps that run against it, each cell
+/// the tool loaded and whether that slot must change before that step.
 ///
-/// Computed for every step even though the Rack view shows one, because
-/// [`SlotChange::Kept`] is only knowable from the sequence — "already in the rack" is a
-/// statement about the steps before this one. [`rack_for_step`] projects one step out.
+/// **A rack belongs to one CNC**, so a job whose steps run on two machines has two of
+/// these. That is not a display nicety: [`SlotChange::Kept`] means "already loaded, do
+/// nothing", and a tool left in one machine's carousel is not in another machine's. The
+/// same is true of the toolset — re-racking a machine to a different toolset is a
+/// different rack — so a schedule is keyed by the `(cnc, toolset)` pair its steps share.
+/// Two CNC profiles may well be the same physical machine set up for different work; they
+/// are still two racks here, because the app cannot know they are one.
+///
+/// Computed across every step of the rack even though the view shows one, because
+/// `Kept` is only knowable from the sequence — "already in the rack" is a statement about
+/// the steps before this one. [`Self::step_view`] projects one step out.
 pub struct RackSchedule {
-    /// One per *resolved* step that loads tools, in order — which is a **subset** of the
-    /// profile's steps, so a column's position is not its step index. Hence
-    /// [`RackStepColumn::step_index`].
+    /// The machine whose rack this is, for the operator: `T3 holds the 0.8 drill` says
+    /// nothing in a job that runs on two machines unless it also says whose `T3`.
+    pub cnc_name: String,
+    /// Usable toolset slots this machine does not physically have — slots numbered past
+    /// its ATC count. A toolset is a logical rack that may be a superset of any one
+    /// machine's carousel (Specification §11.4), so this is a fact to report, not an
+    /// error; those slots simply cannot be loaded here.
+    pub clipped_slots: usize,
+    /// One per *resolved* step that loads tools against this rack, in order — a
+    /// **subset** of the profile's steps, so a column's position is not its step index.
+    /// Hence [`RackStepColumn::step_index`].
     pub steps: Vec<RackStepColumn>,
-    /// One row per physical (non-disabled) slot, in `T`-order.
+    /// One row per physical (non-disabled, machine-reachable) slot, in `T`-order.
     pub slots: Vec<RackSlotSchedule>,
 }
 
@@ -68,9 +97,27 @@ pub struct RackSchedule {
 pub struct RackStepColumn {
     /// Index into the profile's steps — *not* the column's own position.
     pub step_index: usize,
+    /// Tools the step needs that the rack could not hold, already labelled. Empty in the
+    /// ordinary case; non-empty means every slot was taken by a tool the step also needs,
+    /// which the operator has to resolve at the machine.
+    pub unplaced: Vec<String>,
 }
 
-/// One slot as it stands for a single step — what [`rack_for_step`] projects.
+/// One rack as it stands for a single step — what [`RackSchedule::step_view`] projects.
+pub struct RackStepView {
+    /// The machine this rack belongs to (see [`RackSchedule::cnc_name`]).
+    pub cnc_name: String,
+    /// How many of the job's steps run against this rack. The change status only says
+    /// something once a step could have left a tool loaded for another.
+    pub step_count: usize,
+    pub slots: Vec<RackSlotView>,
+    /// See [`RackStepColumn::unplaced`].
+    pub unplaced: Vec<String>,
+    /// See [`RackSchedule::clipped_slots`].
+    pub clipped_slots: usize,
+}
+
+/// One slot as it stands for a single step.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RackSlotView {
     /// Slot label, e.g. `T1`.
@@ -468,21 +515,21 @@ pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> Too
         return ToolingPlan {
             steps: vec![],
             note: Some("Select a machining profile to plan tooling.".into()),
-            rack_schedule: None,
+            racks: vec![],
         };
     };
     if ctx.board.is_none() {
         return ToolingPlan {
             steps: vec![],
             note: Some("No board loaded — nothing to machine.".into()),
-            rack_schedule: None,
+            racks: vec![],
         };
     }
     if !appdata_ready() {
         return ToolingPlan {
             steps: vec![],
             note: Some("Configuration store is not ready.".into()),
-            rack_schedule: None,
+            racks: vec![],
         };
     }
 
@@ -491,15 +538,14 @@ pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> Too
         return ToolingPlan {
             steps: vec![],
             note: Some("The machining profile has no steps.".into()),
-            rack_schedule: None,
+            racks: vec![],
         };
     }
 
-    // The physical rack is the first resolvable step's toolset (jobs share one toolset
-    // in the common case; a later step on a different toolset still schedules into this
-    // layout). Collect each resolved step's tools for the cross-step schedule as we go.
-    let mut schedule_input: Vec<(usize, String, Vec<String>)> = Vec::new();
-    let mut schedule_toolset: Option<crate::data::model::ToolsetProfile> = None;
+    // File each resolved step under the rack it runs against as the steps are planned;
+    // the schedules are built once they are all known, because what a slot holds for one
+    // step depends on the steps before it *on that machine*.
+    let mut groups: Vec<RackGroup> = Vec::new();
 
     let steps: Vec<StepPlan> = raw_steps
         .into_iter()
@@ -507,15 +553,7 @@ pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> Too
         .map(|(index, raw)| {
             let outcome = plan_step(ctx, stitched, &raw);
             if let StepOutcome::Resolved(resolved) = &outcome {
-                if !resolved.tool_ids.is_empty() {
-                    schedule_input.push((index, raw.name.clone(), resolved.tool_ids.clone()));
-                    if schedule_toolset.is_none() {
-                        schedule_toolset = raw
-                            .toolset_id
-                            .and_then(|id| ctx.toolsets.iter().find(|t| t.id == id.to_string()))
-                            .cloned();
-                    }
-                }
+                collect_rack_step(ctx, &mut groups, index, &raw, &resolved.tool_ids);
             }
             StepPlan {
                 name: raw.name.clone(),
@@ -524,42 +562,129 @@ pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> Too
         })
         .collect();
 
-    let rack_schedule = schedule_toolset
-        .as_ref()
-        .filter(|_| !schedule_input.is_empty())
-        .map(|toolset| build_rack_schedule(ctx, toolset, &schedule_input));
+    let racks = groups
+        .iter()
+        .filter_map(|group| {
+            let machine = ctx.machines.iter().find(|m| m.id == group.cnc_id)?;
+            let toolset = ctx.toolsets.iter().find(|t| t.id == group.toolset_id)?;
+            Some(build_rack_schedule(ctx, machine, toolset, &group.steps))
+        })
+        .collect();
 
     ToolingPlan {
         steps,
         note: None,
-        rack_schedule,
+        racks,
     }
 }
 
-/// Builds the cross-step rack schedule: each physical slot's tool per step, with the
-/// change status. A dynamic tool keeps a **stable slot** — loaded once (`Load`) and
-/// `Kept` afterwards — so inter-step changes are minimised. Empty spare slots are used
-/// before any tool is evicted; only when every spare slot holds a still-needed tool is
-/// one reused (that reload shows as `Load`). Fixed (toolset-pinned) slots never change.
+/// The steps sharing one physical rack, gathered while the job is planned.
+struct RackGroup {
+    /// The `(cnc, toolset)` pair that identifies the rack — see [`RackSchedule`]. Held as
+    /// the profile ids so the group stays a key rather than a copy of two profiles.
+    cnc_id: String,
+    toolset_id: String,
+    steps: Vec<RackStepInput>,
+}
+
+/// One step's contribution to a rack schedule.
+struct RackStepInput {
+    /// Index into the profile's steps.
+    step_index: usize,
+    /// The distinct tools the step loads, in slot order.
+    tool_ids: Vec<String>,
+}
+
+/// Files a resolved step under the rack it runs against, opening a group the first time
+/// that `(cnc, toolset)` pair is seen.
+///
+/// Two kinds of step contribute nothing. One that loads no tools has no rack state to
+/// describe. One whose machine has **no tool changer** has no rack at all: its tools go
+/// into the spindle one at a time, so "kept from the last step" is not a thing that can
+/// happen to it — the Tooling tab's T-order is its change sequence, and that is the whole
+/// truth about its tooling.
+///
+/// Grouping is by identity rather than by adjacency: steps 1 and 3 on the same machine
+/// share its rack even with a step on another machine between them, because nothing
+/// touched that machine in the meantime.
+fn collect_rack_step(
+    ctx: &AppState,
+    groups: &mut Vec<RackGroup>,
+    step_index: usize,
+    raw: &StepRaw,
+    tool_ids: &[String],
+) {
+    if tool_ids.is_empty() {
+        return;
+    }
+    let (Some(cnc_id), Some(toolset_id)) = (raw.cnc_id, raw.toolset_id) else {
+        return;
+    };
+    let (cnc_id, toolset_id) = (cnc_id.to_string(), toolset_id.to_string());
+    let has_rack = ctx
+        .machines
+        .iter()
+        .any(|machine| machine.id == cnc_id && machine.atc_slot_count > 0);
+    if !has_rack {
+        return;
+    }
+
+    let step = RackStepInput {
+        step_index,
+        tool_ids: tool_ids.to_vec(),
+    };
+    match groups
+        .iter_mut()
+        .find(|group| group.cnc_id == cnc_id && group.toolset_id == toolset_id)
+    {
+        Some(group) => group.steps.push(step),
+        None => groups.push(RackGroup {
+            cnc_id,
+            toolset_id,
+            steps: vec![step],
+        }),
+    }
+}
+
+/// Builds one machine's cross-step rack schedule: each physical slot's tool per step,
+/// with the change status. A dynamic tool keeps a **stable slot** — loaded once (`Load`)
+/// and `Kept` afterwards — so inter-step changes are minimised. Empty spare slots are
+/// used before any tool is evicted; only when every spare slot holds a still-needed tool
+/// is one reused (that reload shows as `Load`). Fixed (toolset-pinned) slots never
+/// change.
+///
+/// `steps` are the steps that run against *this* rack, which is why the machine is a
+/// parameter beside the toolset: the same toolset loaded into a 8-slot carousel and a
+/// 12-slot one is two different racks, and only the machine knows which slots exist.
 fn build_rack_schedule(
     ctx: &AppState,
+    machine: &crate::data::model::MachineProfile,
     toolset: &crate::data::model::ToolsetProfile,
-    steps: &[(usize, String, Vec<String>)],
+    steps: &[RackStepInput],
 ) -> RackSchedule {
     use std::collections::{BTreeMap, BTreeSet};
 
-    // Classify the physical (non-disabled) slots into fixed (pinned tool) and spare.
+    // Classify the physical (non-disabled) slots into fixed (pinned tool) and spare,
+    // dropping the ones this machine's carousel does not reach. Slots are `T1`-based, so
+    // a machine with N of them has T1..=TN; a toolset may legitimately define more
+    // (Specification §11.4) and those simply cannot be loaded here.
     let mut fixed: BTreeMap<u8, String> = BTreeMap::new();
+    let mut reserved: Vec<u8> = Vec::new();
     let mut spare_slots: Vec<u8> = Vec::new();
+    let mut clipped_slots = 0usize;
     for (index, slot) in toolset.slots.iter() {
         if slot.disabled {
+            continue;
+        }
+        if *index > machine.atc_slot_count {
+            clipped_slots += 1;
             continue;
         }
         match (slot.locked, slot.tool_id.as_ref()) {
             (true, Some(tool)) => {
                 fixed.insert(*index, tool.clone());
             }
-            (true, None) => {} // reserved-but-empty: shown as a fixed empty row below
+            (true, None) => reserved.push(*index), // pinned to nothing: shown, never filled
             (false, _) => spare_slots.push(*index),
         }
     }
@@ -569,9 +694,12 @@ fn build_rack_schedule(
     let snapshots = schedule_spare_slots(&spare_slots, &fixed_tools, steps);
 
     // Build one row per physical slot (fixed first, then spare — both in index order).
+    // A locked slot holding nothing is reserved: the assigner never fills it, so it gets
+    // a fixed, empty row rather than disappearing from the rack the operator is reading.
     let mut rows: Vec<RackSlotSchedule> = Vec::new();
-    let mut all_slots: Vec<(u8, bool)> = fixed
-        .keys()
+    let mut all_slots: Vec<(u8, bool)> = reserved
+        .iter()
+        .chain(fixed.keys())
         .map(|s| (*s, true))
         .chain(spare_slots.iter().map(|s| (*s, false)))
         .collect();
@@ -580,17 +708,17 @@ fn build_rack_schedule(
     for (index, is_fixed) in all_slots {
         let cells: Vec<RackCell> = snapshots
             .iter()
-            .map(|(state, changed)| {
+            .map(|snapshot| {
                 if is_fixed {
                     RackCell {
                         tool: fixed.get(&index).map(|id| tool_label(ctx, id)),
                         status: SlotChange::Fixed,
                     }
                 } else {
-                    match state.get(&index) {
+                    match snapshot.state.get(&index) {
                         Some(id) => RackCell {
                             tool: Some(tool_label(ctx, id)),
-                            status: if changed.contains(&index) {
+                            status: if snapshot.changed.contains(&index) {
                                 SlotChange::Load
                             } else {
                                 SlotChange::Kept
@@ -611,78 +739,107 @@ fn build_rack_schedule(
     }
 
     RackSchedule {
+        cnc_name: machine.name.clone(),
+        clipped_slots,
         steps: steps
             .iter()
-            .map(|(step_index, _, _)| RackStepColumn {
-                step_index: *step_index,
+            .zip(snapshots.iter())
+            .map(|(step, snapshot)| RackStepColumn {
+                step_index: step.step_index,
+                unplaced: snapshot
+                    .unplaced
+                    .iter()
+                    .map(|id| tool_label(ctx, id))
+                    .collect(),
             })
             .collect(),
         slots: rows,
     }
 }
 
-/// The core cross-step spare-slot schedule (ctx-free, so it is unit-testable): for each
-/// step, the resulting spare-slot → tool-id state and the set of slots changed that
-/// step. A tool already loaded is kept in place; a new one takes an empty slot, or
-/// evicts a not-needed one. Fixed tools are excluded (they never occupy a spare slot).
-/// The rack as it stands **for one step**: every physical slot, the tool in it, and
-/// whether the operator must change that slot before running this step.
-///
-/// `None` when the step has no column — it resolved nothing, or loads no tools, so there
-/// is no rack state to describe. Projected rather than recomputed because
-/// [`SlotChange::Kept`] depends on the steps before this one; the schedule is the only
-/// place that knows.
-pub fn rack_for_step(schedule: &RackSchedule, step_index: usize) -> Option<Vec<RackSlotView>> {
-    // Column position is not step index — only resolved, tool-loading steps get columns.
-    let column = schedule
-        .steps
-        .iter()
-        .position(|s| s.step_index == step_index)?;
-    Some(
-        schedule
-            .slots
-            .iter()
-            .map(|row| RackSlotView {
-                slot: row.slot.clone(),
-                tool: row.cells.get(column).and_then(|cell| cell.tool.clone()),
-                status: row
-                    .cells
-                    .get(column)
-                    .map(|cell| cell.status)
-                    .unwrap_or(SlotChange::Empty),
-            })
-            .collect(),
-    )
+impl RackSchedule {
+    /// This rack as it stands **for one step**: every physical slot, the tool in it, and
+    /// whether the operator must change that slot before running this step.
+    ///
+    /// `None` when the step has no column here — it runs against a different rack, or
+    /// none at all. Projected rather than recomputed because [`SlotChange::Kept`] depends
+    /// on the steps before this one; the schedule is the only place that knows.
+    pub fn step_view(&self, step_index: usize) -> Option<RackStepView> {
+        // Column position is not step index — only the resolved, tool-loading steps that
+        // run against *this* machine get columns.
+        let column = self.steps.iter().position(|s| s.step_index == step_index)?;
+        Some(RackStepView {
+            cnc_name: self.cnc_name.clone(),
+            step_count: self.steps.len(),
+            slots: self
+                .slots
+                .iter()
+                .map(|row| RackSlotView {
+                    slot: row.slot.clone(),
+                    tool: row.cells.get(column).and_then(|cell| cell.tool.clone()),
+                    status: row
+                        .cells
+                        .get(column)
+                        .map(|cell| cell.status)
+                        .unwrap_or(SlotChange::Empty),
+                })
+                .collect(),
+            unplaced: self.steps[column].unplaced.clone(),
+            clipped_slots: self.clipped_slots,
+        })
+    }
 }
 
+/// One step's spare-slot state in the cross-step schedule.
+struct SpareSnapshot {
+    /// Which tool sits in which spare slot once this step's changes are made.
+    state: std::collections::BTreeMap<u8, String>,
+    /// The slots the operator must change before this step.
+    changed: std::collections::BTreeSet<u8>,
+    /// Tools the step needs that no slot could take, because every spare slot already
+    /// holds a tool the same step needs. The rack is over capacity for this step; the
+    /// tools are named rather than dropped, so the view can say so.
+    unplaced: Vec<String>,
+}
+
+/// The core cross-step spare-slot schedule (ctx-free, so it is unit-testable): one
+/// [`SpareSnapshot`] per step, in step order. A tool already loaded is kept in place; a
+/// new one takes an empty slot, or evicts a not-needed one. Fixed tools are excluded
+/// (they never occupy a spare slot).
 fn schedule_spare_slots(
     spare_slots: &[u8],
     fixed_tools: &std::collections::BTreeSet<String>,
-    steps: &[(usize, String, Vec<String>)],
-) -> Vec<(
-    std::collections::BTreeMap<u8, String>,
-    std::collections::BTreeSet<u8>,
-)> {
+    steps: &[RackStepInput],
+) -> Vec<SpareSnapshot> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut loaded: BTreeMap<u8, String> = BTreeMap::new();
     let mut snapshots = Vec::new();
-    for (_, _, step_tools) in steps {
-        let dynamic: Vec<&String> = step_tools
+    for step in steps {
+        let dynamic: Vec<&String> = step
+            .tool_ids
             .iter()
             .filter(|t| !fixed_tools.contains(*t))
             .collect();
         let needed: BTreeSet<&String> = dynamic.iter().copied().collect();
         let mut changed: BTreeSet<u8> = BTreeSet::new();
+        let mut unplaced: Vec<String> = Vec::new();
         for tool in dynamic {
             if loaded.values().any(|t| t == tool) {
                 continue; // already in the rack — kept
             }
-            if let Some(slot) = pick_slot(spare_slots, &loaded, &needed) {
-                loaded.insert(slot, tool.clone());
-                changed.insert(slot);
+            match pick_slot(spare_slots, &loaded, &needed) {
+                Some(slot) => {
+                    loaded.insert(slot, tool.clone());
+                    changed.insert(slot);
+                }
+                None => unplaced.push(tool.clone()),
             }
         }
-        snapshots.push((loaded.clone(), changed));
+        snapshots.push(SpareSnapshot {
+            state: loaded.clone(),
+            changed,
+            unplaced,
+        });
     }
     snapshots
 }
@@ -3495,33 +3652,41 @@ mod tests {
         );
     }
 
+    /// A step as the rack scheduler takes it.
+    fn rack_step(step_index: usize, tools: &[&str]) -> RackStepInput {
+        RackStepInput {
+            step_index,
+            tool_ids: tools.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    /// A built schedule's column for `step_index`, with nothing left unplaced.
+    fn column(step_index: usize) -> RackStepColumn {
+        RackStepColumn {
+            step_index,
+            unplaced: vec![],
+        }
+    }
+
     #[test]
     fn cross_step_schedule_keeps_reused_tools_in_the_same_slot() {
         use std::collections::BTreeSet;
         // Spare slots T2/T3/T4; a tool "fix" is pinned (fixed) elsewhere.
         let fixed: BTreeSet<String> = ["fix".to_string()].into_iter().collect();
         let steps = vec![
-            (
-                0,
-                "s1".to_string(),
-                vec!["fix".into(), "A".into(), "B".into()],
-            ),
-            (
-                1,
-                "s2".to_string(),
-                vec!["fix".into(), "B".into(), "C".into()],
-            ),
+            rack_step(0, &["fix", "A", "B"]),
+            rack_step(1, &["fix", "B", "C"]),
         ];
         let snaps = schedule_spare_slots(&[2, 3, 4], &fixed, &steps);
 
         // Step 1 loads A→T2 and B→T3 (both changed).
-        let (state1, changed1) = &snaps[0];
+        let (state1, changed1) = (&snaps[0].state, &snaps[0].changed);
         assert_eq!(state1.get(&2), Some(&"A".to_string()));
         assert_eq!(state1.get(&3), Some(&"B".to_string()));
         assert_eq!(changed1, &BTreeSet::from([2, 3]));
 
         // Step 2: B keeps T3 (the optimisation), C takes the empty T4; A idles in T2.
-        let (state2, changed2) = &snaps[1];
+        let (state2, changed2) = (&snaps[1].state, &snaps[1].changed);
         assert_eq!(
             state2.get(&3),
             Some(&"B".to_string()),
@@ -3546,11 +3711,10 @@ mod tests {
     #[test]
     fn the_rack_is_projected_by_step_index_not_by_column_position() {
         let schedule = RackSchedule {
+            cnc_name: "Router".into(),
+            clipped_slots: 0,
             // Steps 0 and 2 resolved; step 1 loaded nothing and has no column.
-            steps: vec![
-                RackStepColumn { step_index: 0 },
-                RackStepColumn { step_index: 2 },
-            ],
+            steps: vec![column(0), column(2)],
             slots: vec![RackSlotSchedule {
                 slot: "T1".to_string(),
                 cells: vec![
@@ -3566,28 +3730,86 @@ mod tests {
             }],
         };
 
-        let step0 = rack_for_step(&schedule, 0).expect("step 0 has a column");
-        assert_eq!(step0[0].tool.as_deref(), Some("drill"));
-        assert_eq!(step0[0].status, SlotChange::Load);
+        let step0 = schedule.step_view(0).expect("step 0 has a column");
+        assert_eq!(step0.slots[0].tool.as_deref(), Some("drill"));
+        assert_eq!(step0.slots[0].status, SlotChange::Load);
 
         // The *second* column belongs to step 2, not step 1.
-        assert_eq!(
-            rack_for_step(&schedule, 1),
-            None,
+        assert!(
+            schedule.step_view(1).is_none(),
             "a step with no column has no rack"
         );
-        let step2 = rack_for_step(&schedule, 2).expect("step 2 has a column");
-        assert_eq!(step2[0].tool.as_deref(), Some("router"));
+        let step2 = schedule.step_view(2).expect("step 2 has a column");
+        assert_eq!(step2.slots[0].tool.as_deref(), Some("router"));
         assert_eq!(
-            step2[0].status,
+            step2.slots[0].status,
             SlotChange::Kept,
             "carried over from an earlier step"
         );
 
-        assert_eq!(
-            rack_for_step(&schedule, 9),
-            None,
+        assert!(
+            schedule.step_view(9).is_none(),
             "a step beyond the profile has none"
+        );
+    }
+
+    /// A rack is one machine's carousel, so a step is looked up in the rack it runs
+    /// against and nowhere else. Two CNCs sharing one toolset was the case that broke:
+    /// the job had a single schedule, so the second machine's step read the first
+    /// machine's rack — or, when the second machine had no changer at all, read nothing
+    /// and the view fell back to the board.
+    #[test]
+    fn a_step_reads_the_rack_of_its_own_machine() {
+        let plan = ToolingPlan {
+            steps: vec![],
+            note: None,
+            racks: vec![
+                RackSchedule {
+                    cnc_name: "Driller".into(),
+                    clipped_slots: 0,
+                    steps: vec![column(0)],
+                    slots: vec![RackSlotSchedule {
+                        slot: "T1".into(),
+                        cells: vec![RackCell {
+                            tool: Some("drill".into()),
+                            status: SlotChange::Load,
+                        }],
+                    }],
+                },
+                RackSchedule {
+                    cnc_name: "Router".into(),
+                    clipped_slots: 0,
+                    steps: vec![column(1)],
+                    slots: vec![RackSlotSchedule {
+                        slot: "T1".into(),
+                        cells: vec![RackCell {
+                            tool: Some("cutter".into()),
+                            status: SlotChange::Load,
+                        }],
+                    }],
+                },
+            ],
+        };
+
+        let first = plan.rack_for_step(0).expect("step 0 runs on the driller");
+        assert_eq!(first.cnc_name, "Driller");
+        assert_eq!(first.slots[0].tool.as_deref(), Some("drill"));
+
+        let second = plan.rack_for_step(1).expect("step 1 runs on the router");
+        assert_eq!(second.cnc_name, "Router");
+        assert_eq!(
+            second.slots[0].tool.as_deref(),
+            Some("cutter"),
+            "the second machine's rack, not the first machine's"
+        );
+        assert_eq!(
+            second.step_count, 1,
+            "one step on this rack, so nothing can have been kept from another"
+        );
+
+        assert!(
+            plan.rack_for_step(2).is_none(),
+            "a step on no rack (manual tool changes) has none to show"
         );
     }
 
@@ -3598,18 +3820,38 @@ mod tests {
         let snaps = schedule_spare_slots(
             &[1],
             &BTreeSet::new(),
-            &[
-                (0, "s1".into(), vec!["A".into()]),
-                (1, "s2".into(), vec!["B".into()]),
-            ],
+            &[rack_step(0, &["A"]), rack_step(1, &["B"])],
         );
-        assert_eq!(snaps[0].0.get(&1), Some(&"A".to_string()));
+        assert_eq!(snaps[0].state.get(&1), Some(&"A".to_string()));
         assert_eq!(
-            snaps[1].0.get(&1),
+            snaps[1].state.get(&1),
             Some(&"B".to_string()),
             "B evicts the idle A"
         );
-        assert!(snaps[1].1.contains(&1), "the reload counts as a change");
+        assert!(snaps[1].changed.contains(&1), "the reload counts as a change");
+        assert!(
+            snaps[1].unplaced.is_empty(),
+            "an eviction is not an overflow — the tool did get a slot"
+        );
+    }
+
+    /// A step needing more tools at once than the rack has slots cannot be scheduled into
+    /// it. The tools are named rather than quietly left out, because a rack listing that
+    /// omits a tool the program calls reads as a complete rack.
+    #[test]
+    fn a_tool_with_no_slot_left_is_reported_rather_than_dropped() {
+        use std::collections::BTreeSet;
+        let snaps = schedule_spare_slots(
+            &[1, 2],
+            &BTreeSet::new(),
+            &[rack_step(0, &["A", "B", "C"])],
+        );
+        assert_eq!(snaps[0].state.len(), 2, "both slots are filled");
+        assert_eq!(
+            snaps[0].unplaced,
+            vec!["C".to_string()],
+            "the third tool has nowhere to go and says so"
+        );
     }
 
     #[test]

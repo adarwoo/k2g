@@ -44,10 +44,13 @@ pub fn JobViewPanel(state: Signal<crate::runtime::AppCtx>, docked: bool) -> Elem
     let steps = crate::runtime::tooling::step_headers(&snapshot);
     let selected_step = snapshot.selected_step.min(steps.len().saturating_sub(1));
 
-    // The rack belongs to *this step's* machine: a step names its own CNC, so whether
-    // there is a rack to show can differ between steps of one job. (This used to ask the
-    // job-level machine, which is the step-0 projection.)
-    let has_atc = steps.get(selected_step).map(|s| s.is_atc).unwrap_or(false);
+    // Rack is offered when *any* step runs on a machine with a tool changer — "Rack when
+    // relevant" (Specification §8.4), asked of the job rather than of the selected step.
+    // Asking the selected step made the tab come and go as the step chips were clicked,
+    // and clicking a chip while reading the rack silently dropped the user onto the board
+    // view. Which of the job's racks is shown, and what a step with no rack says instead,
+    // is [`RackView`]'s business.
+    let has_atc = steps.iter().any(|step| step.is_atc);
     let mut views =
         vec![JobCenterView::Board, JobCenterView::Machining, JobCenterView::Code, JobCenterView::Tooling];
     if has_atc {
