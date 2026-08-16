@@ -212,7 +212,10 @@ fn compile_schema(yaml_text: &str) -> Result<Value, CatalogError> {
 // -----------------------------------------------------------------------------
 
 /// Runtime catalog tool item shown in stock import UI.
-#[derive(Clone)]
+///
+/// `PartialEq` so it can be a Dioxus component prop — the catalog detail panel takes
+/// the whole tool, and Dioxus compares props to decide whether to re-render.
+#[derive(Clone, PartialEq)]
 pub struct CatalogStockTool {
     pub key: String,
     pub display_name: String,

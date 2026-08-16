@@ -2728,6 +2728,26 @@ mod tests {
             .unwrap();
         assert!(matches!(&availability.value, NodeValue::Str(s) if s == "out_of_stock"));
 
+        // The other enum the planner reads, and the other one the stock table now edits
+        // in place. Same write path, so what matters is that the schema decodes the key:
+        // an undecodable one returns `Some(false)` and the row would silently not change.
+        assert_eq!(
+            data.set_stock_str(&format!("/tools/{first}/preference"), "not_preferred"),
+            Some(true)
+        );
+        let preference = data
+            .stock()
+            .unwrap()
+            .root
+            .get_pointer(&format!("/tools/{first}/preference"))
+            .unwrap();
+        assert!(matches!(&preference.value, NodeValue::Str(s) if s == "not_preferred"));
+        assert_eq!(
+            data.set_stock_str(&format!("/tools/{first}/preference"), "preferred"),
+            Some(true),
+            "and every value in the enum is accepted"
+        );
+
         // Remove it.
         assert!(data.remove_stock_item(first));
         assert_eq!(count(&data), 1);

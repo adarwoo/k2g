@@ -1528,6 +1528,29 @@ select:disabled {
     background: color-mix(in srgb, var(--err) 14%, var(--bg-elev));
 }
 
+/* Preference, in the same shape as status beside it. Both classes are named because
+   the bare `.status-*` chip rules further down the sheet set colour and background but
+   no border — reusing them alone would tint the fill and leave a grey border, and a
+   one-class rule here would be at the mercy of declaration order against
+   `.stock-inline-select` itself. */
+.stock-inline-select.status-preferred {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+    background: color-mix(in srgb, var(--ok) 14%, var(--bg-elev));
+}
+
+.stock-inline-select.status-neutral {
+    color: var(--text-subtle);
+    border-color: var(--border);
+    background: var(--bg-elev);
+}
+
+.stock-inline-select.status-not-preferred {
+    color: color-mix(in srgb, var(--err) 88%, white);
+    border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+    background: color-mix(in srgb, var(--err) 10%, var(--bg-elev));
+}
+
 .toolset-slot-select.state-spare {
     color: var(--ok);
     border-color: color-mix(in srgb, var(--ok) 45%, var(--border));

@@ -178,9 +178,10 @@ mod catalog_projection_tests {
             copper: Default::default(),
         });
         app.catalogs = vec![projected];
-        let added = app.build_catalog_tool_additions(&[app.catalogs[0].sections[0].tools[0]
-            .key
-            .clone()]);
+        let added = app.build_catalog_tool_additions(
+            &[app.catalogs[0].sections[0].tools[0].key.clone()],
+            false,
+        );
 
         assert_eq!(added.len(), 1, "one tool selected, one added");
         assert_eq!(
@@ -205,5 +206,86 @@ mod catalog_projection_tests {
             projected.sections[0].tools[0].z_min_depth,
             Some(Length::from_mm(0.05))
         );
+    }
+
+    /// An app holding one catalogue, and the key of its only tool.
+    fn app_with_one_catalog_tool() -> (AppState, String) {
+        let projected = catalog_to_stock_catalog("test", "Test", &catalog_with(vbit_entry()), true);
+        let mut app = AppState::new(&UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+            copper: Default::default(),
+        });
+        app.catalogs = vec![projected];
+        let key = app.catalogs[0].sections[0].tools[0].key.clone();
+        (app, key)
+    }
+
+    /// The bulk picker declines to hand back a second copy of what is already owned —
+    /// selecting a whole section should not duplicate a rack's worth of tools.
+    #[test]
+    fn the_bulk_add_skips_a_tool_already_in_stock() {
+        let (mut app, key) = app_with_one_catalog_tool();
+
+        let first = app.build_catalog_tool_additions(&[key.clone()], false);
+        assert_eq!(first.len(), 1, "nothing owned yet, so it is added");
+        app.tools = first;
+
+        let again = app.build_catalog_tool_additions(&[key], false);
+        assert!(again.is_empty(), "and the second time it is recognised");
+    }
+
+    /// Naming one tool and pressing Add is a specific request, so it is honoured — and
+    /// the copy is named apart, because a tool's name is what identifies it in the rack
+    /// picker and the tooling plan.
+    #[test]
+    fn a_single_add_takes_a_second_copy_and_names_it_apart() {
+        let (mut app, key) = app_with_one_catalog_tool();
+
+        let first = app.build_catalog_tool_additions(&[key.clone()], true);
+        let original = first[0].composite_name.clone();
+        app.tools = first;
+
+        let second = app.build_catalog_tool_additions(&[key.clone()], true);
+        assert_eq!(second.len(), 1, "asked for, so added");
+        assert_eq!(second[0].composite_name, format!("{original} (2)"));
+        app.tools.extend(second);
+
+        let third = app.build_catalog_tool_additions(&[key], true);
+        assert_eq!(
+            third[0].composite_name,
+            format!("{original} (3)"),
+            "and it keeps counting rather than colliding with the second"
+        );
+    }
+
+    /// The suffix appears only when the name is taken. An ordinary add — the
+    /// overwhelmingly common case — must look exactly as it always did.
+    #[test]
+    fn a_first_add_is_not_renamed() {
+        let (app, key) = app_with_one_catalog_tool();
+        let added = app.build_catalog_tool_additions(&[key], true);
+        assert!(
+            !added[0].composite_name.ends_with("(2)"),
+            "got {}",
+            added[0].composite_name
+        );
+    }
+
+    /// Origin identity, not the current name: renaming a tool in stock must not make
+    /// the catalogue entry it came from look unowned.
+    #[test]
+    fn a_renamed_stock_tool_is_still_recognised_as_the_catalogue_entry() {
+        let (mut app, key) = app_with_one_catalog_tool();
+        let mut added = app.build_catalog_tool_additions(&[key.clone()], false);
+        added[0].name = "The one in the little drawer".to_string();
+        app.tools = added;
+
+        let tool = app.catalogs[0].sections[0].tools[0].clone();
+        assert!(
+            app.catalog_tool_in_stock(&tool, &[]),
+            "the SKU still says where it came from"
+        );
+        assert!(app.build_catalog_tool_additions(&[key], false).is_empty());
     }
 }

@@ -812,17 +812,72 @@ pub fn refresh_legacy_stock() {
     }
 }
 
+/// What an add-from-catalog actually did.
+///
+/// `skipped` exists because "added 0" is not an explanation. Selecting five tools you
+/// already own reported exactly that and left the operator to guess whether the button
+/// was broken, the selection was lost, or the tools were already there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StockAddition {
+    pub added: usize,
+    /// Already in stock, so not added again. Always 0 for a forced single add.
+    pub skipped: usize,
+}
+
 /// Adds the catalog-picker selection to stock: builds the additions from the
-/// legacy catalog (dedup vs current stock), projects them to stock-item values,
-/// and appends them to the AppData document (the sole writer). Refreshes the
-/// legacy projection and returns how many were added.
-pub fn add_stock_from_catalog(selected_keys: &[String]) -> usize {
-    let new_tools =
-        crate::runtime::with_ctx(|ctx| ctx.build_catalog_tool_additions(selected_keys));
+/// legacy catalog (skipping what is already owned), projects them to stock-item
+/// values, and appends them to the AppData document (the sole writer). Refreshes the
+/// legacy projection.
+pub fn add_stock_from_catalog(selected_keys: &[String]) -> StockAddition {
+    add_catalog_tools(selected_keys, false)
+}
+
+/// Adds one catalog tool to stock **even if it is already there**, and reports the name
+/// it landed under.
+///
+/// The deliberate counterpart to the bulk picker: naming one tool and pressing Add is a
+/// specific request, and a second copy of a tool is a real thing to own. The copy is
+/// named apart (`… (2)`) by `build_catalog_tool_additions` so the two can be told apart
+/// in the rack picker and in the tooling plan. Returns `None` when the key resolves to
+/// no catalog tool.
+pub fn add_catalog_tool_to_stock(tool_key: &str) -> Option<String> {
+    let keys = [tool_key.to_string()];
+    let new_tools = crate::runtime::with_ctx(|ctx| ctx.build_catalog_tool_additions(&keys, true));
+    let name = new_tools.first()?.composite_name.clone();
+    append_stock_tools(&new_tools);
+    Some(name)
+}
+
+/// Whether this catalog tool is already in stock — the question the single-tool add
+/// warns about, answered by the same predicate the bulk picker skips on.
+pub fn catalog_tool_already_in_stock(tool_key: &str) -> bool {
+    crate::runtime::with_ctx(|ctx| {
+        ctx.catalogs
+            .iter()
+            .flat_map(|catalog| catalog.sections.iter())
+            .flat_map(|section| section.tools.iter())
+            .find(|tool| tool.key == tool_key)
+            .is_some_and(|tool| ctx.catalog_tool_in_stock(tool, &[]))
+    })
+}
+
+fn add_catalog_tools(selected_keys: &[String], allow_duplicates: bool) -> StockAddition {
+    let new_tools = crate::runtime::with_ctx(|ctx| {
+        ctx.build_catalog_tool_additions(selected_keys, allow_duplicates)
+    });
+    // Everything the caller asked for that the builder did not return was already in
+    // stock; it resolves keys itself, so this is the only place the two counts meet.
+    let skipped = selected_keys.len().saturating_sub(new_tools.len());
+    StockAddition { added: append_stock_tools(&new_tools), skipped }
+}
+
+/// Projects built tools to stock-item values and appends them to the AppData document.
+fn append_stock_tools(new_tools: &[crate::data::model::Tool]) -> usize {
     if new_tools.is_empty() {
+        bump_render();
         return 0;
     }
-    let projected = crate::data::model::stock::stock_value_from_tools(&new_tools);
+    let projected = crate::data::model::stock::stock_value_from_tools(new_tools);
     let items: Vec<Value> = projected
         .get("tools")
         .and_then(Value::as_array)
@@ -857,6 +912,20 @@ pub fn set_stock_availability(index: usize, in_stock: bool) {
     let raw = if in_stock { "in_stock" } else { "out_of_stock" };
     with_appdata_mut(|data| {
         data.set_stock_str(&format!("/tools/{index}/availability"), raw);
+    });
+    refresh_legacy_stock();
+    bump_render();
+}
+
+/// Sets the preference enum of the stock tool at array `index` (the table's inline
+/// preference selector), decoding against the schema, then refreshes the projection.
+///
+/// Takes the schema's own key rather than a bool or an enum: preference has three
+/// states, and `availability` already spells itself three ways between storage, the DOM
+/// and the label — a fourth vocabulary here would earn nothing.
+pub fn set_stock_preference(index: usize, raw: &str) {
+    with_appdata_mut(|data| {
+        data.set_stock_str(&format!("/tools/{index}/preference"), raw);
     });
     refresh_legacy_stock();
     bump_render();

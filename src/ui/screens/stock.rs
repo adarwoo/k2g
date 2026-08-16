@@ -514,8 +514,8 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                         .iter()
                                         .cloned()
                                         .collect();
-                                    let added = crate::ui::bindings::add_stock_from_catalog(&selected);
-                                    stock_feedback.set(format!("Added {} tool(s) from catalogs", added));
+                                    let outcome = crate::ui::bindings::add_stock_from_catalog(&selected);
+                                    stock_feedback.set(describe_addition(outcome));
                                     selected_catalog_tool_keys.set(BTreeSet::new());
                                     catalog_anchor.set(None);
                                     show_catalog_picker.set(false);
@@ -744,7 +744,22 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                 td { class: "stock-name-cell", "{tool.display_name()}" }
                                                 td { "{tool.source_catalog}" }
                                                 td {
-                                                    span { class: "status-chip {tool.preference.class_name()}", "{tool.preference.label()}" }
+                                                    // Editable in the row, like status beside it: both decide
+                                                    // whether the planner may pick this tool, and opening the
+                                                    // detail view to change one of them was the odd rule out.
+                                                    select {
+                                                        class: "stock-inline-select {tool.preference.class_name()}",
+                                                        value: tool_preference_value(tool.preference),
+                                                        // The row's double-click opens the tool; without this,
+                                                        // using the control would also open it.
+                                                        ondoubleclick: move |evt| evt.stop_propagation(),
+                                                        onchange: move |evt| {
+                                                            crate::ui::bindings::set_stock_preference(row_index, &evt.value());
+                                                        },
+                                                        option { value: "preferred", "Preferred" }
+                                                        option { value: "neutral", "Neutral" }
+                                                        option { value: "not_preferred", "Not preferred" }
+                                                    }
                                                 }
                                                 if has_atc {
                                                     td {
@@ -762,6 +777,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                     select {
                                                         class: "stock-inline-select {tool.status.class_name()}",
                                                         value: tool_status_value(tool.status),
+                                                        ondoubleclick: move |evt| evt.stop_propagation(),
                                                         onchange: move |evt| {
                                                             crate::ui::bindings::set_stock_availability(
                                                                 row_index,
@@ -791,10 +807,37 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     }
 }
 
+/// What a bulk add did, in words.
+///
+/// The count alone was misleading: picking five tools already in stock reported
+/// "Added 0 tool(s)", which reads as a broken button rather than as the picker
+/// declining to give you a second copy of what you own.
+fn describe_addition(outcome: crate::ui::bindings::StockAddition) -> String {
+    match (outcome.added, outcome.skipped) {
+        (0, 0) => "Nothing to add".to_string(),
+        (0, skipped) => format!("{skipped} tool(s) already in stock — nothing added"),
+        (added, 0) => format!("Added {added} tool(s) from catalogs"),
+        (added, skipped) => {
+            format!("Added {added} tool(s) — {skipped} already in stock")
+        }
+    }
+}
+
 fn tool_status_value(status: ToolStatus) -> &'static str {
     match status {
         ToolStatus::InStock => "in-stock",
         ToolStatus::OutOfStock => "out-of-stock",
+    }
+}
+
+/// The `<option>` value for a preference — the schema's own storage key, so the value
+/// the DOM carries is the value written. Status has three spellings of one enum
+/// (`in_stock` stored, `in-stock` in the DOM, "In stock" shown); this adds no fourth.
+fn tool_preference_value(preference: ToolPreference) -> &'static str {
+    match preference {
+        ToolPreference::Preferred => "preferred",
+        ToolPreference::Neutral => "neutral",
+        ToolPreference::NotPreferred => "not_preferred",
     }
 }
 
@@ -962,6 +1005,27 @@ mod tests {
         // An anchor whose key no longer exists here, as after a catalog reimport shifts
         // the positional keys under it.
         assert_eq!(catalog_click_range(&section(), Some("t9"), "t2", true), vec!["t2"]);
+    }
+
+    /// "Added 0 tool(s)" is not an explanation. Picking tools already in stock reported
+    /// exactly that, which reads as a broken button rather than as the picker declining
+    /// to give a second copy of what is already owned.
+    #[test]
+    fn a_bulk_add_says_what_it_skipped() {
+        use crate::ui::bindings::StockAddition;
+
+        assert_eq!(
+            describe_addition(StockAddition { added: 3, skipped: 0 }),
+            "Added 3 tool(s) from catalogs"
+        );
+        assert_eq!(
+            describe_addition(StockAddition { added: 0, skipped: 5 }),
+            "5 tool(s) already in stock — nothing added"
+        );
+        assert_eq!(
+            describe_addition(StockAddition { added: 2, skipped: 3 }),
+            "Added 2 tool(s) — 3 already in stock"
+        );
     }
 
     #[test]

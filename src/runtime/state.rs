@@ -1323,6 +1323,27 @@ impl AppState {
         impact
     }
 
+    /// A name for a stock tool that no other stock tool already wears: `base`, else
+    /// `base (2)`, `base (3)`, and so on.
+    ///
+    /// Two rows with the same name are not merely untidy. A tool's name is what labels
+    /// it in the toolset slot picker, the 3D legend, the tooling table and the
+    /// assigner's diagnostics — so an operator pinning "0.8mm carbide drill" to a rack
+    /// slot has no way to say *which* one, and a message naming it identifies neither.
+    ///
+    /// Only the composite (catalog-derived) name is considered. A practical name the
+    /// operator types is theirs to duplicate if they want to.
+    fn unique_composite_name(taken: &[&str], base: &str) -> String {
+        if !taken.contains(&base) {
+            return base.to_string();
+        }
+        // From 2: the unsuffixed name *is* the first, so the next copy is the second.
+        (2..)
+            .map(|n| format!("{base} ({n})"))
+            .find(|candidate| !taken.iter().any(|name| name == candidate))
+            .unwrap_or_else(|| base.to_string())
+    }
+
     fn next_tool_id(&self) -> String {
         loop {
             let candidate = Uuid::now_v7().to_string();
@@ -1332,12 +1353,44 @@ impl AppState {
         }
     }
 
-    /// Builds the stock tools to add for a catalog-picker selection: resolves each
-    /// selected catalog tool, skipping any already present — in stock or already
-    /// queued this call — by non-empty SKU, or by (label, kind, diameter) identity.
-    /// Pure: the caller projects the result to the stock document (the AppData
-    /// writer). Returns the new tools in catalog order.
-    pub fn build_catalog_tool_additions(&self, selected_tool_keys: &[String]) -> Vec<Tool> {
+    /// Whether `tool` is already in stock — the one definition of "the same tool",
+    /// shared by the bulk picker's skip and the single-tool add's warning.
+    ///
+    /// Identity is the tool's **origin**, not its current name: a non-empty SKU matches
+    /// on the SKU alone, so a tool renamed or resized since it was added is still
+    /// recognised. An entry with no SKU falls back to the label it was added under
+    /// (`composite_name`) plus kind and diameter, compared to 0.1 µm — the assigner's
+    /// own precision.
+    ///
+    /// `also` lets a caller include tools queued but not yet written, so one bulk add
+    /// cannot duplicate within itself.
+    pub fn catalog_tool_in_stock(&self, tool: &CatalogStockTool, also: &[Tool]) -> bool {
+        let has_sku = tool.sku.as_ref().is_some_and(|sku| !sku.trim().is_empty());
+        self.tools.iter().chain(also.iter()).any(|existing| {
+            (has_sku && existing.sku.as_deref() == tool.sku.as_deref())
+                || (existing.composite_name == tool.display_name
+                    && existing.kind == tool.kind
+                    && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001)
+        })
+    }
+
+    /// Builds the stock tools to add for a catalog selection, in catalog order.
+    ///
+    /// `allow_duplicates` is what separates the two ways tools reach stock. The bulk
+    /// picker passes `false`: selecting a whole section should not hand back a second
+    /// copy of everything already owned. The single **Add to stock** button passes
+    /// `true`, because asking for one named tool is a deliberate act — a second
+    /// physical drill of the same type is a real thing to record, with its own wear and
+    /// its own in/out-of-stock state — and the copy is named apart by
+    /// [`unique_composite_name`] so the two can be told apart wherever a tool is
+    /// listed by name.
+    ///
+    /// Pure: the caller projects the result to the stock document (the AppData writer).
+    pub fn build_catalog_tool_additions(
+        &self,
+        selected_tool_keys: &[String],
+        allow_duplicates: bool,
+    ) -> Vec<Tool> {
         let mut additions: Vec<Tool> = Vec::new();
         if selected_tool_keys.is_empty() {
             return additions;
@@ -1350,20 +1403,24 @@ impl AppState {
                         continue;
                     }
 
-                    let has_sku = tool.sku.as_ref().map(|sku| !sku.trim().is_empty()).unwrap_or(false);
-                    let is_duplicate = self.tools.iter().chain(additions.iter()).any(|existing| {
-                        (has_sku && existing.sku.as_deref() == tool.sku.as_deref())
-                            || (existing.composite_name == tool.display_name
-                                && existing.kind == tool.kind
-                                && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001)
-                    });
-                    if is_duplicate {
+                    if !allow_duplicates && self.catalog_tool_in_stock(tool, &additions) {
                         continue;
                     }
 
+                    // Named apart only when the name is actually taken, so the ordinary
+                    // add is untouched: the suffix appears exactly when it is needed to
+                    // tell two rows apart.
+                    let taken: Vec<&str> = self
+                        .tools
+                        .iter()
+                        .chain(additions.iter())
+                        .map(|existing| existing.composite_name.as_str())
+                        .collect();
+                    let composite_name = Self::unique_composite_name(&taken, &tool.display_name);
+
                     additions.push(Tool {
                         id: self.next_tool_id(),
-                        composite_name: tool.display_name.clone(),
+                        composite_name,
                         name: String::new(),
                         kind: tool.kind.clone(),
                         diameter: tool.diameter,
