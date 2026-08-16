@@ -1412,10 +1412,12 @@ fn retire_work_coordinate_system(obj: &mut serde_json::Map<String, Value>, file:
     );
 }
 
-/// Adapts [`normalize_machining_value`] to the [`load_normalized`] signature; machining
-/// normalisation needs no file name.
-fn normalize_machining_file(value: &mut Value, _path: &Path) {
-    normalize_machining_value(value);
+/// Adapts [`normalize_machining_value`] to the [`load_normalized`] signature. The file
+/// name rides along so a migration that drops one of the operator's settings can say
+/// which profile it happened in — see [`fold_mill_board`].
+fn normalize_machining_file(value: &mut Value, path: &Path) {
+    let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("machining.yaml");
+    normalize_machining_value(value, file);
 }
 
 /// The per-step keys moved out of the pre-v3 flat top level into a step object.
@@ -1446,7 +1448,7 @@ const STEP_KEYS: &[&str] = &[
 /// Either way each step is cleaned by [`normalize_step_value`]. The version is
 /// stamped to 3 so the datastore's `x-schema-version` gate accepts the file
 /// (it hard-rejects a mismatched `schema_version`).
-fn normalize_machining_value(value: &mut Value) {
+fn normalize_machining_value(value: &mut Value, file: &str) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
@@ -1463,14 +1465,14 @@ fn normalize_machining_value(value: &mut Value) {
             }
         }
         let mut step_value = Value::Object(step);
-        normalize_step_value(&mut step_value);
+        normalize_step_value(&mut step_value, file);
         obj.insert("steps".to_string(), Value::Array(vec![step_value]));
         return;
     }
 
     if let Some(steps) = obj.get_mut("steps").and_then(Value::as_array_mut) {
         for step in steps {
-            normalize_step_value(step);
+            normalize_step_value(step, file);
         }
     }
 }
@@ -1508,15 +1510,115 @@ fn normalize_machining_value(value: &mut Value) {
 /// - `finishing` collapsed from `{clearance, direction}` to the clearance alone. Climb is
 ///   the only sensible direction for cutting a part out, and the toolpaths take it from
 ///   the geometry.
-fn normalize_route_board_value(step: &mut serde_json::Map<String, Value>) {
-    // Both keys, because `mill_board` now carries the same shape: it is `route_board` with
-    // an area-clearing strategy, and it always shared `read_edge_config`. Its old shape —
-    // `finishing: {clearance, direction}` and nothing else — would be rejected by the new
-    // one, and its `direction` has the same fate as `route_board`'s did: the toolpaths
-    // pick climb from the geometry, so the setting went rather than staying as a knob that
-    // changed nothing.
+fn normalize_edge_blocks(step: &mut serde_json::Map<String, Value>) {
+    // Both keys, and `mill_board` first has to be brought to this shape before
+    // [`fold_mill_board`] can fold it: its oldest form was `finishing: {clearance,
+    // direction}` and nothing else, which the current shape would reject. Running the
+    // same migration over both means the fold only ever sees one shape.
     for key in ["route_board", "mill_board"] {
         normalize_edge_block(step, key);
+    }
+}
+
+/// Folds a retired `mill_board` block into `route_board`, the one operation that cuts the
+/// board's boundary.
+///
+/// The two were the same operation wearing two names: `mill_board` was declared as a
+/// `$ref` to `route_board`'s own shape, differing only in defaulting `outline.cut` to
+/// `mill` rather than `route` — and `mill` and `route` plan the identical toolpath, since
+/// no area-clearing strategy was ever built. Being *separate keys* was the active harm:
+/// the once-per-face rule compares keys, so a step could enable both and the editor would
+/// not stop it.
+///
+/// # What must be preserved
+///
+/// Whichever block `read_steps` was reading is the one that produced the operator's last
+/// program, and this reproduces its choice exactly: it read `/steps/{i}/mill_board`
+/// whenever the step listed `mill_board`, in preference to `route_board`. So a step that
+/// listed both keeps its **milling** settings and discards the routing ones — the reverse
+/// of the "existing value under the new name wins" rule used when renaming primitives.
+/// Preserving the cut beats preserving the key: a kerf is a dimension of the finished
+/// job, and silently adopting the other block's could cut a different board.
+///
+/// # Why the block is removed even when it was never used
+///
+/// The loader materialises every per-operation config object into every step, so
+/// essentially every profile ever saved carries a full `mill_board` block whether or not
+/// it was ever ticked. That is why presence cannot be the signal — only the `operations`
+/// array says what the step actually ran — and why the common case has to be silent.
+///
+/// It is removed rather than left alone because an unknown key does **not** stop a
+/// document loading: the datastore collects the validation error and carries on, keeping
+/// keys the schema does not describe (`build_object` in crates/datastore/src/parse.rs). A
+/// block left here would survive every load, be handed to CNC templates, and be written
+/// back out on the next flush.
+fn fold_mill_board(step: &mut serde_json::Map<String, Value>, file: &str) {
+    let listed = |key: &str| {
+        step.get("operations")
+            .and_then(Value::as_array)
+            .is_some_and(|ops| ops.iter().filter_map(Value::as_str).any(|op| op == key))
+    };
+    let milled = listed("mill_board");
+    let routed = listed("route_board");
+
+    let block = step.remove("mill_board");
+    if !milled {
+        // Never ran it: the block was furniture. `route_board` is left exactly as it is.
+        return;
+    }
+
+    if routed {
+        let step_name = step
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("an unnamed step");
+        warn!(
+            "[{file}] {step_name} ran both 'Route board edge' and 'Mill board', which are \
+             now one operation. Its milling settings were kept and its routing settings \
+             dropped, because milling is what the step was generating from. Check the \
+             step's kerf, retention and finishing."
+        );
+    }
+
+    let mut folded = match block {
+        Some(Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    // A block that never named a cut must still come out milling: `mill` was
+    // `mill_board`'s own default, and without this the loader materialises `route` and
+    // the step quietly becomes a contour cut. An explicit cut — including `score` or
+    // `vgroove` — is the operator's and is left alone.
+    let outline = folded
+        .entry("outline")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(outline) = outline.as_object_mut() {
+        outline.entry("cut").or_insert_with(|| Value::from("mill"));
+    }
+
+    step.insert("route_board".to_string(), Value::Object(folded));
+
+    // `operation_key` items are `uniqueItems`, so a step that listed both must not come
+    // out listing `route_board` twice — that would trade one validation error for
+    // another. Document order is kept; nothing reads the array as ordered.
+    if let Some(operations) = step.get_mut("operations").and_then(Value::as_array_mut) {
+        let mut kept: Vec<Value> = Vec::with_capacity(operations.len());
+        let mut seen: Vec<&str> = Vec::new();
+        for operation in operations.iter() {
+            let key = match operation.as_str() {
+                Some("mill_board") => "route_board",
+                Some(other) => other,
+                // Not a string, so not an operation key the schema would accept anyway.
+                None => continue,
+            };
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            kept.push(Value::from(key));
+        }
+        *operations = kept;
     }
 }
 
@@ -1600,7 +1702,7 @@ fn rename_side_to_board_face(obj: &mut serde_json::Map<String, Value>) {
 
 /// Operation config objects are left in place (always materialized by the
 /// loader); only their `enabled` flag is stripped.
-fn normalize_step_value(step: &mut Value) {
+fn normalize_step_value(step: &mut Value, file: &str) {
     let Some(obj) = step.as_object_mut() else {
         return;
     };
@@ -1621,7 +1723,11 @@ fn normalize_step_value(step: &mut Value) {
 
     rename_side_to_board_face(obj);
 
-    normalize_route_board_value(obj);
+    normalize_edge_blocks(obj);
+
+    // After the edge blocks, never before: an old-shape `mill_board` has to be brought to
+    // the current shape first, so the fold sees one shape rather than two.
+    fold_mill_board(obj, file);
 
     // A step's cnc/fixture/toolset was once `{ default: <uuid>, choices: [<uuid>…] }`,
     // for a job-level override that was never built and has since been dropped: a step
@@ -2347,51 +2453,205 @@ mod tests {
     }
     /// **A milling step configures the same things a routing step does.**
     ///
-    /// `read_edge_config` reads whichever of `route_board`/`mill_board` the step enables
-    /// through one reader built for `route_board`'s shape, but `mill_board` used to have a
-    /// shape all its own. Nothing lined up: a milling step's kerf, cut mode, cutouts and
-    /// retention all silently took the reader's fallbacks, and the machining screen had no
-    /// control for any of them because the schema described none.
+    /// The one that matters: a real profile on disk that milled its outline opens clean
+    /// and still mills.
+    ///
+    /// The unit tests above can all pass while the file still trips the validator, and an
+    /// unmigrated file does **not** fail loudly — the datastore collects the validation
+    /// error and loads the document anyway, keeping keys the schema does not describe. So
+    /// the failure this catches is a profile that opens with a stray `mill_board`, an
+    /// operation list naming an operation that no longer exists, and a step that silently
+    /// cuts no outline at all.
     #[test]
-    fn a_milling_step_offers_the_same_edge_settings_as_a_routing_one() {
+    fn a_profile_that_milled_its_outline_loads_clean_and_still_mills() {
         let dir = tempdir().unwrap();
-        let (mut data, _) = load_temp(dir.path());
-        let id = data.create(Profile::Machining).expect("create machining");
-        let doc = data.get(id).expect("the profile exists");
+        let data_dir = dir.path().join("data");
+        let proc_dir = data_dir.join("processing_profiles");
+        fs::create_dir_all(&proc_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        // Serialised rather than written as a string literal: a `\`-continuation in a Rust
+        // string swallows the next line's leading whitespace, and YAML is indentation.
+        let saved = serde_yaml::to_string(&serde_json::json!({
+            "schema_version": 3,
+            "id": id.to_string(),
+            "name": "Milled the outline",
+            "steps": [{
+                "name": "Cut out",
+                "operations": ["mill_board"],
+                "mill_board": {
+                    "outline": { "cut": "mill" },
+                    "kerf": "3.0mm",
+                    "finishing": "0.25mm",
+                },
+            }],
+        }))
+        .expect("the fixture serialises");
+        fs::write(proc_dir.join(format!("{id}.yaml")), saved).unwrap();
 
-        let keys = |ptr: &str| -> Vec<String> {
-            match &doc.root.get_pointer(ptr).expect(ptr).value {
-                NodeValue::Object(map) => map.keys().cloned().collect(),
-                other => panic!("{ptr} should be an object, got {other:?}"),
-            }
-        };
-        let mut routed = keys("/steps/0/route_board");
-        let mut milled = keys("/steps/0/mill_board");
-        routed.sort();
-        milled.sort();
-        assert_eq!(routed, milled, "the two operations configure the same things");
-        assert!(routed.contains(&"kerf".to_string()), "including the kerf: {routed:?}");
+        let (data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "the migrated profile validates: {errors:?}");
+
+        let doc = data.get(id).expect("the profile loads");
+        assert_eq!(
+            doc.root.get_pointer("/steps/0/route_board/outline/cut").map(|n| &n.value),
+            Some(&NodeValue::Str("mill".to_string())),
+            "still milled"
+        );
+        assert!(
+            doc.root.get_pointer("/steps/0/mill_board").is_none(),
+            "and carries no trace of the retired key"
+        );
     }
 
-    /// A profile written when `mill_board` had its own shape still loads, and the settings
-    /// it did carry survive. `direction` does not: climb is picked from the geometry, so
-    /// it was a knob that changed nothing — the same fate it met under `route_board`.
+    /// The key went; the cut must not. A step that milled its outline keeps milling it,
+    /// with the settings it was milling with.
+    ///
+    /// The failure this guards against is silent in both directions: dropping the block
+    /// leaves the step cutting no outline at all, and folding it without carrying
+    /// `outline.cut` leaves it cutting a contour with the default 2 mm kerf — a different
+    /// board, cut by a tool the operator did not choose.
     #[test]
-    fn a_mill_board_block_in_the_old_shape_is_migrated() {
+    fn a_step_that_milled_its_outline_still_cuts_it_by_milling() {
+        let mut step = serde_json::json!({
+            "name": "Mill it out",
+            "operations": ["drill_pth", "mill_board"],
+            "mill_board": {
+                "outline": { "cut": "mill", "retention": { "mode": "tabs", "count": 6 } },
+                "kerf": "3.0mm",
+                "finishing": "0.25mm",
+            },
+        });
+        normalize_step_value(&mut step, "test.yaml");
+
+        assert_eq!(
+            step.pointer("/operations").and_then(Value::as_array),
+            Some(&vec![Value::from("drill_pth"), Value::from("route_board")]),
+            "the operation is renamed in place, keeping the step's other work"
+        );
+        assert_eq!(step.pointer("/route_board/kerf").and_then(Value::as_str), Some("3.0mm"));
+        assert_eq!(
+            step.pointer("/route_board/finishing").and_then(Value::as_str),
+            Some("0.25mm")
+        );
+        assert_eq!(
+            step.pointer("/route_board/outline/retention/count").and_then(Value::as_i64),
+            Some(6)
+        );
+        assert_eq!(
+            step.pointer("/route_board/outline/cut").and_then(Value::as_str),
+            Some("mill"),
+            "and it is still milled"
+        );
+        assert!(step.pointer("/mill_board").is_none(), "the retired key is gone");
+    }
+
+    /// A profile written when `mill_board` had a shape of its own is brought to the
+    /// current shape *and then* folded. `direction` does not survive: climb is picked from
+    /// the geometry, so it was a knob that changed nothing.
+    ///
+    /// The `cut` assertion is the load-bearing one. `normalize_edge_block` only creates an
+    /// `outline` when there was an `edge` to rename, so a block this old reaches the fold
+    /// with no cut named — and without the fold writing one, the loader materialises
+    /// `route` and the mill quietly becomes a contour cut.
+    #[test]
+    fn a_mill_board_block_in_the_old_shape_is_folded_and_migrated() {
         let mut step = serde_json::json!({
             "name": "Mill",
+            "operations": ["mill_board"],
             "mill_board": { "finishing": { "clearance": "0.25mm", "direction": "conventional" } },
         });
-        normalize_step_value(&mut step);
+        normalize_step_value(&mut step, "test.yaml");
+
         assert_eq!(
-            step.pointer("/mill_board/finishing").and_then(Value::as_str),
+            step.pointer("/route_board/finishing").and_then(Value::as_str),
             Some("0.25mm"),
             "the clearance the operator set survives as the finishing allowance"
         );
         assert!(
-            step.pointer("/mill_board/direction").is_none(),
+            step.pointer("/route_board/direction").is_none(),
             "and the retired direction does not"
         );
+        assert_eq!(
+            step.pointer("/route_board/outline/cut").and_then(Value::as_str),
+            Some("mill"),
+            "a block that never named a cut still comes out milling"
+        );
+        assert!(step.pointer("/mill_board").is_none());
+    }
+
+    /// A step that ran both keeps the settings the planner was actually reading.
+    ///
+    /// Reachable through the ordinary UI, not just by hand-editing: the once-per-face rule
+    /// compares operation *keys*, so "Route board edge" and "Mill board" were never in
+    /// conflict and both boxes could be ticked. `read_steps` resolved that by reading
+    /// `mill_board`, so those are the settings that produced the last program and those
+    /// are the ones kept.
+    #[test]
+    fn a_step_that_ran_both_keeps_the_settings_the_planner_was_reading() {
+        let mut step = serde_json::json!({
+            "name": "Both",
+            "operations": ["route_board", "mill_board"],
+            "route_board": { "outline": { "cut": "route" }, "kerf": "2.0mm" },
+            "mill_board": { "outline": { "cut": "mill" }, "kerf": "3.0mm" },
+        });
+        normalize_step_value(&mut step, "test.yaml");
+
+        assert_eq!(
+            step.pointer("/route_board/kerf").and_then(Value::as_str),
+            Some("3.0mm"),
+            "the milling kerf, because milling is what it was generating from"
+        );
+        assert_eq!(step.pointer("/route_board/outline/cut").and_then(Value::as_str), Some("mill"));
+        assert_eq!(
+            step.pointer("/operations").and_then(Value::as_array),
+            Some(&vec![Value::from("route_board")]),
+            "and listed exactly once — `operation_key` items are uniqueItems, so a naive \
+             rename would trade one validation error for another"
+        );
+    }
+
+    /// The common case, and it must be silent. The loader materialises every
+    /// per-operation block into every step, so essentially every profile ever saved
+    /// carries a `mill_board` block it never ran. Warning on that would fire on every
+    /// profile at every launch, and touching `route_board` would change a program the
+    /// operator did not ask to change.
+    #[test]
+    fn a_mill_board_block_the_step_never_ran_is_dropped_without_a_word() {
+        let mut step = serde_json::json!({
+            "name": "Route only",
+            "operations": ["route_board"],
+            "route_board": { "outline": { "cut": "route" }, "kerf": "1.0mm" },
+            "mill_board": { "outline": { "cut": "mill" }, "kerf": "3.0mm" },
+        });
+        let before = step.pointer("/route_board").cloned().expect("the routing block");
+        normalize_step_value(&mut step, "test.yaml");
+
+        assert!(step.pointer("/mill_board").is_none(), "the furniture goes");
+        assert_eq!(
+            step.pointer("/route_board"),
+            Some(&before),
+            "and the settings the step actually used are untouched"
+        );
+        assert_eq!(
+            step.pointer("/operations").and_then(Value::as_array),
+            Some(&vec![Value::from("route_board")])
+        );
+    }
+
+    /// Normalising twice must change nothing. The fold *writes* `outline.cut`, so a
+    /// second pass over its own output is exactly where a rule that is not idempotent
+    /// would show up — and every load runs it again over what the last flush wrote.
+    #[test]
+    fn folding_the_outline_operation_twice_changes_nothing() {
+        let mut once = serde_json::json!({
+            "name": "Mill it out",
+            "operations": ["mill_board"],
+            "mill_board": { "kerf": "3.0mm" },
+        });
+        normalize_step_value(&mut once, "test.yaml");
+        let mut twice = once.clone();
+        normalize_step_value(&mut twice, "test.yaml");
+        assert_eq!(once, twice);
     }
     #[test]
     fn job_singleton_references_a_machining_profile() {
@@ -3056,7 +3316,7 @@ mod tests {
     fn a_step_written_with_side_to_machine_keeps_the_face_it_named() {
         for (was, now) in [("top", "front"), ("bottom", "back")] {
             let mut step = serde_json::json!({ "name": "S", "side_to_machine": was });
-            normalize_step_value(&mut step);
+            normalize_step_value(&mut step, "test.yaml");
             assert_eq!(step.get("side_to_machine"), None, "the old key does not survive");
             assert_eq!(
                 step.pointer("/board_face").and_then(Value::as_str),
@@ -3067,12 +3327,12 @@ mod tests {
 
         // A step that never said anything gets the schema default rather than a guess.
         let mut bare = serde_json::json!({ "name": "S" });
-        normalize_step_value(&mut bare);
+        normalize_step_value(&mut bare, "test.yaml");
         assert_eq!(bare.get("board_face"), None, "absent stays absent — the schema defaults it");
 
         // Re-running the migration over a migrated step must not resurrect anything.
         let mut migrated = serde_json::json!({ "board_face": "back", "side_to_machine": "top" });
-        normalize_step_value(&mut migrated);
+        normalize_step_value(&mut migrated, "test.yaml");
         assert_eq!(
             migrated.pointer("/board_face").and_then(Value::as_str),
             Some("back"),

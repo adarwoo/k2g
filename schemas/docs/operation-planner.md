@@ -94,7 +94,7 @@ with a single `drill` op (G81 — no peck, decision 4).
 | **Oblong — `drill_ends_then_route`** | two **drill** ops (the end centres) **+** one **route** op (mill the web) |
 | **Oblong — `drill_chain`** | N overlapping **drill** ops along the major axis |
 | **Oblong — `drill_chain_then_route`** | N **drill** ops **+** a cleanup **route** op |
-| **Route board** (`route_board`/`mill_board`) | **contour** ops for the outline (offset path, tabs/mouse-bites *inside* the op) + one per interior **cutout** |
+| **Cut board outline** (`route_board`) | **contour** ops for the outline (offset path, tabs/mouse-bites *inside* the op) + one per interior **cutout** |
 | **Corner relief** | smallest-drill ops at concave corners the router radius can't reach |
 | **Pilot** (routed hole, `pilot` on) | a **drill** op preceding the hole's helical route |
 

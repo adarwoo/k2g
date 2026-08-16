@@ -454,13 +454,6 @@ fn sample_steps() -> Vec<StepValue> {
         ),
         ("finishing".into(), StepValue::Length(Length::from_mm(0.1))),
     ]);
-    let mill_board = StepValue::Map(vec![(
-        "finishing".into(),
-        StepValue::Map(vec![
-            ("clearance".into(), StepValue::Length(Length::from_mm(0.1))),
-            ("direction".into(), StepValue::Text("climb".into())),
-        ]),
-    )]);
 
     // The ids are the shape a real step carries — a UUID the operator never reads — and
     // the `_name` beside each is what a header would actually print. Both are sampled so
@@ -500,7 +493,6 @@ fn sample_steps() -> Vec<StepValue> {
                     ("drill_sharp_corners".into(), StepValue::Bool(true)),
                 ]),
             ),
-            ("mill_board".into(), mill_board.clone()),
             (
                 "engrave_copper".into(),
                 StepValue::Map(vec![("width".into(), StepValue::Text("0.25mm".into()))]),

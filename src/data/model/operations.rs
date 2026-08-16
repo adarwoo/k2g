@@ -39,8 +39,8 @@ pub struct MachiningOperation {
 /// The operations, in schema order.
 ///
 /// Ordered by how often a step uses them, not alphabetically or by phase: almost
-/// every job drills PTH, most also drill NPTH, many route the edge; locating pins and
-/// milling are the exceptions. The UI shows them in this order and persists the
+/// every job drills PTH, most also drill NPTH, many cut the outline; locating pins and
+/// engraving are the exceptions. The UI shows them in this order and persists the
 /// enabled set in it.
 ///
 /// `drill_locating_pins` is the one repeatable operation today. Pins register the
@@ -63,8 +63,8 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
     },
     MachiningOperation {
         key: "route_board",
-        label: "Route board edge",
-        short_label: "Route",
+        label: "Cut board outline",
+        short_label: "Outline",
         once_per_face: true,
     },
     // Once per face like the boundary: the openings exist once, so two steps both
@@ -80,12 +80,6 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         label: "Drill locating pins",
         short_label: "Pins",
         once_per_face: false,
-    },
-    MachiningOperation {
-        key: "mill_board",
-        label: "Mill board",
-        short_label: "Mill",
-        once_per_face: true,
     },
     // Repeatable, as the note above anticipated: passes at different depths, or over
     // different regions, are all legitimately engraving.
@@ -137,7 +131,7 @@ pub const UNNAMED_STEP: &str = "Machining step";
 ///
 /// Deliberately **not** persisted: writing the derived name into the document would make
 /// the step look named, and it would then stop tracking the operations it describes — tick
-/// "Route board edge" on a step called "PTH" and the name is a lie the operator did not
+/// "Cut board outline" on a step called "PTH" and the name is a lie the operator did not
 /// tell. Derived on read, it always matches.
 ///
 /// The test for "not named yet" is the literal [`UNNAMED_STEP`] default (or blank), not the
@@ -334,7 +328,7 @@ mod tests {
     #[test]
     fn an_unnamed_step_is_named_after_what_it_does() {
         assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["drill_pth"])), "PTH");
-        assert_eq!(step_display_name("", &ops(&["route_board"])), "Route");
+        assert_eq!(step_display_name("", &ops(&["route_board"])), "Outline");
         assert_eq!(
             step_display_name("   ", &ops(&["drill_locating_pins", "drill_pth", "drill_npth"])),
             "PTH + NPTH + Pins",
@@ -372,27 +366,23 @@ mod tests {
     }
 
     /// The reason the rule is per face rather than per profile: two faces are two
-    /// setups, and milling each one is two different jobs.
+    /// setups, and cutting the outline of each is two different jobs.
     #[test]
     fn the_two_board_faces_are_counted_separately() {
         let conflicts = conflicting_operations([
-            (
-                "Mill the front",
-                false,
-                ops(&["mill_board"]).as_slice(),
-            ),
-            ("Mill the back", true, ops(&["mill_board"]).as_slice()),
+            ("Cut the front", false, ops(&["route_board"]).as_slice()),
+            ("Cut the back", true, ops(&["route_board"]).as_slice()),
         ]);
         assert!(
             conflicts.is_empty(),
-            "one mill per face is the intended workflow"
+            "one outline cut per face is the intended workflow"
         );
 
         let conflicts = conflicting_operations([
-            ("Rough", true, ops(&["mill_board"]).as_slice()),
-            ("Finish", true, ops(&["mill_board"]).as_slice()),
+            ("Rough", true, ops(&["route_board"]).as_slice()),
+            ("Finish", true, ops(&["route_board"]).as_slice()),
         ]);
-        assert_eq!(conflicts.len(), 1, "but milling the same face twice is not");
+        assert_eq!(conflicts.len(), 1, "but cutting the same face twice is not");
         assert!(
             conflicts[0].back,
             "and the message must name the face it happened on"
@@ -446,7 +436,7 @@ mod tests {
         };
         assert_eq!(
             conflict.message(),
-            "Route board edge is set in step 1 'Drill' and step 2 'Cut out' on the front \
+            "Cut board outline is set in step 1 'Drill' and step 2 'Cut out' on the front \
              face; only one step may cut it."
         );
     }

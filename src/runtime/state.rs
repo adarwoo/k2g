@@ -2078,13 +2078,6 @@ fn default_operation_setup_value(op: ProductionOperation) -> Value {
             "island_tab": "4%",
             "drill_sharp_corners": true,
         }),
-        ProductionOperation::MillBoard => json!({
-            "enabled": false,
-            "finishing": {
-                "clearance": "0.1mm",
-                "direction": "climb",
-            }
-        }),
         ProductionOperation::EngraveCopper => json!({
             "enabled": false,
             "width": "0.25mm",
@@ -2246,7 +2239,6 @@ fn operation_to_key(operation: ProductionOperation) -> &'static str {
         ProductionOperation::DrillNpth => "drill_npth",
         ProductionOperation::RouteBoard => "route_board",
         ProductionOperation::RouteCutouts => "route_cutouts",
-        ProductionOperation::MillBoard => "mill_board",
         ProductionOperation::EngraveCopper => "engrave_copper",
     }
 }
@@ -2258,7 +2250,12 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
         "drill_npth" => Some(ProductionOperation::DrillNpth),
         "route_board" => Some(ProductionOperation::RouteBoard),
         "route_cutouts" => Some(ProductionOperation::RouteCutouts),
-        "mill_board" => Some(ProductionOperation::MillBoard),
+        // Retired: one operation cuts the boundary, and `fold_mill_board` rewrites the
+        // key on load. Kept as an alias so a value that reaches here without passing
+        // that migration — a hand-built list, an imported profile — still names the
+        // operation the board actually gets, rather than resolving to nothing and
+        // leaving the profile with an empty operation set.
+        "mill_board" => Some(ProductionOperation::RouteBoard),
         "engrave_copper" => Some(ProductionOperation::EngraveCopper),
         _ => None,
     }

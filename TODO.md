@@ -205,6 +205,4 @@ Check board orientation and scale
 Bugs / improvemmet
 -------------------
 Max feed rate for the CNC -> Do we care? - Yes we do.
-In the CNC : Mill board edge?
 Oversize is global - not bblong
-Route board edge: Cut board

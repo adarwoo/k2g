@@ -328,7 +328,8 @@ first. So a header can name itself:
 
 Each entry in `steps` is the step exactly as you set it up on the Machining screen, so
 its fields are that screen's fields: `name`, `board_face`, `operations`, and the
-settings blocks `drill_pth`, `drill_npth`, `route_board` and `mill_board`. Reach into
+settings blocks it enables — `drill_pth`, `drill_npth`, `route_board`,
+`route_cutouts`, `drill_locating_pins`, `engrave_copper`. Reach into
 them with a dot, as deep as you like:
 
 ```

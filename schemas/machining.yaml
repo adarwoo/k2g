@@ -17,7 +17,7 @@ type: object
 
 $defs:
   # Ordered by how often a step uses them — almost every job drills PTH, most also
-  # drill NPTH, many route the edge; locating pins and milling are the exceptions.
+  # drill NPTH, many cut the outline; locating pins and engraving are the exceptions.
   # The UI shows them in this order and persists the enabled set in it.
   #
   # ONE CLAIM PER BOARD FACE. Every key here except `drill_locating_pins` may appear
@@ -39,7 +39,6 @@ $defs:
       - route_board
       - route_cutouts
       - drill_locating_pins
-      - mill_board
       - engrave_copper
 
   allowance:
@@ -192,10 +191,21 @@ $defs:
           cut: route
           retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
         properties:
+          # `mill` is accepted and currently emits exactly what `route` does: both
+          # plan one contour offset by the cutter radius, and no area-clearing
+          # strategy has been built. It is kept because it is what a step migrated
+          # from the retired `mill_board` operation lands on, and because it says
+          # what the operator asked for when there is one to honour.
+          #
+          # `score` and `vgroove` are declared and NOT planned: a step set to
+          # either produces no outline pass at all — not a shallower one — and says
+          # so in the step's notes (`machining_plan.rs`). They still require the
+          # kerf router, which is worth knowing before choosing one.
           cut:
             description: >-
-              How the boundary is made. `route`/`mill` cut right through, so the
-              board needs retaining; `score`/`vgroove` cut partway and it does not.
+              How the boundary is made. `route` and `mill` cut right through, so
+              the board needs retaining, and are currently identical. `score` and
+              `vgroove` are not yet planned and produce no outline pass.
             type: string
             default: route
             enum: [route, mill, score, vgroove]
@@ -536,31 +546,17 @@ $defs:
           island_tab: 4%
           drill_sharp_corners: true
 
-      # `mill_board` is `route_board` done with an area-clearing strategy rather
-      # than a contour cut, so it takes the SAME configuration — the same edge
-      # kerf, the same retention and the same finishing.
+      # `mill_board` was here, as a `$ref` to `route_board`'s own shape defaulting
+      # `outline.cut` to `mill`. It is gone: it was a second key for one operation,
+      # and being a second *key* was the harm — the once-per-face rule compares
+      # keys, so a step could claim the boundary twice and the editor would not
+      # stop it. Milling is a `cut` value on `route_board`, which is where the
+      # choice always lived.
       #
-      # It used to have a shape all its own (`finishing: {clearance, direction}`
-      # and nothing else), while `read_edge_config` in src/runtime/tooling.rs
-      # read whichever of the two the step enables through one reader built for
-      # `route_board`'s shape. Nothing lined up: a milling step's kerf, cut mode,
-      # cutouts and retention all silently took the reader's fallbacks, its
-      # `finishing` object failed to read as a length and fell back too, and the
-      # machining screen had no control for any of them because the schema
-      # described none. The operator could see a "Mill board" section with one
-      # setting in it that changed nothing the planner read.
-      #
-      # (`direction` is gone with the rest: `route_board` dropped it in 2026-07
-      # because the toolpaths pick climb from the geometry — see the note on
-      # `finishing` in the `route_board` def.)
-      mill_board:
-        $ref: "#/$defs/route_board"
-        default:
-          outline:
-            cut: mill
-            retention: { mode: tabs, count: 4, width: 2.0mm, mouse_bites: false }
-          kerf: 2.0mm
-          finishing: 0.1mm
+      # Folded on load — see `fold_mill_board` in src/data/mod.rs, which moves the
+      # block onto `route_board` and sets `outline.cut: mill` for a step that ran
+      # it. A CNC template reading `steps[step_index].mill_board.*` must become
+      # `.route_board.*`.
 
       engrave_copper:
         $ref: "#/$defs/engrave_copper"

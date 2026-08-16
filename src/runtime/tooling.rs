@@ -205,11 +205,11 @@ impl StepRaw {
         self.enabled("drill_npth")
     }
 
-    /// The board boundary, by either route (a contour cut) or mill (area clearing).
-    /// One predicate because both cut the outline; they differ in *how*, which is the
-    /// planner's business rather than this question's.
+    /// The board boundary. One operation, whose `outline.cut` says how it is made —
+    /// `mill_board` was a second key for the same work and folds into this one on load
+    /// (`fold_mill_board` in src/data/mod.rs).
     pub(crate) fn routes_outline(&self) -> bool {
-        self.enabled("route_board") || self.enabled("mill_board")
+        self.enabled("route_board")
     }
 
     /// The interior openings, cut on their own terms rather than with the edge kerf.
@@ -822,14 +822,7 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                 let drill = drill_base
                     .map(|base| read_drill_config(root, &base))
                     .unwrap_or_default();
-                // `mill_board` shares the `route_board` shape; whichever the step
-                // enables, its edge config is read from the same place.
-                let edge_op = if operations.iter().any(|op| op == "mill_board") {
-                    "mill_board"
-                } else {
-                    "route_board"
-                };
-                let route_board = read_edge_config(root, &format!("/steps/{i}/{edge_op}"));
+                let route_board = read_edge_config(root, &format!("/steps/{i}/route_board"));
                 let route_cutouts = read_cutout_config(root, &format!("/steps/{i}/route_cutouts"));
                 let engrave_copper =
                     read_engrave_config(root, &format!("/steps/{i}/engrave_copper"));

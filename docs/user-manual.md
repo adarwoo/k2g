@@ -146,7 +146,7 @@ else. Building the first job takes about ten minutes; after that, a new board is
    a one-slot spare toolset is enough. (§8)
 6. **Machining → Add Machining.** Bind the CNC, fixture and toolset to the step,
    tick the operations you want (*Drill plated holes*, *Drill non-plated holes*,
-   *Route board edge* is the usual first set), and set the outline options. (§9)
+   *Cut board outline* is the usual first set), and set the outline options. (§9)
 7. **Job → sidebar → Machining profile**: select the profile you just made. The job
    summary fills in and generation starts by itself.
 8. **Check the plan.** *Tooling* — is each hole size getting a sensible tool?
@@ -389,15 +389,14 @@ Both take the same settings, under **Holes**:
 | **Oversize / Undersize allowance** | How far a stock drill may differ from the requested finished size, as a fraction of the hole capped by an absolute maximum (defaults: 8% capped at 0.10 mm oversize, 6% capped at 0.08 mm undersize). Applies to *every* hole, round and oblong. Plated holes account for the plating thickness read from the board. |
 | **Oblong hole strategy** | How a slot longer than it is wide is made: `route`, `drill_ends_then_route` (default), `drill_chain`, or `drill_chain_then_route`. Round holes ignore this. |
 
-### Route board edge / Mill board
+### Cut board outline
 
-The board's own boundary. *Mill* is the same settings done with an area-clearing
-strategy instead of a contour cut.
+The board's own boundary, however it is made — the **Cut** setting decides.
 
 | Setting | Meaning |
 |---|---|
-| **Cut** | `route` / `mill` cut right through, so the board needs retaining. `score` / `vgroove` cut partway and it does not. |
-| **V-groove depth** | 50–100% (default 80%), when the cut is a V-groove. |
+| **Cut** | `route` and `mill` cut right through, so the board needs retaining. They currently produce the identical toolpath: one contour offset by the cutter's radius. `score` and `vgroove` are **not yet planned** — a step set to either produces no outline pass at all, and says so in the step's notes, while still requiring the kerf router. |
+| **V-groove depth** | 50–100% (default 80%). Stored, and not yet read by anything — see **Cut**. |
 | **Retention → Mode** | `tabs` leaves short bridges so the part cannot move under the cutter; `none` cuts it free in one pass — correct only when something else holds it (tape, vacuum). |
 | **Retention → Count** | How many tabs. They are shared out over the outline's straight sides, longest side first, evenly within each side. |
 | **Retention → Width** | How much contour each tab leaves uncut. |
