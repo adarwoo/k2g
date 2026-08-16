@@ -106,9 +106,9 @@ face — and is being tested on real hardware. What is **not** done:
 | --- | --- | --- |
 | **Windows** | Packaged — the release builds are Windows | WebView2 |
 | **Linux** | Builds and runs, verified against the running application on Debian 13 (GTK 3 + WebKitGTK 2.52, KiCad 10 over IPC). Not packaged: [build it](#from-source). | WebKitGTK |
-| **macOS** | Should build and run — k2g knows where KiCad's configuration, its plugin directory and its own data live there — but nobody has built it yet. Reports welcome. | WKWebView |
+| **macOS** | Packaged — every change is built and tested on both Apple Silicon and Intel, and each release carries a build for each. Nobody has yet driven the UI on a Mac, so reports welcome. | WKWebView |
 
-- **Rust** (stable) to build from source, which is the only route on Linux and macOS.
+- **Rust** (stable) to build from source, which is the only route on Linux.
 
 Two features vary by platform, and both degrade rather than break. Saving straight to
 a removable medium and ejecting it needs the Win32 volume API, so on Linux and macOS
@@ -120,9 +120,14 @@ settings rather than refusing.
 
 ## Install
 
-On Linux and macOS, [build from source](#from-source) — the releases are Windows
-only, and nothing else is planned until someone is running k2g on each often enough
-to say the packaging works.
+On Linux, [build from source](#from-source) — nothing is packaged there until someone
+is running k2g on it often enough to say the packaging works.
+
+On macOS, take the build for your Mac from the latest
+[release](https://github.com/adarwoo/k2g/releases) — `arm64` for Apple Silicon,
+`x86_64` for Intel. They are unsigned, so clear the quarantine flag once with
+`xattr -dr com.apple.quarantine` on the app or the extracted binary; see
+[install-and-security.md](docs/install-and-security.md#macos).
 
 On Windows, take the latest [release](https://github.com/adarwoo/k2g/releases):
 
@@ -191,8 +196,9 @@ list above. k2g resolves the Mac locations for everything it touches: KiCad's
 configuration in `~/Library/Preferences/kicad`, its plugin directory under
 `~/Documents/KiCad`, and k2g's own data in `~/Library/Application Support/k2g`.
 
-Untested, though — this is the platform where the honest answer is that it should
-work and nobody has checked. If you build it, say how it went.
+Built and tested on both architectures by CI, so it compiles and its tests pass — but
+CI has no screen, and nobody has yet opened a window on a Mac. That is the part still
+worth a report: if you run it, say how it went.
 
 | Environment variable | Effect |
 | --- | --- |

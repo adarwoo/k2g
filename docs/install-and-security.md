@@ -76,11 +76,35 @@ minisign -Vm k2g-<version>.msi -P RWQ...    # the key in assets/release-signing.
 
 A failed check means the file is not what was published. Do not run it.
 
-### Other platforms
+### macOS
 
-Linux and macOS build from source (`cargo build --release`) but are not currently
-tested or packaged. The Windows-only parts are removable-media handling and the KiCad
-process check; everything else is portable.
+Both architectures are built and tested on every change, and published with each
+release. Take the one for your Mac — **`arm64`** for Apple Silicon, **`x86_64`** for
+Intel:
+
+- **`k2g-<version>-portable-macos-<arch>.tar.gz`** — extract and run `k2g`. The binary
+  embeds everything it needs, so there is nothing to install and nothing else to place.
+  Keep `k2g-kicad-launcher` beside it for the KiCad integration.
+- **`k2g-<version>-macos-<arch>.dmg`**, when a release carries one — the same build as
+  an application bundle.
+
+These are **not signed or notarised**, so the first open is refused by Gatekeeper with
+"cannot be opened because the developer cannot be verified". Clear the quarantine flag
+once, on whichever you downloaded:
+
+```
+xattr -dr com.apple.quarantine /Applications/k2g.app     # or the extracted k2g binary
+```
+
+Removable-media detection and eject are Windows-only, so the "Save to USB" button never
+appears; the ordinary Save works normally and the drive is ejected with Finder.
+
+### Linux
+
+Builds and tests run on every change, but no artifact is published yet — build from
+source with `cargo build --release`. The build needs GTK3, WebKitGTK 4.1 and CMake
+(`libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
+libxdo-dev cmake`). As on macOS, there is no "Save to USB" button.
 
 ## Connecting to KiCad
 

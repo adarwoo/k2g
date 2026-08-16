@@ -152,6 +152,8 @@ jobs:
           name: k2g-windows
           path: dist/*
 
+      # This job owns the release notes; the macOS one only adds its files. Whichever
+      # finishes first creates the release, so the notes must not depend on the order.
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -168,6 +170,18 @@ jobs:
             installer from this page instead. Signing returns once the project's
             minisign key is in place.
 
+            **Windows** — `.msi` or `-setup.exe` to install, or the portable `.zip`.
+
+            **macOS** — take the build for your Mac: `arm64` for Apple Silicon,
+            `x86_64` for Intel. Unsigned means Gatekeeper will refuse it on the first
+            open; clear the quarantine flag once with
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/k2g.app
+            ```
+
+            or, for the portable tarball, on the extracted `k2g` binary.
+
             `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
             this build.
 
@@ -175,3 +189,140 @@ jobs:
 
             k2g emits programs that drive a physical CNC machine. Verify every program
             against the actual fixture, stock and tooling before running it.
+
+  # macOS, both architectures, each on its own silicon — see the matching job in
+  # `rust.yml` for why these are not cross-compiled from one runner.
+  #
+  # Deliberately **not** a universal binary. Two clearly named downloads say which Mac
+  # each is for; one `lipo`'d fat binary would be half dead weight on every machine and
+  # would have to be assembled by hand inside the .app bundle, which is a thing to get
+  # wrong in a release pipeline nobody runs by hand.
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    name: macos (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # As in the Windows job: `build.rs` compares Cargo.toml's version against the
+          # nearest tag, and a shallow clone has no tags to compare against.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Read the declared version
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          declared=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "k2g") | .version')
+          test -n "$declared"
+          echo "version=$declared" >> "$GITHUB_OUTPUT"
+          echo "Building k2g $declared for ${{ matrix.arch }}"
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          tag_core="${tag#v}"; tag_core="${tag_core%%-*}"
+          if [ "$tag_core" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "::error::tag $tag declares $tag_core but Cargo.toml says ${{ steps.meta.outputs.version }}"
+            exit 1
+          fi
+
+      # The artifact this job can stand behind. The binary embeds every schema, catalog,
+      # stylesheet and script it needs, so an extracted `k2g` is a working k2g — no .app
+      # wrapper required, and nothing to install.
+      - name: Portable tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --bins
+          mkdir -p staging
+          cp target/release/k2g staging/
+          cp target/release/k2g-kicad-launcher staging/
+          cp README.md LICENSE PRIVACY.md SECURITY.md staging/ 2>/dev/null || true
+          tar -czf "k2g-${{ steps.meta.outputs.version }}-portable-macos-${{ matrix.arch }}.tar.gz" -C staging .
+
+      - name: Install the Dioxus CLI
+        run: cargo install dioxus-cli --locked
+
+      # Not gating, and that is a considered choice rather than laziness: no one has yet
+      # opened a k2g .app on a Mac, so this pipeline cannot claim the bundle works — but
+      # a bundler that trips must not cost the release its portable tarball, which does.
+      # Make this fatal (drop `continue-on-error`) as soon as one release's .dmg has been
+      # mounted and run by a person.
+      - name: Bundle
+        id: bundle
+        continue-on-error: true
+        run: dx bundle --platform desktop --release --package-types macos --package-types dmg
+
+      # `continue-on-error` turns a failure into a green tick, which is exactly how a
+      # release quietly stops carrying its .dmg. Say so in the run summary instead.
+      - name: Note a bundle that did not build
+        if: steps.bundle.outcome == 'failure'
+        run: |
+          echo "::warning::dx bundle failed on ${{ matrix.arch }} — this release ships the portable tarball only"
+
+      # The SBOM is emitted by the Windows job only. It is one document per release and
+      # the release assets are one flat namespace, so a second job writing the same file
+      # name would be a race rather than extra information.
+      - name: Collect artifacts
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Renamed rather than taken as the bundler names them. A release's assets are
+          # one flat namespace shared with the other architecture, and two files called
+          # the same thing is not a collision anyone would notice until a Mac user
+          # downloaded the wrong one. These names are also what the install docs promise.
+          # `|| true` on both: the bundle step is allowed to fail, so `target/dx` may not
+          # exist at all — and under `set -euo pipefail` a `find` that cannot open its
+          # directory would end this step before the tarball is collected.
+          dmg=$(find target/dx -type f -name '*.dmg' 2>/dev/null | head -1 || true)
+          if [ -n "$dmg" ]; then
+            cp "$dmg" "dist/k2g-${VERSION}-macos-${ARCH}.dmg"
+          fi
+          # `-prune` so find stops at the bundle instead of walking into it and finding
+          # whatever .app frameworks live inside.
+          app=$(find target/dx -type d -name '*.app' -prune 2>/dev/null | head -1 || true)
+          if [ -n "$app" ]; then
+            # `ditto`, not `zip`: it is the one that preserves the symlinks and resource
+            # forks an .app is made of.
+            ditto -c -k --keepParent "$app" "dist/k2g-${VERSION}-macos-${ARCH}-app.zip"
+          fi
+
+          cp "./k2g-${VERSION}-portable-macos-${ARCH}.tar.gz" dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k2g-macos-${{ matrix.arch }}
+          path: dist/*
+
+      # Files only: the notes belong to the Windows job, and this action leaves fields it
+      # is not given alone — so whichever job gets here first, the release ends up with
+      # both platforms' assets and one set of notes.
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

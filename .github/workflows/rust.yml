@@ -51,6 +51,39 @@ jobs:
       - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
 
+  # Both architectures a Mac can be, each built and tested on its own silicon rather
+  # than cross-compiled: the point of the job is to find out whether k2g *runs* there,
+  # and a cross-compiled binary cannot be tested by the machine that produced it.
+  #
+  # `macos-latest` is Apple Silicon. `macos-15-intel` is the Intel image that replaced
+  # the retired `macos-13` — if that label ever goes the same way, the fallback is to
+  # build `--target x86_64-apple-darwin` from the arm64 runner (the `cmake` crate sets
+  # `CMAKE_OSX_ARCHITECTURES` from the target, so nng cross-builds cleanly) and accept
+  # that the Intel half is then compiled but not run.
+  macos:
+    strategy:
+      # Both legs always report. Which architecture broke is most of the diagnosis, and
+      # cancelling the other one throws that away.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    name: macos (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Same reason as the Windows job: `nng-sys` builds the bundled nng C library with
+      # CMake, and a missing one fails deep inside a build script rather than here.
+      - name: Check CMake is available
+        run: cmake --version
+      - run: cargo build --workspace --verbose
+      - run: cargo test --workspace --verbose
+
   lint:
     runs-on: ubuntu-latest
     steps:
