@@ -3292,6 +3292,75 @@ th {
     cursor: grabbing;
 }
 
+/*
+ * The view buttons, over the canvas rather than beside it: they belong to the picture,
+ * and the row beside it is the tool legend, which is a different kind of thing.
+ *
+ * Top-right, because the busy panel already owns the bottom-left and the board frames
+ * itself into the middle. `pointer-events` goes back on for the buttons alone so the
+ * strip's padding does not steal a drag from the orbit.
+ */
+.machining-3d-controls {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    display: flex;
+    gap: 4px;
+    pointer-events: none;
+}
+
+.machining-3d-control {
+    pointer-events: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    /* Nearly opaque: it sits over a scene whose colours are arbitrary, and a translucent
+       control over a bright toolpath is unreadable exactly when the view is busiest. */
+    background: color-mix(in srgb, var(--bg-elev) 94%, transparent);
+    color: var(--text-subtle);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+
+.machining-3d-control:hover {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+/* The key that does the same thing. Shown on the button because that is the only place
+   anyone would look for it — nobody reads a manual to find out a viewport has shortcuts. */
+.machining-3d-control-key {
+    display: inline-grid;
+    place-items: center;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--text-subtle) 18%, transparent);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 1100px) {
+    /* The label goes; the key stays, and the tooltip still says what it does. Four
+       buttons and a legend do not both fit across a narrow canvas. */
+    .machining-3d-control {
+        font-size: 0;
+        gap: 0;
+        padding: 3px 5px;
+    }
+
+    .machining-3d-control-key {
+        font-size: 10px;
+    }
+}
+
 .board-canvas {
     display: flex;
     width: 100%;

@@ -513,8 +513,19 @@ the front**, click again to restore the drawing order. Reading the drawing:
 The operation plan, and the 3D toolpath render above it.
 
 - **3D**: orbit with the mouse. Z is up, machine convention. Rapids are thin and
-  muted; cutting moves are solid and coloured per tool. The **Tools** legend beside
-  it switches individual tools off, which is how you read a dense plan.
+  muted; cutting moves are solid and coloured per tool, and are drawn over the board
+  rather than under it — the board is there to say where the work sits, not to tint
+  it. The **Tools** legend beside it switches individual tools off, which is how you
+  read a dense plan.
+- The buttons top-right of the canvas set the view, and the number key on each does
+  the same thing:
+
+  | | |
+  |---|---|
+  | **Reset** (0) | Frame the whole job again, from the usual three-quarter view. |
+  | **Front** (1) | Look straight at the board's front (green) face. On a step that machines the back, the board is lying turned over — so this looks up at it from underneath, which is the view that shows whether the mirrored artwork came out right. |
+  | **Back** (2) | The same for the back (red) face. |
+  | **Flat / 3D** (3) | Switch between a flat (orthographic) view and the 3D one. Flat is the one to judge alignment in: perspective pushes anything away from the middle of the picture sideways, so two paths that line up only look like it in the flat view. |
 - Below: the step's summary (operation count, tool blocks, travel), then one table
   per tool block listing the atomic operations in the order the planner chose, with
   coordinates. Long blocks are capped at 40 rows with a "+N more" line.
@@ -741,7 +752,7 @@ Two records that look alike and are not the same thing.
 | Where | Gesture |
 |---|---|
 | Board view | Wheel = zoom · drag = pan · **+** / **−** / **Reset** buttons |
-| 3D view | Drag = orbit · wheel = zoom · legend checkboxes hide tools |
+| 3D view | Drag = orbit · wheel = zoom · legend checkboxes hide tools · **0** reset · **1** front face · **2** back face · **3** flat/3D |
 | Board legend | Click a row to raise that layer; click again to restore |
 | Catalog picker | Click = select · Shift-click = the run since the last plain click · section header box = whole section |
 | Stock table | Double-click a row = tool detail · checkboxes = multi-select |

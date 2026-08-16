@@ -81,11 +81,22 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     renderer.setPixelRatio(window.devicePixelRatio || 1);
 
     const scene = new T.Scene();
-    const camera = new T.PerspectiveCamera(45, 1, 0.1, 5000);
-    camera.up.set(0, 0, 1);            // Z is up: machine convention, not screen convention.
+    // Two cameras, one active. The flat view is a real orthographic projection rather
+    // than a very long lens: judging whether two paths line up is the thing this view is
+    // for, and perspective moves them apart by however far they are from the middle.
+    const persp = new T.PerspectiveCamera(45, 1, 0.1, 5000);
+    const ortho = new T.OrthographicCamera(-1, 1, 1, -1, 0.1, 5000);
+    persp.up.set(0, 0, 1);             // Z is up: machine convention, not screen convention.
+    ortho.up.set(0, 0, 1);
+    let camera = persp;
 
     const controls = new T.OrbitControls(camera, canvas);
     controls.enableDamping = true;
+
+    // Which way up the board is lying, so the face views know which side of it to stand
+    // on. Kept from the last `addBoard`; false until one arrives, which is the same
+    // default the payload carries.
+    let backFaceUp = false;
 
     // The board's two faces. Deep enough that every colour in `scene::TOOL_PALETTE`
     // reads as a line *on* the board rather than as a shade *of* it — which is what
@@ -107,6 +118,22 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // back is red, whichever way up the board is lying.
     const BOARD_GREEN = 0x103a24;
     const BOARD_RED = 0x6b1f17;
+
+    // Draw order: the board, then the toolpaths over it.
+    //
+    // The board is translucent and writes no depth precisely so it cannot hide the work
+    // (see `addBoard`) — but that only covers *occlusion*. A face at 0.85 still blends
+    // over any path beneath it, and geometry order alone cannot prevent it: an opaque
+    // line renders in the earlier pass, so the board is composited on top afterwards
+    // whatever the scene graph says. Looking straight down at the front face, that turned
+    // the engraving into a faint tint of the board — which is exactly what these colours
+    // were retuned to stop.
+    //
+    // Explicit order in the transparent pass is what fixes it, so every trace is drawn at
+    // its own colour from any angle. The paths therefore also show through the board from
+    // behind, which is what a toolpath view is for.
+    const BOARD_ORDER = 0;
+    const TRACE_ORDER = 1;
 
     scene.add(new T.HemisphereLight(0xffffff, 0x334455, 2.0));
     const key = new T.DirectionalLight(0xffffff, 1.2);
@@ -149,6 +176,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // them, so you can see through the board and see the drill go somewhere.
     function addBoard(board) {
       if (!board || !board.outline || board.outline.length <= 2) return;
+      backFaceUp = !!board.back_face_up;
       const shape = new T.Shape(board.outline.map(function (p) { return new T.Vector2(p[0], p[1]); }));
       (board.openings || []).forEach(function (loop) {
         if (loop.length > 2) {
@@ -175,6 +203,8 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       // Z0 is the board's top surface (op-planner §6), so the slab hangs below it —
       // which is what puts the toolpaths' plunges *into* the material.
       slab.position.z = -board.thickness_mm;
+      // Before the toolpaths, whatever the geometry says — see `addTraces`.
+      slab.renderOrder = BOARD_ORDER;
       content.add(slab);
 
       // The two faces, in the board's own colours: the **back** is always red and the
@@ -202,6 +232,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         // Held a hair clear of the slab. Coplanar faces z-fight, and the flicker reads as
         // a rendering fault rather than as the deliberate marking it is.
         mesh.position.z = z;
+        mesh.renderOrder = BOARD_ORDER;
         content.add(mesh);
       };
       const BACK = BOARD_RED, FRONT = BOARD_GREEN;
@@ -296,12 +327,17 @@ const BOOTSTRAP_SCRIPT: &str = r#"
             dashed: rapid,
             dashSize: 1.2,
             gapSize: 1.2,
-            transparent: rapid,
+            // Transparent even at full opacity, and that is not a contradiction: only the
+            // transparent pass honours `renderOrder`, and being drawn *after* the board is
+            // the whole point (see `TRACE_ORDER`). An opaque line renders in the earlier
+            // pass, where the board's 0.85 face then blends over it.
+            transparent: true,
             opacity: rapid ? 0.6 : 1.0,
             worldUnits: false,
           });
           materials.push(material);
           const line = new T.LineSegments2(geometry, material);
+          line.renderOrder = TRACE_ORDER;
           // Dashes come out of the line's own distance attribute, and without this the
           // material's `dashed` flag renders a solid line and reports nothing. Across a
           // batch the phase carries on from one segment to the next, including over the
@@ -335,8 +371,10 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         return;
       }
       // Back off far enough that the largest dimension fits the vertical field of view,
-      // with a little air around it.
-      const distance = (span / 2) / Math.tan((camera.fov * Math.PI) / 360) * 1.6;
+      // with a little air around it. Always the *perspective* camera's field of view,
+      // even when the flat one is active: an orthographic camera has none, and this is
+      // the distance both are framed from — see `syncOrtho`.
+      const distance = (span / 2) / Math.tan((persp.fov * Math.PI) / 360) * 1.6;
       controls.target.copy(centre);
       // Looking from the front-right and above: the orientation an operator stands in.
       camera.position.set(
@@ -347,17 +385,120 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       camera.near = Math.max(distance / 1000, 0.01);
       camera.far = distance * 10;
       camera.updateProjectionMatrix();
+      syncOrtho();
       controls.update();
       framed = { centre: centre.clone(), span: span };
+    }
+
+    // Gives the flat camera the frustum that frames what the 3D one would frame from
+    // where it is standing. An orthographic projection has no field of view, so "how
+    // much fits on screen" has to be derived from the orbit distance and the lens the
+    // other camera would have used — otherwise switching projection also changes the
+    // zoom, and the two views cannot be compared.
+    function syncOrtho() {
+      const distance = camera.position.distanceTo(controls.target) || 1;
+      const height = 2 * distance * Math.tan((persp.fov * Math.PI) / 360);
+      const aspect = (canvas.clientWidth || 1) / (canvas.clientHeight || 1);
+      ortho.left = (-height * aspect) / 2;
+      ortho.right = (height * aspect) / 2;
+      ortho.top = height / 2;
+      ortho.bottom = -height / 2;
+      ortho.near = camera.near;
+      ortho.far = camera.far;
+      ortho.updateProjectionMatrix();
     }
 
     function resize() {
       const w = canvas.clientWidth || 1, h = canvas.clientHeight || 1;
       renderer.setSize(w, h, false);
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      persp.aspect = w / h;
+      persp.updateProjectionMatrix();
+      if (camera === ortho) syncOrtho();
       materials.forEach(function (m) { m.resolution.set(w, h); });
     }
+
+    // --- the view controls ---------------------------------------------------------
+    //
+    // The camera lives entirely on this side, so these do too: the Rust half calls
+    // `__k2g_view` for its buttons and the key handler below calls it directly, which
+    // means there is one implementation and no state to keep in step across the two.
+
+    // Swaps which camera the controls drive, keeping the eye where it is. `zoom` is reset
+    // rather than carried across: the orbit dolly means different things to the two
+    // projections (a distance to one, a scale factor to the other), and `syncOrtho` is
+    // what makes the flat view match the distance.
+    function setProjection(flat) {
+      const next = flat ? ortho : persp;
+      if (next === camera) return;
+      next.position.copy(camera.position);
+      next.up.copy(camera.up);
+      next.near = camera.near;
+      next.far = camera.far;
+      next.zoom = 1;
+      camera = next;
+      controls.object = camera;
+      syncOrtho();
+      camera.updateProjectionMatrix();
+      controls.update();
+    }
+
+    // Stands the camera off the wanted face of the board.
+    //
+    // The board's front is the green face and its back the red one *whichever way up it
+    // is lying*, so on a back-face step — where the board has been turned over — the
+    // front face is the one underneath and this looks up at it from below. That is the
+    // point: it is the view that shows whether the mirrored artwork came out right.
+    function faceView(wantFront) {
+      const frontIsUp = !backFaceUp;
+      const above = wantFront ? frontIsUp : !frontIsUp;
+      const sign = above ? 1 : -1;
+      const centre = controls.target;
+      const distance = camera.position.distanceTo(centre) || 1;
+      // A few degrees off the axis rather than straight down it. `up` is +Z, so a camera
+      // exactly overhead sits on the singular axis of the orbit maths, where which way is
+      // up on screen is whatever the azimuth happens to be. The tilt keeps it predictable
+      // — X to the right, Y away — and still reads as face-on.
+      camera.position.set(
+        centre.x,
+        centre.y - sign * distance * 0.08,
+        centre.z + sign * distance * 0.997
+      );
+      syncOrtho();
+      controls.update();
+    }
+
+    canvas.__k2g_view = function (command) {
+      if (command === "reset") {
+        // Clearing `framed` is what makes this a reset rather than a no-op: `frameScene`
+        // holds still for small changes, and after an orbit the bounds have not changed
+        // at all.
+        framed = null;
+        frameScene();
+      } else if (command === "front") {
+        faceView(true);
+      } else if (command === "back") {
+        faceView(false);
+      } else if (command === "projection") {
+        setProjection(camera !== ortho);
+      }
+    };
+
+    // Number keys, matching the buttons. On `window` because the canvas is not focusable
+    // and nobody clicks a 3D view before using it — but that means every text field in
+    // the application would otherwise eat a digit, hence the guards: anything typed into
+    // an editable element, or with a modifier held, is not for us.
+    const onKey = function (event) {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const target = event.target;
+      if (target && (target.isContentEditable ||
+                     /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || ""))) return;
+      if (!canvas.isConnected || !canvas.__k2g_view) return;
+      const command = { "0": "reset", "1": "front", "2": "back", "3": "projection" }[event.key];
+      if (!command) return;
+      event.preventDefault();
+      canvas.__k2g_view(command);
+    };
+    window.addEventListener("keydown", onKey);
 
     // The whole of what a plan change changes. Kept on the canvas because that is the
     // only handle a later `eval` — which runs in page scope, with no reference to this
@@ -388,6 +529,11 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       if (!canvas.isConnected) {
         if (++orphaned > ORPHAN_FRAMES) {
           canvas.__k2g_draw = null;
+          canvas.__k2g_view = null;
+          // Goes with the renderer: the listener is on `window`, which outlives every
+          // canvas, so leaving it behind would keep this whole closure — scene, geometry
+          // and all — reachable for the life of the page.
+          window.removeEventListener("keydown", onKey);
           renderer.forceContextLoss();
           renderer.dispose();
           return;
@@ -415,6 +561,28 @@ const BOOTSTRAP_SCRIPT: &str = r#"
   }
 })();
 "#;
+
+/// The view buttons: `(command, key, label, tooltip)`.
+///
+/// The command strings are the script's `__k2g_view` vocabulary and the keys are the ones
+/// its `keydown` handler maps, so this table and that handler have to agree — they are
+/// twelve lines apart in the same file for exactly that reason.
+const VIEW_CONTROLS: [(&str, &str, &str, &str); 4] = [
+    ("reset", "0", "Reset", "Frame the whole job again, from the usual three-quarter view"),
+    (
+        "front",
+        "1",
+        "Front",
+        "Look at the board's front (green) face — from underneath, on a step that machines the back",
+    ),
+    ("back", "2", "Back", "Look at the board's back (red) face"),
+    (
+        "projection",
+        "3",
+        "Flat / 3D",
+        "Switch between a flat (orthographic) view, where paths that line up look like it, and the 3D one",
+    ),
+];
 
 /// Everything the scene script draws, already serialised.
 ///
@@ -603,6 +771,39 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
                 // styling mistake.
                 div { class: "machining-3d-placeholder", "3D toolpath — starting renderer…" }
                 canvas { id: CANVAS_ID, class: "machining-3d-canvas" }
+
+                // The same four commands the number keys run. Present because a 3D view
+                // with no visible controls tells nobody it has any — the keys are the
+                // fast path, these are how they are found.
+                //
+                // Stateless commands, deliberately. The projection one toggles rather
+                // than showing which mode is on: the mode lives in the script (where the
+                // key handler is), and a label mirrored over here would be one re-render
+                // away from claiming the opposite of what is on screen. The picture is
+                // the readout.
+                div { class: "machining-3d-controls",
+                    for (command , key , label , hint) in VIEW_CONTROLS {
+                        button {
+                            key: "{command}",
+                            class: "machining-3d-control",
+                            r#type: "button",
+                            title: "{hint}",
+                            onclick: move |_| {
+                                spawn(async move {
+                                    let script = format!(
+                                        "const c = document.getElementById('{CANVAS_ID}');\
+                                         if (c && c.__k2g_view) c.__k2g_view('{command}');",
+                                    );
+                                    if let Err(err) = document::eval(&script).await {
+                                        log::debug!("3D view command '{command}' failed: {err}");
+                                    }
+                                });
+                            },
+                            span { class: "machining-3d-control-key", "{key}" }
+                            "{label}"
+                        }
+                    }
+                }
 
                 // Over the canvas rather than instead of it: the rest of the step — the
                 // drilling, the outline — is already drawn and worth looking at while the
