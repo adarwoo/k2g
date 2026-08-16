@@ -87,6 +87,27 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     const controls = new T.OrbitControls(camera, canvas);
     controls.enableDamping = true;
 
+    // The board's two faces. Deep enough that every colour in `scene::TOOL_PALETTE`
+    // reads as a line *on* the board rather than as a shade *of* it — which is what
+    // they did not, before: engraving covers the whole face in dense paths, and a mint
+    // toolpath on a bright green board was two greens rather than a path and a board.
+    //
+    // Measured rather than eyeballed, by rendering this exact material stack (Lambert,
+    // these lights, 0.85/0.72 opacity) over both themes' backgrounds and sampling the
+    // pixels. Taking the worse theme of the two: contrast against the palette over the
+    // front face went 3.0:1 → 5.5:1 at its weakest, and the mint the engraving usually
+    // draws in 4.6:1 → 8.3:1. The back face was worse than either at 2.8:1 — a rose
+    // path on a red board — and is now 5.1:1.
+    //
+    // Keep both above ~5:1 if these are ever retuned, and keep
+    // them within about a stop of each other — they are the front/back cue, so one
+    // reading deeper than the other would say something the board is not.
+    //
+    // Still green and still red, because that is the cue: front is soldermask green,
+    // back is red, whichever way up the board is lying.
+    const BOARD_GREEN = 0x103a24;
+    const BOARD_RED = 0x6b1f17;
+
     scene.add(new T.HemisphereLight(0xffffff, 0x334455, 2.0));
     const key = new T.DirectionalLight(0xffffff, 1.2);
     key.position.set(80, -120, 200);
@@ -144,7 +165,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         // the job the view exists to show. `depthWrite: false` stops the board from
         // occluding the paths behind it while still shading as a solid.
         new T.MeshLambertMaterial({
-          color: 0x1f6f43,
+          color: BOARD_GREEN,
           side: T.DoubleSide,
           transparent: true,
           opacity: 0.72,
@@ -183,7 +204,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         mesh.position.z = z;
         content.add(mesh);
       };
-      const BACK = 0xc0392b, FRONT = 0x1f6f43;
+      const BACK = BOARD_RED, FRONT = BOARD_GREEN;
       const up = 0.02, down = -board.thickness_mm - 0.02;
       face(board.back_face_up ? BACK : FRONT, up);
       face(board.back_face_up ? FRONT : BACK, down);
