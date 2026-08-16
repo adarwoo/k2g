@@ -9,7 +9,9 @@ name: Release
 # `runtime::update::fetch_latest`, which treats a missing signature as a broken
 # release rather than as permission to skip verification.
 #
-# Setting this up once:
+# The key is set up (public half `06B8B6495DD89857`). It was done once, like this, and
+# is written down here because the next time anyone reads it will be the day it has to be
+# rotated:
 #
 #   1. Generate an unencrypted keypair:   rsign generate -W -p k2g.pub -s k2g.key
 #      Unencrypted is deliberate. A passphrase protects a key at rest against someone
@@ -18,8 +20,15 @@ name: Release
 #   2. Put the contents of `k2g.key` in the repository secret MINISIGN_SECRET_KEY.
 #      Keep an offline copy — losing it means every installed build stops accepting
 #      updates until users reinstall by hand.
-#   3. Commit the contents of `k2g.pub` to `assets/release-signing.pub`, replacing the
-#      placeholder. Until that is done the updater refuses every download, by design.
+#   3. Commit the contents of `k2g.pub` to `assets/release-signing.pub`. That file is
+#      compiled into the application, so it is the half that decides what an installed
+#      k2g will accept — and `.github/actions/sign-artifacts` verifies each signature
+#      against it, so a mismatched pair fails the build instead of shipping installers
+#      that every updater in the field rejects.
+#
+# Rotating the key is a breaking change for anyone already running k2g: their build has
+# the old key compiled in and will refuse the new signatures, and they update by hand
+# once. Only worth doing if the secret is compromised.
 
 on:
   push:
@@ -83,8 +92,11 @@ jobs:
             exit 1
           fi
 
+      # Pinned to the `dioxus` version in Cargo.lock, and it has to stay in step with it:
+      # `dx` refuses to bundle when the two differ. Unpinned, this step installs whatever
+      # is newest — which is how a 0.7.10 CLI came to be pointed at a 0.7.9 application.
       - name: Install the Dioxus CLI
-        run: cargo install dioxus-cli --locked
+        run: cargo install dioxus-cli --version 0.7.10 --locked
 
       - name: Bundle
         run: dx bundle --platform desktop --release --package-types msi --package-types nsis
@@ -131,21 +143,12 @@ jobs:
           cp ./k2g.cdx.json "dist/k2g-${{ steps.meta.outputs.version }}.cdx.json" 2>/dev/null || true
           ls -la dist
 
-      # SIGNING IS OFF FOR NOW.
-      #
-      # There is no key to sign with: MINISIGN_SECRET_KEY is unset and
-      # `assets/release-signing.pub` is still the placeholder. The step used to fail the
-      # whole run rather than publish unsigned artifacts, which is why no release has
-      # ever been published.
-      #
-      # What it costs while it is off: k2g's in-app updater will not install these
-      # artifacts. `runtime::update` requires a `.minisig` beside the installer and
-      # treats its absence as a broken release rather than as permission to skip the
-      # check — so the update banner reports an error and the user downloads by hand.
-      # Nothing regresses, because the placeholder public key fails closed anyway.
-      #
-      # Turning it back on is the three numbered steps at the top of this file, and
-      # restoring the step removed here (see the history of this file).
+      # Detached signatures over every artifact. This is the root of trust for the in-app
+      # updater: TLS and GitHub's account security are not relied on, only this key.
+      - name: Sign every artifact
+        uses: ./.github/actions/sign-artifacts
+        with:
+          secret-key: ${{ secrets.MINISIGN_SECRET_KEY }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -165,11 +168,6 @@ jobs:
           body: |
             ## Installing this release
 
-            These artifacts are **not signed**, so k2g's in-app updater will not
-            install them — it accepts only signed releases, by design. Download an
-            installer from this page instead. Signing returns once the project's
-            minisign key is in place.
-
             **Windows** — `.msi` or `-setup.exe` to install, or the portable `.zip`.
 
             **macOS** — take the build for your Mac: `arm64` for Apple Silicon,
@@ -184,6 +182,21 @@ jobs:
 
             `k2g-<version>.cdx.json` is the CycloneDX software bill of materials for
             this build.
+
+            ## Verifying what you downloaded
+
+            Every artifact here is signed with minisign, and carries its detached
+            `.minisig` beside it. k2g's own updater checks that signature before it will
+            run an installer, and refuses one it cannot verify — so there is nothing you
+            have to do. To check by hand:
+
+            ```
+            minisign -Vm k2g-<version>.msi -P RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
+            ```
+
+            That key is also in the repository, at `assets/release-signing.pub` — which
+            is the copy compiled into the application, so a release signed with anything
+            else fails the build rather than reaching this page.
 
             ## Safety
 
@@ -258,8 +271,10 @@ jobs:
           cp README.md LICENSE PRIVACY.md SECURITY.md staging/ 2>/dev/null || true
           tar -czf "k2g-${{ steps.meta.outputs.version }}-portable-macos-${{ matrix.arch }}.tar.gz" -C staging .
 
+      # Pinned to Cargo.lock's `dioxus`, as in the Windows job — `dx` refuses to bundle
+      # against an application built with a different version.
       - name: Install the Dioxus CLI
-        run: cargo install dioxus-cli --locked
+        run: cargo install dioxus-cli --version 0.7.10 --locked
 
       # Not gating, and that is a considered choice rather than laziness: no one has yet
       # opened a k2g .app on a Mac, so this pipeline cannot claim the bundle works — but
@@ -312,6 +327,13 @@ jobs:
 
           cp "./k2g-${VERSION}-portable-macos-${ARCH}.tar.gz" dist/
           ls -la dist
+
+      # As in the Windows job: every artifact this release publishes carries a signature
+      # the updater can check, whichever platform produced it.
+      - name: Sign every artifact
+        uses: ./.github/actions/sign-artifacts
+        with:
+          secret-key: ${{ secrets.MINISIGN_SECRET_KEY }}
 
       - uses: actions/upload-artifact@v4
         with:

@@ -701,6 +701,39 @@ mod tests {
         }
     }
 
+    /// This build can verify a signature at all.
+    ///
+    /// The complement of the test above, and the one that matters now that a real key is
+    /// in place: an unusable key fails *closed*, which is safe but silent — the updater
+    /// refuses every release and says the download was tampered with, when in fact the
+    /// build never had a key. That is what shipped for the whole life of the placeholder.
+    ///
+    /// So it is asserted here rather than discovered by a user whose update failed. The
+    /// signing side is guarded symmetrically: `.github/actions/sign-artifacts` verifies
+    /// every signature it makes against this same file, so the pair cannot drift apart in
+    /// either direction without something going red.
+    #[test]
+    fn the_compiled_in_key_can_verify_a_signature() {
+        let key = minisign_verify::PublicKey::decode(PUBLIC_KEY.trim()).unwrap_or_else(|e| {
+            panic!(
+                "assets/release-signing.pub is not a usable minisign public key ({e}), so this \
+                 build would refuse every release — including correctly signed ones"
+            )
+        });
+
+        // A signature by *another* key must still be rejected: proving the key parses
+        // says nothing about it being used, and a verifier that accepts anything would
+        // pass the parse check just as well.
+        let payload = b"pretend this is k2g-0.12.0.msi";
+        let (theirs, their_signature) = signed_fixture(payload);
+        assert_ne!(theirs.trim(), PUBLIC_KEY.trim(), "a fresh keypair is not ours");
+        assert!(
+            verify_signature(payload, &their_signature).is_err(),
+            "the compiled-in key must reject a signature made with a different key"
+        );
+        let _ = key;
+    }
+
     /// A generated keypair, the payload it signed, and its detached signature —
     /// exactly the shape the release workflow produces.
     fn signed_fixture(payload: &[u8]) -> (String, Vec<u8>) {

@@ -139,11 +139,10 @@ On Windows, take the latest [release](https://github.com/adarwoo/k2g/releases):
 | `k2g-<version>.cdx.json` | The CycloneDX software bill of materials for that build. |
 
 > [!NOTE]
-> **Releases are not signed yet.** k2g's updater installs only a release carrying a
-> [minisign](https://jedisct1.github.io/minisign/) signature, so it reports an error
-> instead of updating itself — take installers from the releases page by hand until
-> the project's signing key is in place. That refusal is the feature working: an
-> unverified installer is one k2g will not run.
+> **Every artifact is signed** with [minisign](https://jedisct1.github.io/minisign/) and
+> carries its `.minisig` beside it. k2g's updater checks that signature before it will
+> run an installer and refuses one it cannot verify, so there is nothing you need to do
+> — see [Signing key](#signing-key) to check by hand.
 
 Full instructions — connecting to KiCad, registering the toolbar button, updates,
 and how to remove everything — are in
@@ -260,5 +259,24 @@ Bundled third-party components keep their own licences —
 [three.js](assets/vendor) (MIT).
 
 ## Signing key
+
+Release artifacts are signed with minisign. This is the public half — the same key that
+is compiled into every k2g build as the one thing its updater trusts, and the reason the
+updater does not have to trust TLS, GitHub's account security or this page:
+
+```
 untrusted comment: minisign public key 06B8B6495DD89857
 RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
+```
+
+To check a download by hand:
+
+```
+minisign -Vm k2g-<version>.msi -P RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
+```
+
+A failed check means the file is not what was published — do not run it. The same key is
+in the repository at [assets/release-signing.pub](assets/release-signing.pub), which is
+the copy the application compiles in; the release workflow verifies each signature it
+makes against that file, so a build signed with any other key fails rather than
+publishing installers no updater would accept.

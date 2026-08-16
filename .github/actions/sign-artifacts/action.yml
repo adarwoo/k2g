@@ -1,0 +1,78 @@
+name: Sign artifacts
+description: >
+  Detached minisign signatures over every artifact of a release, each one then verified
+  against the public key the application itself compiles in.
+
+# A composite action rather than a step copied into each platform's job. Every job that
+# publishes has to sign, and the failure mode of two copies drifting apart is that one
+# platform quietly ships unsigned — which nobody notices until a user's updater refuses
+# an installer, long after the release.
+
+inputs:
+  secret-key:
+    description: >
+      The unencrypted minisign secret key, from the MINISIGN_SECRET_KEY repository
+      secret. Never echoed, and deleted from the runner before the step ends.
+    required: true
+  directory:
+    description: Directory whose files are signed. Signatures land beside them.
+    required: false
+    default: dist
+  public-key:
+    description: >
+      The key to verify against. Defaults to the one compiled into the binary, which is
+      the whole point of the check — see below.
+    required: false
+    default: assets/release-signing.pub
+
+runs:
+  using: composite
+  steps:
+    - name: Sign and verify
+      shell: bash
+      env:
+        MINISIGN_SECRET_KEY: ${{ inputs.secret-key }}
+        DIRECTORY: ${{ inputs.directory }}
+        PUBLIC_KEY: ${{ inputs.public-key }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+          echo "::error::MINISIGN_SECRET_KEY is not set. Releasing unsigned artifacts \
+        would publish installers that k2g's own updater then refuses to run; see the \
+        setup notes at the top of .github/workflows/release.yml."
+          exit 1
+        fi
+
+        cargo install rsign2 --locked
+        # Written, used and deleted inside this one step. Not passed on stdin because
+        # rsign wants a file, and not left behind for a later step or an upload.
+        printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+
+        signed=0
+        for artifact in "$DIRECTORY"/*; do
+          case "$artifact" in *.minisig) continue;; esac
+          [ -f "$artifact" ] || continue
+          rsign sign -W -s minisign.key -x "${artifact}.minisig" "$artifact"
+
+          # The half that matters, and the half that was missing. Signing proves the
+          # workflow holds *a* key; this proves it holds *the* key — the public half of
+          # which is compiled into every k2g build as `update::PUBLIC_KEY`. Get that
+          # pairing wrong and each artifact is perfectly signed and universally
+          # rejected, with the first report arriving from a user whose update failed.
+          rsign verify -p "$PUBLIC_KEY" -x "${artifact}.minisig" "$artifact"
+          echo "signed and verified $(basename "$artifact")"
+          signed=$((signed + 1))
+        done
+
+        rm -f minisign.key
+
+        # A release with nothing signed is a release with nothing in it. Better to fail
+        # here than to publish an empty set of assets and a set of notes claiming they
+        # are verifiable.
+        if [ "$signed" -eq 0 ]; then
+          echo "::error::no artifacts found in '$DIRECTORY' to sign"
+          exit 1
+        fi
+        echo "$signed artifact(s) signed against $PUBLIC_KEY"
+        ls -la "$DIRECTORY"

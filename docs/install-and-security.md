@@ -68,11 +68,16 @@ Take the latest [release](https://github.com/adarwoo/k2g/releases) and either:
 ### Verifying what you downloaded
 
 Every artifact has a detached `.minisig` signature. You do not have to check it by
-hand — k2g's own updater always does — but for a first install from a fresh download:
+hand — k2g's own updater always does, and refuses anything it cannot verify — but for a
+first install from a fresh download:
 
 ```
-minisign -Vm k2g-<version>.msi -P RWQ...    # the key in assets/release-signing.pub
+minisign -Vm k2g-<version>.msi -P RWRXmNhdSba4BtwDZDRNbvFIpLLW4dHBanW4oe0v8oc+M/z5qX7mcay4
 ```
+
+That key (`06B8B6495DD89857`) is in the repository at `assets/release-signing.pub`, and
+it is the copy compiled into the application — so it is what an installed k2g checks
+against, not something fetched at the time.
 
 A failed check means the file is not what was published. Do not run it.
 
