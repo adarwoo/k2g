@@ -476,12 +476,6 @@ impl AppState {
         format!("{kind}:{id}")
     }
 
-    pub fn selected_machine(&self) -> Option<&MachineProfile> {
-        self.selected_machine_id
-            .as_ref()
-            .and_then(|id| self.machines.iter().find(|m| &m.id == id))
-    }
-
     pub fn selected_process_profile(&self) -> Option<&JobProfile> {
         self.selected_process_profile_id
             .as_ref()
@@ -1145,12 +1139,6 @@ impl AppState {
         }
 
         locations
-    }
-
-    pub fn selected_machine_has_atc(&self) -> bool {
-        self.selected_machine()
-            .map(|m| m.atc_slot_count > 0)
-            .unwrap_or(false)
     }
 
     pub fn select_machine_profile_by_id(&mut self, id: Option<String>) {

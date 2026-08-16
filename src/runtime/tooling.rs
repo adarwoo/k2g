@@ -861,6 +861,151 @@ fn pick_slot(
         .copied()
 }
 
+/// One rack that holds a tool: whose rack it is, and where in it the tool sits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedSlot {
+    /// The machine whose changer holds it.
+    pub cnc_name: String,
+    /// The toolset that rack is loaded to — a machine used with two toolsets has two
+    /// racks, and the same tool may sit in a different slot in each.
+    pub toolset_name: String,
+    /// The slot index: `1` is `T1`.
+    pub slot: u8,
+}
+
+/// Where every pinned tool sits across all the racks the configuration defines.
+///
+/// A rack is a `(CNC, toolset)` pair (Specification §11.7), and those pairs are made in
+/// machining-profile steps — the only place a machine meets a toolset. So this walks
+/// every machining profile's steps rather than any one selection: the Stock screen is
+/// inventory, and "which of my machines expects this bit" is not a question about the
+/// job that happens to be loaded.
+///
+/// Only **fixed** slots count, the same predicate the assigner's rack spec uses. A spare
+/// slot holds whatever a step's plan puts in it, which is a property of a board, not of
+/// the tool sitting on the shelf.
+pub struct RackPinning {
+    /// How many racks were examined, pinning or not. Nothing about a rack can be shown
+    /// when there is no rack — this is what the ATC column's presence turns on.
+    pub rack_count: usize,
+    /// Tool id → the racks holding it, ordered by machine then toolset.
+    by_tool: std::collections::BTreeMap<String, Vec<PinnedSlot>>,
+}
+
+impl RackPinning {
+    /// The racks holding `tool_id`, in display order. Empty when nothing pins it.
+    pub fn for_tool(&self, tool_id: &str) -> &[PinnedSlot] {
+        self.by_tool.get(tool_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The slots as one line — `T1, T1, T4`.
+    ///
+    /// One entry per rack even when the numbers repeat, because they are answers to
+    /// different questions: a tool pinned in three machines' racks is three tools to own,
+    /// and collapsing the list to `T1` would say the opposite. Which machine is which is
+    /// [`Self::detail`]'s business.
+    pub fn slots_label(&self, tool_id: &str) -> String {
+        self.for_tool(tool_id)
+            .iter()
+            .map(|pinned| format!("T{}", pinned.slot))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The same list named, one rack per line, for a tooltip.
+    pub fn detail(&self, tool_id: &str) -> String {
+        self.for_tool(tool_id)
+            .iter()
+            .map(|pinned| {
+                format!(
+                    "{} · {} — T{}",
+                    pinned.cnc_name, pinned.toolset_name, pinned.slot
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// Builds [`RackPinning`] for the whole configuration.
+pub fn pinned_rack_slots(ctx: &AppState) -> RackPinning {
+    let mut pinning = RackPinning {
+        rack_count: 0,
+        by_tool: std::collections::BTreeMap::new(),
+    };
+    if !appdata_ready() {
+        return pinning;
+    }
+
+    // The distinct racks, as `(cnc id, toolset id)`. A pair bound by several steps or
+    // several profiles is still one rack, and is listed once.
+    let mut racks: Vec<(String, String)> = Vec::new();
+    for profile in &ctx.process_profiles {
+        let Ok(profile_id) = Uuid::parse_str(&profile.id) else {
+            continue;
+        };
+        for step in read_steps(profile_id) {
+            let (Some(cnc_id), Some(toolset_id)) = (step.cnc_id, step.toolset_id) else {
+                continue;
+            };
+            let pair = (cnc_id.to_string(), toolset_id.to_string());
+            if !racks.contains(&pair) {
+                racks.push(pair);
+            }
+        }
+    }
+
+    // Resolve each rack to its profiles, dropping machines with no changer — they hold
+    // nothing between tool changes, so no slot of theirs can be said to expect a tool.
+    let mut resolved: Vec<(
+        &crate::data::model::MachineProfile,
+        &crate::data::model::ToolsetProfile,
+    )> = racks
+        .iter()
+        .filter_map(|(cnc_id, toolset_id)| {
+            let machine = ctx
+                .machines
+                .iter()
+                .find(|m| m.id == *cnc_id && m.atc_slot_count > 0)?;
+            let toolset = ctx.toolsets.iter().find(|t| t.id == *toolset_id)?;
+            Some((machine, toolset))
+        })
+        .collect();
+    // Ordered by machine so the numbers read down the column in a fixed order rather than
+    // in whichever order the machining profiles happened to bind them.
+    resolved.sort_by(|(left_cnc, left_ts), (right_cnc, right_ts)| {
+        left_cnc
+            .name
+            .cmp(&right_cnc.name)
+            .then_with(|| left_ts.name.cmp(&right_ts.name))
+    });
+    pinning.rack_count = resolved.len();
+
+    for (machine, toolset) in resolved {
+        for (index, slot) in toolset.slots.iter() {
+            // Clipped exactly as the rack schedule clips: a slot past the machine's
+            // changer is not a slot on this machine, whatever the toolset says.
+            if slot.disabled || !slot.locked || *index > machine.atc_slot_count {
+                continue;
+            }
+            let Some(tool_id) = slot.tool_id.as_ref() else {
+                continue;
+            };
+            pinning
+                .by_tool
+                .entry(tool_id.clone())
+                .or_default()
+                .push(PinnedSlot {
+                    cnc_name: machine.name.clone(),
+                    toolset_name: toolset.name.clone(),
+                    slot: *index,
+                });
+        }
+    }
+
+    pinning
+}
+
 /// Reads every step's operations, bindings and drill config from the profile document.
 /// What the selected step actually machines, as the Board view needs it.
 ///
@@ -3810,6 +3955,45 @@ mod tests {
         assert!(
             plan.rack_for_step(2).is_none(),
             "a step on no rack (manual tool changes) has none to show"
+        );
+    }
+
+    /// A tool pinned in three racks is three tools to own, so the stock row lists a slot
+    /// per rack — repeats included. Collapsing `T1, T1, T4` to `T1, T4` would say two
+    /// machines expect it when three do.
+    #[test]
+    fn a_tool_pinned_in_several_racks_lists_one_slot_per_rack() {
+        let pinned = |cnc: &str, toolset: &str, slot: u8| PinnedSlot {
+            cnc_name: cnc.to_string(),
+            toolset_name: toolset.to_string(),
+            slot,
+        };
+        let pinning = RackPinning {
+            rack_count: 3,
+            by_tool: [(
+                "drill".to_string(),
+                vec![
+                    pinned("Driller", "Metric", 1),
+                    pinned("Router", "Metric", 1),
+                    pinned("Mill", "Imperial", 4),
+                ],
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        assert_eq!(pinning.slots_label("drill"), "T1, T1, T4");
+        assert_eq!(
+            pinning.detail("drill"),
+            "Driller · Metric — T1\nRouter · Metric — T1\nMill · Imperial — T4",
+            "the tooltip says which rack each slot belongs to"
+        );
+
+        assert!(pinning.for_tool("cutter").is_empty());
+        assert_eq!(
+            pinning.slots_label("cutter"),
+            "",
+            "a tool no rack pins reads as nothing, not as T0"
         );
     }
 

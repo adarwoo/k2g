@@ -104,7 +104,12 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     });
 
     let snapshot = state.read().clone();
-    let has_atc = snapshot.selected_machine_has_atc();
+    // Where each tool is pinned across *every* rack, not just one machine's: a tool may
+    // be expected in several changers at once, and a stock row that shows one slot for a
+    // machine it never names cannot say which. Computed once for the table, then indexed
+    // per row.
+    let pinning = crate::runtime::tooling::pinned_rack_slots(&snapshot);
+    let has_atc = pinning.rack_count > 0;
     let unit_system = snapshot.unit_system;
 
     let mut show_catalog_picker = use_signal(|| false);
@@ -676,7 +681,10 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                 th { "Source catalog" }
                                 th { "Preference" }
                                 if has_atc {
-                                    th { "ATC" }
+                                    th {
+                                        title: "The slot each machine's rack pins this tool to, one entry per rack",
+                                        "ATC"
+                                    }
                                 }
                                 th { "Status" }
                             }
@@ -694,11 +702,11 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                         let is_selected = selected_stock_tool_ids
                                             .read()
                                             .contains(tool_id.as_str());
-                                        let atc_slot = snapshot
-                                            .rack_slots
-                                            .iter()
-                                            .find(|(_, slot)| slot.tool_id.as_ref() == Some(&tool_id))
-                                            .map(|(slot_num, _)| *slot_num);
+                                        // One `Tn` per rack that pins this tool, in the
+                                        // same order for every row; the title names the
+                                        // machine each belongs to.
+                                        let atc_slots = pinning.slots_label(&tool_id);
+                                        let atc_detail = pinning.detail(&tool_id);
                                         rsx! {
                                             tr {
                                                 key: "{tool_id}",
@@ -740,13 +748,13 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                 }
                                                 if has_atc {
                                                     td {
-                                                        if let Some(slot_num) = atc_slot {
-                                                            span { class: "atc-indicator",
-                                                                span { class: "atc-dot" }
-                                                                span { "T{slot_num}" }
-                                                            }
-                                                        } else {
+                                                        if atc_slots.is_empty() {
                                                             span { class: "atc-empty", "-" }
+                                                        } else {
+                                                            span { class: "atc-indicator", title: "{atc_detail}",
+                                                                span { class: "atc-dot" }
+                                                                span { "{atc_slots}" }
+                                                            }
                                                         }
                                                     }
                                                 }

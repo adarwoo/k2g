@@ -165,8 +165,8 @@ Stock is the list of tools you own. Every stock tool is an independent copy — 
 one added from a catalog — so deleting a catalog, or reimporting a newer version of
 it, never disturbs stock.
 
-**The table.** Type, diameter, name, source catalog, preference, ATC slot (only when
-the selected machine has an ATC), and status. Above it:
+**The table.** Type, diameter, name, source catalog, preference, ATC slot, and status.
+Above it:
 
 - a **filter box** matching type, name, source, preference or status;
 - a **type filter** (All / Drill / Router / V-bit / Engraving);
@@ -180,7 +180,16 @@ the selected machine has an ATC), and status. Above it:
 | Open a tool | Double-click the row |
 | Select several | Row checkboxes; the header box takes every visible row |
 | Delete | Select, then **Delete Selected** — confirmed, and it warns if the tools are used by the current job or referenced by a profile |
-| Change availability | The **Status** dropdown in the row itself |
+| Change availability or preference | The **Status** and **Preference** dropdowns in the row itself |
+
+**The ATC column** says which rack slot a tool is pinned to — with a green dot, since a
+pinned tool is one you are expected to keep loaded. A rack belongs to a machine, so a
+tool pinned in more than one reads as one slot per rack, in machine order: `T1, T1, T4`
+is three racks expecting this tool, which is also three of it to own. Hover for the
+machine and toolset behind each. The column is present whenever any machining profile
+binds a toolset to a machine with an ATC, and shows `-` for a tool no rack pins — one
+picked automatically for a spare slot belongs to a board's plan rather than to the tool,
+and is on the Job screen's *Tooling* and *Rack* tabs instead.
 
 **Availability and preference** are what the planner reads:
 
@@ -188,6 +197,8 @@ the selected machine has an ATC), and status. Above it:
   quickest way to tell k2g "I broke that drill" without deleting it.
 - *Preferred* / *Neutral* / *Not preferred* — a tie-break when several tools fit a
   hole equally well.
+
+Both are editable straight from the row, and both take effect on the next generation.
 
 **Tool detail** (double-click) shows the catalog metadata read-only and lets you edit
 the practical values: custom name, diameter, tip geometry, feed rate, spindle speed,
@@ -207,7 +218,9 @@ spindle and feed range.
 - **Shift-click** takes the whole run between it and your last plain click, within
   one section.
 - A section's header checkbox takes the whole section.
-- **Add Selected (n)** copies every catalog field into new stock entries.
+- **Add Selected (n)** copies every catalog field into new stock entries. Tools you
+  already own are skipped rather than duplicated, and the message says how many —
+  "Added 2 tool(s) — 3 already in stock".
 
 ### The Catalog screen
 
@@ -218,6 +231,14 @@ Browse what is inside a catalog without adding anything, and manage the list:
   cannot be deleted; imported ones can.
 - Selecting a catalog lists its tools read-only, with SKU, point angle, feed and
   speed.
+- **Double-click a tool** to open it, exactly as in Stock. The detail shows everything
+  the catalog holds — including flute length, minimum depth and the plunge feed, which
+  appear nowhere else — and offers **Add to stock**.
+
+**Add to stock** puts a copy in stock there and then. If you already own that tool it
+says so and adds a second copy anyway, named `… (2)`: two of the same drill is a real
+thing to own, each with its own wear and its own in/out-of-stock state, and the
+distinct names are what let you tell them apart when pinning one to a rack slot.
 
 ---
 
