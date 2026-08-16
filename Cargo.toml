@@ -143,7 +143,8 @@ windows-sys = { version = "0.61", features = [
     # a wrong module path rather than a missing feature.
     "Win32_Security",
     # GetLogicalDrives, GetDriveTypeW, GetVolumeInformationW, GetDiskFreeSpaceExW,
-    # CreateFileW, FlushFileBuffers, FILE_SHARE_*, OPEN_EXISTING
+    # CreateFileW, FlushFileBuffers, FILE_SHARE_*, OPEN_EXISTING, and STORAGE_BUS_TYPE /
+    # BusTypeUsb — which live here rather than beside the IOCTL that reports them.
     "Win32_Storage_FileSystem",
     # DRIVE_REMOVABLE — which lives here, not beside GetDriveTypeW that returns it.
     "Win32_System_WindowsProgramming",
@@ -153,7 +154,9 @@ windows-sys = { version = "0.61", features = [
     # DeviceIoControl
     "Win32_System_IO",
     # FSCTL_LOCK_VOLUME / FSCTL_DISMOUNT_VOLUME, IOCTL_STORAGE_MEDIA_REMOVAL /
-    # IOCTL_STORAGE_EJECT_MEDIA, PREVENT_MEDIA_REMOVAL
+    # IOCTL_STORAGE_EJECT_MEDIA, PREVENT_MEDIA_REMOVAL, and IOCTL_STORAGE_QUERY_PROPERTY
+    # with STORAGE_PROPERTY_QUERY / STORAGE_DEVICE_DESCRIPTOR — the bus-type test that
+    # keeps virtual drive letters out of the removable-media list.
     "Win32_System_Ioctl",
     # CreateToolhelp32Snapshot / Process32FirstW / Process32NextW — used by
     # `runtime::kicad_integration` to refuse editing kicad_common.json while KiCad

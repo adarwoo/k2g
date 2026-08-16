@@ -6,20 +6,33 @@
 //! passed in the unit the callee documents, handle validity, and a `#[repr(C)]` struct
 //! passed as an input buffer.
 //!
-//! ## Known limitation: USB hard drives do not appear
+//! ## What counts as removable media here
 //!
-//! `GetDriveTypeW` reports `DRIVE_REMOVABLE` from the *device's* removable-media bit.
-//! Flash sticks and card readers set it; external USB hard drives and most USB SSDs do
-//! not — the medium inside them is not removable, the enclosure is — so they come back as
-//! `DRIVE_FIXED` and are not offered here. Doing better means `IOCTL_STORAGE_QUERY_PROPERTY`
-//! or SetupAPI for a materially larger unsafe surface, and ejecting a fixed volume also
-//! wants elevation this app does not have and should not ask for.
+//! Two questions, and a volume must answer both: `GetDriveTypeW` must say
+//! `DRIVE_REMOVABLE` (is the medium removable), and the device behind it must say it is
+//! on the **USB bus** (is there a stick there at all — see [`is_usb`]). The drive type
+//! alone is not enough, because a virtual filesystem mounted on a letter answers it yes:
+//! a cloud drive was being offered as somewhere to save a program and then eject.
 //!
-//! That is a missing convenience, never a dead end: the ordinary Save button stays
-//! visible and unconditional, so a USB hard drive is saved to through the normal dialog
-//! and removed with Windows' own Safely Remove Hardware.
+//! ## Known limitations, both of them missing convenience rather than dead ends
 //!
-//! The converse false positive — a card reader with no card, which *is* reported as
+//! **USB hard drives do not appear.** `GetDriveTypeW` reports `DRIVE_REMOVABLE` from the
+//! *device's* removable-media bit. Flash sticks and card readers set it; external USB
+//! hard drives and most USB SSDs do not — the medium inside them is not removable, the
+//! enclosure is — so they come back as `DRIVE_FIXED`. Ejecting a fixed volume also wants
+//! elevation this app does not have and should not ask for.
+//!
+//! **A card reader that is not itself on USB does not appear.** Most are: a laptop's
+//! built-in reader is usually an internal USB device, and every external one is. A reader
+//! wired to PCIe reports `BusTypeSd` or `BusTypeMmc` instead, and the rule above excludes
+//! it. If those should be offered, this is the one place to say so — the bus test is a
+//! single comparison in [`is_usb`].
+//!
+//! Neither case loses any work: the ordinary Save button stays visible and unconditional,
+//! so such a drive is saved to through the normal dialog and removed with Windows' own
+//! Safely Remove Hardware.
+//!
+//! The remaining false positive — a card reader with no card, which *is* reported as
 //! `DRIVE_REMOVABLE` — is filtered by the `GetVolumeInformationW` failure in [`scan`],
 //! not by a special case.
 
@@ -32,12 +45,15 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FlushFileBuffers, GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives,
-    GetVolumeInformationW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    GetVolumeInformationW, BusTypeUsb, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    STORAGE_BUS_TYPE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::{SetThreadErrorMode, SEM_FAILCRITICALERRORS};
 use windows_sys::Win32::System::Ioctl::{
     FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA,
-    IOCTL_STORAGE_MEDIA_REMOVAL, PREVENT_MEDIA_REMOVAL,
+    IOCTL_STORAGE_MEDIA_REMOVAL, IOCTL_STORAGE_QUERY_PROPERTY, PREVENT_MEDIA_REMOVAL,
+    PropertyStandardQuery, StorageDeviceProperty, STORAGE_DEVICE_DESCRIPTOR,
+    STORAGE_PROPERTY_QUERY,
 };
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOVABLE;
 use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -115,6 +131,11 @@ pub(super) fn scan() -> Vec<RemovableMedium> {
         let Some(label) = volume_label(&root) else {
             continue; // no media in the slot — see the module header
         };
+        // After the label, because that is the call that filters an empty card-reader
+        // slot, and there is no point opening a device for a slot with nothing in it.
+        if !is_usb(letter) {
+            continue; // a virtual volume wearing the removable bit — see `is_usb`
+        }
         let Some(free_bytes) = free_space(&root) else {
             continue; // pulled between the two calls; skipping is the right answer
         };
@@ -162,6 +183,110 @@ fn volume_label(root: &[u16]) -> Option<String> {
     // drop the drive from the list.
     let label = String::from_utf16_lossy(&name[..end]).trim().to_string();
     Some(if label.is_empty() { UNLABELLED_MEDIUM.to_string() } else { label })
+}
+
+/// Whether the volume behind `letter` is attached over USB.
+///
+/// `GetDriveTypeW` answers a question about the *medium* — "can this be taken out of the
+/// drive" — and a virtual filesystem answers it yes. A cloud drive mounted on a letter
+/// (Google Drive, Dropbox, anything built on WinFsp or Dokan) reports `DRIVE_REMOVABLE`,
+/// so it was offered here as a stick: something to save a program onto and then "safely
+/// eject", which for a synced folder is a meaningless act on a drive that will not go
+/// away. The same goes for RAM disks and mounted images.
+///
+/// What separates them is the **bus**, and only the device can answer that.
+/// `IOCTL_STORAGE_QUERY_PROPERTY` reports the bus a real storage device sits on.
+///
+/// The test is an allow-list — *is it USB* — rather than a deny-list of the virtual bus
+/// types, because the virtual ones do not admit to being virtual. Measured on a machine
+/// that hit this: pCloud's drive letter reports `DRIVE_REMOVABLE` and `BusTypeAta`,
+/// which is indistinguishable from an internal hard disk. Only naming the bus we do want
+/// keeps it out.
+///
+/// The device is opened with **no access rights at all** (`dwDesiredAccess: 0`), which is
+/// what makes this safe to do for every removable letter on every poll: a property query
+/// is `FILE_ANY_ACCESS`, while asking for `GENERIC_READ` on a volume can need elevation
+/// this app does not have and should not ask for.
+fn is_usb(letter: u8) -> bool {
+    // Compared rather than matched: `BusTypeUsb` is not upper case, and a lower-case name
+    // in pattern position is a binding that matches anything until the day it resolves to
+    // the constant instead.
+    match bus_type(letter) {
+        Some(bus) if bus == BusTypeUsb => true,
+        Some(bus) => {
+            log::debug!(
+                "{}: not offered as removable media — storage bus type {bus} is not USB",
+                letter as char
+            );
+            false
+        }
+        None => {
+            log::debug!(
+                "{}: not offered as removable media — no storage device answered for it ({}), \
+                 so it is a virtual volume rather than a stick",
+                letter as char,
+                std::io::Error::last_os_error()
+            );
+            false
+        }
+    }
+}
+
+/// The `STORAGE_BUS_TYPE` of the device behind `letter`, or `None` when nothing answered.
+fn bus_type(letter: u8) -> Option<STORAGE_BUS_TYPE> {
+    let path = device_path_wide(letter);
+    // SAFETY: `path` is a live local NUL-terminated wide string. Zero desired access is
+    // documented as "query attributes without accessing the device", which is exactly
+    // this call. The security-attributes and template-file arguments are null (defaults,
+    // and no template).
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING, // a device is never created
+            0,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let volume = VolumeHandle(handle);
+
+    let query = STORAGE_PROPERTY_QUERY {
+        PropertyId: StorageDeviceProperty,
+        QueryType: PropertyStandardQuery,
+        AdditionalParameters: [0],
+    };
+    let mut descriptor = STORAGE_DEVICE_DESCRIPTOR::default();
+    let mut returned: u32 = 0;
+    // SAFETY: the handle is open for the length of the call (owned by the live `volume`).
+    // Both buffers are live `#[repr(C)]` locals whose lengths are the `size_of` of their
+    // own types, so the callee reads and writes exactly the bytes that exist. `returned`
+    // is a live local; the overlapped pointer is null, which requests a synchronous call
+    // on a handle opened without `FILE_FLAG_OVERLAPPED`.
+    let ok = unsafe {
+        DeviceIoControl(
+            volume.0,
+            IOCTL_STORAGE_QUERY_PROPERTY,
+            ptr::addr_of!(query).cast(),
+            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
+            ptr::addr_of_mut!(descriptor).cast(),
+            std::mem::size_of::<STORAGE_DEVICE_DESCRIPTOR>() as u32,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    // The real descriptor is longer than this buffer — it carries the vendor and product
+    // strings past its fixed head — and a driver handed a buffer that cannot hold all of
+    // it fills what fits. So the test is not "did it fill the struct" but "did it get as
+    // far as `BusType`": a driver that answered with the two-field header alone has
+    // reported a length and nothing else.
+    let read_bus_type =
+        returned as usize >= std::mem::offset_of!(STORAGE_DEVICE_DESCRIPTOR, RawPropertiesLength);
+    (ok != 0 && read_bus_type).then_some(descriptor.BusType)
 }
 
 /// Free bytes on the volume, or `None` if it went away mid-scan.
@@ -313,20 +438,21 @@ fn control(volume: &VolumeHandle, code: u32, input: *const core::ffi::c_void, in
     }
 }
 
-/// Owns a volume handle for the length of one eject attempt.
+/// Owns a volume handle for the length of one eject attempt or one property query.
 ///
 /// Every step of [`eject`] is an early return, and a leaked handle keeps the volume
 /// *locked* — a worse outcome than the failed eject, because the user then cannot open
 /// the drive in Explorer either. Tying the close to the scope means no exit path can
-/// forget it.
+/// forget it. [`bus_type`] takes no lock but runs on every poll, where a leak would be a
+/// handle every two seconds for the life of the session.
 struct VolumeHandle(HANDLE);
 
 impl Drop for VolumeHandle {
     fn drop(&mut self) {
         // SAFETY: the handle came from a `CreateFileW` that returned something other than
         // `INVALID_HANDLE_VALUE`; this type is its sole owner (no `Copy`, no `Clone`,
-        // constructed only in `eject`) and `drop` runs at most once, so this is neither a
-        // double close nor the close of a foreign handle.
+        // constructed only in `eject` and `bus_type`) and `drop` runs at most once, so
+        // this is neither a double close nor the close of a foreign handle.
         unsafe { CloseHandle(self.0) };
     }
 }

@@ -83,7 +83,7 @@ Three consequences worth knowing up front:
 | **mm / in / mil** | The display unit for the whole application. Changes only how values are shown and how bare numbers you type are interpreted; nothing stored is converted. |
 | **Status pill** | Whether there is a program to save (see below). |
 | **Save…** | Writes the program(s) to disk. Disabled when there is nothing current to save. |
-| **USB button** | Appears *only* when a removable medium is plugged in: saves and ejects in one action. Its appearance is the signal that the stick is ready. |
+| **USB button** | Appears *only* when a USB stick or card reader is plugged in: saves and ejects in one action. Its appearance is the signal that the stick is ready. |
 | **⚙ cog** | Settings. |
 
 The pill reads:
@@ -722,7 +722,7 @@ Two records that look alike and are not the same thing.
 | A primitive is filled in but nothing appears | It is a **callable** — nothing emits it on its own | Call it from `program_begin` or wherever it belongs |
 | Board outline errors — open contours, floating island | The edge-cut geometry does not close | Fix it in KiCad, then ↻ |
 | Multiple KiCads open and the wrong board loads | KiCad serves one fixed API socket and instances are not individually addressable | Launch k2g from the board you want, via KiCad's **Create GCode** button |
-| The USB save button is missing | It appears only when a removable medium is mounted | Plug the stick in |
+| The USB save button is missing | It appears only for a drive that is really on the USB bus, so cloud and virtual drive letters never bring it up, and neither do USB hard drives (Windows calls those fixed) | Plug the stick in; for anything else use **Save…** and Windows' own Safely Remove Hardware |
 | Deleting a profile is refused | A machining profile still references it | Re-bind or delete that machining profile first — the message names it |
 
 ---
