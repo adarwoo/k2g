@@ -263,7 +263,7 @@ patch.
 | Field | Meaning |
 |---|---|
 | **Output file extension** | What a saved program for this machine is called (`nc`, `ngc`, `drl`…), without the dot. The templates decide the *format*, so the extension belongs with them. |
-| **ATC slot count** | Number of automatic tool-changer pockets. **0 means no ATC** — tool changes become operator prompts, and the Job screen's *Rack* tab disappears for steps on this machine. |
+| **ATC slot count** | Number of automatic tool-changer pockets. **0 means no ATC** — tool changes become operator prompts and a step on this machine has no rack, so the Job screen's *Rack* tab says so for it. It is also the count of slots the machine really has: a toolset defining more than this is still valid, but the extra slots cannot be loaded here. |
 | **Spindle min / max rpm** | The machine's real range. Tool speeds are clamped into it. |
 | **Max feed XY / Z** | The machine's real feed ceilings, from its specification — not a preference. A tool rated faster than the machine can feed is run at a proportionally *lower spindle speed*, so its chip load is preserved rather than silently ruined. Z is usually the slower axis and binds every drilling plunge. |
 | **Axis scaling X / Y** | Multipliers for a machine with a known dimensional error. 1.0 is no scaling. |
@@ -527,19 +527,32 @@ The tooling plan for the selected step — the answer to "what makes what".
 
 ### Rack
 
-Only present when the selected step's machine has an ATC. Each slot, the tool in it,
-and what you must do about it before running the step:
+Present when any step of the job runs on a machine with an ATC. It shows the rack of
+the **selected step's** machine, named in the heading — each slot, the tool in it, and
+what you must do about it before running the step:
 
 | | |
 |---|---|
 | **Fixed** 📌 | Pinned by the toolset profile. |
 | **Load** | Must be swapped in before this step. |
-| **Kept** | Carried over from an earlier step — leave it alone. |
+| **Kept** | Carried over from an earlier step on this machine — leave it alone. |
 | **Empty** | Nothing in it. |
 
-With a single step there is nothing to carry over, so the view collapses to slot and
-tool. With several, a line says how many changes stand between the previous step and
-this one.
+A rack belongs to a machine, so a job that runs on two CNCs has two of them, each
+scheduled on its own. Sharing one toolset between them changes nothing about that:
+the toolset says which tools may be used and which slots are pinned, while the rack
+is what one machine physically holds. A tool left loaded by an earlier step is only
+*Kept* for a later step on the same machine — anything else would be telling you a
+tool is already in a machine you have not touched.
+
+With a single step on that rack there is nothing to carry over, so the view collapses
+to slot and tool. With several, a line says how many changes stand between the
+previous step on that machine and this one.
+
+A step whose machine has **no** tool changer has no rack: it says so, and its tools
+are listed in call order on the *Tooling* tab. If the toolset defines slots beyond
+the machine's changer, or a step needs more tools at once than the rack holds, a note
+under the table says what cannot be loaded.
 
 ---
 

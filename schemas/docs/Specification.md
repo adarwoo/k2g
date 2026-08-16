@@ -1151,6 +1151,29 @@ This may include:
 - slot minimization
 - operation grouping
 
+### 11.7 Racks Belong to Machines
+
+A toolset profile describes *tooling*. A **rack** is what one machine physically holds
+at a point in the job. They are not the same thing: a job binds a CNC per step, so its
+steps may run on more than one machine, and the same toolset may be used on all of them.
+
+Rules:
+
+- A rack is identified by the **(CNC profile, toolset profile)** pair a step binds. Its
+  slots are computed per rack, never once per job.
+- Steps sharing that pair share one rack, whether or not they are adjacent: nothing
+  disturbs a machine while another machine is being used.
+- Loaded-tool state carries only within one rack. A tool an earlier step leaves in a slot
+  is *kept* for a later step **on the same machine**; a step on another CNC starts from
+  that machine's own rack.
+- Two CNC profiles are two racks even when they describe one physical machine set up for
+  different work. The application cannot know they are the same machine, and assuming so
+  would report a tool as already loaded when the operator may have removed it.
+- A machine with `atc_slot_count: 0` has no rack at all. Its tools are loaded one at a
+  time and its T-numbers are a change sequence.
+- A machine's rack holds slots `T1..T<atc_slot_count>`. A toolset defining more remains
+  valid (11.4); the surplus slots cannot be loaded on that machine and are reported.
+
 ### 11.9 UI Requirements
 
 #### Toolset Profile Editor

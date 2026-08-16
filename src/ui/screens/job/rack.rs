@@ -19,7 +19,7 @@
 
 use dioxus::prelude::*;
 
-use crate::runtime::tooling::{plan_tooling, step_headers, SlotChange};
+use crate::runtime::tooling::{plan_tooling, step_headers, SlotChange, StepOutcome, ToolingPlan};
 use crate::runtime::AppCtx;
 
 /// The selected step's rack. Falls back to an explanation when there is no rack to show
@@ -32,11 +32,12 @@ pub fn RackView(state: Signal<AppCtx>) -> Element {
     let selected = snapshot.selected_step.min(step_count.saturating_sub(1));
 
     let Some(rack) = plan.rack_for_step(selected) else {
-        // Say which of the reasons it is. The plan's own note wins: with no board or no
-        // profile there is no step to say anything about in the first place.
+        // Say which of the reasons it is, most specific first. The plan's own note wins:
+        // with no board or no profile there is no step to say anything about at all.
         let note = plan
             .note
             .clone()
+            .or_else(|| unplanned_note(&plan, selected))
             .or_else(|| no_changer_note(&snapshot, selected))
             .unwrap_or_else(|| "This step loads no tools — nothing to rack.".to_string());
         return rsx! {
@@ -54,14 +55,19 @@ pub fn RackView(state: Signal<AppCtx>) -> Element {
         .iter()
         .filter(|row| row.status == SlotChange::Load)
         .count();
+    // Named, because a job that runs on two machines has two racks, and the slot numbers
+    // alone do not say which machine is being loaded.
+    let title = if rack.cnc_name.trim().is_empty() {
+        "Rack".to_string()
+    } else {
+        format!("Rack — {}", rack.cnc_name)
+    };
+    let unplaced = rack.unplaced.join(", ");
+    let clipped = rack.clipped_slots;
 
     rsx! {
         div { class: "screen single rack-view",
-            // Named, because a job that runs on two machines has two racks and the slot
-            // numbers alone do not say which machine is being loaded.
-            h3 {
-                if rack.cnc_name.trim().is_empty() { "Rack" } else { "Rack — {rack.cnc_name}" }
-            }
+            h3 { "{title}" }
             if show_status {
                 p { class: "field-hint",
                     "Highlighted slots must be changed before this step; tools carried over from an earlier step on this machine are not."
@@ -116,22 +122,40 @@ pub fn RackView(state: Signal<AppCtx>) -> Element {
             // What the rack cannot do, under the rack it can. Both are facts about *this*
             // machine holding *this* toolset, which is exactly what the operator standing
             // at it needs told.
-            if !rack.unplaced.is_empty() {
+            if !unplaced.is_empty() {
                 div { class: "tooling-warnings",
                     p { class: "tooling-warning",
-                        "\u{26A0} This step needs more tools at once than the rack holds. No slot is free for: "
-                        "{rack.unplaced.join(\", \")}."
+                        "\u{26A0} This step needs more tools at once than the rack holds. No slot is free for: {unplaced}."
                     }
                 }
             }
-            if rack.clipped_slots > 0 {
+            if clipped > 0 {
                 div { class: "tooling-warnings",
                     p { class: "tooling-warning",
-                        "\u{26A0} The toolset defines {rack.clipped_slots} slot(s) beyond this machine's tool changer, which cannot be loaded here."
+                        "\u{26A0} The toolset defines {clipped} slot(s) beyond this machine's tool changer, which cannot be loaded here."
                     }
                 }
             }
         }
+    }
+}
+
+/// Why the selected step has no rack when the reason is the step itself: it has nothing
+/// to machine, or nothing that can machine it. A rack listing is downstream of a tooling
+/// solution, so it says so and points at the tab that carries the detail.
+///
+/// `None` when the step planned normally — the caller then looks at its machine.
+fn unplanned_note(plan: &ToolingPlan, step_index: usize) -> Option<String> {
+    match &plan.steps.get(step_index)?.outcome {
+        StepOutcome::Empty => {
+            Some("Nothing to machine in this step, so nothing to rack.".to_string())
+        }
+        StepOutcome::Failed(_) => Some(
+            "This step has no tooling solution, so there is no rack to load — the Tooling \
+             tab lists what is missing."
+                .to_string(),
+        ),
+        StepOutcome::Resolved(_) => None,
     }
 }
 
