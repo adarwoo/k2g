@@ -75,22 +75,71 @@ properties:
     maximum: 1200
     default: 560
 
+  export_directories:
+    description: |
+      Where **Export** last wrote, remembered per volume: the machine's disk and each
+      USB stick keep their own, so plugging a stick in offers the folder that stick was
+      last written to rather than the one on the hard disk.
+
+      An array rather than a map keyed by volume, because this schema dialect carries no
+      `patternProperties` and a key-per-volume object cannot be expressed. `job.yaml`'s
+      `edge_tabs` is the same shape for the same reason.
+
+      Ordered **most recently used first**, and that ordering is load-bearing rather than
+      tidiness: an ordinary Export has no volume to look up until it has a path, so "the
+      most recent entry that is not a stick and still exists" is what answers it — which
+      is also what gives each fixed drive its own memory.
+
+      Trimmed by the application rather than by `maxItems` here: a list that outgrew a
+      schema bound would be reported as a load problem and recorded as a rejected
+      configuration, and a noisy launch is a worse outcome than a long list.
+    type: array
+    default: []
+    items:
+      type: object
+      properties:
+        volume:
+          description: |
+            Which volume the path is on:
+
+              * `usb:1A2B3C4D` — a removable medium, filed under its **filesystem volume
+                serial**, so the folder survives the stick returning on a different drive
+                letter, and two sticks that have both been `E:` keep their own. Only the
+                part of the path after the drive prefix is honoured, so it re-bases onto
+                whichever letter the stick holds now. The serial belongs to the
+                filesystem, not the hardware: **reformatting a stick mints a new one**,
+                after which its old entry is never matched again and ages out.
+              * `drive:C` — a fixed drive, filed under its letter, which for a drive that
+                is never ejected is a stable identity. Also the provisional key a migrated
+                `last_removable_media_path` lands under, until the first Export to that
+                stick re-files it under the serial.
+              * `host` — a platform with no drive letters (Linux, macOS), where there is
+                one destination to remember.
+          type: string
+          minLength: 1
+        path:
+          description: |
+            The directory last exported to, absolute. Used only while it still exists; a
+            folder since deleted falls back to that volume's own default — the root of
+            the device for a stick, the host's download folder otherwise.
+          type: string
+          minLength: 1
+
   gcode_save_directory:
     description: |
-      Directory the last G-code save wrote to, so the next Save opens where the
-      previous one left off. Null until the first save; a directory that has since
-      been moved or deleted falls back to the host's default download location.
+      Superseded by `export_directories`, and no longer read: this is written as a mirror
+      of the most recent entry that is not on a stick, so that downgrading to a build
+      predating the per-volume table still finds its folder. Remove once no supported
+      build reads it.
     type: [string, "null"]
     default: null
 
   last_removable_media_path:
     description: |
-      Directory on removable media the last "Save to USB" wrote to, so the next one
-      opens where the previous left off. Null until the first such save. Kept apart
-      from `gcode_save_directory` deliberately: a USB save must not drag the ordinary
-      Save dialog onto a drive that will not be plugged in tomorrow. Only the drive
-      letter is matched against the media present at save time — a letter since reused
-      by a different stick falls back to that stick's root.
+      Superseded by `export_directories`, and no longer read: written as a mirror of the
+      most recent entry that *is* on a stick, on the same terms as `gcode_save_directory`
+      above. It was matched by drive letter alone, which is what the volume serial in the
+      new table exists to fix — a letter is handed to whatever is plugged in next.
     type: [string, "null"]
     default: null
 

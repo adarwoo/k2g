@@ -3305,10 +3305,14 @@ mod tests {
         );
     }
 
-    /// The removable-media path is a second, independent history: a "Save to USB" must
-    /// record where it went without disturbing where the ordinary Save opens. Same
+    /// The removable-media path is a second, independent history: a USB export must
+    /// record where it went without disturbing where an ordinary export opens. Same
     /// optional-key rule as above — it was added later than every settings file in the
     /// wild.
+    ///
+    /// Both scalars are now write-only mirrors of `export_directories`, kept so that a
+    /// downgrade to a build without the table still finds its two folders. They must
+    /// therefore keep round-tripping independently for as long as they are declared.
     #[test]
     fn the_removable_media_path_round_trips_without_touching_the_save_directory() {
         let dir = tempdir().unwrap();
@@ -3483,6 +3487,87 @@ mod tests {
             matches!(read("/reopen_where_left_off"), Some(NodeValue::Bool(false))),
             "the opt-out must survive a reload — a preference that needs re-setting each \
              launch is not a preference"
+        );
+    }
+
+    /// The per-volume export table round-trips as an array of objects.
+    ///
+    /// This is the assumption the whole per-drive memory rests on, and it is the one thing
+    /// about it that could not be reasoned out: every other key in `settings.yaml` is a
+    /// scalar, so nothing here had ever written an array through the settings path.
+    /// (`job.yaml`'s `edge_tabs` is the precedent, but that is a different document.)
+    #[test]
+    fn the_export_directory_table_round_trips_as_an_array_of_objects() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let (mut data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "a fresh store should load: {errors:#?}");
+
+        let mut value = data.settings().expect("settings loaded").to_value();
+        value["export_directories"] = serde_json::json!([
+            { "volume": "usb:1A2B3C4D", "path": "E:\\jobs" },
+            { "volume": "drive:C", "path": "C:\\Users\\me\\Downloads" },
+        ]);
+        assert!(
+            data.replace_settings_from_value(&value).is_some_and(|p| p.is_empty()),
+            "an array of {{volume, path}} must satisfy the schema"
+        );
+        data.flush();
+
+        let (reloaded, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "reload should be clean: {errors:#?}");
+        let read = |pointer: &str| {
+            reloaded
+                .settings()
+                .and_then(|doc| doc.root.get_pointer(pointer))
+                .map(|node| node.value.clone())
+        };
+        assert!(
+            matches!(read("/export_directories/0/volume"), Some(NodeValue::Str(ref s)) if s == "usb:1A2B3C4D"),
+            "the first entry's volume must survive, got {:?}",
+            read("/export_directories/0/volume")
+        );
+        assert!(
+            matches!(read("/export_directories/1/path"), Some(NodeValue::Str(ref s)) if s == "C:\\Users\\me\\Downloads"),
+            "and the second entry's path — order is meaningful, it is most-recent-first"
+        );
+    }
+
+    /// A settings file written before the table existed still loads, and gains it.
+    ///
+    /// The keys it *does* carry are the two scalars the table supersedes; the migration
+    /// that folds them in lives in `AppState`, so what is asserted here is the half this
+    /// layer owns — that the old file is not rejected and the new key materialises from
+    /// its schema default.
+    #[test]
+    fn settings_written_before_the_export_table_still_load() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let previous = "schema_version: 1\n\
+                        units: mm\n\
+                        theme: Dark\n\
+                        selected_process_profile_id: null\n\
+                        selected_cnc_profile_id: null\n\
+                        selected_fixture_profile_id: null\n\
+                        selected_toolset_profile_id: null\n\
+                        gcode_save_directory: C:\\Users\\me\\Downloads\n\
+                        last_removable_media_path: E:\\jobs\n";
+        fs::write(data_dir.join(SETTINGS_FILE), previous).unwrap();
+
+        let (data, errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        assert!(errors.is_empty(), "a file predating the table must load: {errors:#?}");
+
+        let table = data
+            .settings()
+            .and_then(|doc| doc.root.get_pointer("/export_directories"))
+            .map(|node| node.value.clone());
+        assert!(
+            matches!(table, Some(NodeValue::Array(ref items)) if items.is_empty()),
+            "the new key materialises empty from its default, got {table:?}"
         );
     }
 

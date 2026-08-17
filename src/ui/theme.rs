@@ -1683,48 +1683,6 @@ select:disabled {
     opacity: 0.18;
 }
 
-/* The pre-save plan: one row per step, named before the folder is chosen. Wider than the
-   default wizard because a row carries a step label, its CNC and an editable file name. */
-.save-plan-dialog {
-    width: min(680px, 92vw);
-}
-
-.save-plan-table {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    max-height: 46vh;
-    overflow-y: auto;
-}
-
-.save-plan-row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
-    align-items: center;
-    gap: 10px;
-}
-
-.save-plan-step {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-}
-
-.save-plan-step-name {
-    font-size: 12px;
-    font-weight: 600;
-}
-
-.save-plan-step-meta {
-    font-size: 11px;
-    color: var(--text-subtle);
-}
-
-.save-plan-name {
-    font-family: var(--mono, Consolas, monospace);
-    font-size: 12px;
-}
-
 .project-step-chips {
     display: flex;
     align-items: center;
@@ -3998,6 +3956,84 @@ th {
     gap: 8px;
 }
 
+/* The export dialog: what is being written, what each file is called, and where it goes.
+   Wider than the default wizard because a row carries a step label, its CNC and an
+   editable file name, and the destination row carries a path.
+
+   Declared *after* `.wizard-dialog` on purpose. These are equal specificity, so source
+   order is the only thing deciding the width — and as `.save-plan-dialog` this rule sat
+   1500 lines earlier in the file, lost to `.wizard-dialog`'s 520px every time it was
+   used. See `every_dialog_width_rule_is_declared_after_the_wizard_dialog`. */
+.export-dialog {
+    width: min(680px, 92vw);
+}
+
+.export-table {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 46vh;
+    overflow-y: auto;
+}
+
+.export-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+}
+
+/* One program has no checkbox — it cannot be unticked and still exported — so the row
+   loses that column rather than leaving a gap where it was. */
+.export-row-single {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.export-step {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.export-step-name {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.export-step-meta {
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
+.export-name {
+    font-family: var(--mono, Consolas, monospace);
+    font-size: 12px;
+}
+
+/* Where it is going, and the way to change it. The whole point of the rework: the folder
+   is shown and already right, instead of being asked for on every export. */
+.export-destination {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+}
+
+.export-destination-label {
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.export-destination-path {
+    font-family: var(--mono, Consolas, monospace);
+    font-size: 12px;
+}
+
+.export-eject-note {
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
 .catalog-picker-dialog {
     width: min(820px, 92vw);
     max-height: 82vh;
@@ -5504,19 +5540,20 @@ mod tests {
         );
     }
 
-    /// The Settings dialog must outrank the wizard dialog it widens.
+    /// Every dialog that widens the wizard must be declared after it.
     ///
-    /// `.wizard-dialog` and `.settings-dialog` are both plain single-class rules setting
-    /// `width` and `padding`, so they tie on specificity and source order alone decides.
-    /// Declared the other way round, the dialog snaps back to 520px and regains the
-    /// padding its own head and body then double up — silently, because a too-narrow
-    /// dialog still renders.
+    /// `.wizard-dialog` and each `*-dialog` that overrides its width are plain
+    /// single-class rules, so they tie on specificity and source order alone decides.
+    /// Declared the other way round, the dialog silently renders at the 520px meant for a
+    /// name field — silently, because a too-narrow dialog is still a dialog.
     ///
-    /// This is not hypothetical. `.save-plan-dialog` (`width: min(680px, 92vw)`) is
-    /// declared *before* `.wizard-dialog` and has therefore never applied; the save
-    /// dialog has been 520px the whole time. That bug is the reason this test exists.
+    /// This began life checking `.settings-dialog` alone, written because
+    /// `.save-plan-dialog` had the bug: its `width: min(680px, 92vw)` sat 1500 lines
+    /// *before* `.wizard-dialog` and had never once applied. Naming one dialog was not
+    /// enough — the broken one was the example in the comment and still shipped broken —
+    /// so this now walks every width rule that ties with the wizard.
     #[test]
-    fn the_settings_dialog_outranks_the_wizard_dialog() {
+    fn every_dialog_width_rule_is_declared_after_the_wizard_dialog() {
         let rules = rules();
         let index_of = |wanted: &str| {
             rules
@@ -5526,16 +5563,31 @@ mod tests {
         };
 
         let wizard = index_of(".wizard-dialog");
-        let settings = index_of(".settings-dialog");
-        assert_eq!(
-            class_count(".settings-dialog"),
-            class_count(".wizard-dialog"),
-            "if these stop tying, this test is measuring the wrong thing"
-        );
+        let wizard_specificity = class_count(".wizard-dialog");
+
+        let mut checked = 0;
+        for (position, (selector, body)) in rules.iter().enumerate() {
+            // Every rule that sets a width on something named `…-dialog` and ties with the
+            // wizard on specificity — which is what makes source order the decider.
+            if selector == ".wizard-dialog"
+                || !selector.ends_with("-dialog")
+                || !body.contains("width")
+                || class_count(selector) != wizard_specificity
+            {
+                continue;
+            }
+            assert!(
+                position > wizard,
+                "`{selector}` sets a width and ties with `.wizard-dialog` on specificity, \
+                 but is declared before it — so it never applies and the dialog renders at \
+                 520px. Move it after `.wizard-dialog`."
+            );
+            checked += 1;
+        }
         assert!(
-            settings > wizard,
-            "the settings dialog's width must be declared after the wizard dialog it ties \
-             with, or the modal renders at the 520px meant for a name field"
+            checked >= 2,
+            "expected at least the settings and export dialogs to be checked, saw {checked} \
+             — if the naming convention changed, this test is measuring nothing"
         );
     }
 }

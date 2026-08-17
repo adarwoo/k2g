@@ -111,9 +111,9 @@ face — and is being tested on real hardware. What is **not** done:
 - **Rust** (stable) to build from source, which is the route on an older distribution
   or an architecture no release covers.
 
-Two features vary by platform, and both degrade rather than break. Saving straight to
+Two features vary by platform, and both degrade rather than break. Exporting straight to
 a removable medium and ejecting it needs the Win32 volume API, so on Linux and macOS
-the Save button behaves as though nothing is plugged in. And k2g can tell whether
+the Export button behaves as though nothing is plugged in. And k2g can tell whether
 KiCad is running on Windows and Linux but not on macOS — no `/proc` there, and
 shelling out to `ps` to answer a question you can answer by looking at your dock is a
 poor trade — so on a Mac the KiCad integration card warns before editing KiCad's
@@ -225,7 +225,7 @@ one owns the socket.
 
 | Document | What it covers |
 | --- | --- |
-| [User manual](docs/user-manual.md) | Every screen and setting, from first run to saving a program |
+| [User manual](docs/user-manual.md) | Every screen and setting, from first run to exporting a program |
 | [Install and security](docs/install-and-security.md) | Installing, connecting to KiCad, updating, uninstalling — and the safety warning |
 | [Privacy](PRIVACY.md) | What is stored, what leaves the machine (almost nothing) |
 | [Security policy](SECURITY.md) | Reporting a vulnerability; what is supported |

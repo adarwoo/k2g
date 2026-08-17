@@ -8,7 +8,7 @@ use crate::data::model::*;
 use crate::ui::navigation::*;
 use crate::runtime::AppError;
 use crate::runtime::{UiCommand, apply_ui_command, ctx_snapshot, with_ctx_mut};
-use super::save_program::SaveProgramButton;
+use super::save_program::ExportProgramButton;
 
 #[component]
 pub fn AppTopBar(
@@ -173,7 +173,7 @@ pub fn AppTopBar(
 
                 // Immediately right of the pill: the pill says the program is ready, and
                 // this is what you do about it.
-                SaveProgramButton { state }
+                ExportProgramButton { state }
 
                 // Application preferences, including the palette that used to have its
                 // own button here. Icon-only, so it carries the label a sighted user

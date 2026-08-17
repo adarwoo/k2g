@@ -39,6 +39,14 @@ use uuid::Uuid;
 /// suffixes as filters.
 pub const GCODE_FILE_EXTENSION: &str = "nc";
 
+/// How many export destinations are remembered before the oldest is forgotten.
+///
+/// One per volume, and a volume is a machine's disk or a stick — a dozen covers a
+/// workshop's worth with room to spare. There is a bound at all because the settings
+/// document is rewritten whole on every write, so a list that only ever grew would be a
+/// slow leak into a file that is read at every launch.
+pub const MAX_REMEMBERED_EXPORT_DIRECTORIES: usize = 12;
+
 /// Default width of the docked Job column, in pixels. Comfortable for the Code,
 /// Tooling and Rack views at the 1400px minimum the dock needs overall.
 pub const DEFAULT_JOB_PIN_WIDTH: i64 = 560;
@@ -159,13 +167,19 @@ pub struct AppState {
     pub board: Option<BoardSnapshot>,
     /// Clean KiCad connection status for the status bar.
     pub kicad_status: String,
-    /// Directory the last G-code save wrote to, mirrored to `global.setting.yaml`.
-    /// `None` until the first save; see [`AppState::gcode_save_directory_or_default`].
+    /// Where Export last wrote, per volume, most recently used first.
+    ///
+    /// The machine's disk and each stick keep their own, so switching between them stops
+    /// dragging the other one's folder along — which is what the two scalars below did.
+    /// Resolved by [`removable::export_target`].
+    pub export_directories: Vec<removable::ExportDirectory>,
+    /// Legacy mirror of the most recent entry above that is not on a stick.
+    ///
+    /// Written, never read: a build predating [`AppState::export_directories`] reads this
+    /// key, so keeping it current means downgrading does not lose the folder. It is also
+    /// what a settings file written by such a build is migrated *from*, once.
     pub gcode_save_directory: Option<String>,
-    /// Directory on removable media the last "Save to USB" wrote to. Separate from
-    /// [`AppState::gcode_save_directory`] so the two histories cannot contaminate each
-    /// other — see [`removable::removable_save_directory`], which resolves it against
-    /// the media actually plugged in at the time.
+    /// Legacy mirror of the most recent entry that *is* on a stick. Same contract.
     pub last_removable_media_path: Option<String>,
     /// Keep the Job view docked beside the profile screens (see
     /// [`Screen::shows_pinned_job`]). The flag is kept even while the window is too
@@ -435,6 +449,7 @@ fn default_global_settings() -> Value {
         "selected_cnc_profile_id": Value::Null,
         "selected_fixture_profile_id": Value::Null,
         "selected_toolset_profile_id": Value::Null,
+        "export_directories": Value::Array(vec![]),
         "gcode_save_directory": Value::Null,
         "last_removable_media_path": Value::Null,
         "job_view_pinned": false,

@@ -88,6 +88,11 @@ impl AppState {
             rack_slots: BTreeMap::new(),
             board: boot.board_snapshot.clone(),
             kicad_status: boot.kicad_status.clone(),
+            export_directories: migrate_legacy_export_directories(
+                load_persisted_export_directories(),
+                load_persisted_string("gcode_save_directory").as_deref(),
+                load_persisted_string("last_removable_media_path").as_deref(),
+            ),
             gcode_save_directory: load_persisted_string("gcode_save_directory"),
             last_removable_media_path: load_persisted_string("last_removable_media_path"),
             job_view_pinned: load_persisted_flag("job_view_pinned", false),
@@ -328,6 +333,14 @@ impl AppState {
             "selected_cnc_profile_id": self.selected_machine_id,
             "selected_fixture_profile_id": self.selected_fixture_id,
             "selected_toolset_profile_id": self.selected_toolset_id,
+            "export_directories": Value::Array(
+                self.export_directories
+                    .iter()
+                    .map(|entry| json!({ "volume": entry.volume, "path": entry.path }))
+                    .collect(),
+            ),
+            // Written, never read — see the fields. They mirror the table so a downgrade
+            // to a build that predates it still finds both folders.
             "gcode_save_directory": self.gcode_save_directory,
             "last_removable_media_path": self.last_removable_media_path,
             "job_view_pinned": self.job_view_pinned,
@@ -533,15 +546,17 @@ impl AppState {
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
-    /// Where a G-code Save dialog should open.
+    /// Where an export should open, and what to file the result under.
     ///
-    /// The remembered directory wins, but only while it still exists — a folder that
-    /// has since been deleted, renamed, or lived on a drive that is no longer mounted
-    /// would otherwise open the dialog somewhere useless. Anything else (including the
-    /// very first save) falls back to the host's download folder, which is where a
-    /// desktop user expects a generated file to land.
-    pub fn gcode_save_directory_or_default(&self) -> std::path::PathBuf {
-        resolve_save_directory(self.gcode_save_directory.as_deref())
+    /// The whole decision — remembered folder, whether it still exists, the fallback —
+    /// lives in [`removable::choose_export_target`], which is pure and tested without a
+    /// filesystem. This only supplies it the state.
+    pub fn export_target(&self, destination: &removable::ExportDestination) -> removable::ExportTarget {
+        removable::export_target(
+            destination,
+            &self.export_directories,
+            &host_default_save_directory(),
+        )
     }
 
     /// Toggles the docked Job view and persists the choice.
@@ -623,31 +638,56 @@ impl AppState {
         }
     }
 
-    /// Records the directory a save wrote to and mirrors it to `global.setting.yaml`.
-    /// A no-op when the directory is unchanged, so re-saving the same file does not
-    /// churn the settings write.
-    pub fn remember_gcode_save_directory(&mut self, directory: &std::path::Path) {
-        let directory = directory.to_string_lossy().into_owned();
-        if self.gcode_save_directory.as_deref() == Some(directory.as_str()) {
+    /// Records where an export wrote, filed under the volume it landed on.
+    ///
+    /// Moved to the front, because the front is what an ordinary Export offers next — see
+    /// `choose_export_target`. A write to a stick also drops any `drive:` entry for the
+    /// same letter: that is the provisional key a migration left behind, and once the
+    /// stick has been seen its serial is the better one.
+    ///
+    /// A no-op when the front entry already says this, so re-exporting to the same folder
+    /// does not churn a settings write — the contract the two setters this replaces had.
+    pub fn remember_export_directory(&mut self, volume: &str, directory: &std::path::Path) {
+        let path = directory.to_string_lossy().into_owned();
+        if self
+            .export_directories
+            .first()
+            .is_some_and(|entry| entry.volume == volume && entry.path == path)
+        {
             return;
         }
-        self.gcode_save_directory = Some(directory);
+
+        let letter_key = volume
+            .strip_prefix("usb:")
+            .and_then(|_| removable::drive_letter_of(&path))
+            .map(|letter| format!("drive:{letter}"));
+        self.export_directories.retain(|entry| {
+            entry.volume != volume && Some(&entry.volume) != letter_key.as_ref()
+        });
+        self.export_directories.insert(
+            0,
+            removable::ExportDirectory { volume: volume.to_string(), path },
+        );
+        // Sticks come and go, and this document is rewritten whole on every settings
+        // write — an unbounded list is a slow leak into the file.
+        self.export_directories.truncate(MAX_REMEMBERED_EXPORT_DIRECTORIES);
+        self.refresh_legacy_export_mirrors();
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
-    /// Records the removable-media directory a "Save to USB" wrote to.
+    /// Keeps the two superseded scalars equal to the table's most recent entries.
     ///
-    /// Deliberately *not* folded into [`Self::remember_gcode_save_directory`]: the two
-    /// have independent histories, and letting a USB save move the ordinary dialog to a
-    /// drive letter that will be gone tomorrow is exactly the annoyance this feature
-    /// exists to remove. Same no-op-when-unchanged contract, for the same reason.
-    pub fn remember_removable_media_path(&mut self, directory: &std::path::Path) {
-        let directory = directory.to_string_lossy().into_owned();
-        if self.last_removable_media_path.as_deref() == Some(directory.as_str()) {
-            return;
-        }
-        self.last_removable_media_path = Some(directory);
-        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    /// They are written and never read (see their fields): a build predating the table
+    /// reads them, so a downgrade keeps both remembered folders rather than starting over.
+    fn refresh_legacy_export_mirrors(&mut self) {
+        let front = |on_stick: bool| {
+            self.export_directories
+                .iter()
+                .find(|entry| entry.volume.starts_with("usb:") == on_stick)
+                .map(|entry| entry.path.clone())
+        };
+        self.gcode_save_directory = front(false);
+        self.last_removable_media_path = front(true);
     }
 
     // -----------------------------------------------------------------------
@@ -758,13 +798,6 @@ impl AppState {
 
         self.persist_realms(&[PersistRealm::GlobalSettings]);
         previous
-    }
-
-    /// The file name a G-code Save should offer: the board's name (KiCad's file stem,
-    /// so `panel.kicad_pcb` becomes `panel`) plus the program extension. Falls back to
-    /// a generic stem when no board is loaded, so the dialog is never blank.
-    pub fn gcode_default_file_name(&self) -> String {
-        self.program_file_name(0, 1, "", GCODE_FILE_EXTENSION)
     }
 
     /// What the program for `index` is saved as.
@@ -2397,17 +2430,6 @@ fn load_persisted_unit_system() -> UserUnitSystem {
     UserUnitSystem::from_settings_str(units_value)
 }
 
-/// Picks the directory a Save dialog opens in: the remembered one while it still
-/// exists, else the host default. Split out from [`AppState`] so the "destination has
-/// gone away" path is testable without building a whole app state.
-fn resolve_save_directory(remembered: Option<&str>) -> std::path::PathBuf {
-    remembered
-        .filter(|dir| !dir.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .filter(|dir| dir.is_dir())
-        .unwrap_or_else(host_default_save_directory)
-}
-
 /// The host's default place for a user-generated file. `dirs` resolves this properly
 /// per platform — Windows reads the `Downloads` known folder from the shell rather
 /// than assuming `%USERPROFILE%\Downloads` (it is relocatable), macOS gives
@@ -2485,6 +2507,72 @@ fn load_persisted_string(key: &str) -> Option<String> {
 /// An absent or unrecognised key opens on Job, which is what a fresh install does. Not an
 /// error worth surfacing: a settings file from a build with a screen this one does not
 /// have is a downgrade, and the right answer to it is to open somewhere sensible.
+/// The remembered export destinations, most recently used first.
+///
+/// A malformed entry is skipped rather than fatal — the same contract `EdgeTab` reads its
+/// array under. One bad line in a hand-edited settings file should cost that line, not
+/// every remembered folder.
+fn load_persisted_export_directories() -> Vec<removable::ExportDirectory> {
+    let Some(state) = persistence_state() else {
+        return Vec::new();
+    };
+    state
+        .global_settings
+        .get("export_directories")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let volume = entry.get("volume").and_then(Value::as_str)?.trim();
+                    let path = entry.get("path").and_then(Value::as_str)?.trim();
+                    (!volume.is_empty() && !path.is_empty()).then(|| removable::ExportDirectory {
+                        volume: volume.to_string(),
+                        path: path.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Folds the two superseded scalars into the per-volume table, once.
+///
+/// Idempotent by construction: an entry already filed under a key wins, because the table
+/// is by definition newer than the scalar that seeded it.
+///
+/// The removable one is filed under its **drive letter**, not under a serial, and that is
+/// forced rather than lazy: `AppState::new` runs before the media watcher starts, so there
+/// is no stick to read a serial from — and there may be no stick plugged in at all. The
+/// letter key is provisional; `choose_export_target` accepts it as a second chance for a
+/// medium on that letter, and the first export to that stick re-files the folder under the
+/// serial and drops the letter entry.
+fn migrate_legacy_export_directories(
+    mut table: Vec<removable::ExportDirectory>,
+    legacy_ordinary: Option<&str>,
+    legacy_removable: Option<&str>,
+) -> Vec<removable::ExportDirectory> {
+    let mut seed = |key: String, path: &str| {
+        let path = path.trim();
+        if path.is_empty() || table.iter().any(|entry| entry.volume == key) {
+            return;
+        }
+        table.push(removable::ExportDirectory { volume: key, path: path.to_string() });
+    };
+
+    if let Some(path) = legacy_ordinary {
+        // No media list here, so a path on a stick reads as its letter — which is exactly
+        // what this key is: the drive the previous build would have opened.
+        seed(removable::volume_key_for_path(std::path::Path::new(path), &[]), path);
+    }
+    if let Some(path) = legacy_removable {
+        if let Some(letter) = removable::drive_letter_of(path) {
+            seed(format!("drive:{letter}"), path);
+        }
+    }
+    table
+}
+
 fn load_persisted_screen() -> Screen {
     load_persisted_string("selected_screen")
         .and_then(|key| Screen::from_key(&key))
@@ -2576,41 +2664,52 @@ mod step_projection_tests {
 }
 
 #[cfg(test)]
-mod gcode_save_tests {
+mod export_tests {
     use super::*;
 
-    /// The remembered directory is honoured while it exists — that is the whole point
-    /// of persisting it.
-    #[test]
-    fn an_existing_remembered_directory_is_used() {
-        let dir = tempfile::tempdir().unwrap();
-        let remembered = dir.path().to_string_lossy().into_owned();
-        assert_eq!(resolve_save_directory(Some(&remembered)), dir.path());
+    fn entry(volume: &str, path: &str) -> removable::ExportDirectory {
+        removable::ExportDirectory { volume: volume.to_string(), path: path.to_string() }
     }
 
-    /// The first save (nothing remembered) and a destination that has since been
-    /// deleted both land on the host default rather than a path that no longer exists.
+    /// The two superseded scalars become table entries once, and never overwrite what the
+    /// table already says — the table is by definition newer than the scalar that seeded
+    /// it, so a second launch must not undo an export made since.
     #[test]
-    fn a_missing_or_absent_destination_falls_back_to_the_host_default() {
-        let host = host_default_save_directory();
-        assert_eq!(resolve_save_directory(None), host, "first save");
-        assert_eq!(resolve_save_directory(Some("")), host, "blank setting");
+    fn the_legacy_scalars_are_folded_in_once() {
+        let migrated = migrate_legacy_export_directories(
+            Vec::new(),
+            Some("C:\\Users\\me\\Downloads"),
+            Some("E:\\jobs"),
+        );
+        assert_eq!(
+            migrated,
+            vec![entry("drive:C", "C:\\Users\\me\\Downloads"), entry("drive:E", "E:\\jobs")],
+            "the removable one lands under its letter — no stick is plugged in this early"
+        );
 
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_string_lossy().into_owned();
-        drop(dir); // the folder is gone, as if the user deleted or unmounted it
-        assert_eq!(resolve_save_directory(Some(&path)), host, "destination removed");
+        // Idempotent: running it again over its own output changes nothing.
+        let again = migrate_legacy_export_directories(
+            migrated.clone(),
+            Some("C:\\Users\\me\\Downloads"),
+            Some("E:\\jobs"),
+        );
+        assert_eq!(again, migrated);
+
+        // And a table entry wins over the scalar that would have seeded its key.
+        let newer = migrate_legacy_export_directories(
+            vec![entry("drive:C", "C:\\work")],
+            Some("C:\\Users\\me\\Downloads"),
+            None,
+        );
+        assert_eq!(newer, vec![entry("drive:C", "C:\\work")]);
     }
 
-    /// A file path is not a directory — a stale setting pointing at one must not be
-    /// handed to the dialog as a starting folder.
     #[test]
-    fn a_remembered_path_that_is_a_file_falls_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("not-a-directory.nc");
-        std::fs::write(&file, "G21").unwrap();
-        let as_str = file.to_string_lossy().into_owned();
-        assert_eq!(resolve_save_directory(Some(&as_str)), host_default_save_directory());
+    fn a_blank_legacy_scalar_seeds_nothing() {
+        assert!(migrate_legacy_export_directories(Vec::new(), Some("   "), None).is_empty());
+        assert!(migrate_legacy_export_directories(Vec::new(), None, None).is_empty());
+        // A removable path with no drive letter to read is not a location on a stick.
+        assert!(migrate_legacy_export_directories(Vec::new(), None, Some("jobs")).is_empty());
     }
 
     /// The default name is the board's own, with characters Windows rejects folded to
@@ -2656,7 +2755,10 @@ mod gcode_save_tests {
         let app = named_board("panel");
         assert_eq!(app.program_file_name(0, 1, "", "nc"), "panel.nc");
         assert_eq!(app.program_file_name(0, 1, "Drill PTH", "nc"), "panel.nc");
-        assert_eq!(app.gcode_default_file_name(), "panel.nc", "the old name is unchanged");
+        // The extension is the step's own. It used to be `.nc` for a single program
+        // whatever the machine emitted, because the one dialog that named it hard-coded
+        // the constant; there is one naming path now and it takes what it is given.
+        assert_eq!(app.program_file_name(0, 1, "", "drl"), "panel.drl");
     }
 
     /// Past one step the file is named for the step, because that is the name the operator

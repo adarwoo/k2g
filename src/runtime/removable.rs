@@ -79,9 +79,22 @@ pub struct RemovableMedium {
     pub root: PathBuf,
     /// The volume label, or [`UNLABELLED_MEDIUM`].
     pub label: String,
-    /// Uppercase ASCII, e.g. `'E'` — the identity both the remembered-path match and the
-    /// device path are built on.
+    /// Uppercase ASCII, e.g. `'E'` — what the device path is built on, and what the
+    /// operator reads on screen.
     pub drive_letter: char,
+    /// The volume serial number, when the filesystem has one.
+    ///
+    /// This is what a remembered export folder is filed under ([`volume_key`]), because
+    /// the drive letter is not an identity: it is handed to whatever is plugged in next,
+    /// so a folder remembered against `E:` would be offered for a stick that never had
+    /// it. The serial survives replugging and reassignment.
+    ///
+    /// Its honest limits, since they decide what this can be trusted for: it is a
+    /// *filesystem* property written at format time, so reformatting a stick changes it
+    /// (the remembered folder is forgotten, which is the right answer for a wiped disk),
+    /// and a bit-for-bit clone of one carries the same serial. `None` where the
+    /// filesystem reports none.
+    pub serial: Option<u32>,
     /// Free bytes available *to this process* (the quota-aware figure), because the
     /// question being asked is "will my program fit", not "how empty is this disk".
     pub free_bytes: u64,
@@ -130,17 +143,6 @@ pub enum EjectError {
 
     #[error("{0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Where a "save to removable media" dialog should open, and which medium that is.
-///
-/// The two travel together because the button needs both: the directory to open at, and
-/// the medium's name for its tooltip.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(not(windows), allow(dead_code))]
-pub struct SaveTarget {
-    pub medium: RemovableMedium,
-    pub directory: PathBuf,
 }
 
 /// The last published scan.
@@ -212,10 +214,175 @@ pub fn request_eject(medium: RemovableMedium) {
     }
 }
 
-/// Where a "save to removable media" dialog should open, or `None` when there is nothing
-/// to save to.
-pub fn save_target(media: &[RemovableMedium], remembered: Option<&str>) -> Option<SaveTarget> {
-    choose_save_target(media, remembered, |path| path.is_dir())
+/// The medium an export to removable media should go to, or `None` when there is nothing
+/// plugged in.
+///
+/// *Which* medium, not where on it: the folder is [`crate::runtime::export`]'s business,
+/// because it is remembered per volume and the hard disk is remembered the same way. This
+/// only answers "is there a stick, and which one".
+pub fn export_medium(media: &[RemovableMedium]) -> Option<RemovableMedium> {
+    // The lowest-lettered one. With two sticks in, the operator picks in the dialog; this
+    // is only the opening bid.
+    media.first().cloned()
+}
+
+/// What a volume's remembered export folder is filed under.
+///
+/// The serial where the filesystem has one, because a drive letter is not an identity —
+/// it is handed to whatever is plugged in next, and a folder remembered against `E:`
+/// would then be offered for a stick that never had it. The letter is the fallback for a
+/// filesystem with no serial, which is no worse than what this replaced.
+///
+/// Prefixed so the two kinds cannot collide, and so an entry in the settings file says
+/// what it is to anyone reading it.
+pub fn volume_key(medium: &RemovableMedium) -> String {
+    match medium.serial {
+        Some(serial) => format!("usb:{serial:08X}"),
+        None => format!("drive:{}", medium.drive_letter),
+    }
+}
+
+/// What a written-to path is filed under.
+///
+/// A path on a stick that is plugged in takes that stick's serial key, so the folder is
+/// remembered against the medium rather than against the letter it happens to hold today.
+/// Anything else takes its drive letter — a fixed drive keeps its letter, which is the
+/// whole difference from a stick — and a path with no letter to read (every non-Windows
+/// path, and the UNC and drive-relative forms [`drive_letter_of`] declines) takes
+/// [`HOST_VOLUME_KEY`].
+pub fn volume_key_for_path(path: &Path, media: &[RemovableMedium]) -> String {
+    match drive_letter_of(&path.to_string_lossy()) {
+        Some(letter) => match media.iter().find(|medium| medium.drive_letter == letter) {
+            Some(medium) => volume_key(medium),
+            None => format!("drive:{letter}"),
+        },
+        None => HOST_VOLUME_KEY.to_string(),
+    }
+}
+
+/// The bucket a path with no drive letter is filed under — every path on Linux and macOS,
+/// where there is one destination to remember and nothing to distinguish.
+pub const HOST_VOLUME_KEY: &str = "host";
+
+/// One remembered export destination: which volume, and where on it.
+///
+/// Stored in `global.setting.yaml` as an array of these, most recently used first — see
+/// `export_directories` there for why an array rather than a map.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportDirectory {
+    pub volume: String,
+    pub path: String,
+}
+
+/// Which volume an export is aimed at: the machine, or a stick.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExportDestination {
+    /// The **Export** button — wherever the machine last exported to.
+    Host,
+    /// The USB button — this medium.
+    Medium(RemovableMedium),
+}
+
+/// Where an export dialog opens, and what the result is filed under afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportTarget {
+    pub directory: PathBuf,
+    /// What [`ExportDirectory::volume`] to write when the export lands *here*. The folder
+    /// the operator finally browses to can be somewhere else entirely, so the key is
+    /// recomputed from the real path after the write — this is the opening bid.
+    pub volume_key: String,
+    /// The eject candidate, for a `Medium` destination. Whether anything is *actually*
+    /// ejected is decided after the write, from where the files landed.
+    pub medium: Option<RemovableMedium>,
+}
+
+/// Where an export should open. See [`choose_export_target`].
+pub fn export_target(
+    destination: &ExportDestination,
+    remembered: &[ExportDirectory],
+    host_default: &Path,
+) -> ExportTarget {
+    choose_export_target(destination, remembered, host_default, |path| path.is_dir())
+}
+
+/// The destination decision, with the filesystem injected.
+///
+/// Pure and hardware-free for the reason the medium selection it replaced was: half the
+/// input is a synthesised medium list, and a test mixing synthetic media with real
+/// directories is a test that passes on its author's machine.
+///
+/// For a **stick**: the folder remembered against its serial, *re-based onto the letter it
+/// holds now* — `F:\jobs` remembered, plugged back in as `E:`, opens `E:\jobs`. Re-basing
+/// is the entire point of keying by serial; without it the remembered path names a drive
+/// that may belong to something else. A migrated `drive:` entry is accepted as a second
+/// chance, and the first export re-files it under the serial. Failing both, the root of
+/// the device.
+///
+/// For the **host**: the most recent remembered folder that is not on a stick and still
+/// exists, else the host's own default. Most-recent-first is what gives each fixed drive
+/// its own memory — exporting to `D:` puts `drive:D` at the front, so the next export
+/// offers `D:`, and going back to `C:` restores it.
+fn choose_export_target(
+    destination: &ExportDestination,
+    remembered: &[ExportDirectory],
+    host_default: &Path,
+    dir_exists: impl Fn(&Path) -> bool,
+) -> ExportTarget {
+    match destination {
+        ExportDestination::Medium(medium) => {
+            let key = volume_key(medium);
+            // The serial's own entry first, then a `drive:` entry left by a migration —
+            // which cannot have carried a serial, because nothing was plugged in when the
+            // settings were read.
+            let letter_key = format!("drive:{}", medium.drive_letter);
+            let candidate = remembered
+                .iter()
+                .find(|entry| entry.volume == key)
+                .or_else(|| remembered.iter().find(|entry| entry.volume == letter_key))
+                .and_then(|entry| rebase_onto(&medium.root, &entry.path))
+                .filter(|path| dir_exists(path));
+
+            ExportTarget {
+                directory: candidate.unwrap_or_else(|| medium.root.clone()),
+                volume_key: key,
+                medium: Some(medium.clone()),
+            }
+        }
+        ExportDestination::Host => {
+            let directory = remembered
+                .iter()
+                .find(|entry| !entry.volume.starts_with("usb:") && dir_exists(Path::new(&entry.path)))
+                .map(|entry| PathBuf::from(&entry.path))
+                .unwrap_or_else(|| host_default.to_path_buf());
+            ExportTarget {
+                volume_key: volume_key_for_path(&directory, &[]),
+                directory,
+                medium: None,
+            }
+        }
+    }
+}
+
+/// A remembered path moved onto `root`: `E:\` + `F:\jobs\out` → `E:\jobs\out`.
+///
+/// A serial names a *filesystem*, so a folder on it only means anything relative to that
+/// filesystem's root — and the root is whichever letter the stick was given this time.
+/// `None` for a remembered path that is not rooted at a drive letter, which is not a
+/// location on a stick and cannot be moved onto one.
+fn rebase_onto(root: &Path, remembered: &str) -> Option<PathBuf> {
+    let within = path_within_volume(remembered)?;
+    Some(if within.is_empty() { root.to_path_buf() } else { root.join(within) })
+}
+
+/// What follows the drive prefix in a rooted Windows path: `E:\jobs\out` → `jobs\out`,
+/// `E:\` and `E:` → the empty string. `None` for anything not rooted at a drive letter.
+///
+/// String-parsed for the same reason as [`drive_letter_of`]: on a non-Windows test host
+/// `Path` has no notion of a drive prefix and hands back `E:\jobs` as one component.
+fn path_within_volume(path: &str) -> Option<&str> {
+    let trimmed = path.trim();
+    drive_letter_of(trimmed)?;
+    Some(trimmed[2..].trim_start_matches(['\\', '/']))
 }
 
 /// The medium a written file landed on, if any.
@@ -235,7 +402,7 @@ pub fn eject_report(medium: &RemovableMedium, outcome: EjectOutcome) -> String {
             format!("Ejected {} — safe to remove.", medium.display_name())
         }
         EjectOutcome::SafeToRemove => format!(
-            "Saved to {} — safe to remove (this device has no eject mechanism).",
+            "Exported to {} — safe to remove (this device has no eject mechanism).",
             medium.display_name()
         ),
     }
@@ -243,22 +410,22 @@ pub fn eject_report(medium: &RemovableMedium, outcome: EjectOutcome) -> String {
 
 /// The toast for a failed eject.
 ///
-/// Every message leads with the save. By the time this runs the program is already on the
-/// stick, and a user who reads "Could not eject" first will assume they lost the file and
-/// save it again.
+/// Every message leads with the export. By the time this runs the program is already on
+/// the stick, and a user who reads "Could not eject" first will assume they lost the file
+/// and export it again.
 pub fn eject_advice(medium: &RemovableMedium, error: &EjectError) -> String {
     let name = medium.display_name();
     match error {
         EjectError::Busy { .. } => format!(
-            "Saved to {name}. Windows would not release the drive — close anything \
+            "Exported to {name}. Windows would not release the drive — close anything \
              showing it, then use Safely Remove Hardware before unplugging."
         ),
         EjectError::Unsupported => format!(
-            "Saved to {name}. Ejecting is only supported on Windows — unmount the device \
+            "Exported to {name}. Ejecting is only supported on Windows — unmount the device \
              the usual way."
         ),
         EjectError::Io(err) => format!(
-            "Saved to {name}. Could not eject the drive ({err}); use Safely Remove \
+            "Exported to {name}. Could not eject the drive ({err}); use Safely Remove \
              Hardware before unplugging."
         ),
     }
@@ -272,48 +439,6 @@ pub fn eject(medium: &RemovableMedium) -> Result<EjectOutcome, EjectError> {
     platform::eject(medium)
 }
 
-/// Chooses which removable medium a save dialog should target, and where on it.
-///
-/// Ordered by what the user most likely means:
-///  1. Nothing plugged in ⇒ `None`; the caller falls back to the ordinary save directory
-///     rather than inventing a destination.
-///  2. The remembered path names a drive letter that is *still present* ⇒ reuse it. If
-///     that exact sub-directory has since gone — the classic case being the same letter
-///     now belonging to a different stick — fall back to **that medium's root**, not to
-///     the first medium: the user asked for `E:`, so give them `E:`.
-///  3. Otherwise the lowest-lettered medium's root.
-///
-/// `dir_exists` is injected rather than probed directly so the whole decision is testable
-/// with no hardware and no filesystem. (Compare `resolve_save_directory` in `state.rs`,
-/// which probes for real — it can, because its only input is a path. Here half the input
-/// is a synthesised medium list, and mixing synthetic and real inputs in one test is how
-/// a test ends up passing only on the author's machine.)
-fn choose_save_target(
-    media: &[RemovableMedium],
-    remembered: Option<&str>,
-    dir_exists: impl Fn(&Path) -> bool,
-) -> Option<SaveTarget> {
-    if media.is_empty() {
-        return None;
-    }
-
-    if let Some(remembered) = remembered {
-        if let Some(letter) = drive_letter_of(remembered) {
-            if let Some(medium) = media.iter().find(|medium| medium.drive_letter == letter) {
-                let directory = Path::new(remembered);
-                let directory =
-                    if dir_exists(directory) { directory.to_path_buf() } else { medium.root.clone() };
-                return Some(SaveTarget { medium: medium.clone(), directory });
-            }
-        }
-    }
-
-    media.first().map(|medium| SaveTarget {
-        medium: medium.clone(),
-        directory: medium.root.clone(),
-    })
-}
-
 /// The drive letter a Windows path is rooted at, uppercased.
 ///
 /// Parsed from the string rather than through `Path::components`, because this also runs
@@ -321,7 +446,7 @@ fn choose_save_target(
 /// would hand back `E:\out` as one opaque component. `None` for UNC paths, relative
 /// paths, and `E:relative` — that last one is a real Win32 form meaning "the current
 /// directory *on* E:", which is not a rooted path and must not be treated as one.
-fn drive_letter_of(path: &str) -> Option<char> {
+pub(crate) fn drive_letter_of(path: &str) -> Option<char> {
     let bytes = path.trim().as_bytes();
     if bytes.len() < 2 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' {
         return None;
@@ -348,6 +473,10 @@ fn is_material_change(previous: &[RemovableMedium], current: &[RemovableMedium])
     previous.iter().zip(current).any(|(before, after)| {
         before.drive_letter != after.drive_letter
             || before.label != after.label
+            // Without this, one stick swapped for another that happens to share its
+            // letter, its label and its free space to the megabyte is a change nothing
+            // reports — and the export folder offered would be the *previous* stick's.
+            || before.serial != after.serial
             || before.free_bytes.abs_diff(after.free_bytes) >= FREE_SPACE_NOTICE_BYTES
     })
 }
@@ -417,52 +546,157 @@ mod tests {
     use super::*;
 
     /// A medium with everything but the drive letter and label left at a plausible
-    /// default — the selection rules only ever look at those two.
+    /// default. Serial-free, which is the pre-serial world and the fallback path.
     fn medium(letter: char, label: &str) -> RemovableMedium {
         RemovableMedium {
             root: PathBuf::from(format!("{letter}:\\")),
             label: label.to_string(),
             drive_letter: letter,
+            serial: None,
             free_bytes: 4 * 1024 * 1024 * 1024,
         }
     }
 
-    #[test]
-    fn no_media_means_no_target() {
-        assert_eq!(choose_save_target(&[], Some("E:\\jobs"), |_| true), None);
+    /// The same, with an identity — which is what the export memory is filed under.
+    fn stick(letter: char, label: &str, serial: u32) -> RemovableMedium {
+        RemovableMedium { serial: Some(serial), ..medium(letter, label) }
+    }
+
+    fn remembered(volume: &str, path: &str) -> ExportDirectory {
+        ExportDirectory { volume: volume.to_string(), path: path.to_string() }
     }
 
     #[test]
-    fn the_remembered_directory_wins_while_its_drive_is_present() {
+    fn nothing_plugged_in_means_no_medium_to_export_to() {
+        assert_eq!(export_medium(&[]), None);
+    }
+
+    #[test]
+    fn with_two_sticks_in_the_lowest_letter_is_the_opening_bid() {
         let media = [medium('E', "KINGSTON"), medium('F', "SDCARD")];
-        let target = choose_save_target(&media, Some("F:\\jobs"), |_| true).unwrap();
-        assert_eq!(target.directory, PathBuf::from("F:\\jobs"));
-        assert_eq!(target.medium.drive_letter, 'F');
-    }
-
-    /// The same letter can come back as a *different* stick, so a remembered
-    /// sub-directory that is gone falls back to that drive's root — not to another drive.
-    #[test]
-    fn a_vanished_subdirectory_falls_back_to_its_own_drives_root() {
-        let media = [medium('E', "KINGSTON"), medium('F', "SDCARD")];
-        let target = choose_save_target(&media, Some("F:\\jobs"), |_| false).unwrap();
-        assert_eq!(target.directory, PathBuf::from("F:\\"));
-        assert_eq!(target.medium.drive_letter, 'F');
+        assert_eq!(export_medium(&media).unwrap().drive_letter, 'E');
     }
 
     #[test]
-    fn a_remembered_drive_that_is_gone_falls_back_to_the_first_medium() {
-        let media = [medium('E', "KINGSTON")];
-        let target = choose_save_target(&media, Some("G:\\jobs"), |_| true).unwrap();
+    fn a_volume_is_filed_under_its_serial_and_falls_back_to_its_letter() {
+        assert_eq!(volume_key(&stick('E', "KINGSTON", 0x1A2B_3C4D)), "usb:1A2B3C4D");
+        assert_eq!(volume_key(&medium('E', "KINGSTON")), "drive:E");
+        let media = [stick('E', "KINGSTON", 0x1A2B_3C4D)];
+        assert_eq!(volume_key_for_path(Path::new("E:\\jobs"), &media), "usb:1A2B3C4D");
+        assert_eq!(volume_key_for_path(Path::new("C:\\out"), &media), "drive:C");
+        assert_eq!(volume_key_for_path(Path::new("/home/me/out"), &media), HOST_VOLUME_KEY);
+    }
+
+    /// The headline, and the only reason the serial is read at all: a stick that comes
+    /// back on a different letter still opens in the folder it was last exported to.
+    #[test]
+    fn a_sticks_folder_survives_it_returning_on_another_letter() {
+        let table = [remembered("usb:1A2B3C4D", "F:\\jobs")];
+        let now_at_e = stick('E', "KINGSTON", 0x1A2B_3C4D);
+        let target = choose_export_target(
+            &ExportDestination::Medium(now_at_e),
+            &table,
+            Path::new("C:\\Downloads"),
+            |_| true,
+        );
+        assert_eq!(target.directory, PathBuf::from("E:\\jobs"));
+        assert_eq!(target.volume_key, "usb:1A2B3C4D");
+    }
+
+    #[test]
+    fn two_sticks_that_have_both_been_e_keep_their_own_folders() {
+        let table = [
+            remembered("usb:11111111", "E:\\alpha"),
+            remembered("usb:22222222", "E:\\beta"),
+        ];
+        let host = Path::new("C:\\Downloads");
+        let first = choose_export_target(
+            &ExportDestination::Medium(stick('E', "ONE", 0x1111_1111)), &table, host, |_| true);
+        let second = choose_export_target(
+            &ExportDestination::Medium(stick('E', "TWO", 0x2222_2222)), &table, host, |_| true);
+        assert_eq!(first.directory, PathBuf::from("E:\\alpha"));
+        assert_eq!(second.directory, PathBuf::from("E:\\beta"));
+    }
+
+    /// A folder deleted since — or a stick reformatted, which is the same thing from
+    /// here — opens at the root of the device rather than at nothing.
+    #[test]
+    fn a_vanished_folder_on_a_stick_falls_back_to_its_root() {
+        let table = [remembered("usb:1A2B3C4D", "E:\\jobs")];
+        let target = choose_export_target(
+            &ExportDestination::Medium(stick('E', "KINGSTON", 0x1A2B_3C4D)),
+            &table,
+            Path::new("C:\\Downloads"),
+            |_| false,
+        );
         assert_eq!(target.directory, PathBuf::from("E:\\"));
     }
 
     #[test]
-    fn with_nothing_remembered_the_lowest_letter_wins() {
-        let media = [medium('E', "KINGSTON"), medium('F', "SDCARD")];
-        let target = choose_save_target(&media, None, |_| true).unwrap();
-        assert_eq!(target.medium.drive_letter, 'E');
+    fn a_stick_with_nothing_remembered_opens_at_its_root() {
+        let target = choose_export_target(
+            &ExportDestination::Medium(stick('E', "KINGSTON", 0x1A2B_3C4D)),
+            &[],
+            Path::new("C:\\Downloads"),
+            |_| true,
+        );
         assert_eq!(target.directory, PathBuf::from("E:\\"));
+    }
+
+    /// What a migration leaves behind: a folder filed under a letter, because nothing was
+    /// plugged in when the old settings were read. It is honoured once, and the target it
+    /// produces is keyed by serial — so the first export re-files it.
+    #[test]
+    fn a_migrated_letter_entry_is_honoured_then_refiled_under_the_serial() {
+        let table = [remembered("drive:E", "E:\\jobs")];
+        let target = choose_export_target(
+            &ExportDestination::Medium(stick('E', "KINGSTON", 0x1A2B_3C4D)),
+            &table,
+            Path::new("C:\\Downloads"),
+            |_| true,
+        );
+        assert_eq!(target.directory, PathBuf::from("E:\\jobs"));
+        assert_eq!(target.volume_key, "usb:1A2B3C4D", "the write re-files it by serial");
+    }
+
+    /// Each fixed drive keeps its own, by being the most recent one that still exists.
+    #[test]
+    fn the_host_takes_the_most_recent_folder_that_is_not_on_a_stick() {
+        let table = [
+            remembered("usb:1A2B3C4D", "E:\\jobs"),
+            remembered("drive:D", "D:\\work"),
+            remembered("drive:C", "C:\\out"),
+        ];
+        let target = choose_export_target(
+            &ExportDestination::Host, &table, Path::new("C:\\Downloads"), |_| true);
+        assert_eq!(target.directory, PathBuf::from("D:\\work"), "not the stick's folder");
+        assert_eq!(target.volume_key, "drive:D");
+        assert_eq!(target.medium, None);
+    }
+
+    /// Covers both "never exported" and "the folder has since gone" — a remembered path
+    /// that is a file rather than a directory is just `dir_exists` saying no.
+    #[test]
+    fn the_host_falls_back_to_the_platform_default() {
+        let table = [remembered("drive:D", "D:\\work")];
+        let target = choose_export_target(
+            &ExportDestination::Host, &table, Path::new("C:\\Downloads"), |_| false);
+        assert_eq!(target.directory, PathBuf::from("C:\\Downloads"));
+
+        let empty = choose_export_target(
+            &ExportDestination::Host, &[], Path::new("C:\\Downloads"), |_| true);
+        assert_eq!(empty.directory, PathBuf::from("C:\\Downloads"));
+    }
+
+    #[test]
+    fn paths_within_a_volume_are_parsed_from_rooted_paths_only() {
+        assert_eq!(path_within_volume("E:\\jobs\\out"), Some("jobs\\out"));
+        assert_eq!(path_within_volume("e:/jobs"), Some("jobs"));
+        assert_eq!(path_within_volume("E:\\"), Some(""));
+        assert_eq!(path_within_volume("E:"), Some(""));
+        assert_eq!(path_within_volume("E:relative"), None);
+        assert_eq!(path_within_volume("/home/user"), None);
+        assert_eq!(path_within_volume(""), None);
     }
 
     #[test]
@@ -504,6 +738,14 @@ mod tests {
             "the same label on a different letter"
         );
         assert!(!is_material_change(&one, &one), "nothing changed");
+
+        // Two sticks of the same make, formatted the same way, swapped between polls:
+        // identical on letter, label and free space, and a different volume. Missing this
+        // would leave the export dialog offering the folder belonging to the one that has
+        // just been pulled out.
+        let first = [stick('E', "KINGSTON", 0x1111_1111)];
+        let second = [stick('E', "KINGSTON", 0x2222_2222)];
+        assert!(is_material_change(&first, &second), "one stick swapped for another");
     }
 
     /// The predicate that stops an idle app repainting on a timer.

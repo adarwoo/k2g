@@ -1,17 +1,29 @@
-//! The Save control in the top bar: write the generated program to disk, or write it to
+//! The Export control in the top bar: write the generated programs out, or write them to
 //! a removable medium and eject that in one action.
+//!
+//! **Export, not Save.** These are program files leaving the application; "Save" is the
+//! word for keeping the project, which is a different act on different data.
 //!
 //! It lives in the top bar rather than on the Job → Code tab because the program is the
 //! thing the whole app produces, and having to navigate to one tab to get it made the
-//! last step the least reachable. Being global also means the save status cannot be shown
+//! last step the least reachable. Being global also means the outcome cannot be shown
 //! inline any more — it goes out as a toast, which is visible from wherever the user
 //! happened to be.
+//!
+//! ## One dialog, and a destination that is already right
+//!
+//! There is a single path for one program and for ten: the dialog names them, shows where
+//! they are going, and offers **Browse…** to change it. The forced folder picker it
+//! replaced cost a click on every export to answer a question the previous export had
+//! already answered — the destination is remembered per volume (see
+//! `runtime::removable::choose_export_target`), so the machine's disk and each stick keep
+//! their own and the offered folder is almost always the wanted one.
 //!
 //! ## The split button
 //!
 //! The second, narrow button appears **only when a removable medium is plugged in**. That
 //! is deliberate: its appearance is itself the signal that the stick is ready, and a
-//! permanently greyed USB button on a machine that never has one is noise. The main Save
+//! permanently greyed USB button on a machine that never has one is noise. The main Export
 //! button, by contrast, is always visible and merely disabled when there is no program —
 //! a control that vanishes is a control the user cannot find again.
 
@@ -20,13 +32,13 @@ use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
 
-use crate::runtime::removable::{self, SaveTarget};
-use crate::runtime::{with_ctx_mut, AppCtx, GCODE_FILE_EXTENSION};
+use crate::runtime::removable::{self, ExportDestination, RemovableMedium};
+use crate::runtime::{with_ctx_mut, AppCtx};
 
-/// The Save control: an ordinary save, plus a save-to-removable-media button when there
-/// is somewhere to save to.
+/// The Export control: an ordinary export, plus an export-to-removable-media button when
+/// there is somewhere to export to.
 #[component]
-pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
+pub fn ExportProgramButton(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
     // Saveable means *both* that a program exists and that the job it came from is still
     // the job on screen. The orchestrator clears the programs when a regeneration it
@@ -42,29 +54,30 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
     let is_current = is_ready
         && !matches!(snapshot.generation_state, crate::ui::navigation::GenerationState::Running);
     let has_program = snapshot.has_any_program() && is_current;
-    // A one-step job saves exactly as it always did: one dialog, `{board}.nc`, no modal
-    // and no `_step1` suffix. The plan dialog exists only because N programs cannot each
-    // be named by a save dialog when there is one folder prompt between them.
-    let multi_step = snapshot.programs.len() > 1;
-    let mut plan_rows = use_signal(Vec::<SaveRow>::new);
-    let mut plan_to_medium = use_signal(|| false);
-    let mut plan_start = use_signal(PathBuf::new);
-    let mut plan_open = use_signal(|| false);
+
+    let mut rows = use_signal(Vec::<ExportRow>::new);
+    let mut destination = use_signal(PathBuf::new);
+    // `Some` only when the dialog was opened from the USB button — which is what decides
+    // whether an eject follows, so it is the intent that is remembered rather than where
+    // the files happen to end up.
+    let mut eject_medium = use_signal(|| Option::<RemovableMedium>::None);
+    let mut open = use_signal(|| false);
 
     // Read during render, which is sound only because the watcher bumps the shared UI
     // wake channel on every material change and `AppRoot` re-renders this subtree from
     // it — see `runtime::removable::removable_media`. There is no signal to subscribe to.
     let media = removable::removable_media();
-    let target = removable::save_target(&media, snapshot.last_removable_media_path.as_deref());
+    let stick = removable::export_medium(&media);
 
-    // Opening the plan is the same act either way; only where the folder prompt starts
-    // and whether an eject follows differ.
-    let mut open_plan = move |to_medium: bool, start: PathBuf| {
+    // Opening is the same act either way; only which volume's remembered folder is
+    // resolved, and whether an eject follows, differ.
+    let mut open_export = move |wants: ExportDestination| {
         let snapshot = state.read().clone();
-        plan_rows.set(save_rows(&snapshot));
-        plan_to_medium.set(to_medium);
-        plan_start.set(start);
-        plan_open.set(true);
+        let target = snapshot.export_target(&wants);
+        rows.set(export_rows(&snapshot));
+        destination.set(target.directory);
+        eject_medium.set(target.medium);
+        open.set(true);
     };
 
     rsx! {
@@ -74,61 +87,48 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
                 r#type: "button",
                 disabled: !has_program,
                 title: match (has_program, snapshot.has_any_program()) {
-                    (true, _) => "Save the G-code program",
+                    (true, _) => "Export the G-code program",
                     // Distinguish "nothing generated" from "what was generated no longer
                     // matches the job", which are different things to do something about.
-                    (false, true) => "The job has changed — no current program to save",
-                    (false, false) => "No program to save yet",
+                    (false, true) => "The job has changed — no current program to export",
+                    (false, false) => "No program to export yet",
                 },
-                onclick: move |_| {
-                    if multi_step {
-                        let start = state.read().gcode_save_directory_or_default();
-                        open_plan(false, start);
-                    } else {
-                        spawn(async move { save_anywhere(state).await });
-                    }
-                },
-                "Save…"
+                onclick: move |_| open_export(ExportDestination::Host),
+                "Export…"
             }
 
-            if let Some(target) = target {
+            if let Some(stick) = stick {
                 button {
                     class: "btn btn-primary topbar-save-media",
                     r#type: "button",
                     disabled: !has_program,
-                    title: "Save to {target.medium.display_name()} and eject",
-                    "aria-label": "Save to {target.medium.display_name()} and eject",
+                    title: "Export to {stick.display_name()} and eject",
+                    "aria-label": "Export to {stick.display_name()} and eject",
                     onclick: {
-                        let target = target.clone();
-                        move |_| {
-                            if multi_step {
-                                open_plan(true, target.directory.clone());
-                            } else {
-                                let target = target.clone();
-                                spawn(async move { save_to_medium(state, target).await });
-                            }
-                        }
+                        let stick = stick.clone();
+                        move |_| open_export(ExportDestination::Medium(stick.clone()))
                     },
                     UsbIcon {}
                 }
             }
 
-            if *plan_open.read() {
-                SaveProgramDialog {
-                    rows: plan_rows,
-                    confirm_label: "Choose folder…".to_string(),
-                    on_cancel: move |_| plan_open.set(false),
-                    on_confirm: move |_| {
-                        plan_open.set(false);
-                        let rows = plan_rows.read().clone();
-                        let start = plan_start.read().clone();
-                        let to_medium = *plan_to_medium.read();
-                        // Spawned, never called inline. `plan_open.set(false)` above has
-                        // just queued this dialog's unmount, and a blocking folder picker
-                        // here would let its modal pump re-enter the event loop and render
-                        // that pending unmount while the arena is still borrowed for this
-                        // very event — see `profiles_common::dialog_parent`.
-                        spawn(async move { save_batch(state, rows, start, to_medium).await });
+            if *open.read() {
+                ExportProgramsDialog {
+                    rows,
+                    destination,
+                    medium_name: eject_medium.read().as_ref().map(|m| m.display_name()),
+                    on_cancel: move |_| open.set(false),
+                    on_export: move |_| {
+                        open.set(false);
+                        let rows = rows.read().clone();
+                        let folder = destination.read().clone();
+                        let eject = eject_medium.read().clone();
+                        // Spawned, never called inline. `open.set(false)` above has just
+                        // queued this dialog's unmount, and a blocking dialog here would
+                        // let its modal pump re-enter the event loop and render that
+                        // pending unmount while the arena is still borrowed for this very
+                        // event — see `profiles_common::dialog_parent`.
+                        spawn(async move { export_batch(state, rows, folder, eject).await });
                     },
                 }
             }
@@ -139,7 +139,7 @@ pub fn SaveProgramButton(state: Signal<AppCtx>) -> Element {
 /// A USB stick lying on its side: a body with the metal connector off one end.
 ///
 /// It names the *destination*, not the action — the button it is attached to already says
-/// "Save", so the pair reads "Save… to [this]". An eject symbol would suggest a button
+/// "Export", so the pair reads "Export to [this]". An eject symbol would suggest a button
 /// that only unmounts, and an arrow would just repeat the word next to it.
 ///
 /// Two plain rectangles and nothing inside them, because at 16 px anything finer merges —
@@ -160,44 +160,98 @@ fn UsbIcon() -> Element {
     }
 }
 
-/// The pre-save plan: one row per step that produced a program, each named before the
-/// folder is chosen.
+/// The export: what is being written, what each file is called, and where it is going.
+///
+/// One dialog for one program and for ten. It used to appear only for a multi-step job,
+/// with a single program going straight to a native save dialog — two journeys to keep
+/// working, and the single one had no say in the folder beyond navigating there again
+/// every time.
 ///
 /// Follows `ProfileNameDialog`'s shape (`wizard-overlay` / `wizard-dialog` /
 /// `wizard-actions`, Escape to cancel) so it is the same dialog the rest of the app uses.
 #[component]
-fn SaveProgramDialog(
-    rows: Signal<Vec<SaveRow>>,
-    confirm_label: String,
+fn ExportProgramsDialog(
+    rows: Signal<Vec<ExportRow>>,
+    destination: Signal<PathBuf>,
+    /// `Some` when the export was aimed at a stick — the note that it will be ejected.
+    medium_name: Option<String>,
     on_cancel: EventHandler<()>,
-    on_confirm: EventHandler<()>,
+    on_export: EventHandler<()>,
 ) -> Element {
     let current = rows.read().clone();
-    let problem = validate_rows(&current);
+    let folder = destination.read().clone();
+    let problem = validate_export(&current, &folder);
+    // One program needs no checkbox: it cannot be unticked and still exported, and
+    // `validate_export` refuses an empty selection anyway.
+    let single = current.len() == 1;
+
+    // Built before the closure takes it: the eject note below needs `medium_name` too.
+    let browse_title = match &medium_name {
+        Some(name) => format!("Choose a folder on {name}"),
+        None => "Choose a folder for the programs".to_string(),
+    };
+    let browse = move |_| {
+        let title = browse_title.clone();
+        let start = destination.read().clone();
+        spawn(async move {
+            // Async, and never the blocking variant — see `profiles_common::dialog_parent`
+            // and the rule `dialog_safety_tests` enforces over this very file. Nothing is
+            // written here: this only moves where Export will write.
+            if let Some(picked) = rfd::AsyncFileDialog::new()
+                .set_parent(&*super::profiles_common::dialog_parent())
+                .set_title(title)
+                .set_directory(&start)
+                .pick_folder()
+                .await
+            {
+                destination.set(picked.path().to_path_buf());
+            }
+        });
+    };
 
     rsx! {
         div { class: "wizard-overlay",
-            div { class: "wizard-dialog save-plan-dialog",
-                h2 { "Save programs" }
+            div {
+                class: "wizard-dialog export-dialog",
+                // Escape used to be bound to the name input alone, so with any other
+                // control focused the documented "Escape cancels" was not true. On the
+                // dialog it is, and `tabindex` is what lets this element receive the key.
+                tabindex: "-1",
+                onkeydown: move |evt| {
+                    let key = evt.key().to_string().to_ascii_lowercase();
+                    if key == "escape" || key == "esc" {
+                        on_cancel.call(());
+                    }
+                },
+
+                h2 { if single { "Export program" } else { "Export programs" } }
                 p { class: "field-hint",
-                    "Each machining step is its own program. Name them here, then choose one folder to write them to."
+                    if single {
+                        "Check the name and where it is going, then export."
+                    } else {
+                        "Each machining step is its own program. Name them here, tick the ones to write, then export."
+                    }
                 }
 
-                div { class: "save-plan-table",
+                div { class: "export-table",
                     for (position , row) in current.iter().enumerate() {
-                        div { key: "{row.step_index}", class: "save-plan-row",
-                            input {
-                                r#type: "checkbox",
-                                checked: row.include,
-                                title: "Include this step",
-                                onchange: move |evt| {
-                                    let checked = evt.checked();
-                                    rows.write()[position].include = checked;
-                                },
+                        div {
+                            key: "{row.step_index}",
+                            class: if single { "export-row export-row-single" } else { "export-row" },
+                            if !single {
+                                input {
+                                    r#type: "checkbox",
+                                    checked: row.include,
+                                    title: "Include this step",
+                                    onchange: move |evt| {
+                                        let checked = evt.checked();
+                                        rows.write()[position].include = checked;
+                                    },
+                                }
                             }
-                            div { class: "save-plan-step",
-                                span { class: "save-plan-step-name", "{row.step_label}" }
-                                span { class: "save-plan-step-meta",
+                            div { class: "export-step",
+                                span { class: "export-step-name", "{row.step_label}" }
+                                span { class: "export-step-meta",
                                     if row.cnc_name.is_empty() {
                                         "{row.line_count} lines"
                                     } else {
@@ -206,7 +260,7 @@ fn SaveProgramDialog(
                                 }
                             }
                             input {
-                                class: "save-plan-name",
+                                class: "export-name",
                                 value: "{row.file_name}",
                                 disabled: !row.include,
                                 autofocus: position == 0,
@@ -214,14 +268,32 @@ fn SaveProgramDialog(
                                     let value = evt.value();
                                     rows.write()[position].file_name = value;
                                 },
-                                onkeydown: move |evt| {
-                                    let key = evt.key().to_string().to_ascii_lowercase();
-                                    if key == "escape" || key == "esc" {
-                                        on_cancel.call(());
-                                    }
-                                },
                             }
                         }
+                    }
+                }
+
+                div { class: "export-destination",
+                    span { class: "export-destination-label", "Folder" }
+                    // Read-only rather than free text: a typed path that does not exist is
+                    // a validation branch with nothing to gain, and Browse is the
+                    // affordance. It still selects, copies and scrolls a long path.
+                    input {
+                        class: "export-destination-path",
+                        readonly: true,
+                        value: "{folder.display()}",
+                    }
+                    button {
+                        class: "btn btn-secondary",
+                        r#type: "button",
+                        onclick: browse,
+                        "Browse…"
+                    }
+                }
+
+                if let Some(name) = medium_name.as_ref() {
+                    p { class: "export-eject-note",
+                        "{name} will be ejected when the export finishes."
                     }
                 }
 
@@ -238,8 +310,8 @@ fn SaveProgramDialog(
                     button {
                         class: "btn btn-primary",
                         disabled: problem.is_some(),
-                        onclick: move |_| on_confirm.call(()),
-                        "{confirm_label}"
+                        onclick: move |_| on_export.call(()),
+                        "Export"
                     }
                 }
             }
@@ -247,21 +319,18 @@ fn SaveProgramDialog(
     }
 }
 
-/// Writes every planned program into one chosen folder.
+/// Writes every ticked program into the chosen folder, then ejects if that was the point.
 ///
-/// `pick_folder` rather than a save dialog per file: with N programs the operator would
-/// otherwise face N prompts, having already said what each is called.
-async fn save_batch(state: Signal<AppCtx>, rows: Vec<SaveRow>, start: PathBuf, to_medium: bool) {
-    let Some(folder) = rfd::AsyncFileDialog::new()
-        .set_parent(&*super::profiles_common::dialog_parent())
-        .set_title(if to_medium { "Choose a folder on the removable medium" } else { "Choose a folder for the programs" })
-        .set_directory(&start)
-        .pick_folder()
-        .await
-        .map(|handle| handle.path().to_path_buf())
-    else {
-        return; // cancelled
-    };
+/// The folder arrives already decided — the dialog resolved and showed it, and Browse is
+/// what changed it. Nothing is picked here.
+async fn export_batch(
+    state: Signal<AppCtx>,
+    rows: Vec<ExportRow>,
+    folder: PathBuf,
+    eject: Option<RemovableMedium>,
+) {
+    // The only overwrite guard there is. A native save dialog used to supply one for the
+    // single-program case; with no picker anywhere in the flow, this covers every export.
     if !confirm_overwrites(&rows, &folder).await {
         return;
     }
@@ -269,147 +338,62 @@ async fn save_batch(state: Signal<AppCtx>, rows: Vec<SaveRow>, start: PathBuf, t
     let snapshot = state.read().clone();
     let report = write_rows(&snapshot, &rows, &folder);
 
-    with_ctx_mut(|ctx| {
-        if to_medium {
-            ctx.app.remember_removable_media_path(&folder);
-        } else {
-            ctx.app.remember_gcode_save_directory(&folder);
-        }
-    });
+    // Filed under the volume the files actually landed on, which Browse may have changed —
+    // and read against the media list as it is *now*, so a folder on a stick is filed by
+    // that stick's serial rather than by the letter it currently holds.
+    let media = removable::removable_media();
+    let volume = removable::volume_key_for_path(&folder, &media);
+    with_ctx_mut(|ctx| ctx.app.remember_export_directory(&volume, &folder));
 
     if !report.failed.is_empty() {
         let (name, err) = &report.failed[0];
         report_message(
             state,
             format!(
-                "Saved {} of {} — {name} failed: {err}",
+                "Exported {} of {} — {name} failed: {err}",
                 report.written.len(),
                 report.written.len() + report.failed.len()
             ),
         );
+    } else if let [only] = report.written.as_slice() {
+        report_message(state, format!("Exported {only} to {}", folder.display()));
     } else {
         report_message(
             state,
-            format!("Saved {} programs to {}", report.written.len(), folder.display()),
+            format!("Exported {} programs to {}", report.written.len(), folder.display()),
         );
     }
 
-    // Eject only when the whole batch landed: a partial write leaves the medium mounted
-    // so the operator can retry the rest.
-    if to_medium && report.all_written() {
-        let media = removable::removable_media();
-        if let Some(medium) = removable::medium_for_path(&media, &folder) {
-            report_message(state, format!("Ejecting {}…", medium.display_name()));
-            removable::request_eject(medium);
-        }
+    if let Some(medium) = eject_after_export(eject.as_ref(), &report, &media, &folder) {
+        // Fire-and-forget: the eject waits on a volume lock for up to several seconds, and
+        // this is the WebView thread. The outcome arrives as its own toast from the watcher.
+        report_message(state, format!("Ejecting {}…", medium.display_name()));
+        removable::request_eject(medium);
     }
 }
 
-/// The ordinary Save: a dialog anywhere, no eject.
-async fn save_anywhere(state: Signal<AppCtx>) {
-    let snapshot = state.read().clone();
-    let Some(program) = snapshot.selected_program().and_then(|step| step.program()) else {
-        return;
-    };
-    let Some(path) = run_save_dialog(
-        state,
-        &program.text,
-        &snapshot.gcode_save_directory_or_default(),
-        &snapshot.gcode_default_file_name(),
-    )
-    .await
-    else {
-        return; // cancelled, or reported already
-    };
-
-    if let Some(directory) = path.parent() {
-        with_ctx_mut(|ctx| ctx.app.remember_gcode_save_directory(directory));
-    }
-    report_message(state, format!("Saved {}", file_name_of(&path)));
-}
-
-/// Save to removable media, then eject it.
+/// Whether, and what, to eject once the files have landed. Three conditions, all needed:
 ///
-/// The dialog still opens — the user may want a sub-folder, or a different name — it just
-/// starts on the medium. Which medium gets ejected is decided by where the file *actually*
-/// landed rather than by `target`, because the dialog lets the user navigate anywhere and
-/// ejecting a drive the program was not written to would be both useless and alarming.
-async fn save_to_medium(state: Signal<AppCtx>, target: SaveTarget) {
-    let snapshot = state.read().clone();
-    let Some(program) = snapshot.selected_program().and_then(|step| step.program()) else {
-        return;
-    };
-    let Some(path) = run_save_dialog(
-        state,
-        &program.text,
-        &target.directory,
-        &snapshot.gcode_default_file_name(),
-    )
-    .await
-    else {
-        return;
-    };
-
-    if let Some(directory) = path.parent() {
-        with_ctx_mut(|ctx| ctx.app.remember_removable_media_path(directory));
+///  1. **The export was aimed at a stick** — the USB button. Browsing onto a stick from an
+///     ordinary export does not eject it: an eject is something the operator asked for by
+///     pressing that button, not something inferred from where a file ended up.
+///  2. **The whole batch was written.** A partial write leaves the medium mounted so the
+///     rest can be retried.
+///  3. **The folder really is on a mounted medium**, re-read after the write. Browse lets
+///     the operator navigate off the stick, and the stick may have been pulled while the
+///     dialog was open — ejecting a drive the programs did not go to would be both useless
+///     and alarming.
+fn eject_after_export(
+    aimed_at: Option<&RemovableMedium>,
+    report: &ExportReport,
+    media: &[RemovableMedium],
+    folder: &Path,
+) -> Option<RemovableMedium> {
+    aimed_at?;
+    if !report.all_written() {
+        return None;
     }
-
-    // Re-read the media: the dialog was open for as long as the user wanted, and the
-    // stick may well have been pulled in the meantime.
-    let media = removable::removable_media();
-    match removable::medium_for_path(&media, &path) {
-        Some(medium) => {
-            // Fire-and-forget: the eject waits on a volume lock for up to several seconds,
-            // and this is the WebView thread. The outcome arrives as its own toast from
-            // the watcher.
-            report_message(state, format!("Saved {} — ejecting {}…", file_name_of(&path), medium.display_name()));
-            removable::request_eject(medium);
-        }
-        None => {
-            // Saved somewhere that is not removable media (the user navigated away, or the
-            // stick went). Nothing to eject, and nothing has gone wrong.
-            report_message(state, format!("Saved {}", file_name_of(&path)));
-        }
-    }
-}
-
-/// Runs the save dialog and writes the program.
-///
-/// The one implementation both buttons share; they differ only in where the dialog opens,
-/// which remembered directory they update, and whether an eject follows. Returns `None`
-/// when the user cancelled — indistinguishable from a failed write at the call site by
-/// design, because a failure has already been reported by then and neither should record
-/// a directory.
-async fn run_save_dialog(
-    state: Signal<AppCtx>,
-    program: &str,
-    start_directory: &Path,
-    file_name: &str,
-) -> Option<PathBuf> {
-    let path = rfd::AsyncFileDialog::new()
-        .set_parent(&*super::profiles_common::dialog_parent())
-        .set_title("Save G-code program")
-        .set_directory(start_directory)
-        .set_file_name(file_name)
-        .add_filter("G-code", &[GCODE_FILE_EXTENSION, "ngc", "gcode", "tap"])
-        .add_filter("All files", &["*"])
-        .save_file()
-        .await
-        .map(|handle| handle.path().to_path_buf())?;
-
-    match write_program(&path, program) {
-        Ok(()) => Some(path),
-        Err(err) => {
-            // Reported through the same path as a success, and taking `state` for exactly
-            // that reason: a bare `with_ctx_mut` here would write the toast into the global
-            // context without re-syncing the signal the notification stack renders from, so
-            // the one message that must not be missed would sit unseen until something else
-            // happened to re-render.
-            log::error!("could not write {}: {err}", path.display());
-            report_message(state, format!("Save failed: {err}"));
-            None
-        }
-    }
+    removable::medium_for_path(media, folder)
 }
 
 /// Write one program to disk, recording the fact.
@@ -446,7 +430,7 @@ fn write_program(path: &Path, text: &str) -> std::io::Result<()> {
 /// per file the way `save_file` does — with N programs there is one directory prompt and
 /// no opportunity to name anything after it.
 #[derive(Clone, PartialEq)]
-pub(crate) struct SaveRow {
+pub(crate) struct ExportRow {
     pub step_index: usize,
     pub step_label: String,
     pub cnc_name: String,
@@ -460,14 +444,14 @@ pub(crate) struct SaveRow {
 ///
 /// A step name is the operator's label for a setup and is under no obligation to be
 /// unique — two steps called "Drill" are a perfectly reasonable profile. Naming files
-/// after them would produce the same name twice, which `validate_rows` then refuses: a
+/// after them would produce the same name twice, which `validate_export_rows` then refuses: a
 /// clash the application invented and left the operator to fix in the dialog before it
 /// would let them save.
 ///
 /// So the colliding steps fall back to their ordinals, which are unique by construction,
 /// and only they pay for it — a job with one "Drill" and one "Route" keeps both names.
 ///
-/// Compared trimmed and case-folded, matching `validate_rows`, which is the check this
+/// Compared trimmed and case-folded, matching `validate_export_rows`, which is the check this
 /// exists to stay ahead of — and matching Windows, where `Drill.nc` and `drill.nc` are
 /// one file and the second write would silently replace the first.
 ///
@@ -487,7 +471,7 @@ fn names_belong_to_one_step_each(names: &[String]) -> Vec<bool> {
 /// Named from the **step count**, not the number of programs: a three-step profile whose
 /// middle step failed still writes `board_step3.nc`, because that ordinal is what tells
 /// the operator which setup the file belongs to.
-fn save_rows(snapshot: &AppCtx) -> Vec<SaveRow> {
+fn export_rows(snapshot: &AppCtx) -> Vec<ExportRow> {
     let step_count = snapshot.programs.len();
     let ready = snapshot.ready_programs();
 
@@ -499,7 +483,7 @@ fn save_rows(snapshot: &AppCtx) -> Vec<SaveRow> {
         .enumerate()
         .map(|(position, (step, program))| {
             let unique = usable[position];
-            SaveRow {
+            ExportRow {
                 step_index: step.index,
                 step_label: if step.name.trim().is_empty() {
                     format!("Step {}", step.index + 1)
@@ -520,14 +504,28 @@ fn save_rows(snapshot: &AppCtx) -> Vec<SaveRow> {
         .collect()
 }
 
-/// Why the plan cannot be written yet, or `None` when it can.
+/// Why the export cannot run yet, or `None` when it can.
 ///
-/// Checked before the folder prompt rather than after: discovering a clash once the
-/// directory is chosen would mean either losing the choice or writing some of the batch.
-pub(crate) fn validate_rows(rows: &[SaveRow]) -> Option<String> {
-    let included: Vec<&SaveRow> = rows.iter().filter(|row| row.include).collect();
+/// The destination is checked here rather than only at the write, so a stick pulled while
+/// the dialog is open disables Export and says so, instead of failing every row.
+pub(crate) fn validate_export(rows: &[ExportRow], folder: &Path) -> Option<String> {
+    if folder.as_os_str().is_empty() {
+        return Some("Choose a folder to export to.".to_string());
+    }
+    if !folder.is_dir() {
+        return Some(format!("{} is no longer there — choose another folder.", folder.display()));
+    }
+    validate_export_rows(rows)
+}
+
+/// Why the rows cannot be written yet, or `None` when they can.
+///
+/// Checked before the write rather than during: discovering a clash halfway through means
+/// some of the batch is on disk and the rest is not.
+pub(crate) fn validate_export_rows(rows: &[ExportRow]) -> Option<String> {
+    let included: Vec<&ExportRow> = rows.iter().filter(|row| row.include).collect();
     if included.is_empty() {
-        return Some("Select at least one program to save.".to_string());
+        return Some("Select at least one program to export.".to_string());
     }
     for row in &included {
         let name = row.file_name.trim();
@@ -553,12 +551,12 @@ pub(crate) fn validate_rows(rows: &[SaveRow]) -> Option<String> {
 
 /// What a batch save actually did. Success is not all-or-nothing, and a half-written
 /// batch has to say which half.
-struct SaveReport {
+struct ExportReport {
     written: Vec<String>,
     failed: Vec<(String, String)>,
 }
 
-impl SaveReport {
+impl ExportReport {
     fn all_written(&self) -> bool {
         self.failed.is_empty() && !self.written.is_empty()
     }
@@ -568,8 +566,8 @@ impl SaveReport {
 ///
 /// Successful writes are **not** rolled back when a later one fails: they are valid
 /// programs, and deleting them would be the worse failure.
-fn write_rows(snapshot: &AppCtx, rows: &[SaveRow], folder: &Path) -> SaveReport {
-    let mut report = SaveReport { written: Vec::new(), failed: Vec::new() };
+fn write_rows(snapshot: &AppCtx, rows: &[ExportRow], folder: &Path) -> ExportReport {
+    let mut report = ExportReport { written: Vec::new(), failed: Vec::new() };
     for row in rows.iter().filter(|row| row.include) {
         let Some(program) = snapshot
             .programs
@@ -596,7 +594,7 @@ fn write_rows(snapshot: &AppCtx, rows: &[SaveRow], folder: &Path) -> SaveReport 
 /// `pick_folder` has no overwrite confirmation, where `save_file` gets one from the OS —
 /// so without this, saving a multi-step job would silently clobber, which is a regression
 /// against the single-step behaviour. Returns whether to proceed.
-async fn confirm_overwrites(rows: &[SaveRow], folder: &Path) -> bool {
+async fn confirm_overwrites(rows: &[ExportRow], folder: &Path) -> bool {
     let existing: Vec<String> = rows
         .iter()
         .filter(|row| row.include)
@@ -632,17 +630,12 @@ fn report_message(state: Signal<AppCtx>, message: String) {
     super::mutate_ctx(state, |ctx| ctx.log_event(message));
 }
 
-/// The file name to show in a toast, falling back to the whole path if it has none.
-fn file_name_of(path: &Path) -> String {
-    path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn row(step_index: usize, file_name: &str) -> SaveRow {
-        SaveRow {
+    fn row(step_index: usize, file_name: &str) -> ExportRow {
+        ExportRow {
             step_index,
             step_label: format!("Step {}", step_index + 1),
             cnc_name: "CNC".to_string(),
@@ -656,21 +649,21 @@ mod tests {
     /// either losing the operator's choice of folder or writing half the batch.
     #[test]
     fn a_save_plan_must_name_every_included_step_uniquely() {
-        assert_eq!(validate_rows(&[row(0, "a.nc"), row(1, "b.nc")]), None, "distinct names are fine");
+        assert_eq!(validate_export_rows(&[row(0, "a.nc"), row(1, "b.nc")]), None, "distinct names are fine");
 
         assert!(
-            validate_rows(&[row(0, "same.nc"), row(1, "SAME.nc")])
+            validate_export_rows(&[row(0, "same.nc"), row(1, "SAME.nc")])
                 .unwrap_or_default()
                 .contains("twice"),
             "names that differ only in case would collide on Windows"
         );
-        assert!(validate_rows(&[row(0, "   ")]).unwrap_or_default().contains("file name"));
-        assert!(validate_rows(&[]).unwrap_or_default().contains("at least one"));
+        assert!(validate_export_rows(&[row(0, "   ")]).unwrap_or_default().contains("file name"));
+        assert!(validate_export_rows(&[]).unwrap_or_default().contains("at least one"));
 
         // A separator would write outside the folder the operator chose — the one thing
         // choosing a folder once is meant to guarantee.
-        assert!(validate_rows(&[row(0, "sub/dir.nc")]).unwrap_or_default().contains("separator"));
-        assert!(validate_rows(&[row(0, r"sub\dir.nc")]).unwrap_or_default().contains("separator"));
+        assert!(validate_export_rows(&[row(0, "sub/dir.nc")]).unwrap_or_default().contains("separator"));
+        assert!(validate_export_rows(&[row(0, r"sub\dir.nc")]).unwrap_or_default().contains("separator"));
     }
 
     /// An excluded row is not the operator's problem: it is not written, so its name need
@@ -679,25 +672,59 @@ mod tests {
     fn an_excluded_step_is_not_validated() {
         let mut excluded = row(1, "same.nc");
         excluded.include = false;
-        assert_eq!(validate_rows(&[row(0, "same.nc"), excluded]), None);
+        assert_eq!(validate_export_rows(&[row(0, "same.nc"), excluded]), None);
     }
 
+    /// The three conditions on ejecting, each of which has a way of being wrong.
+    ///
+    /// The first is the one worth stating: an eject is something the operator asked for by
+    /// pressing the USB button, not something inferred from a file having landed on a
+    /// stick. Browsing onto one from an ordinary export must not unmount it underneath
+    /// them.
     #[test]
-    fn a_toast_names_the_file_not_the_whole_path() {
-        // Built from components so the separator is the host's. `Path` treats `\` as one
-        // only on Windows, so a hard-coded `E:\jobs\panel.nc` reads as a single long
-        // filename on the Linux CI and the assertion fails there for no real reason.
-        let nested: PathBuf = ["jobs", "panel.nc"].iter().collect();
-        assert_eq!(file_name_of(&nested), "panel.nc");
-        assert_eq!(file_name_of(Path::new("panel.nc")), "panel.nc");
-        // The shape the app actually produces: an absolute path with a drive letter.
-        #[cfg(windows)]
-        assert_eq!(file_name_of(Path::new("E:\\jobs\\panel.nc")), "panel.nc");
+    fn ejecting_needs_the_usb_button_a_whole_batch_and_a_folder_on_that_medium() {
+        use crate::runtime::removable::RemovableMedium;
+
+        let stick = RemovableMedium {
+            root: PathBuf::from("E:\\"),
+            label: "KINGSTON".to_string(),
+            drive_letter: 'E',
+            serial: Some(0x1A2B_3C4D),
+            free_bytes: 1 << 30,
+        };
+        let media = [stick.clone()];
+        let whole = ExportReport { written: vec!["panel.nc".into()], failed: Vec::new() };
+        let partial = ExportReport {
+            written: vec!["panel.nc".into()],
+            failed: vec![("back.nc".into(), "denied".into())],
+        };
+        let on_stick = Path::new("E:\\jobs");
+
+        assert!(
+            eject_after_export(Some(&stick), &whole, &media, on_stick).is_some(),
+            "asked for, wrote everything, and the files are on it"
+        );
+        assert!(
+            eject_after_export(None, &whole, &media, on_stick).is_none(),
+            "browsed onto a stick from an ordinary export — nobody asked to unmount it"
+        );
+        assert!(
+            eject_after_export(Some(&stick), &partial, &media, on_stick).is_none(),
+            "a partial write leaves it mounted so the rest can be retried"
+        );
+        assert!(
+            eject_after_export(Some(&stick), &whole, &media, Path::new("C:\\out")).is_none(),
+            "aimed at the stick but browsed off it — the files are not there"
+        );
+        assert!(
+            eject_after_export(Some(&stick), &whole, &[], on_stick).is_none(),
+            "pulled while the dialog was open"
+        );
     }
 
     /// The rule that keeps the generated plan saveable.
     ///
-    /// `validate_rows` refuses a duplicate file name, so a profile with two steps called
+    /// `validate_export_rows` refuses a duplicate file name, so a profile with two steps called
     /// the same thing would have produced a plan the operator could not save without
     /// editing it first — a clash the application created.
     #[test]

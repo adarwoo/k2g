@@ -101,8 +101,8 @@ once, on whichever you downloaded:
 xattr -dr com.apple.quarantine /Applications/k2g.app     # or the extracted k2g binary
 ```
 
-Removable-media detection and eject are Windows-only, so the "Save to USB" button never
-appears; the ordinary Save works normally and the drive is ejected with Finder.
+Removable-media detection and eject are Windows-only, so the USB export button never
+appears; **Export…** works normally and the drive is ejected with Finder.
 
 ### Linux
 
@@ -118,8 +118,8 @@ or any architecture other than x86_64 — build from source with `cargo build --
 the build needs GTK3, WebKitGTK 4.1 and CMake (`libgtk-3-dev libwebkit2gtk-4.1-dev
 libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libxdo-dev cmake`).
 
-As on macOS, there is no "Save to USB" button — removable-media detection is Windows
-only, so the ordinary Save works and the drive is unmounted with your file manager.
+As on macOS, there is no USB export button — removable-media detection is Windows only,
+so **Export…** works and the drive is unmounted with your file manager.
 
 ## Connecting to KiCad
 

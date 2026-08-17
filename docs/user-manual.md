@@ -30,7 +30,7 @@ every setting means, and the order to do things in.
 8. [Toolset profiles](#8-toolset-profiles)
 9. [Machining profiles](#9-machining-profiles)
 10. [The Job screen](#10-the-job-screen)
-11. [Generating and saving the program](#11-generating-and-saving-the-program)
+11. [Generating and exporting the program](#11-generating-and-exporting-the-program)
 12. [Two-sided work](#12-two-sided-work)
 13. [Settings](#13-settings)
 14. [Logs](#14-logs)
@@ -64,7 +64,7 @@ Three consequences worth knowing up front:
 
 - **A step is one setup.** A second machine, a second fixture, or the board turned
   over means a second *step*, never an alternative inside one.
-- **Everything auto-saves.** There is no Save button for configuration. Edits are
+- **Everything auto-saves.** Nothing you configure needs saving — edits are
   written as you make them.
 - **Generation is automatic.** Any change that could affect the program re-runs it,
   and only one run happens at a time — a new change cancels the run in flight.
@@ -81,16 +81,16 @@ Three consequences worth knowing up front:
 | **Board** | The name of the PCB read from KiCad. **↻** re-reads it — press this after changing the layout in KiCad. |
 | **Job** | The machining profile the job runs. Says *No machining profile selected* until you pick one, and warns when the profile's step has no operations ticked. |
 | **mm / in / mil** | The display unit for the whole application. Changes only how values are shown and how bare numbers you type are interpreted; nothing stored is converted. |
-| **Status pill** | Whether there is a program to save (see below). |
-| **Save…** | Writes the program(s) to disk. Disabled when there is nothing current to save. |
-| **USB button** | Appears *only* when a USB stick or card reader is plugged in: saves and ejects in one action. Its appearance is the signal that the stick is ready. |
+| **Status pill** | Whether there is a program to export (see below). |
+| **Export…** | Writes the program(s) out. Disabled when there is nothing current to export. |
+| **USB button** | Appears *only* when a USB stick or card reader is plugged in: exports and ejects in one action. Its appearance is the signal that the stick is ready. |
 | **⚙ cog** | Settings. |
 
 The pill reads:
 
 | Pill | Meaning |
 |---|---|
-| **Program ready** / **N programs ready** | Generation finished; Save is live. |
+| **Program ready** / **N programs ready** | Generation finished; Export is live. |
 | **Generating…** | A run is in flight; what is on screen is the previous result. |
 | **Not ready** | The job cannot be machined yet. The **Code** tab lists exactly why. |
 | **No program** | Ready, but nothing has been generated yet. |
@@ -126,7 +126,7 @@ the companion documents at the foot of that list open in your browser.
 
 A fresh install has the tool catalogs and the bundled CNC templates, and nothing
 else. Building the first job takes about ten minutes; after that, a new board is
-"open it, check the plan, save".
+"open it, check the plan, export".
 
 1. **Open the board in KiCad**, with the IPC API enabled. If k2g's top bar says *No
    board loaded*, see [Connecting to KiCad](install-and-security.md#connecting-to-kicad)
@@ -153,7 +153,7 @@ else. Building the first job takes about ten minutes; after that, a new board is
    *Machining* — does the 3D toolpath look like your board? *Board* — are all the
    features there?
 9. **Read the program** on the *Code* tab.
-10. **Save…**, then air-cut it.
+10. **Export…**, then air-cut it.
 
 ---
 
@@ -283,7 +283,7 @@ patch.
 
 | Field | Meaning |
 |---|---|
-| **Output file extension** | What a saved program for this machine is called (`nc`, `ngc`, `drl`…), without the dot. The templates decide the *format*, so the extension belongs with them. |
+| **Output file extension** | What an exported program for this machine is called (`nc`, `ngc`, `drl`…), without the dot. The templates decide the *format*, so the extension belongs with them. |
 | **ATC slot count** | Number of automatic tool-changer pockets. **0 means no ATC** — tool changes become operator prompts and a step on this machine has no rack, so the Job screen's *Rack* tab says so for it. It is also the count of slots the machine really has: a toolset defining more than this is still valid, but the extra slots cannot be loaded here. |
 | **Spindle min / max rpm** | The machine's real range. Tool speeds are clamped into it. |
 | **Max feed XY / Z** | The machine's real feed ceilings, from its specification — not a preference. A tool rated faster than the machine can feed is run at a proportionally *lower spindle speed*, so its chip load is preserved rather than silently ruined. Z is usually the slower axis and binds every drilling plunge. |
@@ -588,7 +588,7 @@ under the table says what cannot be loaded.
 
 ---
 
-## 11. Generating and saving the program
+## 11. Generating and exporting the program
 
 ### When generation runs
 
@@ -613,24 +613,36 @@ The pill says **Not ready** and the Code tab lists the reasons. The common ones:
 | An operation is claimed by two steps on one face | Untick it in one of them. |
 | Blocking runtime errors present | Open the diagnostics banner. |
 
-### Saving
+### Exporting
 
-**Save…** in the top bar, from any screen.
+**Export…** in the top bar, from any screen. It is called *export* rather than *save*
+because these are program files leaving k2g; saving is what you do to a project.
 
-- **A single-step job** opens an ordinary save dialog, pre-named after the board
-  (`.nc` by default — change the extension in the dialog if your controller wants
-  another).
-- **A multi-step job** first shows the save plan: one row per step that produced a
-  program, with its name, machine and line count. Each row is pre-named after the
-  board and the step, with that step's own CNC file extension. Tick which to write,
-  adjust the file names, then choose **one folder** for all of them. Names are checked before
-  the folder prompt — blank names, path separators and clashes (including
-  case-only clashes, which collide on Windows) are refused there rather than halfway
-  through writing. Existing files are confirmed once, for the batch.
-- **The USB button** does the same thing starting on the removable medium, then
-  **ejects it** — but only if the whole batch was written, so a partial write leaves
-  the stick mounted to retry. Which drive is ejected is decided by where the files
-  actually landed, not by which button you pressed.
+One dialog, whether the job makes one program or ten:
+
+- **The programs.** One row per step that produced one, with its machine and line count,
+  pre-named after the board and the step and carrying that step's own file extension. Tick
+  which to write and adjust any name. A single program needs no ticking and shows none.
+- **The folder**, already filled in, with **Browse…** beside it if you want another. This
+  is the click the flow used to spend asking a question the last export had answered.
+- **Export** writes them. Names are checked first — blank names, path separators and
+  clashes (including case-only clashes, which collide on Windows) are refused in the
+  dialog rather than halfway through writing — and anything that would be replaced is
+  confirmed once, listing the files.
+
+**The folder is remembered per drive.** The machine's disk and each USB stick keep their
+own, so plugging a stick in offers the folder that *stick* was last written to instead of
+the one on your hard disk. A stick is recognised by its volume serial rather than by its
+drive letter, so it keeps its folder even when Windows gives it a different letter — and
+two sticks that have both been `E:` do not inherit each other's. Reformatting a stick
+gives it a new serial, so it starts again from its root, which is what a wiped disk should
+do. Where nothing is remembered yet: the root of the stick, or your Downloads folder.
+
+**The USB button** opens the same dialog already pointed at the stick, and **ejects it**
+when the export finishes — but only if every file was written, so a partial export leaves
+it mounted to retry. Browsing somewhere off the stick before exporting ejects nothing:
+an eject is something you asked for by pressing that button, not something inferred from
+where a file landed.
 
 Every write is recorded in the security log (file name and byte count; the directory
 is redacted, and the program text never goes near the record).
@@ -740,7 +752,7 @@ Two records that look alike and are not the same thing.
 | A primitive is filled in but nothing appears | It is a **callable** — nothing emits it on its own | Call it from `program_begin` or wherever it belongs |
 | Board outline errors — open contours, floating island | The edge-cut geometry does not close | Fix it in KiCad, then ↻ |
 | Multiple KiCads open and the wrong board loads | KiCad serves one fixed API socket and instances are not individually addressable | Launch k2g from the board you want, via KiCad's **Create GCode** button |
-| The USB save button is missing | It appears only for a drive that is really on the USB bus, so cloud and virtual drive letters never bring it up, and neither do USB hard drives (Windows calls those fixed) | Plug the stick in; for anything else use **Save…** and Windows' own Safely Remove Hardware |
+| The USB export button is missing | It appears only for a drive that is really on the USB bus, so cloud and virtual drive letters never bring it up, and neither do USB hard drives (Windows calls those fixed) | Plug the stick in; for anything else use **Export…** and Windows' own Safely Remove Hardware |
 | Deleting a profile is refused | A machining profile still references it | Re-bind or delete that machining profile first — the message names it |
 
 ---

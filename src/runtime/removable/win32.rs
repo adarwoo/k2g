@@ -128,7 +128,7 @@ pub(super) fn scan() -> Vec<RemovableMedium> {
             continue;
         }
 
-        let Some(label) = volume_label(&root) else {
+        let Some((label, serial)) = volume_label(&root) else {
             continue; // no media in the slot — see the module header
         };
         // After the label, because that is the call that filters an empty card-reader
@@ -144,30 +144,40 @@ pub(super) fn scan() -> Vec<RemovableMedium> {
             root: PathBuf::from(format!("{}:\\", letter as char)),
             label,
             drive_letter: letter as char,
+            serial,
             free_bytes,
         });
     }
     media
 }
 
-/// The volume label, or `None` when the drive has no media in it.
+/// The volume label and serial, or `None` when the drive has no media in it.
 ///
 /// The expected failure is `ERROR_NOT_READY` from a card reader with an empty slot, which
 /// Windows still reports as `DRIVE_REMOVABLE` — so this call is what filters empty slots
 /// (and any surviving A:/B: floppy letter) out of the picker.
-fn volume_label(root: &[u16]) -> Option<String> {
+///
+/// The serial comes back from the same call: it is the out-parameter this used to pass a
+/// null for, and it is what lets a remembered export folder belong to *this stick* rather
+/// than to whichever one is `E:` today. Zero is treated as absent — it is what a
+/// filesystem with no serial reports, and it identifies nothing.
+fn volume_label(root: &[u16]) -> Option<(String, Option<u32>)> {
     let mut name = [0u16; VOLUME_NAME_CAPACITY];
+    let mut serial: u32 = 0;
     // SAFETY: `root` is a NUL-terminated wide string that outlives the call. `name` is
     // `[u16; VOLUME_NAME_CAPACITY]` and the length is passed as a count of *characters*,
     // which is the unit `nVolumeNameSize` is specified in, so the callee writes at most
-    // the space that exists. The five null pointers are the optional out-parameters this
-    // caller does not want, which the API documents as skippable.
+    // the space that exists. `serial` is a live local the callee writes one `u32` into.
+    // The three null pointers are the optional out-parameters this caller does not want,
+    // which the API documents as skippable. (It said "five" while passing four, and now
+    // passes three — a SAFETY note that cannot count its own arguments is worth less than
+    // no note.)
     let ok = unsafe {
         GetVolumeInformationW(
             root.as_ptr(),
             name.as_mut_ptr(),
             name.len() as u32,
-            ptr::null_mut(),
+            &mut serial,
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
@@ -182,7 +192,8 @@ fn volume_label(root: &[u16]) -> Option<String> {
     // Lossy: a label with an unpaired surrogate in it is a curiosity, not a reason to
     // drop the drive from the list.
     let label = String::from_utf16_lossy(&name[..end]).trim().to_string();
-    Some(if label.is_empty() { UNLABELLED_MEDIUM.to_string() } else { label })
+    let label = if label.is_empty() { UNLABELLED_MEDIUM.to_string() } else { label };
+    Some((label, (serial != 0).then_some(serial)))
 }
 
 /// Whether the volume behind `letter` is attached over USB.
@@ -339,7 +350,7 @@ pub(super) fn eject(medium: &RemovableMedium) -> Result<EjectOutcome, EjectError
     // the *filesystem cache*, and whether Windows write-caches a removable volume is a
     // per-device policy ("Quick removal" is only the default). If the lock never succeeds,
     // this is the only thing that pushed the program onto the stick, and it is why the
-    // busy message can honestly lead with "Saved to E:".
+    // busy message can honestly lead with "Exported to E:".
     //
     // SAFETY: the handle came from a `CreateFileW` that returned something other than
     // `INVALID_HANDLE_VALUE` and is owned by the live `volume`, so it is open here.
