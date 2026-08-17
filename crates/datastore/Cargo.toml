@@ -12,7 +12,7 @@ description = "Generic schema-driven data store: validate, default, type units/i
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
-jsonschema = "0.28"
+jsonschema = "0.49"
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
