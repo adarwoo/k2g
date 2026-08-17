@@ -5,7 +5,7 @@ name = "k2g"
 # (seeded from CARGO_PKG_* by `build.rs`) and the crate metadata all read this one
 # value. `build.rs` warns when it falls behind the newest `vX.Y.Z-*` git tag, which is
 # how it reached 0.10.0 having sat at 0.1.0 through nine of them.
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 description = "GCode generator"
 authors = ["Bill Arreckx <software@arreckx.com>"]
