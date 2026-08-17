@@ -106,10 +106,20 @@ appears; the ordinary Save works normally and the drive is ejected with Finder.
 
 ### Linux
 
-Builds and tests run on every change, but no artifact is published yet — build from
-source with `cargo build --release`. The build needs GTK3, WebKitGTK 4.1 and CMake
-(`libgtk-3-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev
-libxdo-dev cmake`). As on macOS, there is no "Save to USB" button.
+x86_64 is built, tested and published with each release:
+
+- **`k2g-<version>-linux-x86_64.deb`** — installs with `apt install ./k2g-…deb`.
+- **`k2g-<version>-linux-x86_64.AppImage`** — `chmod +x` and run; nothing to install.
+- **`k2g-<version>-portable-linux-x86_64.tar.gz`** — extract and run `k2g`, with
+  `k2g-kicad-launcher` beside it for the KiCad integration.
+
+These are built on Ubuntu, so they need that glibc or newer. On an older distribution —
+or any architecture other than x86_64 — build from source with `cargo build --release`;
+the build needs GTK3, WebKitGTK 4.1 and CMake (`libgtk-3-dev libwebkit2gtk-4.1-dev
+libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libxdo-dev cmake`).
+
+As on macOS, there is no "Save to USB" button — removable-media detection is Windows
+only, so the ordinary Save works and the drive is unmounted with your file manager.
 
 ## Connecting to KiCad
 

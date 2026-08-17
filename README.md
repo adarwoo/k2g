@@ -105,10 +105,11 @@ face — and is being tested on real hardware. What is **not** done:
 | | State | The UI renders in |
 | --- | --- | --- |
 | **Windows** | Packaged — the release builds are Windows | WebView2 |
-| **Linux** | Builds and runs, verified against the running application on Debian 13 (GTK 3 + WebKitGTK 2.52, KiCad 10 over IPC). Not packaged: [build it](#from-source). | WebKitGTK |
+| **Linux** | Packaged — `.deb`, `.AppImage` and a portable tarball for x86_64 with each release, built on Ubuntu. Verified against the running application on Debian 13 (GTK 3 + WebKitGTK 2.52, KiCad 10 over IPC). Older distributions and other architectures [build from source](#from-source). | WebKitGTK |
 | **macOS** | Packaged — every change is built and tested on both Apple Silicon and Intel, and each release carries a build for each. Nobody has yet driven the UI on a Mac, so reports welcome. | WKWebView |
 
-- **Rust** (stable) to build from source, which is the only route on Linux.
+- **Rust** (stable) to build from source, which is the route on an older distribution
+  or an architecture no release covers.
 
 Two features vary by platform, and both degrade rather than break. Saving straight to
 a removable medium and ejecting it needs the Win32 volume API, so on Linux and macOS
@@ -120,8 +121,9 @@ settings rather than refusing.
 
 ## Install
 
-On Linux, [build from source](#from-source) — nothing is packaged there until someone
-is running k2g on it often enough to say the packaging works.
+On Linux (x86_64), take the `.deb`, the `.AppImage` or the portable `.tar.gz` from the
+latest [release](https://github.com/adarwoo/k2g/releases). They are built on Ubuntu, so
+an older distribution — or another architecture — [builds from source](#from-source).
 
 On macOS, take the build for your Mac from the latest
 [release](https://github.com/adarwoo/k2g/releases) — `arm64` for Apple Silicon,
