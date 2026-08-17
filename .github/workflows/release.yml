@@ -149,7 +149,7 @@ jobs:
 
       # Unsigned, and not published from here: signing and publishing are the `publish`
       # job's, behind the one approval gate. See its comment.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-windows
           path: dist/*
@@ -280,7 +280,7 @@ jobs:
           cp "./k2g-${VERSION}-portable-linux-x86_64.tar.gz" dist/
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-linux
           path: dist/*
@@ -410,7 +410,7 @@ jobs:
           cp "./k2g-${VERSION}-portable-macos-${ARCH}.tar.gz" dist/
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-macos-${{ matrix.arch }}
           path: dist/*
@@ -460,7 +460,7 @@ jobs:
 
       # The signed set, kept whole for a manual run — which never publishes, so this is
       # the only way to inspect what a release *would* have contained.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-release-signed
           path: dist/*
