@@ -45,9 +45,60 @@ runs:
         fi
 
         cargo install rsign2 --locked
-        # Written, used and deleted inside this one step. Not passed on stdin because
-        # rsign wants a file, and not left behind for a later step or an upload.
-        printf '%s' "$MINISIGN_SECRET_KEY" > minisign.key
+
+        # --- get the secret into the shape rsign wants -------------------------------
+        #
+        # A minisign secret key is a *file* of two lines: an untrusted comment, then the
+        # encoded key. A GitHub secret is a string, and there are three shapes people
+        # reasonably end up storing it in — the file verbatim, the file base64-encoded
+        # (the usual reflex for "a secret with newlines in it"), or just the payload line
+        # with the comment dropped. The last two both fail with rsign's
+        # "Missing encoded key in secret key", which says nothing about which mistake it
+        # was, twenty minutes into a release.
+        #
+        # So each candidate is *tried* rather than sniffed: built, then tested by signing
+        # a throwaway file. Whichever signs is the right reading. Nothing here echoes the
+        # key or any part of it.
+        printf '%s' "$MINISIGN_SECRET_KEY" > secret.raw
+        printf 'probe' > probe.bin
+
+        candidate_works() {
+          rm -f probe.bin.minisig
+          rsign sign -W -s "$1" -x probe.bin.minisig probe.bin >/dev/null 2>&1
+        }
+
+        # 1. The key file as it stands. A trailing newline is added because a secret
+        #    pasted without one is otherwise a valid file that reads as truncated.
+        { cat secret.raw; echo; } > candidate-verbatim.key
+        # 2. base64 of the whole file.
+        base64 -d < secret.raw > candidate-base64.key 2>/dev/null || : > candidate-base64.key
+        # 3. The encoded line on its own — the comment is untrusted and unused, so any
+        #    comment restores a usable file.
+        { echo "untrusted comment: k2g release signing key"; cat secret.raw; echo; } \
+          > candidate-bare.key
+
+        shape=""
+        for pair in "verbatim:the key file" \
+                    "base64:the key file, base64-encoded" \
+                    "bare:the encoded line without its comment"; do
+          name="${pair%%:*}"
+          if candidate_works "candidate-${name}.key"; then
+            cp "candidate-${name}.key" minisign.key
+            shape="${pair#*:}"
+            break
+          fi
+        done
+
+        rm -f secret.raw candidate-*.key probe.bin probe.bin.minisig
+
+        if [ -z "$shape" ]; then
+          echo "::error::MINISIGN_SECRET_KEY is set but is not a usable minisign secret \
+        key in any of the shapes this understands (the key file, that file base64-encoded, \
+        or its encoded line alone). Re-set it from the file itself: \
+        gh secret set MINISIGN_SECRET_KEY --env release < k2g.key"
+          exit 1
+        fi
+        echo "read the signing key as $shape"
 
         signed=0
         for artifact in "$DIRECTORY"/*; do
