@@ -21,12 +21,31 @@
 //! into the Logs screen after every draw.
 
 use std::collections::BTreeSet;
+use std::sync::{Mutex, OnceLock};
 
 use dioxus::prelude::*;
 
 use crate::gcode::scene;
 use crate::runtime::machining_plan::{self, cached_plan};
 use crate::runtime::AppCtx;
+
+/// Tools switched off in the legend, for as long as the application is running.
+///
+/// A `static` rather than component state because this view is *remounted* constantly:
+/// switching the Job tab, pinning the dock beside a profile screen, or navigating away
+/// and back all destroy the component and build another. Component state resets on each
+/// of those, so a tool switched off to see underneath it came back the moment the screen
+/// was split — which is what this fixes.
+///
+/// Session-scoped and deliberately not persisted: hiding a tool is a way of looking at
+/// one job, not a preference to carry into the next one. It lives beside the view rather
+/// than in `AppCtx` for the reason `runtime::removable` gives for its own static — this
+/// is not job state, and putting it in the context would mean a full clone and a
+/// post-mutation reconciliation every time a checkbox is ticked.
+fn hidden_tools() -> &'static Mutex<BTreeSet<String>> {
+    static HIDDEN: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    HIDDEN.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
 
 /// The DOM id the canvas is mounted under. The script finds it rather than being handed
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
@@ -388,6 +407,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       syncOrtho();
       controls.update();
       framed = { centre: centre.clone(), span: span };
+      saveView();
     }
 
     // Gives the flat camera the frustum that frames what the 3D one would frame from
@@ -422,6 +442,47 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // The camera lives entirely on this side, so these do too: the Rust half calls
     // `__k2g_view` for its buttons and the key handler below calls it directly, which
     // means there is one implementation and no state to keep in step across the two.
+
+    // The view the operator arranged, kept on `window` so it outlives the canvas.
+    //
+    // This canvas is destroyed and rebuilt constantly — switching the Job tab, pinning
+    // the dock beside a profile screen, or navigating away and back (see the orphan
+    // teardown at the foot of this script). Every rebuild handed back the default
+    // three-quarter view, so splitting the screen threw away whatever the operator had
+    // orbited to. `window` is the only thing here that survives a canvas.
+    //
+    // Session-scoped and deliberately not persisted: this is a way of looking at one
+    // job, not a preference to carry into the next run.
+    function saveView() {
+      window.__K2G_VIEW = {
+        pos: camera.position.toArray(),
+        target: controls.target.toArray(),
+        flat: camera === ortho,
+        framed: framed && { centre: framed.centre.toArray(), span: framed.span },
+      };
+    }
+
+    // Puts the remembered view back, but only when it still belongs to this work.
+    //
+    // The saved camera was arranged around a particular bounding box. Restoring it over a
+    // different board — another job, another step with far more or less in it — would
+    // leave the operator looking past the work with no clue why, so the same "materially
+    // moved or resized" test `frameScene` uses decides it, and a genuine change keeps the
+    // fresh framing instead.
+    function restoreView(saved) {
+      if (!saved || !saved.framed || !framed) return;
+      const centre = new T.Vector3().fromArray(saved.framed.centre);
+      if (centre.distanceTo(framed.centre) > framed.span * REFRAME_RATIO ||
+          Math.abs(saved.framed.span - framed.span) > framed.span * REFRAME_RATIO) {
+        return;
+      }
+      setProjection(!!saved.flat);
+      camera.position.fromArray(saved.pos);
+      controls.target.fromArray(saved.target);
+      syncOrtho();
+      controls.update();
+      saveView();
+    }
 
     // Swaps which camera the controls drive, keeping the eye where it is. `zoom` is reset
     // rather than carried across: the orbit dolly means different things to the two
@@ -481,6 +542,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       } else if (command === "projection") {
         setProjection(camera !== ortho);
       }
+      saveView();
     };
 
     // Number keys, matching the buttons. On `window` because the canvas is not focusable
@@ -513,7 +575,18 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     };
 
     new ResizeObserver(resize).observe(canvas);
+
+    // On "end" rather than "change": the latter fires every frame of a drag, and this
+    // only has to be right once the hand comes off.
+    controls.addEventListener("end", saveView);
+
+    // Read before the first draw, because that draw frames the scene and records the
+    // framing it chose — which would overwrite the very thing being restored.
+    const remembered = window.__K2G_VIEW;
     canvas.__k2g_draw(board, traces, fixture);
+    // After the first draw, never before: that draw is what establishes the bounds the
+    // remembered view is judged against.
+    restoreView(remembered);
 
     // Frames the canvas has been out of the document for. The canvas is destroyed when
     // the Job view switches tab or the dock closes, and this loop would otherwise keep a
@@ -702,7 +775,7 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     // Keyed by id and not by position: a step's blocks are ordered by the planner, and a
     // profile edit can reorder them. An index would then carry the hidden flag onto
     // whichever tool inherited the position.
-    let mut hidden = use_signal(BTreeSet::<String>::new);
+    let mut hidden = use_signal(|| hidden_tools().lock().map(|set| set.clone()).unwrap_or_default());
 
     let payload = use_memo(move || {
         let _ = crate::ui::bindings::data_revision();
@@ -846,6 +919,13 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
                                                     off.remove(&tool_id);
                                                 } else {
                                                     off.insert(tool_id.clone());
+                                                }
+                                                // Through to the session store as well as
+                                                // the signal: the signal is what redraws
+                                                // now, the store is what the next mount of
+                                                // this view starts from.
+                                                if let Ok(mut kept) = hidden_tools().lock() {
+                                                    kept.clone_from(off);
                                                 }
                                             });
                                     }
