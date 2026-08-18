@@ -31,6 +31,12 @@ fn CatalogManagementPanel(
 ) -> Element {
     let mut viewing_catalog_key = use_signal(|| None::<String>);
     let mut detail_tool_key = use_signal(|| None::<String>);
+    // Which sections are open, by key. Empty to begin with, so a catalog arrives as a
+    // list of its sections rather than as several hundred rows: a supplier library is
+    // browsed by looking for the *kind* of tool first. Switching catalogs collapses
+    // everything for free, since a section key carries its catalog's position and so
+    // matches nothing in another one.
+    let mut expanded_sections = use_signal(std::collections::BTreeSet::<String>::new);
 
     use_effect(move || {
         super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
@@ -213,44 +219,70 @@ fn CatalogManagementPanel(
                                         th { "Point angle" }
                                         th { "Feed" }
                                         th { "Speed" }
+                                        th {
+                                            class: "catalog-stock-col",
+                                            title: "Whether this tool is already in your stock, and whether that copy still matches the catalog",
+                                            "In stock"
+                                        }
                                     }
                                 }
                                 tbody {
                                     {catalog.sections.iter().map(|section| {
+                                        let open = expanded_sections.read().contains(&section.key);
+                                        let section_key = section.key.clone();
+                                        let count = section.tools.len();
                                         rsx! {
-                                            tr { key: "sec-{section.key}", class: "catalog-section-row",
-                                                td { colspan: "7", "{section.name}" }
-                                            }
-                                            {section.tools.iter().map(|tool| {
-                                                let sku = tool.sku.clone().unwrap_or_else(|| "\u{2014}".to_string());
-                                                let feed = tool
-                                                    .table_feed
-                                                    .map(|f| unit_format::format_feed_display(f, unit_system))
-                                                    .unwrap_or_else(|| "\u{2014}".to_string());
-                                                let speed = tool
-                                                    .spindle_speed
-                                                    .map(|s| unit_format::format_rotational_speed_display(s))
-                                                    .unwrap_or_else(|| "\u{2014}".to_string());
-                                                rsx! {
-                                                    tr {
-                                                        key: "{tool.key}",
-                                                        class: "catalog-tool-table-row",
-                                                        // The gesture the Stock table already uses for the
-                                                        // same thing, on the screen where tools are compared.
-                                                        ondoubleclick: {
-                                                            let key = tool.key.clone();
-                                                            move |_| detail_tool_key.set(Some(key.clone()))
-                                                        },
-                                                        td { "{tool.kind}" }
-                                                        td { "{unit_format::format_length_display(tool.diameter, unit_system)}" }
-                                                        td { class: "stock-name-cell", "{tool.display_name}" }
-                                                        td { "{sku}" }
-                                                        td { "{unit_format::format_angle_display(tool.point_angle)}" }
-                                                        td { "{feed}" }
-                                                        td { "{speed}" }
+                                            tr {
+                                                key: "sec-{section.key}",
+                                                class: "catalog-section-row",
+                                                onclick: move |_| {
+                                                    let mut open_sections = expanded_sections.write();
+                                                    if !open_sections.remove(&section_key) {
+                                                        open_sections.insert(section_key.clone());
                                                     }
+                                                },
+                                                td { colspan: "8",
+                                                    span { class: "catalog-section-caret", if open { "▾" } else { "▸" } }
+                                                    span { "{section.name}" }
+                                                    span { class: "catalog-section-count", "{count}" }
                                                 }
-                                            })}
+                                            }
+                                            if open {
+                                                {section.tools.iter().map(|tool| {
+                                                    let sku = tool.sku.clone().unwrap_or_else(|| "\u{2014}".to_string());
+                                                    let feed = tool
+                                                        .table_feed
+                                                        .map(|f| unit_format::format_feed_display(f, unit_system))
+                                                        .unwrap_or_else(|| "\u{2014}".to_string());
+                                                    let speed = tool
+                                                        .spindle_speed
+                                                        .map(|s| unit_format::format_rotational_speed_display(s))
+                                                        .unwrap_or_else(|| "\u{2014}".to_string());
+                                                    let presence = snapshot.catalog_tool_stock_state(tool);
+                                                    rsx! {
+                                                        tr {
+                                                            key: "{tool.key}",
+                                                            class: "catalog-tool-table-row",
+                                                            // The gesture the Stock table already uses for the
+                                                            // same thing, on the screen where tools are compared.
+                                                            ondoubleclick: {
+                                                                let key = tool.key.clone();
+                                                                move |_| detail_tool_key.set(Some(key.clone()))
+                                                            },
+                                                            td { "{tool.kind}" }
+                                                            td { "{unit_format::format_length_display(tool.diameter, unit_system)}" }
+                                                            td { class: "stock-name-cell", "{tool.display_name}" }
+                                                            td { "{sku}" }
+                                                            td { "{unit_format::format_angle_display(tool.point_angle)}" }
+                                                            td { "{feed}" }
+                                                            td { "{speed}" }
+                                                            td { class: "catalog-stock-col",
+                                                                CatalogStockCell { tool: tool.clone(), presence, feedback }
+                                                            }
+                                                        }
+                                                    }
+                                                })}
+                                            }
                                         }
                                     })}
                                 }
@@ -259,6 +291,56 @@ fn CatalogManagementPanel(
                     }
                 }
             }
+        }
+    }
+}
+
+/// The rightmost cell of a catalog row: what stock holds of this tool, or the button
+/// that puts it there.
+///
+/// One cell, two states, and the pair is the feature: **Add** appears exactly when the
+/// tool is not in stock in any form, so there is no disabled button to explain and no
+/// second click spent discovering you already own it. Once it is owned, the square says
+/// in what condition — the catalog entry as it stands, a copy you have since edited, or
+/// both — and the tooltip names the rows and what changed about them.
+#[component]
+fn CatalogStockCell(
+    tool: crate::data::model::CatalogStockTool,
+    presence: crate::runtime::StockPresence,
+    feedback: Signal<String>,
+) -> Element {
+    let mut feedback = feedback;
+    let tool_key = tool.key.clone();
+
+    if let Some(class) = presence.class_name() {
+        let tooltip = presence.tooltip();
+        return rsx! {
+            span {
+                class: "catalog-stock-dot {class}",
+                title: "{tooltip}",
+                // A shape, not a glyph: the state is carried by colour, and a character
+                // in the middle of it would only ever be redundant with the tooltip.
+                "aria-label": "{tooltip}",
+                role: "img",
+            }
+        };
+    }
+
+    rsx! {
+        button {
+            class: "btn btn-secondary catalog-stock-add",
+            title: "Add '{tool.display_name}' to stock",
+            onclick: move |evt| {
+                // The row beneath opens the tool detail on a double click; adding is one
+                // click on a button inside it, and must not be read as the first half of
+                // that gesture.
+                evt.stop_propagation();
+                match crate::ui::bindings::add_catalog_tool_to_stock(&tool_key) {
+                    Some(name) => feedback.set(format!("Added '{name}' to stock")),
+                    None => feedback.set("That tool is no longer in the catalog".to_string()),
+                }
+            },
+            "Add"
         }
     }
 }

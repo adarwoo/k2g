@@ -4190,7 +4190,8 @@ th {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
-/* Section header row inside the read-only catalog contents table. */
+/* Section header row inside the read-only catalog contents table. Clickable: it opens
+   and closes its section, which start closed. */
 .catalog-section-row td {
     background: var(--bg-subtle);
     font-weight: 700;
@@ -4198,6 +4199,68 @@ th {
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-subtle);
+}
+
+.catalog-section-row {
+    cursor: pointer;
+    user-select: none;
+}
+
+.catalog-section-row:hover td {
+    background: color-mix(in srgb, var(--accent) 10%, var(--bg-subtle));
+}
+
+.catalog-section-caret {
+    display: inline-block;
+    width: 12px;
+    color: var(--text-subtle);
+}
+
+/* How many tools are behind a closed section — the number is the reason to open it. */
+.catalog-section-count {
+    margin-left: 8px;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--text-subtle) 18%, transparent);
+    font-weight: 600;
+}
+
+/* The "In stock" column: one square per owned tool, or the button to own it. */
+.catalog-stock-col {
+    width: 1%;
+    white-space: nowrap;
+    text-align: center;
+}
+
+.catalog-stock-dot {
+    display: inline-block;
+    width: 11px;
+    height: 11px;
+    border-radius: 3px;
+    vertical-align: middle;
+    border: 1px solid color-mix(in srgb, var(--text) 25%, transparent);
+}
+
+/* Green: in stock, exactly as the catalog describes it. */
+.catalog-stock-dot.in-stock-verbatim {
+    background: var(--ok);
+}
+
+/* Amber: in stock, but that copy has been edited — a tool of your own now. */
+.catalog-stock-dot.in-stock-modified {
+    background: var(--warn);
+}
+
+/* Both, split on the diagonal rather than blended: two copies in two conditions is
+   what it means, and a mixed colour would read as a third state of one copy. */
+.catalog-stock-dot.in-stock-both {
+    background: linear-gradient(135deg, var(--ok) 0 50%, var(--warn) 50% 100%);
+}
+
+.catalog-stock-add {
+    padding: 1px 8px;
+    font-size: 11px;
+    line-height: 1.6;
 }
 
 .size-cell {

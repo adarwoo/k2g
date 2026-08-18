@@ -1441,13 +1441,32 @@ impl AppState {
     /// `also` lets a caller include tools queued but not yet written, so one bulk add
     /// cannot duplicate within itself.
     pub fn catalog_tool_in_stock(&self, tool: &CatalogStockTool, also: &[Tool]) -> bool {
-        let has_sku = tool.sku.as_ref().is_some_and(|sku| !sku.trim().is_empty());
-        self.tools.iter().chain(also.iter()).any(|existing| {
-            (has_sku && existing.sku.as_deref() == tool.sku.as_deref())
-                || (existing.composite_name == tool.display_name
-                    && existing.kind == tool.kind
-                    && (existing.diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001)
-        })
+        self.tools
+            .iter()
+            .chain(also.iter())
+            .any(|existing| same_tool(existing, tool))
+    }
+
+    /// Whether a catalog tool is in stock, and in what condition — the Catalog screen's
+    /// per-row indicator, and what decides whether it offers an **Add** button at all.
+    ///
+    /// "Verbatim" and "modified" are the stock document's own distinction: a stock tool
+    /// keeps the values it was added with as an immutable `base` and the operator's edits
+    /// as `overrides`, so "has this copy been changed" is a question the data already
+    /// answers (see `stock_value_from_tools`). It is worth showing because the two mean
+    /// different things when you are about to add another: a verbatim copy is the catalog
+    /// entry, while a modified one is a tool of your own that merely started there.
+    pub fn catalog_tool_stock_state(&self, tool: &CatalogStockTool) -> StockPresence {
+        let mut presence = StockPresence::default();
+        for existing in self.tools.iter().filter(|t| same_tool(t, tool)) {
+            let changes = changed_from_catalog(existing);
+            if changes.is_empty() {
+                presence.verbatim.push(existing.display_name());
+            } else {
+                presence.modified.push((existing.display_name(), changes));
+            }
+        }
+        presence
     }
 
     /// Builds the stock tools to add for a catalog selection, in catalog order.
@@ -1567,6 +1586,106 @@ impl AppState {
             });
         }
     }
+}
+
+/// Which stock rows a catalog tool has, and whether they are still as they were added.
+///
+/// Both lists at once rather than one verdict, because a tool can be in stock twice —
+/// once as the catalog describes it and once resized for a job — and that is a different
+/// answer from either alone.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StockPresence {
+    /// Display names of the copies that still match what the catalog says.
+    pub verbatim: Vec<String>,
+    /// Display names of the copies that have been edited, each with what was changed.
+    pub modified: Vec<(String, Vec<&'static str>)>,
+}
+
+impl StockPresence {
+    /// The modifier for the indicator's CSS class, and the test for presence itself:
+    /// `None` means nothing in stock came from this catalog entry, which is what puts an
+    /// **Add** button in the cell instead of a square.
+    pub fn class_name(&self) -> Option<&'static str> {
+        match (self.verbatim.is_empty(), self.modified.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some("in-stock-verbatim"),
+            (true, false) => Some("in-stock-modified"),
+            (false, false) => Some("in-stock-both"),
+        }
+    }
+
+    /// What the indicator says when pointed at: which rows, and what was changed about
+    /// them. Naming the changed fields is the point — "modified" on its own invites
+    /// opening the tool to find out what, which is the click this is meant to save.
+    pub fn tooltip(&self) -> String {
+        let mut lines: Vec<String> = Vec::new();
+        for name in &self.verbatim {
+            lines.push(format!("In stock as '{name}' — unchanged"));
+        }
+        for (name, changes) in &self.modified {
+            lines.push(format!("In stock as '{name}' — changed: {}", changes.join(", ")));
+        }
+        lines.join("\n")
+    }
+}
+
+/// The one definition of "the same tool", shared by every caller that has to decide
+/// whether a catalog entry is already owned.
+///
+/// Identity is the tool's **origin**, not what it wears now: a non-empty SKU matches on
+/// the SKU alone, and the fallback compares the values the copy was *added* with
+/// (`catalog_*`) rather than its current ones — otherwise resizing a copy would make it
+/// stop being recognised as the tool it came from, which is the opposite of what a
+/// stock indicator is for.
+fn same_tool(existing: &Tool, tool: &CatalogStockTool) -> bool {
+    let has_sku = tool.sku.as_ref().is_some_and(|sku| !sku.trim().is_empty());
+    let diameter = existing.catalog_diameter.unwrap_or(existing.diameter);
+    (has_sku && existing.sku.as_deref() == tool.sku.as_deref())
+        || (existing.composite_name == tool.display_name
+            && existing.kind == tool.kind
+            && (diameter.as_mm() - tool.diameter.as_mm()).abs() < 0.0001)
+}
+
+/// What a stock tool carries that differs from the catalog values it was added with, as
+/// field labels in the order the tool detail shows them.
+///
+/// Compared as quantities, not as stored strings: `0.8mm` and `800um` are the same
+/// diameter, and a unit the operator retyped is not an edit.
+///
+/// Flute length and minimum depth are absent because no catalog snapshot of them is kept
+/// on the in-memory tool — a change to either is invisible here, and says "unchanged"
+/// rather than guessing.
+fn changed_from_catalog(tool: &Tool) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if !tool.name.trim().is_empty() {
+        changed.push("name");
+    }
+    if let Some(catalog) = tool.catalog_diameter {
+        if (catalog.as_mm() - tool.diameter.as_mm()).abs() > 1e-6 {
+            changed.push("diameter");
+        }
+    }
+    if let Some(catalog) = tool.catalog_point_angle {
+        if (catalog.as_degrees() - tool.point_angle.as_degrees()).abs() > 1e-6 {
+            changed.push("point angle");
+        }
+    }
+    if let (Some(catalog), Some(current)) = (tool.catalog_table_feed, tool.table_feed) {
+        if (catalog.as_mm_per_min() - current.as_mm_per_min()).abs() > 1e-6 {
+            changed.push("table feed");
+        }
+    }
+    if let (Some(catalog), Some(current)) = (tool.catalog_z_feed, tool.z_feed) {
+        if (catalog.as_mm_per_min() - current.as_mm_per_min()).abs() > 1e-6 {
+            changed.push("plunge feed");
+        }
+    }
+    if let (Some(catalog), Some(current)) = (tool.catalog_spindle_speed, tool.spindle_speed) {
+        if (catalog.as_rpm() - current.as_rpm()).abs() > 1e-6 {
+            changed.push("spindle speed");
+        }
+    }
+    changed
 }
 
 fn load_tools_direct_from_disk() -> Option<Vec<Tool>> {
@@ -2660,6 +2779,159 @@ mod step_projection_tests {
         assert_eq!(profile.cnc_profile_id, cnc);
         assert!(profile.default_operations.contains(&ProductionOperation::DrillPth));
         assert!(profile.default_operations.contains(&ProductionOperation::RouteBoard));
+    }
+}
+
+#[cfg(test)]
+mod stock_presence_tests {
+    use super::*;
+    use units::{Angle, FeedRate, Length};
+
+    fn catalog_tool(name: &str, sku: Option<&str>, diameter_mm: f64) -> CatalogStockTool {
+        CatalogStockTool {
+            key: format!("cat::s0::{name}"),
+            display_name: name.to_string(),
+            kind: "Drill".to_string(),
+            diameter: Length::from_mm(diameter_mm),
+            point_angle: Angle::from_degrees(118.0),
+            z_min_depth: None,
+            flute_length: None,
+            table_feed: Some(FeedRate::from_mm_per_min(300.0)),
+            z_feed: None,
+            spindle_speed: None,
+            sku: sku.map(ToString::to_string),
+        }
+    }
+
+    /// A stock tool as `build_catalog_tool_additions` would have made it: every current
+    /// value equal to the catalog snapshot beside it.
+    fn added_from(tool: &CatalogStockTool, id: &str) -> Tool {
+        Tool {
+            id: id.to_string(),
+            composite_name: tool.display_name.clone(),
+            name: String::new(),
+            kind: tool.kind.clone(),
+            diameter: tool.diameter,
+            catalog_diameter: Some(tool.diameter),
+            point_angle: tool.point_angle,
+            catalog_point_angle: Some(tool.point_angle),
+            flute_length: None,
+            z_min_depth: None,
+            table_feed: tool.table_feed,
+            catalog_table_feed: tool.table_feed,
+            z_feed: None,
+            catalog_z_feed: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: ToolStatus::InStock,
+            preference: ToolPreference::Neutral,
+            source_catalog: "Cat / S".to_string(),
+            manufacturer: None,
+            sku: tool.sku.clone(),
+        }
+    }
+
+    fn app_with_tools(tools: Vec<Tool>) -> AppState {
+        let mut app = AppState::new(&crate::ui::UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+            copper: Default::default(),
+        });
+        app.tools = tools;
+        app
+    }
+
+    #[test]
+    fn a_tool_nothing_in_stock_came_from_has_no_indicator() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+        let app = app_with_tools(vec![]);
+
+        let presence = app.catalog_tool_stock_state(&tool);
+
+        assert_eq!(presence.class_name(), None, "and so the cell offers Add");
+        assert_eq!(presence.tooltip(), "");
+    }
+
+    #[test]
+    fn an_untouched_copy_reads_as_verbatim() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+        let app = app_with_tools(vec![added_from(&tool, "a")]);
+
+        let presence = app.catalog_tool_stock_state(&tool);
+
+        assert_eq!(presence.class_name(), Some("in-stock-verbatim"));
+        assert_eq!(presence.tooltip(), "In stock as '0.8mm drill' — unchanged");
+    }
+
+    /// The point of the amber square: a copy that has been edited is a tool of your own,
+    /// and the tooltip says what was changed rather than leaving it to be found by
+    /// opening the tool.
+    #[test]
+    fn an_edited_copy_reads_as_modified_and_names_the_fields() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+        let mut edited = added_from(&tool, "a");
+        edited.name = "Fine drill".to_string();
+        edited.diameter = Length::from_mm(0.85);
+        let app = app_with_tools(vec![edited]);
+
+        let presence = app.catalog_tool_stock_state(&tool);
+
+        assert_eq!(presence.class_name(), Some("in-stock-modified"));
+        assert_eq!(
+            presence.tooltip(),
+            "In stock as 'Fine drill' — changed: name, diameter"
+        );
+    }
+
+    /// Both at once is its own state, not a stronger version of either: one copy is the
+    /// catalog entry and the other is not, and an operator about to add a third needs to
+    /// know that both are already there.
+    #[test]
+    fn one_of_each_reads_as_both() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+        let mut edited = added_from(&tool, "b");
+        edited.spindle_speed = Some(units::RotationalSpeed::from_rpm(12_000.0));
+        edited.catalog_spindle_speed = Some(units::RotationalSpeed::from_rpm(10_000.0));
+        let app = app_with_tools(vec![added_from(&tool, "a"), edited]);
+
+        let presence = app.catalog_tool_stock_state(&tool);
+
+        assert_eq!(presence.class_name(), Some("in-stock-both"));
+        assert_eq!(presence.verbatim.len(), 1);
+        assert_eq!(presence.modified.len(), 1);
+        assert!(presence.tooltip().contains("changed: spindle speed"));
+    }
+
+    /// Retyping `0.8mm` as `800um` is not an edit. The values are compared as
+    /// quantities, so the unit an operator prefers cannot turn a square amber.
+    #[test]
+    fn the_same_diameter_in_another_unit_is_not_a_change() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+        let mut retyped = added_from(&tool, "a");
+        retyped.diameter = Length::from_string("800um", None).unwrap();
+        let app = app_with_tools(vec![retyped]);
+
+        assert_eq!(
+            app.catalog_tool_stock_state(&tool).class_name(),
+            Some("in-stock-verbatim")
+        );
+    }
+
+    /// A resized copy of a SKU-less catalog entry is still that entry's copy. Identity
+    /// compares the values it was *added* with, or editing a tool would make the catalog
+    /// forget where it came from and offer to add it again.
+    #[test]
+    fn a_resized_copy_is_still_recognised_without_a_sku() {
+        let tool = catalog_tool("2mm router", None, 2.0);
+        let mut resized = added_from(&tool, "a");
+        resized.diameter = Length::from_mm(1.9);
+        let app = app_with_tools(vec![resized]);
+
+        assert_eq!(
+            app.catalog_tool_stock_state(&tool).class_name(),
+            Some("in-stock-modified"),
+            "recognised, and reported as edited"
+        );
     }
 }
 
