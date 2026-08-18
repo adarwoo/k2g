@@ -1652,14 +1652,18 @@ fn same_tool(existing: &Tool, tool: &CatalogStockTool) -> bool {
 /// Compared as quantities, not as stored strings: `0.8mm` and `800um` are the same
 /// diameter, and a unit the operator retyped is not an edit.
 ///
+/// **The name is not compared.** It is what the tool is called, not what it is: renaming a
+/// copy changes nothing about the bit in the drawer, and the indicator is answering
+/// "is this still the catalog's tool". It also cannot be compared usefully — a stock tool
+/// reads its name back as its own base name when nothing overrides it
+/// (`tools_from_stock_value`), so treating a non-empty name as an edit marked *every*
+/// tool as modified the moment it had been through a save.
+///
 /// Flute length and minimum depth are absent because no catalog snapshot of them is kept
 /// on the in-memory tool — a change to either is invisible here, and says "unchanged"
 /// rather than guessing.
 fn changed_from_catalog(tool: &Tool) -> Vec<&'static str> {
     let mut changed = Vec::new();
-    if !tool.name.trim().is_empty() {
-        changed.push("name");
-    }
     if let Some(catalog) = tool.catalog_diameter {
         if (catalog.as_mm() - tool.diameter.as_mm()).abs() > 1e-6 {
             changed.push("diameter");
@@ -2879,8 +2883,35 @@ mod stock_presence_tests {
         assert_eq!(presence.class_name(), Some("in-stock-modified"));
         assert_eq!(
             presence.tooltip(),
-            "In stock as 'Fine drill' — changed: name, diameter"
+            "In stock as 'Fine drill' — changed: diameter",
+            "the name it is called by is not one of the changes — it is already the \
+             subject of the sentence"
         );
+    }
+
+    /// The reported bug: every tool showed amber.
+    ///
+    /// A stock tool reads its name back as its own base name when nothing overrides it,
+    /// so "has a name" was true of every tool that had ever been saved, and a rename is
+    /// not a change to the tool in any case.
+    #[test]
+    fn a_renamed_copy_with_nothing_else_touched_is_still_verbatim() {
+        let tool = catalog_tool("0.8mm drill", Some("K-08"), 0.8);
+
+        let mut as_loaded = added_from(&tool, "a");
+        as_loaded.name = tool.display_name.clone();
+
+        let mut renamed = added_from(&tool, "b");
+        renamed.name = "The little one".to_string();
+
+        for (case, stocked) in [("as loaded", as_loaded), ("renamed", renamed)] {
+            let app = app_with_tools(vec![stocked]);
+            assert_eq!(
+                app.catalog_tool_stock_state(&tool).class_name(),
+                Some("in-stock-verbatim"),
+                "{case}: nothing about the tool itself differs from the catalog"
+            );
+        }
     }
 
     /// Both at once is its own state, not a stronger version of either: one copy is the
