@@ -73,8 +73,17 @@ pub enum Event {
     KicadPluginUnregistered,
     /// `api.enable_server` in another application's config file was changed.
     KicadApiSettingChanged,
-    /// A configuration or catalog file failed schema validation and was set aside.
+    /// A configuration or catalog file could not be loaded at all and was set aside — the
+    /// application is running on something other than what is on disk.
     ConfigRejected,
+    /// A configuration or catalog file loaded, but something in it did not validate.
+    ///
+    /// Kept apart from [`Self::ConfigRejected`] because the two call for opposite
+    /// responses: a rejected file means a profile has silently vanished from the
+    /// application, while a complaint means one field is not what the schema says and
+    /// everything else is in use. Reporting both as "rejected" made every stray value read
+    /// like a lost profile.
+    ConfigProblem,
     /// A G-code program was written to disk or to removable media.
     GcodeWritten,
     /// Settings were reset to their shipped defaults.
@@ -99,6 +108,7 @@ impl Event {
             Self::KicadPluginUnregistered => "kicad.plugin_unregistered",
             Self::KicadApiSettingChanged => "kicad.api_setting_changed",
             Self::ConfigRejected => "config.rejected",
+            Self::ConfigProblem => "config.problem",
             Self::GcodeWritten => "gcode.written",
             Self::FactoryReset => "data.factory_reset",
             Self::DataDeleted => "data.deleted",
@@ -345,6 +355,7 @@ mod tests {
             Event::KicadPluginUnregistered,
             Event::KicadApiSettingChanged,
             Event::ConfigRejected,
+            Event::ConfigProblem,
             Event::GcodeWritten,
             Event::FactoryReset,
             Event::DataDeleted,

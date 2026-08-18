@@ -3174,6 +3174,94 @@ mod tests {
         assert!(data.create_cnc_from_template("does_not_exist").is_err());
     }
 
+    /// Every unit the `units` crate can *write* must be accepted by the schema that will
+    /// read it back.
+    ///
+    /// A value is persisted as the string the crate's `Display` produces, and validated
+    /// against `units.yaml` on the next launch — two vocabularies, in two files, that
+    /// nothing held together. They had already drifted three ways: `Angle` could write
+    /// `90degree` where the pattern took `deg` and `°` only (and did, for every angle the
+    /// operator typed, because the editor's parser defaulted a bare number to that
+    /// spelling); `FeedRate` could write `cm/min` and `m/min`, and `Length` `nm` and `cm`,
+    /// none of which the patterns listed.
+    ///
+    /// The failure mode is what makes this worth a test rather than a fix: the write
+    /// succeeds, the value decodes and behaves correctly, and the only symptom is a
+    /// validation complaint on the *next* launch — far from the edit that caused it.
+    #[test]
+    fn every_unit_the_crate_can_write_is_accepted_by_its_schema() {
+        use units::{Angle, FeedRate, Length, RotationalSpeed};
+        use units::{AngleUnit, FeedRateUnit, LengthUnit, RotationalSpeedUnit};
+
+        let units_text = SCHEMAS
+            .iter()
+            .find(|(name, _)| *name == "units.yaml")
+            .map(|(_, text)| *text)
+            .expect("units.yaml is embedded");
+        let units: Value =
+            serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(units_text).unwrap())
+                .unwrap();
+
+        let validator_for = |def: &str| {
+            let schema = units["$defs"][def].clone();
+            jsonschema::validator_for(&schema)
+                .unwrap_or_else(|e| panic!("units.yaml#/$defs/{def} must compile: {e}"))
+        };
+
+        // Written as the crate writes it: parse `1<suffix>` and render it straight back,
+        // which is exactly the round trip a stored value makes.
+        let mut checked = 0;
+        let mut check = |def: &str, suffix: &str, written: String| {
+            let validator = validator_for(def);
+            assert!(
+                validator.is_valid(&Value::String(written.clone())),
+                "`{written}` is what the crate writes for a value in `{suffix}`, and \
+                 units.yaml#/$defs/{def} rejects it. Every unit the crate can emit has to \
+                 be in that pattern, or a document written with it fails validation the \
+                 next time it is read."
+            );
+            checked += 1;
+        };
+
+        for unit in LengthUnit::ALL {
+            let suffix = unit.suffix();
+            let value = Length::from_string(&format!("1{suffix}"), None)
+                .unwrap_or_else(|e| panic!("the crate must parse its own `{suffix}`: {e}"));
+            check("size", suffix, value.to_string());
+        }
+        for unit in FeedRateUnit::ALL {
+            let suffix = unit.suffix();
+            let value = FeedRate::from_string(&format!("1{suffix}"), None)
+                .unwrap_or_else(|e| panic!("the crate must parse its own `{suffix}`: {e}"));
+            check("feed", suffix, value.to_string());
+        }
+        for unit in AngleUnit::ALL {
+            let suffix = unit.suffix();
+            let value = Angle::from_string(&format!("1{suffix}"), None)
+                .unwrap_or_else(|e| panic!("the crate must parse its own `{suffix}`: {e}"));
+            check("angle", suffix, value.to_string());
+        }
+        for unit in RotationalSpeedUnit::ALL {
+            let suffix = unit.suffix();
+            let value = RotationalSpeed::from_string(&format!("1{suffix}"), None)
+                .unwrap_or_else(|e| panic!("the crate must parse its own `{suffix}`: {e}"));
+            check("rpm", suffix, value.to_string());
+        }
+
+        assert!(checked >= 17, "every unit variant is checked, got {checked}");
+    }
+
+    /// The angle an operator types is written in the spelling the schema accepts.
+    ///
+    /// The editor's parser decides the unit of a bare number, and therefore the unit the
+    /// value is stored in. `Degree` renders as `90degree`; `Deg` renders as `90deg`. This
+    /// is the one that reached a file.
+    #[test]
+    fn a_typed_angle_is_stored_in_a_spelling_the_schema_accepts() {
+        let angle = units::user_format::parse_angle("90").expect("a bare number is degrees");
+        assert_eq!(angle.to_string(), "90deg");
+    }
+
     #[test]
     fn cnc_templates_lists_all_bundled_seeds() {
         let dir = tempdir().unwrap();

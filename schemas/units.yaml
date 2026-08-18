@@ -17,13 +17,20 @@ $defs:
   # or clearance.
   #
   # Accepted units:
-  #   - mm
+  #   - nm
   #   - um
+  #   - mm
+  #   - cm
   #   - "
   #   - in
   #   - inch
   #   - mil
   #   - thou
+  #
+  # Every unit the `units` crate can *write* must appear here: a stored value is the
+  # string that crate's `Display` produces, so a unit it emits and this pattern rejects
+  # is a document that fails validation the next time it is read. Kept honest by
+  # `every_unit_the_crate_can_write_is_accepted_by_its_schema` in `src/data`.
   #
   # Fractions are only accepted for inch-based units.
   #
@@ -38,7 +45,7 @@ $defs:
   #
   size:
     type: string
-    pattern: '^\s*(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
+    pattern: '^\s*(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|nm|cm|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
 
   # ---------------------------------------------------------------------------
   # offset
@@ -55,7 +62,7 @@ $defs:
   #
   offset:
     type: string
-    pattern: '^\s*-?(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
+    pattern: '^\s*-?(?:(?:\d+(?:\.\d+)?)\s*(?:mm|um|nm|cm|mil|thou|in(?:ch)?|")|(?:\d+\s+\d+/\d+|\d+/\d+)\s*(?:in(?:ch)?|"))\s*$'
 
   # ---------------------------------------------------------------------------
   # feed
@@ -68,10 +75,14 @@ $defs:
   #   "50 in/min"
   #   "50 inch/min"
   #   "50 ipm"
+  #   "1.2 m/min"
+  #
+  # `cm/min` and `m/min` are here because the `units` crate can write them — see the note
+  # under `size`.
   #
   feed:
     type: string
-    pattern: '^\s*\d+(?:\.\d+)?\s*(?:mm/min|mm\/min|in/min|in\/min|inch/min|inch\/min|ipm)\s*$'
+    pattern: '^\s*\d+(?:\.\d+)?\s*(?:mm/min|mm\/min|cm/min|cm\/min|m/min|m\/min|in/min|in\/min|inch/min|inch\/min|ipm)\s*$'
 
   # ---------------------------------------------------------------------------
   # feed_rev
@@ -133,12 +144,17 @@ $defs:
   #   "118°"
   #   "118 deg"
   #   "-90 deg"
+  #   "118degree"
+  #
+  # `degree` is the crate's second spelling of `deg`, and is accepted because files
+  # written before the editor settled on the short one carry it — see the note under
+  # `size`. New values are written as `deg`.
   #
   angle:
     anyOf:
       - type: number
       - type: string
-        pattern: '^\s*[+-]?\d+(?:\.\d+)?\s*(?:deg|°)?\s*$'
+        pattern: '^\s*[+-]?\d+(?:\.\d+)?\s*(?:degree|deg|°)?\s*$'
 
   # ---------------------------------------------------------------------------
   # percent

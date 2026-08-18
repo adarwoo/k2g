@@ -502,13 +502,23 @@ pub fn initialize_ctx(boot: UiLaunchData) {
         }),
     );
 
-    // A configuration or catalog file that failed validation was not loaded, so the
-    // application is running on something other than what is on disk. That is worth
-    // being able to find later — it is the difference between "k2g ignored my profile"
-    // and "my profile is wrong".
+    // Two different things, recorded apart. A file that could not be read or whose
+    // `schema_version` the parser refuses is **not loaded**, so the application is running
+    // on something other than what is on disk — "k2g ignored my profile". Anything else
+    // loaded and is in use, with one value the schema objects to — "my profile has a
+    // stray field". Reporting both as `config.rejected` made a single mistyped unit read
+    // like a lost profile, which is the more alarming of the two by a distance.
     for problem in &load_problems {
+        let dropped = matches!(
+            problem.kind,
+            datastore::DataErrorKind::Yaml | datastore::DataErrorKind::SchemaVersion
+        );
         security_log::record(
-            security_log::Event::ConfigRejected,
+            if dropped {
+                security_log::Event::ConfigRejected
+            } else {
+                security_log::Event::ConfigProblem
+            },
             security_log::Outcome::Failed,
             json!({ "problem": security_log::redact_str(&problem.to_string()) }),
         );

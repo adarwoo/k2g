@@ -279,8 +279,16 @@ pub fn parse_feed_with_preference(
     FeedRate::from_string(value, Some(default))
 }
 
+/// Parses an angle the operator typed, defaulting a bare number to degrees.
+///
+/// `Deg`, not `Degree`, and the difference is not cosmetic: the unit chosen here is the
+/// one written back to the document, `Degree` renders as `90degree`, and the schemas'
+/// angle pattern accepts `deg` and `°` only. Every angle the operator touched therefore
+/// came back as a validation complaint on the next launch. The two spellings are the same
+/// unit, so this also matches what the datastore's own decoder falls back to
+/// (`units_bridge::decode_unit` parses with no default, which lands on `Deg`).
 pub fn parse_angle(value: &str) -> Result<Angle, UnitParseError> {
-    Angle::from_string(value, Some(AngleUnit::Degree))
+    Angle::from_string(value, Some(AngleUnit::Deg))
 }
 
 pub fn parse_rotational_speed(value: &str) -> Result<RotationalSpeed, UnitParseError> {

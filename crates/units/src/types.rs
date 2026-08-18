@@ -116,6 +116,28 @@ pub enum LengthUnit {
 }
 
 impl LengthUnit {
+    /// Every unit a [`Length`] can be rendered in.
+    ///
+    /// The written vocabulary of this type, exposed because a schema has to accept all of
+    /// it: a value is stored as the string [`Length`]'s `Display` produces, so a unit the
+    /// crate can emit and the schema does not accept is a document that fails validation
+    /// the next time it is read. `src/data` tests exactly that against `units.yaml`.
+    pub const ALL: [Self; 8] = [
+        Self::Nm,
+        Self::Um,
+        Self::Mm,
+        Self::Cm,
+        Self::Mil,
+        Self::Thou,
+        Self::Inch,
+        Self::In,
+    ];
+
+    /// The suffix this unit is written with.
+    pub fn suffix(self) -> &'static str {
+        self.name()
+    }
+
     /// Canonical suffix used when rendering the source form (e.g. `mm`).
     fn name(self) -> &'static str {
         match self {
@@ -313,6 +335,21 @@ pub enum FeedRateUnit {
 }
 
 impl FeedRateUnit {
+    /// Every unit a [`FeedRate`] can be rendered in — see [`LengthUnit::ALL`].
+    pub const ALL: [Self; 6] = [
+        Self::MmPerMin,
+        Self::CmPerMin,
+        Self::MPerMin,
+        Self::InPerMin,
+        Self::Ipm,
+        Self::InchPerMin,
+    ];
+
+    /// The suffix this unit is written with.
+    pub fn suffix(self) -> &'static str {
+        self.name()
+    }
+
     /// Canonical suffix used when rendering the source form (e.g. `mm/min`).
     fn name(self) -> &'static str {
         match self {
@@ -441,6 +478,15 @@ pub enum AngleUnit {
 }
 
 impl AngleUnit {
+    /// Every unit an [`Angle`] can be rendered in — see [`LengthUnit::ALL`]. Two spellings
+    /// of one unit, so which one a value carries is decided by whoever parsed it.
+    pub const ALL: [Self; 2] = [Self::Deg, Self::Degree];
+
+    /// The suffix this unit is written with.
+    pub fn suffix(self) -> &'static str {
+        self.name()
+    }
+
     /// Canonical suffix used when rendering the source form.
     fn name(self) -> &'static str {
         match self {
@@ -538,6 +584,14 @@ pub enum RotationalSpeedUnit {
 }
 
 impl RotationalSpeedUnit {
+    /// Every unit a [`RotationalSpeed`] can be rendered in — see [`LengthUnit::ALL`].
+    pub const ALL: [Self; 1] = [Self::Rpm];
+
+    /// The suffix this unit is written with.
+    pub fn suffix(self) -> &'static str {
+        self.name()
+    }
+
     /// Canonical suffix used when rendering the source form.
     fn name(self) -> &'static str {
         "rpm"
