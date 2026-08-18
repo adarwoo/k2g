@@ -6,7 +6,7 @@ every setting means, and the order to do things in.
 
 - Installing, connecting to KiCad, updating and uninstalling: **[install-and-security.md](install-and-security.md)**
 - What is stored and what leaves the machine: **[PRIVACY.md](../PRIVACY.md)**
-- Writing CNC profile templates: **[GCode template language](../schemas/docs/gcode-template-language.md)**
+- Writing CNC profile templates: **[GCode template language](design/gcode-template-language.md)**
 
 > [!WARNING]
 > **The programs k2g produces drive a spindle.** k2g works from geometry it reads

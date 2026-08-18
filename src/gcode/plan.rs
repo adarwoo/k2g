@@ -1,5 +1,5 @@
 //! The **machining plan** — the OperationPlanner's output
-//! ([`schemas/docs/operation-planner.md`] §1). An ordered set of *atomic
+//! ([`docs/design/operation-planner.md`] §1). An ordered set of *atomic
 //! operations*, grouped into tool blocks per machining step, held in memory as the
 //! single structured description of what the job machines.
 //!

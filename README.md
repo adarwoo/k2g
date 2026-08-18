@@ -67,7 +67,7 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 **The machine is yours to describe**
 
 - **CNC profiles** hold the dialect. Every GCode word k2g emits comes from a template you
-  can edit — see the [GCode template language](schemas/docs/gcode-template-language.md).
+  can edit — see the [GCode template language](docs/design/gcode-template-language.md).
   No GCode is hardcoded in the application, so an unusual controller is a profile, not a
   patch.
 - **Fixture profiles** hold the physical setup: which of the machine's stored zeros the
@@ -229,17 +229,17 @@ one owns the socket.
 | [Install and security](docs/install-and-security.md) | Installing, connecting to KiCad, updating, uninstalling — and the safety warning |
 | [Privacy](PRIVACY.md) | What is stored, what leaves the machine (almost nothing) |
 | [Security policy](SECURITY.md) | Reporting a vulnerability; what is supported |
-| [Specification](schemas/docs/Specification.md) | What the application is meant to do |
-| [Architecture](schemas/docs/architecture.md) | How it is put together |
-| [GCode template language](schemas/docs/gcode-template-language.md) | Writing CNC profile templates |
-| [GCode engine](schemas/docs/gcode-engine.md) | How a program is assembled |
-| [Operation planner](schemas/docs/operation-planner.md) | Tool selection, ordering, placement |
+| [Specification](docs/design/Specification.md) | What the application is meant to do |
+| [Architecture](docs/design/architecture.md) | How it is put together |
+| [GCode template language](docs/design/gcode-template-language.md) | Writing CNC profile templates |
+| [GCode engine](docs/design/gcode-engine.md) | How a program is assembled |
+| [Operation planner](docs/design/operation-planner.md) | Tool selection, ordering, placement |
 
 ## Contributing
 
 Issues and pull requests are welcome. The schemas under `schemas/` are the source of
 truth for persisted data and for much of the UI — read
-[architecture.md](schemas/docs/architecture.md) before changing one.
+[architecture.md](docs/design/architecture.md) before changing one.
 
 ## Licence
 

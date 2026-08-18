@@ -8,7 +8,7 @@ configuration data.
 ## 1. Purpose
 
 Introduce a single facade — `AppData` — that owns **all** persisted application
-data through the [`datastore`](../crates/datastore) crate, replacing the bespoke
+data through the [`datastore`](../../crates/datastore) crate, replacing the bespoke
 `legacy_config` + `runtime` persistence layers.
 
 It manages:
@@ -25,10 +25,10 @@ It manages:
    files, schemas, or the writer directly.
 2. **Schema-driven.** Every datum is validated, defaulted, unit-decoded, and
    reference-resolved by `datastore` from the YAML JSON-Schemas in
-   [schemas/](../schemas). No hand-rolled parsing.
+   [schemas/](../../schemas). No hand-rolled parsing.
 3. **No duplicate persistence.** `datastore`'s background, coalescing, atomic
-   writer replaces [`legacy_config/persistence.rs`](../src/legacy_config/persistence.rs) and
-   [`legacy_config/manager.rs`](../src/legacy_config/manager.rs). Edits *are* saves.
+   writer replaces `legacy_config/persistence.rs` and
+   `legacy_config/manager.rs`. Edits *are* saves.
 4. **Annotated tree is the model.** The UI renders forms from the `Meta` on each
    `Node` (title, description, kind, constraints, required, default-applied)
    instead of bespoke structs like `MachineProfile`.
@@ -78,7 +78,7 @@ layer at a time).
 ```
 
 CNC templates ship **inside the binary** (`include_str!` from
-[assets/cnc_templates/](../assets/cnc_templates)); they are not user files.
+[assets/cnc_templates/](../../assets/cnc_templates)); they are not user files.
 
 ## 5. The `AppData` API
 
@@ -133,7 +133,7 @@ impl AppData {
 
 ## 6. CNC templates — `datastore` additions
 
-A CNC template ([genmitsu_3018.yaml](../assets/cnc_templates/genmitsu_3018.yaml))
+A CNC template ([genmitsu_3018.yaml](../../assets/cnc_templates/genmitsu_3018.yaml))
 is a `cnc.yaml`-shaped document **with no `id` and no `schema_version`**.
 "Inject a template into a new profile" = *parse the seed → fill defaults → assign
 a fresh UUID → store as a new file*. This is `create_document` seeded from a
@@ -161,7 +161,7 @@ impl ResolvedStore {
    `clone_with_new_ids`.
 4. `annotate` (not `parse_document`) to build the tree, then persist.
 
-**Why not `parse_document`:** [parse.rs:76](../crates/datastore/src/parse.rs#L76)
+**Why not `parse_document`:** [parse.rs:76](../../crates/datastore/src/parse.rs#L76)
 version-gates on the *raw* `schema_version` before defaults are applied, so a
 version-less seed would be rejected. The factory/`annotate` route materialises
 `schema_version` from its `const` first. This is why templates correctly stay
@@ -180,7 +180,7 @@ Recommended to do **with** this refactor so the facade ships with final names:
 - Data dir: `configs/processing_profiles/` → `configs/machining_profiles/`
   (one-time folder migration on load, or read the old name as a fallback).
 - Code identifiers: `process_profile`, `processing`, `JobProfile` naming, the
-  `resolve_schema_path` map in [manager.rs:487](../src/legacy_config/manager.rs#L487),
+  `resolve_schema_path` map in manager.rs:487,
   and `user_path::AppDirs::processing_profiles`.
 - Existing user files carry `schema_version: 2`; the rename does not change the
   data shape, only the schema `$id` and folder.
@@ -189,11 +189,11 @@ Recommended to do **with** this refactor so the facade ships with final names:
 
 Deleted / absorbed once `AppData` lands:
 
-- [legacy_config/manager.rs](../src/legacy_config/manager.rs) `YamlConfigManager` — replaced by
+- legacy_config/manager.rs `YamlConfigManager` — replaced by
   `datastore` parse/validate/default.
-- [legacy_config/persistence.rs](../src/legacy_config/persistence.rs) `PersistenceWriteManager`,
+- legacy_config/persistence.rs `PersistenceWriteManager`,
   `PersistSession`, `save_*` — replaced by the `datastore` writer.
-- [data/model/catalog.rs](../src/data/model/catalog.rs) `CatalogManager` — replaced by a
+- [data/model/catalog.rs](../../src/data/model/catalog.rs) `CatalogManager` — replaced by a
   read-only `catalog.yaml` collection (tools become resolvable ref targets).
 - `AppState` persistence fields + `PersistRealm` + `sync_from_app_state` —
   replaced by reads off the annotated `Document` tree.
