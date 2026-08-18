@@ -49,7 +49,10 @@ spindle: "8000rpm"
     // Enum + descriptive metadata carried from the schema.
     let kind = doc.root.get_pointer("/kind").unwrap();
     match &kind.meta.kind {
-        FieldKind::Enum(variants) => assert_eq!(variants, &["alpha", "beta", "gamma"]),
+        FieldKind::Enum(variants) => {
+            let keys: Vec<&str> = variants.iter().map(|v| v.key.as_str()).collect();
+            assert_eq!(keys, ["alpha", "beta", "gamma"]);
+        }
         other => panic!("expected enum, got {other:?}"),
     }
     assert_eq!(kind.meta.title.as_deref(), Some("Kind"));
@@ -71,6 +74,50 @@ spindle: "8000rpm"
     assert!(matches!(&label.value, NodeValue::Str(s) if s == "unnamed"));
 
     assert!(doc.status.is_complete());
+}
+
+/// An enum field carries what to *show* for each value, not only what to store.
+///
+/// The two are different things with different owners: the key is the file format, the
+/// label is what an operator reads. Where a schema says nothing the key is humanised, so
+/// a field that never got labels still shows words rather than `right_hand`.
+#[test]
+fn enum_labels_come_from_the_schema_or_from_the_key() {
+    let store = common::store();
+    let text = r#"
+id: "0194fd2c-5f2e-7a9d-9a76-3b2b9fbc3f11"
+kind: alpha
+"#;
+
+    let out = store.parse(&[ParseInput {
+        schema_id: "widget.yaml",
+        source: None,
+        text,
+    }]);
+    let doc = &out.documents[0];
+
+    let labelled = doc.root.get_pointer("/finish").unwrap();
+    match &labelled.meta.kind {
+        FieldKind::Enum(variants) => {
+            assert_eq!(variants[0].key, "as_cast", "the stored value is untouched");
+            assert_eq!(variants[0].label, "As cast");
+            assert_eq!(variants[1].label, "Polished by hand");
+        }
+        other => panic!("expected enum, got {other:?}"),
+    }
+
+    let bare = doc.root.get_pointer("/handedness").unwrap();
+    match &bare.meta.kind {
+        FieldKind::Enum(variants) => {
+            assert_eq!(variants[0].key, "left_hand");
+            assert_eq!(
+                variants[0].label, "Left hand",
+                "no labels declared, so the key is humanised rather than shown raw"
+            );
+            assert_eq!(variants[1].label, "Right hand");
+        }
+        other => panic!("expected enum, got {other:?}"),
+    }
 }
 
 #[test]

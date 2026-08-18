@@ -31,6 +31,7 @@
 //! | `$ref: "units.yaml#/$defs/<name>"` | a unit-bearing value (see [`UnitKind`]) |
 //! | `$ref: "id.yaml#/$defs/uuid_v7"`   | this object's own identity |
 //! | `x-ref: "<schema-id>"` (sibling)   | a reference to another object by UUID |
+//! | `x-enum-labels: [...]` (beside `enum`) | what to show for each value (see [`EnumVariant`]) |
 //!
 //! `x-` keywords are ignored by JSON Schema validation, so they annotate without
 //! affecting validity.
@@ -142,8 +143,8 @@ pub use error::{
     DataError, DataErrorKind, FactoryError, Reason, Referrer, RemoveError, SchemaError,
 };
 pub use model::{
-    Constraints, Document, FieldKind, Handle, Meta, Node, NodeValue, Reference, RefState, SchemaId,
-    Status, UnitValue,
+    Constraints, Document, EnumVariant, FieldKind, Handle, Meta, Node, NodeValue, Reference,
+    RefState, SchemaId, Status, UnitValue,
 };
 pub use persist::WriteError;
 pub use resolve::ResolvedStore;

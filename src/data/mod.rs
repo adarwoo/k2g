@@ -2566,8 +2566,8 @@ mod tests {
         );
         match &node.meta.kind {
             datastore::FieldKind::Enum(options) => assert_eq!(
-                options,
-                &["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"],
+                options.iter().map(|v| v.key.as_str()).collect::<Vec<_>>(),
+                ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"],
                 "the sizes pin stock actually comes in"
             ),
             other => panic!("must be a fixed list, not {other:?} — a free-text box would let \
@@ -3249,6 +3249,64 @@ mod tests {
         }
 
         assert!(checked >= 17, "every unit variant is checked, got {checked}");
+    }
+
+    /// Every `x-enum-labels` lines up with the `enum` beside it.
+    ///
+    /// The labels are matched to values by **position**, so a list one short does not
+    /// fail — it silently falls back to a humanised key for the tail, and a list in the
+    /// wrong order mislabels every value in it while looking perfectly well-formed. The
+    /// length is the half of that a test can hold; the order is why they are written
+    /// beside the values rather than anywhere else.
+    #[test]
+    fn every_declared_enum_label_list_matches_its_enum() {
+        fn walk(node: &Value, path: &str, checked: &mut usize) {
+            match node {
+                Value::Object(map) => {
+                    if let (Some(Value::Array(values)), Some(labels)) =
+                        (map.get("enum"), map.get("x-enum-labels"))
+                    {
+                        let labels = labels.as_array().unwrap_or_else(|| {
+                            panic!("{path}: x-enum-labels must be an array, got {labels}")
+                        });
+                        assert_eq!(
+                            labels.len(),
+                            values.len(),
+                            "{path}: {} labels for {} values. They are matched by position, \
+                             so a short list quietly labels only the head of the enum.",
+                            labels.len(),
+                            values.len()
+                        );
+                        assert!(
+                            labels.iter().all(|l| l.as_str().is_some_and(|s| !s.is_empty())),
+                            "{path}: every label must be a non-empty string"
+                        );
+                        *checked += 1;
+                    }
+                    for (key, value) in map {
+                        walk(value, &format!("{path}/{key}"), checked);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, item) in items.iter().enumerate() {
+                        walk(item, &format!("{path}/{index}"), checked);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut checked = 0;
+        for (name, text) in SCHEMAS {
+            let schema: Value =
+                serde_json::to_value(serde_yaml::from_str::<serde_yaml::Value>(text).unwrap())
+                    .unwrap();
+            walk(&schema, name, &mut checked);
+        }
+        assert!(
+            checked >= 8,
+            "the schemas that declare labels should still declare them, found {checked}"
+        );
     }
 
     /// The angle an operator types is written in the spelling the schema accepts.

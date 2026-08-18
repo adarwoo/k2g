@@ -45,7 +45,9 @@ pub struct FieldView {
     pub kind: FieldKind,
     pub value: NodeValue,
     pub display: String,
-    pub enum_options: Vec<String>,
+    /// The values this field may hold, each with the label to show for it. Empty unless
+    /// the field is an enum.
+    pub enum_options: Vec<datastore::EnumVariant>,
     pub default_applied: bool,
     pub incomplete: bool,
 }
@@ -1203,8 +1205,17 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
             rsx! {
                 select {
                     onchange: move |evt| addr_set_input(addr, &ptr, &evt.value()),
+                    // The key is the value, the label is the text. What reaches the
+                    // document is unchanged — this is the same `<select>` it always was,
+                    // with the storage key no longer doubling as the words an operator
+                    // reads. `allow_hybrid` is a file format, not a sentence.
                     for opt in options {
-                        option { value: "{opt}", selected: current == opt, "{opt}" }
+                        option {
+                            key: "{opt.key}",
+                            value: "{opt.key}",
+                            selected: current == opt.key,
+                            "{opt.label}"
+                        }
                     }
                 }
             }

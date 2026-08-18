@@ -118,6 +118,13 @@ $defs:
             type: string
             default: drill_ends_then_route
             enum: [route, drill_ends_then_route, drill_chain, drill_chain_then_route]
+            x-enum-labels:
+              [
+                "Route the slot",
+                "Drill the ends, then route",
+                "Overlapping drill chain",
+                "Drill chain, then route",
+              ]
         additionalProperties: false
     required: [holes]
     additionalProperties: false
@@ -209,6 +216,7 @@ $defs:
             type: string
             default: route
             enum: [route, mill, score, vgroove]
+            x-enum-labels: [Route, Mill, Score, V-groove]
           # Only meaningful when `cut: vgroove`; ignored otherwise. It carries a
           # default and — like every per-operation field — is always materialised
           # by the loader (see the note at the foot of this file), so it must NOT
@@ -469,6 +477,7 @@ $defs:
           over, so it needs locating pins drilled before it.
         type: string
         enum: [front, back]
+        x-enum-labels: ["Front (component side)", "Back (solder side)"]
         default: front
 
       operations:

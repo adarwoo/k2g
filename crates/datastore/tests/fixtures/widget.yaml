@@ -23,6 +23,21 @@ properties:
     type: string
     enum: [alpha, beta, gamma]
 
+  # An enum that says what to show for each value, and one that does not — the two
+  # halves of the labelling contract, exercised by `enum_labels_come_from_the_schema`.
+  finish:
+    title: Finish
+    type: string
+    enum: [as_cast, hand_polished]
+    x-enum-labels: ["As cast", "Polished by hand"]
+    default: as_cast
+
+  handedness:
+    title: Handedness
+    type: string
+    enum: [left_hand, right_hand]
+    default: left_hand
+
   width:
     description: Nominal width.
     $ref: "units.yaml#/$defs/size"

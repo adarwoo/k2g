@@ -22,6 +22,7 @@ properties:
     description: Global preferred unit system and display units.
     type: string
     enum: [mm, mil, in]
+    x-enum-labels: [Millimetres, Mil, Inches]
     default: mm
   theme:
     description: Application theme.

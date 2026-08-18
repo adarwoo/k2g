@@ -300,6 +300,7 @@ properties:
           operator re-zeros Z per tool change.
         type: string
         enum: [manual, auto_setter]
+        x-enum-labels: ["Manual (re-zero Z per change)", "Automatic tool setter"]
         default: manual
 
     required:

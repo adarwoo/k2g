@@ -58,6 +58,7 @@ $defs:
       kind:
         type: string
         enum: [drillbit, routerbit, endmill, engraver, vbit]
+        x-enum-labels: [Drill, Router, End mill, Engraver, V-bit]
         description: Tool family/type.
 
       # Manufacturer and SKU metadata.

@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::error::{DataError, DataErrorKind, Reason};
 use crate::model::{
-    Constraints, Document, FieldKind, Meta, Node, NodeValue, Reference, RefState, Status,
+    Constraints, Document, EnumVariant, FieldKind, Meta, Node, NodeValue, Reference, RefState,
+    Status,
 };
 use crate::schema::{ref_target, yaml_to_json, RefTarget, SchemaSet};
 use crate::units_bridge::{decode_unit, UnitKind};
@@ -167,6 +168,21 @@ struct Structural<'a> {
     base: String,
 }
 
+/// A storage key as a sentence: `not_preferred` → "Not preferred".
+///
+/// The fallback when a schema declares no `x-enum-labels`. Deliberately timid — separators
+/// become spaces and the first letter is capitalised, and nothing else is guessed. A
+/// cleverer rule would have to know that `vbit` is a V-bit and `g54` is `G54`, which is
+/// vocabulary, and vocabulary belongs in the schema beside the values it names.
+fn humanize_key(key: &str) -> String {
+    let spaced = key.replace(['_', '-'], " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => spaced,
+    }
+}
+
 /// Classifies a property schema, following `anyOf`/`$ref` as needed.
 fn classify<'a>(set: &'a SchemaSet, base_id: &str, node: &'a Value) -> Classification<'a> {
     // An explicit x-ref wins over everything (even a sibling `$ref` to uuid_v7).
@@ -206,9 +222,19 @@ fn classify<'a>(set: &'a SchemaSet, base_id: &str, node: &'a Value) -> Classific
     }
 
     if let Some(Value::Array(values)) = eff.get("enum") {
+        let labels = eff.get("x-enum-labels").and_then(Value::as_array);
         let variants = values
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let key = value.as_str()?.to_string();
+                let label = labels
+                    .and_then(|labels| labels.get(index))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| humanize_key(&key));
+                Some(EnumVariant { key, label })
+            })
             .collect();
         return Classification {
             kind: FieldKind::Enum(variants),

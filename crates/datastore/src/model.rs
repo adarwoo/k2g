@@ -239,8 +239,8 @@ impl Meta {
 pub enum FieldKind {
     /// A plain scalar (`bool`/`integer`/`number`/`string`/`null`).
     Scalar,
-    /// A string constrained to a fixed set of values.
-    Enum(Vec<String>),
+    /// A string constrained to a fixed set of values, each carrying what to show for it.
+    Enum(Vec<EnumVariant>),
     /// A unit-bearing value.
     Unit(UnitKind),
     /// This object's own identity (a UUID).
@@ -251,6 +251,24 @@ pub enum FieldKind {
     Object,
     /// An array.
     Array,
+}
+
+/// One value of an enum field: what is stored, and what is shown for it.
+///
+/// The two are separate because they answer to different owners. The key is the file
+/// format — `allow_hybrid` is what a document holds and what every reader of it matches
+/// on — while the label is for whoever is reading the screen, and a storage key put in
+/// front of an operator is an implementation detail leaking through the glass.
+///
+/// A schema names the labels with `x-enum-labels`, an array parallel to `enum`. Where it
+/// says nothing the key is humanised (`allow_reload` → "Allow reload"), so an enum added
+/// without labels is never *worse* than the key it would otherwise have shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumVariant {
+    /// The value written to the document.
+    pub key: String,
+    /// What to show for it.
+    pub label: String,
 }
 
 /// Validation constraints copied from the schema for UI use. All optional.

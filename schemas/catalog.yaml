@@ -110,6 +110,7 @@ $defs:
       type:
         type: string
         enum: [drillbit, routerbit, engraver, vbit, endmill]
+        x-enum-labels: [Drill, Router, Engraver, V-bit, End mill]
         description: Tool type discriminator.
 
       # Geometry.
