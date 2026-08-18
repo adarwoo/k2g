@@ -888,6 +888,14 @@ pub struct RackPinning {
     /// How many racks were examined, pinning or not. Nothing about a rack can be shown
     /// when there is no rack — this is what the ATC column's presence turns on.
     pub rack_count: usize,
+    /// Racks a step names but that could not be resolved to a machine and a toolset.
+    ///
+    /// Counted rather than skipped in silence. This column once lost a whole rack to a
+    /// stale projection and showed `T1` where two machines each expected the tool, which
+    /// looks exactly like a correct answer — an absence is the one kind of wrong reading
+    /// nothing about the display can betray. A step bound to a since-deleted machine is
+    /// the honest remaining cause, and it is worth saying out loud.
+    pub unresolved: usize,
     /// Tool id → the racks holding it, ordered by machine then toolset.
     by_tool: std::collections::BTreeMap<String, Vec<PinnedSlot>>,
 }
@@ -928,13 +936,17 @@ impl RackPinning {
 }
 
 /// Builds [`RackPinning`] for the whole configuration.
+///
+/// Split in two: which racks exist comes from the machining documents (AppData), and what
+/// is in them comes from the legacy projection. The second half is
+/// [`rack_pinning_for`] — pure, and therefore testable, which the whole of this was not.
 pub fn pinned_rack_slots(ctx: &AppState) -> RackPinning {
-    let mut pinning = RackPinning {
-        rack_count: 0,
-        by_tool: std::collections::BTreeMap::new(),
-    };
     if !appdata_ready() {
-        return pinning;
+        return RackPinning {
+            rack_count: 0,
+            unresolved: 0,
+            by_tool: std::collections::BTreeMap::new(),
+        };
     }
 
     // The distinct racks, as `(cnc id, toolset id)`. A pair bound by several steps or
@@ -955,22 +967,35 @@ pub fn pinned_rack_slots(ctx: &AppState) -> RackPinning {
         }
     }
 
-    // Resolve each rack to its profiles, dropping machines with no changer — they hold
-    // nothing between tool changes, so no slot of theirs can be said to expect a tool.
+    rack_pinning_for(ctx, &racks)
+}
+
+/// Resolves each `(cnc id, toolset id)` rack against the legacy projection and collects
+/// what every rack pins.
+fn rack_pinning_for(ctx: &AppState, racks: &[(String, String)]) -> RackPinning {
+    let mut pinning = RackPinning {
+        rack_count: 0,
+        unresolved: 0,
+        by_tool: std::collections::BTreeMap::new(),
+    };
+
+    // Resolve each rack to its profiles. Two ways not to end up with one, kept apart
+    // because only one of them is a fault: a machine with no changer holds nothing between
+    // tool changes, so no slot of its own can be said to expect a tool, while a machine or
+    // toolset that cannot be found at all means a step names something that is not there.
     let mut resolved: Vec<(
         &crate::data::model::MachineProfile,
         &crate::data::model::ToolsetProfile,
-    )> = racks
-        .iter()
-        .filter_map(|(cnc_id, toolset_id)| {
-            let machine = ctx
-                .machines
-                .iter()
-                .find(|m| m.id == *cnc_id && m.atc_slot_count > 0)?;
-            let toolset = ctx.toolsets.iter().find(|t| t.id == *toolset_id)?;
-            Some((machine, toolset))
-        })
-        .collect();
+    )> = Vec::new();
+    for (cnc_id, toolset_id) in racks {
+        let machine = ctx.machines.iter().find(|m| m.id == *cnc_id);
+        let toolset = ctx.toolsets.iter().find(|t| t.id == *toolset_id);
+        match (machine, toolset) {
+            (Some(machine), Some(_)) if machine.atc_slot_count == 0 => {}
+            (Some(machine), Some(toolset)) => resolved.push((machine, toolset)),
+            _ => pinning.unresolved += 1,
+        }
+    }
     // Ordered by machine so the numbers read down the column in a fixed order rather than
     // in whichever order the machining profiles happened to bind them.
     resolved.sort_by(|(left_cnc, left_ts), (right_cnc, right_ts)| {
@@ -3970,6 +3995,7 @@ mod tests {
         };
         let pinning = RackPinning {
             rack_count: 3,
+            unresolved: 0,
             by_tool: [(
                 "drill".to_string(),
                 vec![
@@ -3995,6 +4021,109 @@ mod tests {
             "",
             "a tool no rack pins reads as nothing, not as T0"
         );
+    }
+
+    /// A machine with a changer, for the rack-resolution tests below.
+    fn atc_machine(id: &str, name: &str, slots: u8) -> crate::data::model::MachineProfile {
+        crate::data::model::MachineProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            atc_slot_count: slots,
+            ..Default::default()
+        }
+    }
+
+    fn app_with(
+        machines: Vec<crate::data::model::MachineProfile>,
+        toolsets: Vec<crate::data::model::ToolsetProfile>,
+    ) -> AppState {
+        let mut app = AppState::new(&crate::ui::UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+            copper: Default::default(),
+        });
+        app.machines = machines;
+        app.toolsets = toolsets;
+        app
+    }
+
+    /// A toolset named apart from [`toolset_with_fixed`]'s default, so two racks in one
+    /// test can share it or not as the test intends.
+    fn shared_toolset(
+        id: &str,
+        name: &str,
+        fixed: &[&str],
+    ) -> crate::data::model::ToolsetProfile {
+        let mut toolset = toolset_with_fixed(fixed);
+        toolset.id = id.to_string();
+        toolset.name = name.to_string();
+        toolset
+    }
+
+    /// The reported bug, at the layer that had it: two steps, two machines, one tool fixed
+    /// at T1 in the toolset they share. The display half of this has always been right —
+    /// what was never covered is the half that resolves a rack against the machines, which
+    /// dropped a rack it could not find and left the column reading `T1` where two
+    /// machines each expect the tool.
+    #[test]
+    fn one_tool_fixed_in_two_machines_racks_is_pinned_once_per_machine() {
+        let app = app_with(
+            vec![
+                atc_machine("driller", "Driller", 4),
+                atc_machine("router", "Router", 4),
+            ],
+            vec![shared_toolset("shared", "Shared", &["drill"])],
+        );
+        let racks = vec![
+            ("driller".to_string(), "shared".to_string()),
+            ("router".to_string(), "shared".to_string()),
+        ];
+
+        let pinning = rack_pinning_for(&app, &racks);
+
+        assert_eq!(pinning.rack_count, 2, "two machines are two racks");
+        assert_eq!(pinning.unresolved, 0);
+        assert_eq!(
+            pinning.slots_label("drill"),
+            "T1, T1",
+            "one entry per rack — two machines each expecting the tool is two to own"
+        );
+    }
+
+    /// A rack whose machine cannot be found is counted, not skipped. Skipping produced a
+    /// column that was short by exactly one entry and looked entirely correct.
+    #[test]
+    fn a_rack_naming_a_machine_that_is_not_there_is_counted() {
+        let app = app_with(
+            vec![atc_machine("driller", "Driller", 4)],
+            vec![shared_toolset("shared", "Shared", &["drill"])],
+        );
+        let racks = vec![
+            ("driller".to_string(), "shared".to_string()),
+            ("deleted".to_string(), "shared".to_string()),
+        ];
+
+        let pinning = rack_pinning_for(&app, &racks);
+
+        assert_eq!(pinning.rack_count, 1);
+        assert_eq!(pinning.unresolved, 1, "the missing machine is reported");
+        assert_eq!(pinning.slots_label("drill"), "T1");
+    }
+
+    /// A machine with no changer is not a fault: it has no rack to pin anything in, which
+    /// is a different statement from "its rack could not be read".
+    #[test]
+    fn a_machine_without_a_changer_is_not_an_unresolved_rack() {
+        let app = app_with(
+            vec![atc_machine("manual", "Manual", 0)],
+            vec![shared_toolset("shared", "Shared", &["drill"])],
+        );
+
+        let pinning = rack_pinning_for(&app, &[("manual".to_string(), "shared".to_string())]);
+
+        assert_eq!(pinning.rack_count, 0);
+        assert_eq!(pinning.unresolved, 0, "no changer is not a missing changer");
+        assert_eq!(pinning.slots_label("drill"), "");
     }
 
     #[test]

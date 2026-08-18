@@ -3,30 +3,19 @@ use dioxus::prelude::*;
 use super::profile_manager::{FieldGroup, ProfileManager};
 use super::profiles_common::format_impact_warning;
 use crate::data::Profile;
-use crate::ui::bindings::{data_revision, refresh_legacy_cnc, use_cnc_templates};
+use crate::ui::bindings::use_cnc_templates;
 
 /// CNC profile screen — a thin wrapper over the shared [`ProfileManager`].
 ///
-/// CNC profiles are owned by the `AppData` datastore (`crate::data`). Because the
-/// legacy GCode generator, the setup screen, and the active machine selection
-/// still read the in-memory `machines` list, this wrapper mirrors every AppData
-/// change back into that legacy projection (see [`refresh_legacy_cnc`]) so a
-/// session stays coherent. The delete guard blocks removal while a legacy
-/// machining profile still references the CNC profile (machining is not migrated
-/// to the datastore yet).
+/// CNC profiles are owned by the `AppData` datastore (`crate::data`). The legacy GCode
+/// generator, the setup screen and the active machine selection still read the in-memory
+/// `machines` list; it is mirrored from AppData by the root's single bridge
+/// ([`crate::ui::bindings::refresh_legacy_projections`]) rather than by this screen, so
+/// an edit made here reaches the Job views whether or not this screen is on show. The
+/// delete guard blocks removal while a legacy machining profile still references the CNC
+/// profile (machining is not migrated to the datastore yet).
 #[component]
 pub fn CncScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
-    // Keep the legacy `machines` projection in sync with AppData on every store
-    // mutation while this screen is mounted, then refresh the legacy snapshot so
-    // sibling screens observe the same machines. The effect re-runs whenever the
-    // store revision changes; the follow-up `state.set` does not (it only writes),
-    // so there is no feedback loop.
-    use_effect(move || {
-        let _ = data_revision();
-        refresh_legacy_cnc();
-        state.set(crate::runtime::ctx_snapshot());
-    });
-
     let templates = use_cnc_templates();
 
     let delete_guard = use_callback(move |id: String| {

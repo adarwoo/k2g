@@ -253,48 +253,53 @@ pub fn use_cnc_templates() -> Vec<(String, String)> {
 /// Creates a CNC profile from the bundled template `key`, keeping the template's
 /// own name (the setup screen's quick-add, which does not prompt for a name).
 /// Returns the new id.
-/// Rebuilds the legacy in-memory `machines` projection from the AppData-owned CNC
-/// documents. AppData is the file writer for the CNC realm; this mirrors the data
-/// back into the legacy copy read by the GCode generator and the active machine
-/// selection, so a session stays coherent. Does not persist (AppData already
-/// wrote the files).
-pub fn refresh_legacy_cnc() {
-    let values: Vec<Value> = with_appdata(|data| {
-        data.list(crate::data::Profile::Cnc)
-            .into_iter()
-            .map(|(_, doc)| doc.to_value())
-            .collect()
+/// Rebuilds **every** legacy projection from AppData, in one context mutation.
+///
+/// The single bridge between the two reactive systems this application runs. Writes go
+/// to AppData and bump [`RENDER_TICK`]; the Job views read the legacy `Signal<AppCtx>`,
+/// which knows nothing about that tick. This is what carries one to the other, and it is
+/// mounted once at the root ([`crate::ui::screens::AppRoot`]) rather than per screen.
+///
+/// It used to be six copies of the same effect, one in each editor screen, each
+/// refreshing only its own realm. That made a view's freshness depend on which screen the
+/// operator happened to be standing on: with the Job view docked beside the CNC screen,
+/// an edit refreshed `machines` and left `toolsets` as they were, and anything reading
+/// both — the Stock screen's ATC column resolves a rack from *both* lists — silently saw
+/// half a configuration. Refreshing every realm together costs one projection pass per
+/// store write and removes the question.
+///
+/// One [`crate::runtime::with_ctx_mut`] for all five, so `sync_after_mutation` — and with
+/// it the regeneration trigger — runs once per store write rather than five times.
+/// Bindings first, machining last: a machining profile is read against the machines,
+/// fixtures, toolsets and tools it references.
+pub fn refresh_legacy_projections() {
+    if !appdata_ready() {
+        return;
+    }
+    let (machines, fixtures, toolsets, machining, stock) = with_appdata(|data| {
+        let list = |profile| {
+            data.list(profile)
+                .into_iter()
+                .map(|(_, doc)| doc.to_value())
+                .collect::<Vec<Value>>()
+        };
+        (
+            list(crate::data::Profile::Cnc),
+            list(crate::data::Profile::Fixture),
+            list(crate::data::Profile::Toolset),
+            list(crate::data::Profile::Machining),
+            data.stock().map(|doc| doc.to_value()),
+        )
     });
-    crate::runtime::with_ctx_mut(|ctx| ctx.refresh_machines(&values));
-}
-
-/// Rebuilds the legacy in-memory `fixtures` projection from the AppData-owned
-/// fixture documents. AppData is the file writer for the fixture realm; this
-/// mirrors the data back into the legacy copy read by the current-job reference
-/// check and the setup screen, so a session stays coherent. Without it, a fixture
-/// added mid-session is invisible to the runtime and its machining reference reads
-/// as broken. Does not persist (AppData already wrote the files).
-pub fn refresh_legacy_fixtures() {
-    let values: Vec<Value> = with_appdata(|data| {
-        data.list(crate::data::Profile::Fixture)
-            .into_iter()
-            .map(|(_, doc)| doc.to_value())
-            .collect()
+    crate::runtime::with_ctx_mut(|ctx| {
+        ctx.refresh_machines(&machines);
+        ctx.refresh_fixtures(&fixtures);
+        ctx.refresh_toolsets(&toolsets);
+        if let Some(stock) = &stock {
+            ctx.refresh_tools(stock);
+        }
+        ctx.refresh_process_profiles(&machining);
     });
-    crate::runtime::with_ctx_mut(|ctx| ctx.refresh_fixtures(&values));
-}
-
-/// Rebuilds the legacy in-memory `process_profiles` projection from the
-/// AppData-owned machining documents, keeping the GCode generator and the active
-/// selection coherent. Does not persist (AppData already wrote the files).
-pub fn refresh_legacy_machining() {
-    let values: Vec<Value> = with_appdata(|data| {
-        data.list(crate::data::Profile::Machining)
-            .into_iter()
-            .map(|(_, doc)| doc.to_value())
-            .collect()
-    });
-    crate::runtime::with_ctx_mut(|ctx| ctx.refresh_process_profiles(&values));
 }
 
 // ---------------------------------------------------------------------------
@@ -791,20 +796,12 @@ fn OperationToggle(
     }
 }
 
-/// Rebuilds the legacy in-memory `toolsets` projection (and the active rack) from
-/// the AppData-owned toolset documents. Does not persist.
-pub fn refresh_legacy_toolsets() {
-    let values: Vec<Value> = with_appdata(|data| {
-        data.list(crate::data::Profile::Toolset)
-            .into_iter()
-            .map(|(_, doc)| doc.to_value())
-            .collect()
-    });
-    crate::runtime::with_ctx_mut(|ctx| ctx.refresh_toolsets(&values));
-}
-
 /// Rebuilds the legacy in-memory `tools` (stock inventory) from the AppData-owned
 /// stock singleton. Does not persist.
+///
+/// The one per-realm refresh that survives [`refresh_legacy_projections`], because the
+/// structural stock operations below need the projection current *before* they return —
+/// they report what they did from it. Everything else is the root's business.
 pub fn refresh_legacy_stock() {
     let value = with_appdata(|data| data.stock().map(|doc| doc.to_value()));
     if let Some(value) = value {

@@ -7,28 +7,22 @@ use super::profiles_common::{
 };
 use crate::data::Profile;
 use crate::ui::bindings::{
-    clone_named, create_named, data_revision, export_yaml, import_yaml, refresh_legacy_toolsets,
-    remove_profile_result, use_profiles, RackGrid, SchemaField,
+    clone_named, create_named, export_yaml, import_yaml, remove_profile_result, use_profiles,
+    RackGrid, SchemaField,
 };
 use crate::data::model::stock::ToolStatus;
 
 /// Toolset ("rack") profile screen, backed by the `AppData` datastore.
 ///
 /// Identity and the generation policy render through [`SchemaField`]; the `T1..Tn`
-/// rack renders through [`RackGrid`]. AppData owns the `toolset_profiles` files;
-/// the legacy generator still reads the in-memory `toolsets`/`rack_slots`, so the
-/// screen mirrors AppData back into that projection on every change (see
-/// [`refresh_legacy_toolsets`]). Deletion is guarded natively by the datastore: a
-/// toolset referenced by a machining profile refuses to delete, so the user
-/// clears the reference first.
+/// rack renders through [`RackGrid`]. AppData owns the `toolset_profiles` files; the
+/// legacy generator still reads the in-memory `toolsets`/`rack_slots`, mirrored from
+/// AppData by the root's single bridge
+/// ([`crate::ui::bindings::refresh_legacy_projections`]). Deletion is guarded natively by
+/// the datastore: a toolset referenced by a machining profile refuses to delete, so the
+/// user clears the reference first.
 #[component]
 pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
-    use_effect(move || {
-        let _ = data_revision();
-        refresh_legacy_toolsets();
-        state.set(crate::runtime::ctx_snapshot());
-    });
-
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);

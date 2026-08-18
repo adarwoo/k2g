@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
-use crate::runtime::ctx_snapshot;
 use crate::ui::bindings::{StockField, StockForm};
 use units::user_format as unit_format;
 
@@ -91,18 +90,11 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
         super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });
 
-    // AppData owns stock.yaml. The detail editor writes tool fields directly into
-    // the datastore singleton via StockField/StockForm, bumping the store
-    // revision; mirror those changes back into the legacy in-memory `tools` (the
-    // table's source) so table and detail stay coherent. Structural ops
-    // (add/clone/remove) persist through their own AppData path and update the
-    // local signal directly, so no fingerprint watcher is needed.
-    use_effect(move || {
-        let _ = crate::ui::bindings::data_revision();
-        crate::ui::bindings::refresh_legacy_stock();
-        state.set(ctx_snapshot());
-    });
-
+    // AppData owns stock.yaml. The detail editor writes tool fields straight into the
+    // datastore singleton via StockField/StockForm, bumping the store revision; the
+    // root's bridge (`refresh_legacy_projections`) mirrors that back into the legacy
+    // in-memory `tools` this table reads, so table and detail stay coherent without this
+    // screen having to watch for it.
     let snapshot = state.read().clone();
     // Where each tool is pinned across *every* rack, not just one machine's: a tool may
     // be expected in several changers at once, and a stock row that shows one slot for a
@@ -110,6 +102,18 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     // per row.
     let pinning = crate::runtime::tooling::pinned_rack_slots(&snapshot);
     let has_atc = pinning.rack_count > 0;
+    // A rack a step names but that resolves to nothing is a missing column entry, and a
+    // missing entry reads exactly like "this tool is not pinned there". Say so in the
+    // header rather than letting the numbers under it be quietly short.
+    let atc_header_title = if pinning.unresolved > 0 {
+        format!(
+            "The slot each machine's rack pins this tool to, one entry per rack. \
+             {} rack(s) are not shown: a step names a machine or toolset that no longer exists.",
+            pinning.unresolved
+        )
+    } else {
+        "The slot each machine's rack pins this tool to, one entry per rack".to_string()
+    };
     let unit_system = snapshot.unit_system;
 
     let mut show_catalog_picker = use_signal(|| false);
@@ -682,7 +686,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                 th { "Preference" }
                                 if has_atc {
                                     th {
-                                        title: "The slot each machine's rack pins this tool to, one entry per rack",
+                                        title: "{atc_header_title}",
                                         "ATC"
                                     }
                                 }

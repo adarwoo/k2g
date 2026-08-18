@@ -43,7 +43,7 @@ pub fn mutate_ctx<R>(mut state: Signal<crate::runtime::AppCtx>, f: impl FnOnce(&
 
 #[component]
 pub fn AppRoot() -> Element {
-    let state = use_signal(ctx_snapshot);
+    let mut state = use_signal(ctx_snapshot);
     let show_error_details = use_signal(|| false);
     // Owned here rather than in `AppTopBar`, where the cog that sets it lives — see the
     // note beside the dialog itself at the foot of the shell.
@@ -51,6 +51,23 @@ pub fn AppRoot() -> Element {
 
     // Remember the window's size and maximized state for the next launch.
     crate::ui::window_state::use_window_geometry();
+
+    // The bridge from the datastore to the legacy snapshot every view reads.
+    //
+    // AppData writes bump the store revision; nothing else pushes those writes into
+    // `state`. Mounted here, at the root, it runs for every store write regardless of
+    // which screen is on show — which is the point: the six per-screen copies it replaced
+    // each refreshed one realm, so a view reading two of them (the Stock screen's ATC
+    // column resolves a rack from the machines *and* the toolsets) could see one half
+    // current and the other half as it was when its editor was last open.
+    //
+    // The effect re-runs on the revision alone; `state.set` only writes, so there is no
+    // feedback loop.
+    use_effect(move || {
+        let _ = crate::ui::bindings::data_revision();
+        crate::ui::bindings::refresh_legacy_projections();
+        state.set(ctx_snapshot());
+    });
 
     // Keep the platform's own widgets on the same side of light/dark as the stylesheet.
     // Re-runs whenever the theme changes, because it reads the signal — see
@@ -216,6 +233,80 @@ pub fn AppRoot() -> Element {
 }
 
 
+
+#[cfg(test)]
+mod projection_bridge_tests {
+    /// Every screen, plus the root that owns the bridge. Compiled in for the same reason
+    /// the dialog test below compiles its sources in: the invariant is about what the
+    /// shipping code *is*, and nothing observable at runtime can stand in for it.
+    const SOURCES: &[(&str, &str)] = &[
+        ("mod.rs", include_str!("mod.rs")),
+        ("cnc.rs", include_str!("cnc.rs")),
+        ("fixture.rs", include_str!("fixture.rs")),
+        ("toolset.rs", include_str!("toolset.rs")),
+        ("machining.rs", include_str!("machining.rs")),
+        ("stock.rs", include_str!("stock.rs")),
+        ("catalog.rs", include_str!("catalog.rs")),
+        ("job/mod.rs", include_str!("job/mod.rs")),
+    ];
+
+    const BINDINGS: &str = include_str!("../bindings.rs");
+
+    /// The bridge refreshes **every** realm, not the one its caller happens to care about.
+    ///
+    /// This is the whole of the bug it replaced. Six screens each carried a copy of the
+    /// effect and each refreshed one realm, so what the Job views held depended on which
+    /// editor had last been open — and the Stock screen's ATC column, which resolves a
+    /// rack against the machines *and* the toolsets, could read one of them current and
+    /// the other as it was an hour ago. A realm dropped from this function reinstates that
+    /// silently, so it is asserted rather than trusted.
+    #[test]
+    fn the_bridge_refreshes_every_realm() {
+        let body = BINDINGS
+            .split_once("pub fn refresh_legacy_projections()")
+            .expect("the bridge must exist")
+            .1;
+        for realm in [
+            "refresh_machines",
+            "refresh_fixtures",
+            "refresh_toolsets",
+            "refresh_tools",
+            "refresh_process_profiles",
+        ] {
+            assert!(
+                body.contains(realm),
+                "refresh_legacy_projections does not call `{realm}`. Every legacy \
+                 projection is refreshed together or the views disagree with each other."
+            );
+        }
+    }
+
+    /// No screen may install a projection bridge of its own.
+    ///
+    /// One bridge, at the root, running for every store write regardless of what is on
+    /// screen. A per-screen copy works perfectly while that screen is the one being used,
+    /// which is exactly why the fault it causes elsewhere took so long to see.
+    #[test]
+    fn no_screen_carries_its_own_bridge() {
+        for (name, source) in SOURCES {
+            if *name == "mod.rs" {
+                continue; // the root, where the one bridge lives
+            }
+            for (line_no, line) in source.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or(line);
+                if code.contains("refresh_legacy_") {
+                    panic!(
+                        "{name}:{} refreshes a legacy projection. That is the root's job \
+                         (`AppRoot`'s `refresh_legacy_projections` effect) — a screen-local \
+                         copy refreshes one realm and only while that screen is mounted.\n    {}",
+                        line_no + 1,
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod dialog_safety_tests {

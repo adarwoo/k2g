@@ -36,16 +36,9 @@ fn CatalogManagementPanel(
         super::mutate_ctx(state, |s| s.ensure_catalogs_loaded());
     });
 
-    // Adding a tool to stock writes to the datastore, which this screen would not
-    // otherwise notice — it has no stock of its own to redraw, but the "already in
-    // stock" warning is answered from the projection and would go stale. Same effect
-    // the Stock screen runs.
-    use_effect(move || {
-        let _ = crate::ui::bindings::data_revision();
-        crate::ui::bindings::refresh_legacy_stock();
-        state.set(crate::runtime::ctx_snapshot());
-    });
-
+    // Adding a tool to stock writes to the datastore; the "already in stock" answer this
+    // screen shows is read from the legacy projection, which the root's bridge
+    // (`refresh_legacy_projections`) brings current on every store write.
     let snapshot = state.read().clone();
     let unit_system = snapshot.unit_system;
 

@@ -8,11 +8,9 @@ use super::profiles_common::{
 };
 use crate::data::Profile;
 use crate::ui::bindings::{
-    add_step, clone_named, create_named, data_revision, export_yaml, import_yaml,
-    machining_operations, move_step, refresh_legacy_machining, remove_profile_result, remove_step,
-    use_conflicting_operations, use_field, use_operations, use_profiles, use_step_count,
-    BindingPicker,
-    OperationsEditor, SchemaField, SchemaForm,
+    add_step, clone_named, create_named, export_yaml, import_yaml, machining_operations, move_step,
+    remove_profile_result, remove_step, use_conflicting_operations, use_field, use_operations,
+    use_profiles, use_step_count, BindingPicker, OperationsEditor, SchemaField, SchemaForm,
 };
 
 /// Machining ("process") profile screen, fully backed by the `AppData` datastore.
@@ -21,23 +19,14 @@ use crate::ui::bindings::{
 /// operation set and per-operation configuration. The detail editor is generated
 /// from `machining.yaml`: the deep per-operation config renders through
 /// [`SchemaForm`]; only the reference bindings and the operation toggles use
-/// dedicated pickers. AppData owns the `processing_profiles` files; because the
-/// legacy generator still reads the in-memory `process_profiles`, the screen
-/// mirrors AppData back into that projection on every change (see
-/// [`refresh_legacy_machining`]). Deletion is by simple reference guard — a
-/// referenced cnc/fixture/toolset blocks its own deletion, so profiles are
-/// removed leaf-first; nothing references a machining profile, so it deletes
+/// dedicated pickers. AppData owns the `processing_profiles` files; the legacy generator
+/// still reads the in-memory `process_profiles`, mirrored from AppData by the root's
+/// single bridge ([`crate::ui::bindings::refresh_legacy_projections`]). Deletion is by
+/// simple reference guard — a referenced cnc/fixture/toolset blocks its own deletion, so
+/// profiles are removed leaf-first; nothing references a machining profile, so it deletes
 /// freely.
 #[component]
 pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
-    // Mirror AppData into the legacy projection on every store mutation, then
-    // refresh the legacy snapshot so the generator and other screens agree.
-    use_effect(move || {
-        let _ = data_revision();
-        refresh_legacy_machining();
-        state.set(crate::runtime::ctx_snapshot());
-    });
-
     let mut status_message = use_signal(String::new);
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
