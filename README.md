@@ -234,6 +234,7 @@ one owns the socket.
 | [GCode template language](docs/design/gcode-template-language.md) | Writing CNC profile templates |
 | [GCode engine](docs/design/gcode-engine.md) | How a program is assembled |
 | [Operation planner](docs/design/operation-planner.md) | Tool selection, ordering, placement |
+| [Schema versioning](docs/design/schema-versioning.md) | How a file written by an older release reaches a newer one |
 
 ## Contributing
 
