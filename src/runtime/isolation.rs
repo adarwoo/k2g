@@ -44,6 +44,7 @@
 // is the one arrangement that cannot be fixed afterwards without being noticed.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -97,8 +98,20 @@ pub struct Isolation {
 /// What the context knows about isolation right now.
 #[derive(Clone, Debug, Default)]
 pub struct IsolationState {
-    /// The last finished result, whatever it was computed for.
-    pub ready: Option<Arc<Isolation>>,
+    /// The finished contours, at most one per copper face.
+    ///
+    /// **Per face, not one slot.** A profile that engraves both sides asks two different
+    /// questions, and one slot meant each answer evicted the other: neither step ever
+    /// found its contours, every program was emitted with one face's engraving deferred,
+    /// and the publish that answered one question triggered the regeneration that asked
+    /// the other. It span forever — alternating between two *different*, each incomplete,
+    /// programs, so what you would have saved depended on when you looked.
+    ///
+    /// Keyed by layer because the layer is what alternates. Everything else about the
+    /// question is still checked by [`Self::matching`], so a stale entry — a different
+    /// width, a reloaded board — misses and is recomputed *in place*. That is what bounds
+    /// this to one entry per face rather than one per question ever asked.
+    pub ready: BTreeMap<i32, Arc<Isolation>>,
     /// Why the last run produced nothing, if it failed.
     pub error: Option<String>,
 }
@@ -109,7 +122,7 @@ impl IsolationState {
     /// The whole spec is compared. A near-match is not a match: contours cut to a
     /// different width describe a different board than the one about to be machined.
     pub fn matching(&self, spec: &IsolationSpec) -> Option<&Arc<Isolation>> {
-        self.ready.as_ref().filter(|held| held.spec == *spec)
+        self.ready.get(&spec.layer_id).filter(|held| held.spec == *spec)
     }
 }
 
@@ -335,7 +348,7 @@ fn publish_isolation(isolation: Isolation) {
     with_ctx_mut(|ctx| {
         ctx.isolation.error = None;
         ctx.app.set_isolation_errors(faults);
-        ctx.isolation.ready = Some(Arc::new(isolation));
+        ctx.isolation.ready.insert(isolation.spec.layer_id, Arc::new(isolation));
         // What tells the regeneration trigger that this happened. It diffs the app state
         // and the job's references, and this is on neither.
         ctx.isolation_epoch = ctx.isolation_epoch.wrapping_add(1);
@@ -368,15 +381,60 @@ mod tests {
     }
 
     fn ready(spec: IsolationSpec) -> IsolationState {
-        IsolationState {
-            ready: Some(Arc::new(Isolation {
+        let mut state = IsolationState::default();
+        hold(&mut state, spec);
+        state
+    }
+
+    /// Adds one finished result to `state`, as `publish_isolation` does.
+    fn hold(state: &mut IsolationState, spec: IsolationSpec) {
+        state.ready.insert(
+            spec.layer_id,
+            Arc::new(Isolation {
                 spec,
                 result: IsolationResult::default(),
                 copper_warnings: Vec::new(),
                 copper_layer_count: 2,
-            })),
-            error: None,
-        }
+            }),
+        );
+    }
+
+    /// A profile that engraves both faces asks two questions, and the answers must not
+    /// evict each other.
+    ///
+    /// This is the loop that shipped: one slot held "the last result, whatever it was
+    /// computed for", so the back face's contours displaced the front's and the front's
+    /// displaced the back's. Neither engrave step ever found what it needed, so every
+    /// generation deferred one face — and the publish that answered one question woke the
+    /// regeneration that asked the other, round and round, emitting a different
+    /// half-finished program each way round.
+    #[test]
+    fn both_faces_are_held_at_once() {
+        let front = spec(400_000);
+        let back = IsolationSpec { layer_id: pcb::BACK_COPPER, ..spec(400_000) };
+
+        let mut state = IsolationState::default();
+        hold(&mut state, front.clone());
+        hold(&mut state, back.clone());
+
+        assert!(state.matching(&front).is_some(), "the front face survived the back's arrival");
+        assert!(state.matching(&back).is_some(), "and the back face is there too");
+    }
+
+    /// Bounded to one entry per face: re-asking the same face a different way replaces
+    /// that face's entry rather than accumulating one per question ever asked.
+    #[test]
+    fn a_new_answer_for_a_face_replaces_the_old_one() {
+        let mut state = IsolationState::default();
+        hold(&mut state, spec(400_000));
+        hold(&mut state, spec(200_000));
+
+        assert_eq!(state.ready.len(), 1, "one face, one entry");
+        assert!(state.matching(&spec(200_000)).is_some(), "the newest answer is the held one");
+        assert!(
+            state.matching(&spec(400_000)).is_none(),
+            "and the superseded width is not offered for a job that no longer asks for it"
+        );
     }
 
     fn contour(closed: bool) -> IsolationContour {
@@ -479,7 +537,10 @@ mod tests {
     /// stuck with no contours and no way to provoke another attempt.
     #[test]
     fn a_failure_leaves_the_question_unanswered() {
-        let state = IsolationState { ready: None, error: Some("KiCad is not reachable".into()) };
+        let state = IsolationState {
+            ready: BTreeMap::new(),
+            error: Some("KiCad is not reachable".into()),
+        };
         assert!(state.matching(&spec(400_000)).is_none());
     }
 }
