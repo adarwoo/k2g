@@ -754,6 +754,7 @@ Two records that look alike and are not the same thing.
 | Multiple KiCads open and the wrong board loads | KiCad serves one fixed API socket and instances are not individually addressable | Launch k2g from the board you want, via KiCad's **Create GCode** button |
 | The USB export button is missing | It appears only for a drive that is really on the USB bus, so cloud and virtual drive letters never bring it up, and neither do USB hard drives (Windows calls those fixed) | Plug the stick in; for anything else use **Export…** and Windows' own Safely Remove Hardware |
 | Deleting a profile is refused | A machining profile still references it | Re-bind or delete that machining profile first — the message names it |
+| Starting k2g does nothing, or brings the open window forward | One k2g runs per user: a second copy would share the same settings and profiles, and each would overwrite the other's changes | Use the window that is already open. On Linux and macOS the second launch says so rather than raising it, since there is no portable way to bring another program's window forward |
 
 ---
 

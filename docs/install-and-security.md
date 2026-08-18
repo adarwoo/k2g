@@ -156,6 +156,12 @@ Documents/KiCad/<version>/plugins/k2g/
     icon.png                   the toolbar icon
 ```
 
+Pressing that button while k2g is already open brings the running window forward rather
+than starting a second copy. Only one k2g runs per user: two would share one settings and
+profile directory, each holding its own copy in memory, and every write replaces the file
+whole — so the second one to save silently reverts the first. Nothing is corrupted, and
+nothing tells you it happened, which is why it is prevented rather than reported.
+
 The shim exists because KiCad only launches programs from inside the plugin directory
 — it rejects an absolute path in the manifest. Copying the whole 50 MB application
 there instead would leave a second, separately-ageing copy of k2g that keeps working

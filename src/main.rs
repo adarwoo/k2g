@@ -52,6 +52,16 @@ fn main() {
         );
     }
 
+    // One k2g per data directory. Taken before anything else touches that directory,
+    // and held — in `_instance` — for the whole run: dropping the file releases the
+    // lock, so binding it to a name that lives until `main` returns is what keeps the
+    // claim. See `runtime::single_instance` for why two instances are not merely
+    // redundant but destructive.
+    let _instance = match claim_single_instance() {
+        Some(claim) => claim,
+        None => return,
+    };
+
     // Repair any KiCad plugin registration that still points at a previous build,
     // before connecting — an update replaces the executable, and the registration
     // has to follow it or the toolbar button starts launching nothing. Only ever
@@ -72,4 +82,48 @@ fn main() {
         board_snapshot: acquired.board,
         copper: acquired.copper,
     });
+}
+
+/// Takes the single-instance lock, or hands this launch over to the k2g already running.
+///
+/// `None` means stop — quietly, because the operator's request has been answered by the
+/// window coming forward. Where it could not be raised (no portable way off Windows, or
+/// the window was not found) the refusal is said out loud instead: a launch that appears
+/// to do nothing at all is the one outcome worth avoiding, since the natural response to
+/// it is to press the button again.
+fn claim_single_instance() -> Option<runtime::single_instance::Claim> {
+    use runtime::single_instance::{claim, raise_running_window, Claim};
+
+    let Some(data_dir) = paths::k2g_data_dir() else {
+        // No data directory resolved: the launch has larger problems than coordination,
+        // and `ensure_app_dirs` reports them properly a moment from now.
+        return Some(Claim::Unknown("no platform data directory".to_string()));
+    };
+    // The lock lives in the directory it protects, so the directory has to exist first.
+    // Ignored on failure for the same reason the claim itself is: an unusable path is
+    // reported by the real check, not by this one.
+    let _ = std::fs::create_dir_all(&data_dir);
+
+    match claim(&data_dir) {
+        held @ Claim::Held(_) => Some(held),
+        Claim::Unknown(reason) => {
+            log::warn!("could not take the single-instance lock ({reason}); starting anyway");
+            Some(Claim::Unknown(reason))
+        }
+        Claim::Taken => {
+            log::info!("k2g is already running for this user; handing over to it");
+            if !raise_running_window() {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Info)
+                    .set_title("k2g is already running")
+                    .set_description(
+                        "k2g is already open for this user. Switch to its window — a second \
+                         copy would share the same settings and profiles, and each would \
+                         overwrite the other's changes.",
+                    )
+                    .show();
+            }
+            None
+        }
+    }
 }

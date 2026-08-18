@@ -343,6 +343,9 @@ pub mod security_log;
 /// (EU CRA Annex I (2)(b) and (2)(m)).
 pub mod data_lifecycle;
 
+/// One k2g at a time: the lock a launch takes, and the hand-off when it is already held.
+pub mod single_instance;
+
 static GLOBAL_CTX: OnceLock<RwLock<AppCtx>> = OnceLock::new();
 
 /// The persisted state the launch-time hydrate reads, replaceable because a factory

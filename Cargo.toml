@@ -168,6 +168,11 @@ windows-sys = { version = "0.61", features = [
     # `runtime::kicad_integration` to refuse editing kicad_common.json while KiCad
     # is running, since KiCad rewrites that file wholesale when it exits.
     "Win32_System_Diagnostics_ToolHelp",
+    # FindWindowW / IsIconic / ShowWindow / SetForegroundWindow — how a second launch
+    # brings the running k2g's window forward instead of starting a second copy
+    # (`runtime::single_instance`). There is no portable equivalent, which is why that
+    # hand-off is a message box everywhere else.
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Windows-only: `build.rs` compiles the app icon into the `.exe` as a Windows
