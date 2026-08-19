@@ -371,7 +371,17 @@ fn choose_export_target(
 /// location on a stick and cannot be moved onto one.
 fn rebase_onto(root: &Path, remembered: &str) -> Option<PathBuf> {
     let within = path_within_volume(remembered)?;
-    Some(if within.is_empty() { root.to_path_buf() } else { root.join(within) })
+    if within.is_empty() {
+        return Some(root.to_path_buf());
+    }
+    // Joined as a string rather than with `Path::join`, for the same reason
+    // `path_within_volume` parses as one: these are Windows paths, and `join` inserts the
+    // *host's* separator. `E:\` does not end with a separator as far as a Unix host is
+    // concerned, so `E:\`.join("jobs") came out `E:\/jobs` there — passing on Windows
+    // and failing the Linux and macOS builds, which is the worst place to find out.
+    let root = root.to_string_lossy();
+    let separator = if root.ends_with('\\') || root.ends_with('/') { "" } else { "\\" };
+    Some(PathBuf::from(format!("{root}{separator}{within}")))
 }
 
 /// What follows the drive prefix in a rooted Windows path: `E:\jobs\out` → `jobs\out`,
@@ -585,6 +595,28 @@ mod tests {
         assert_eq!(volume_key_for_path(Path::new("E:\\jobs"), &media), "usb:1A2B3C4D");
         assert_eq!(volume_key_for_path(Path::new("C:\\out"), &media), "drive:C");
         assert_eq!(volume_key_for_path(Path::new("/home/me/out"), &media), HOST_VOLUME_KEY);
+    }
+
+    /// The trap that failed the Linux and macOS builds while passing on Windows.
+    ///
+    /// These are Windows paths, parsed on whatever host the tests run on, so the result
+    /// must not depend on that host's separator. `Path::join` does: `E:\` does not end
+    /// with a separator as far as a Unix host is concerned, so it inserted one and
+    /// `E:\jobs` quietly became `E:\/jobs` — three tests red on two platforms, and green
+    /// on the one they were written on.
+    #[test]
+    fn a_remembered_folder_is_rebased_with_the_volumes_own_separator() {
+        let rebased = rebase_onto(Path::new("E:\\"), "F:\\jobs\\out").expect("a rooted path");
+        assert_eq!(rebased.to_string_lossy(), "E:\\jobs\\out");
+        assert!(
+            !rebased.to_string_lossy().contains('/'),
+            "the host's separator crept in: {}",
+            rebased.display()
+        );
+        // The whole volume remembered is the volume, not a folder inside it.
+        assert_eq!(rebase_onto(Path::new("E:\\"), "F:\\").unwrap().to_string_lossy(), "E:\\");
+        // Not rooted at a drive letter, so not a location on a stick at all.
+        assert!(rebase_onto(Path::new("E:\\"), "/home/me/out").is_none());
     }
 
     /// The headline, and the only reason the serial is read at all: a stick that comes
