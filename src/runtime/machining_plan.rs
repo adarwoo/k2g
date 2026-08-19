@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use units::{Length, UserUnitDisplay};
 
+use crate::data::model::tool_core::ToolKind;
 use crate::data::model::{FixtureProfile, TabContour, Tool};
 use crate::data::{appdata_ready, with_appdata};
 use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
@@ -1183,6 +1184,8 @@ fn plan_cutout_spans(
     let cfg = &raw.route_cutouts;
     let placed_tabs = with_appdata(|data| data.job_edge_tabs());
     let mut corners_skipped = 0usize;
+    // Island tabs asked to be perforated that the rack holds no drill for.
+    let mut unperforated = 0usize;
 
     // Numbered among the cutouts, as `job.yaml#/edge_tabs/index` means it.
     for (kind_index, (contour_index, contour)) in stitched
@@ -1320,6 +1323,7 @@ fn plan_cutout_spans(
                 continue;
             }
             let Some(bite_tool) = mouse_bite_drill(ctx, slots) else {
+                unperforated += 1;
                 continue;
             };
             for (h, centre) in outline::mouse_bite_centres(&path, *fraction, width_mm, bite_tool.1)
@@ -1338,6 +1342,13 @@ fn plan_cutout_spans(
         }
     }
 
+    if unperforated > 0 {
+        notes.push(format!(
+            "{unperforated} island tab(s) are left solid: they are wide enough to want mouse \
+             bites, but this step loads no drill to perforate them. Add a small drill to the \
+             toolset, or expect to cut these tabs rather than snap them."
+        ));
+    }
     if corners_skipped > 0 {
         notes.push(format!(
             "{corners_skipped} sharp corner(s) were left as the cutter rounds them: no drill \
@@ -1392,6 +1403,8 @@ fn plan_outline_spans(
     let mut crowded = 0usize;
     // Interior openings this step leaves in the board, because nothing on it cuts them.
     let mut uncut_openings = 0usize;
+    // Tabs asked to be perforated that the rack holds no drill for.
+    let mut unperforated = 0usize;
     // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
     let (mut outer_n, mut cutout_n) = (0usize, 0usize);
 
@@ -1485,22 +1498,28 @@ fn plan_outline_spans(
 
         // Mouse bites are drills, so they join the drill phase rather than the route one.
         if retention.mouse_bites {
-            if let Some(bite_tool) = mouse_bite_drill(ctx, slots) {
-                for (n, tab) in tabs.iter().enumerate() {
-                    let centres = outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
-                    for (h, centre) in centres.into_iter().enumerate() {
-                        drill_targets.push(DrillTarget {
-                            source: format!("{label}#{kind_index}.bite{n}.{h}"),
-                            // The span geometry is already placed, so unplace it: the
-                            // drill planner places its own targets.
-                            at: placement.unplace(&centre),
-                            tool_id: bite_tool.0.clone(),
-                            diameter: bite_tool.1,
-                            z_bottom: bite_tool.2,
-                            // One run, so the perforation is drilled in order along the
-                            // tab rather than being scattered through the tour.
-                            chain: Some(format!("{label}#{kind_index}.bite{n}")),
-                        });
+            // Counted, not silently dropped: a tab wide enough to ask for bites is a tab
+            // wide enough to tear the board when it is snapped solid.
+            match mouse_bite_drill(ctx, slots) {
+                None => unperforated += tabs.len(),
+                Some(bite_tool) => {
+                    for (n, tab) in tabs.iter().enumerate() {
+                        let centres =
+                            outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
+                        for (h, centre) in centres.into_iter().enumerate() {
+                            drill_targets.push(DrillTarget {
+                                source: format!("{label}#{kind_index}.bite{n}.{h}"),
+                                // The span geometry is already placed, so unplace it: the
+                                // drill planner places its own targets.
+                                at: placement.unplace(&centre),
+                                tool_id: bite_tool.0.clone(),
+                                diameter: bite_tool.1,
+                                z_bottom: bite_tool.2,
+                                // One run, so the perforation is drilled in order along
+                                // the tab rather than being scattered through the tour.
+                                chain: Some(format!("{label}#{kind_index}.bite{n}")),
+                            });
+                        }
                     }
                 }
             }
@@ -1513,6 +1532,13 @@ fn plan_outline_spans(
             "{uncut_openings} interior opening(s) are left in the board: the edge pass cuts \
              the boundary only. Add 'Route interior cutouts' to this step to cut them, each \
              with a cutter chosen to fit."
+        ));
+    }
+    if unperforated > 0 {
+        warnings.push(format!(
+            "{unperforated} retaining tab(s) are left solid: they are wide enough to want mouse \
+             bites, but this step loads no drill to perforate them. Add a small drill to the \
+             toolset, or expect to cut these tabs rather than snap them."
         ));
     }
     if crowded > 0 {
@@ -1560,17 +1586,42 @@ fn straight_segments_mm(contour: &pcb::Contour) -> Vec<(f64, f64, f64, f64)> {
 /// The smallest drill already in the rack, because a mouse bite wants the smallest hole
 /// that will still break cleanly and — more to the point — must not add a tool change of
 /// its own to a step that has already been assigned. `None` when the rack holds no drill,
-/// which leaves the tab solid rather than inventing a tool.
+/// which leaves the tab solid rather than inventing a tool (the callers say so).
+///
+/// `Drillbit` specifically, and not merely "not a router" as this once tested — the same
+/// trap [`pick_pin_tool`] documents. [`ToolKind::from_kind_label`] falls through to
+/// `Endmill` for anything it does not recognise, so "not a router" accepted a V-bit, an
+/// engraver or a typo'd kind string, and the smallest-first rule then *preferred* them: a
+/// V-bit's diameter is its **tip width**, so a ⌀0.20 V60 sorts below every real drill and
+/// wins every time. Sinking one through the board would not drill a 0.20 hole at all but a
+/// cone opening out to ⌀1.9 at the surface of a 1.6 mm board — it would eat the tab it was
+/// meant to perforate, and blunt the isolation bit doing it.
 fn mouse_bite_drill(
     ctx: &AppCtx,
     slots: &std::collections::BTreeMap<String, u8>,
 ) -> Option<(String, Length, Length)> {
     let setup = build_setup(ctx, None);
-    ctx.tools
+    let tool = pick_mouse_bite_drill(&ctx.tools, slots)?;
+    Some((
+        tool.id.clone(),
+        tool.diameter,
+        assigner::router_plunge(&setup),
+    ))
+}
+
+/// The selection rule alone, over the tools and the rack — split out from
+/// [`mouse_bite_drill`] so it can be exercised without a whole [`AppCtx`].
+fn pick_mouse_bite_drill<'a>(
+    tools: &'a [Tool],
+    slots: &std::collections::BTreeMap<String, u8>,
+) -> Option<&'a Tool> {
+    tools
         .iter()
-        .filter(|t| slots.contains_key(&t.id) && !t.kind.eq_ignore_ascii_case("router"))
+        .filter(|t| {
+            slots.contains_key(&t.id)
+                && matches!(ToolKind::from_kind_label(&t.kind), ToolKind::Drillbit)
+        })
         .min_by_key(|t| t.diameter.as_um().round() as i64)
-        .map(|t| (t.id.clone(), t.diameter, assigner::router_plunge(&setup)))
 }
 
 /// How deep a locating-pin hole goes: **through** the board and on into the backboard, by
@@ -1630,6 +1681,108 @@ fn format_assign_error(error: &AssignError) -> Vec<String> {
         AssignError::RackTooSmall { minimal, capacity } => vec![format!(
             "Rack too small: needs {minimal} tools but {capacity} usable slot(s) — see the Tooling tab."
         )],
+    }
+}
+
+#[cfg(test)]
+mod mouse_bite_tests {
+    use super::*;
+
+    /// A stock tool of the given kind and diameter; nothing else is read here.
+    fn tool(id: &str, kind: &str, diameter_mm: f64) -> Tool {
+        Tool {
+            id: id.to_string(),
+            composite_name: format!("{kind} {diameter_mm}mm"),
+            name: format!("{kind} {diameter_mm}mm"),
+            kind: kind.to_string(),
+            diameter: Length::from_mm(diameter_mm),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(118.0),
+            catalog_point_angle: None,
+            flute_length: Some(Length::from_mm(30.0)),
+            z_min_depth: None,
+            table_feed: None,
+            catalog_table_feed: None,
+            z_feed: None,
+            catalog_z_feed: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: crate::data::model::ToolStatus::InStock,
+            preference: crate::data::model::ToolPreference::Neutral,
+            source_catalog: "Test".to_string(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    /// Every tool racked, which is the case the rule is about.
+    fn racked(tools: &[Tool]) -> std::collections::BTreeMap<String, u8> {
+        tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.clone(), i as u8 + 1))
+            .collect()
+    }
+
+    /// The reported bug. An isolation step racks a V-bit whose ⌀ is its *tip width*, so
+    /// smallest-first put a 0.20 V60 ahead of every drill on the machine — and the plan
+    /// then sank a cone through the tab it was supposed to perforate.
+    #[test]
+    fn a_v_bit_never_drills_a_mouse_bite() {
+        let tools = vec![
+            tool("vbit", "V-Bit", 0.2),
+            tool("drill", "Drill", 1.0),
+            tool("router", "Router", 2.0),
+        ];
+        let chosen = pick_mouse_bite_drill(&tools, &racked(&tools));
+
+        assert_eq!(
+            chosen.map(|t| t.id.as_str()),
+            Some("drill"),
+            "the 0.2 V-bit is the smallest tool in the rack, and still must not be picked"
+        );
+    }
+
+    /// The other two kinds that reach a rack are ruled out by the same test, and for the
+    /// same reason: only a drill is a bit whose diameter is the hole it makes.
+    #[test]
+    fn nor_does_an_engraver_or_an_end_mill() {
+        let tools = vec![
+            tool("engraver", "Engraver", 0.1),
+            tool("endmill", "End Mill", 0.8),
+            tool("drill", "Drill", 1.2),
+        ];
+        let chosen = pick_mouse_bite_drill(&tools, &racked(&tools));
+
+        assert_eq!(chosen.map(|t| t.id.as_str()), Some("drill"));
+    }
+
+    /// The rule proper, once the field is drills: the smallest hole that still breaks.
+    #[test]
+    fn the_smallest_racked_drill_wins() {
+        let tools = vec![
+            tool("big", "Drill", 1.0),
+            tool("small", "Drill", 0.5),
+            tool("unracked", "Drill", 0.3),
+        ];
+        let mut slots = racked(&tools);
+        slots.remove("unracked");
+
+        let chosen = pick_mouse_bite_drill(&tools, &slots);
+
+        assert_eq!(
+            chosen.map(|t| t.id.as_str()),
+            Some("small"),
+            "a finer drill off the rack is not worth a tool change the step never planned"
+        );
+    }
+
+    /// No drill loaded leaves the tab solid — the callers count that and say so, rather
+    /// than reaching for whatever else is in the rack.
+    #[test]
+    fn a_rack_without_a_drill_perforates_nothing() {
+        let tools = vec![tool("vbit", "V-Bit", 0.2), tool("router", "Router", 2.0)];
+        assert!(pick_mouse_bite_drill(&tools, &racked(&tools)).is_none());
     }
 }
 

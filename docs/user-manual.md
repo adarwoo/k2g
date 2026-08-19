@@ -523,8 +523,8 @@ The operation plan, and the 3D toolpath render above it.
   | | |
   |---|---|
   | **Reset** (0) | Frame the whole job again, from the usual three-quarter view. |
-  | **Front** (1) | Look straight at the board's front (green) face. On a step that machines the back, the board is lying turned over — so this looks up at it from underneath, which is the view that shows whether the mirrored artwork came out right. |
-  | **Back** (2) | The same for the back (red) face. |
+  | **Front** (1) | Look straight at the board's front (red) face — the same red the 2D view paints the front copper in. On a step that machines the back, the board is lying turned over — so this looks up at it from underneath, which is the view that shows whether the mirrored artwork came out right. |
+  | **Back** (2) | The same for the back (green) face. |
   | **Flat / 3D** (3) | Switch between a flat (orthographic) view and the 3D one. Flat is the one to judge alignment in: perspective pushes anything away from the middle of the picture sideways, so two paths that line up only look like it in the flat view. |
 - Below: the step's summary (operation count, tool blocks, travel), then one table
   per tool block listing the atomic operations in the order the planner chose, with

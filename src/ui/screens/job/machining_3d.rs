@@ -125,16 +125,23 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // Measured rather than eyeballed, by rendering this exact material stack (Lambert,
     // these lights, 0.85/0.72 opacity) over both themes' backgrounds and sampling the
     // pixels. Taking the worse theme of the two: contrast against the palette over the
-    // front face went 3.0:1 → 5.5:1 at its weakest, and the mint the engraving usually
-    // draws in 4.6:1 → 8.3:1. The back face was worse than either at 2.8:1 — a rose
+    // *green* face went 3.0:1 → 5.5:1 at its weakest, and the mint the engraving usually
+    // draws in 4.6:1 → 8.3:1. The *red* face was worse than either at 2.8:1 — a rose
     // path on a red board — and is now 5.1:1.
+    //
+    // Named by colour rather than by face because the two faces have since swapped roles
+    // (below) and the figures did not move with them: both were measured as a face over
+    // the green slab, and the slab is still green, so the two stacks are the same two.
     //
     // Keep both above ~5:1 if these are ever retuned, and keep
     // them within about a stop of each other — they are the front/back cue, so one
     // reading deeper than the other would say something the board is not.
     //
-    // Still green and still red, because that is the cue: front is soldermask green,
-    // back is red, whichever way up the board is lying.
+    // Still green and still red, because that is the cue — but **red is the front**, to
+    // agree with the 2D board view, which paints the front copper in KiCad's F.Cu red.
+    // A soldermask-green front is the prettier metaphor and it lost: two views of one
+    // board that disagree about which face is which is a way to machine the wrong side,
+    // and no amount of realism is worth that.
     const BOARD_GREEN = 0x103a24;
     const BOARD_RED = 0x6b1f17;
 
@@ -226,11 +233,12 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       slab.renderOrder = BOARD_ORDER;
       content.add(slab);
 
-      // The two faces, in the board's own colours: the **back** is always red and the
-      // **front** always green, whichever way up the board happens to be lying.
+      // The two faces, in the board's own colours: the **front** is always red — as it is
+      // in the 2D view — and the **back** always green, whichever way up the board happens
+      // to be lying.
       //
       // Which one the spindle sees is what `back_face_up` says, so a front-face step shows
-      // green with red underneath, and a back-face step shows red with green underneath.
+      // red with green underneath, and a back-face step shows green with red underneath.
       // That is not decoration: the artwork is mirrored for a back-face step (correctly,
       // since the board is physically turned over), and a mirrored board is
       // indistinguishable from a right-way-round one unless you already know which face
@@ -254,7 +262,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         mesh.renderOrder = BOARD_ORDER;
         content.add(mesh);
       };
-      const BACK = BOARD_RED, FRONT = BOARD_GREEN;
+      const FRONT = BOARD_RED, BACK = BOARD_GREEN;
       const up = 0.02, down = -board.thickness_mm - 0.02;
       face(board.back_face_up ? BACK : FRONT, up);
       face(board.back_face_up ? FRONT : BACK, down);
@@ -505,7 +513,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
 
     // Stands the camera off the wanted face of the board.
     //
-    // The board's front is the green face and its back the red one *whichever way up it
+    // The board's front is the red face and its back the green one *whichever way up it
     // is lying*, so on a back-face step — where the board has been turned over — the
     // front face is the one underneath and this looks up at it from below. That is the
     // point: it is the view that shows whether the mirrored artwork came out right.
