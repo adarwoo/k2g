@@ -63,6 +63,15 @@ pub const DEFAULT_JOB_PIN_WIDTH: i64 = 560;
 /// there.
 pub const MIN_JOB_PIN_WIDTH: i64 = 380;
 
+/// How short the 3D pane may be dragged. Below this the canvas is a letterbox: the board
+/// solid no longer reads as a board and the orbit controls have nothing to orbit in.
+///
+/// There is no matching ceiling, for the reason the dock has none. What bounds the pane
+/// from above is the window, and a fixed maximum set by eye is wrong on the next display —
+/// the op list below simply keeps its own minimum height and the pane takes the rest, so a
+/// stored height taller than the window comes back as "as tall as it goes".
+pub const MIN_MACHINING_SPLIT: i64 = 180;
+
 /// Size a fresh install opens the window at, in logical pixels. Wide enough for the
 /// docked Job column the layout wants (see the 1250px media query in the theme), and
 /// small enough for an ordinary laptop panel — a screen it still overflows is handled
@@ -187,6 +196,17 @@ pub struct AppState {
     pub job_view_pinned: bool,
     /// Width of the docked Job column in pixels, as left by the split handle.
     pub job_pin_width: i64,
+    /// Height of the Machining view's 3D pane in pixels, as left by its divider — and
+    /// `None` until it has been. The op list below takes the rest of the column and
+    /// scrolls inside it.
+    ///
+    /// `None` is a real state, not a missing number: it means **half the column**, which
+    /// the stylesheet supplies as its own fallback and this layer deliberately does not.
+    /// The two behave differently as the window changes — half follows a resize, a pixel
+    /// height does not — so substituting a number here would look identical on the window
+    /// it was chosen for and wrong on every other. It would also make "never touched" and
+    /// "deliberately set to 420" the same state, with no way back.
+    pub machining_split_height: Option<i64>,
     /// Inner size of the application window in logical pixels, as the user last left
     /// it — restored at the next launch. While the window is maximized these keep the
     /// *restored* size, so un-maximizing gives back the window that was maximized.
@@ -457,6 +477,7 @@ fn default_global_settings() -> Value {
         "last_removable_media_path": Value::Null,
         "job_view_pinned": false,
         "job_pin_width": DEFAULT_JOB_PIN_WIDTH,
+        "machining_split_height": Value::Null,
         "window_width": DEFAULT_WINDOW_WIDTH,
         "window_height": DEFAULT_WINDOW_HEIGHT,
         "window_maximized": false,

@@ -580,29 +580,64 @@ body {
     margin-right: 2px;
 }
 
-.dock-handle {
-    cursor: col-resize;
+/*
+ * Draggable dividers. Two of them — the docked Job column's, which splits left from
+ * right, and the Machining view's, which splits the 3D pane from the op list. One rule
+ * for both: they are the same affordance, and a hairline that thickened to the accent on
+ * one and not the other would read as one of them being dead.
+ */
+.dock-handle,
+.split-handle {
     background: transparent;
     position: relative;
 }
 
-/* The grab target is the full 8px column; the visible rule is a hairline in it. */
-.dock-handle::after {
+.dock-handle {
+    cursor: col-resize;
+}
+
+.split-handle {
+    cursor: row-resize;
+    /* The grab target, since a row in a flex column has no width to give it one. */
+    height: 8px;
+    flex: 0 0 auto;
+}
+
+/* The grab target is the full 8px band; the visible rule is a hairline in it. */
+.dock-handle::after,
+.split-handle::after {
     content: "";
     position: absolute;
+    background: var(--border);
+    transition: background 140ms ease, width 140ms ease, height 140ms ease;
+}
+
+.dock-handle::after {
     top: 14px;
     bottom: 14px;
     left: 50%;
     width: 1px;
     transform: translateX(-50%);
-    background: var(--border);
-    transition: background 140ms ease, width 140ms ease;
+}
+
+.split-handle::after {
+    left: 14px;
+    right: 14px;
+    top: 50%;
+    height: 1px;
+    transform: translateY(-50%);
 }
 
 .dock-handle:hover::after,
 .dock-handle.is-dragging::after {
     background: var(--accent);
     width: 2px;
+}
+
+.split-handle:hover::after,
+.split-handle.is-dragging::after {
+    background: var(--accent);
+    height: 2px;
 }
 
 /*
@@ -3209,6 +3244,112 @@ th {
     }
 }
 
+/*
+ * The Machining view's split: the 3D pane at the height the divider was left at, the op
+ * list taking the rest and scrolling inside itself.
+ *
+ * `min-height: 0` is what makes the second half possible. `.screen` is `height: 100%` of a
+ * `.screen-host` that scrolls, so without it the flex column grows to its content and the
+ * page scrolls as one — which is exactly what the split exists to stop. With it the column
+ * is bounded by the host, and `flex: 1` on the list resolves against a real height.
+ *
+ * The 3D pane keeps `flex: 0 0 auto` so it is the divider's height and nothing else; it is
+ * the list that absorbs the window being resized.
+ */
+.machining-split {
+    min-height: 0;
+    /* The divider brings its own; a second gap around it reads as slack in the drag. */
+    gap: 0;
+}
+
+/*
+ * The pane's height, and the only place the divider's value is used.
+ *
+ * On the **row**, not on the canvas inside it. `.machining-3d`'s parent is this row, whose
+ * own height is `auto` — so a percentage there resolves against nothing, and a `min()`
+ * containing one cannot resolve at all: the declaration was dropped whole, the canvas kept
+ * its old fixed `clamp()`, and the divider moved a custom property that nothing read. This
+ * row's parent is the column, which is `height: 100%` of a host with a definite height, so
+ * a basis here resolves.
+ *
+ * `50%` is the fallback, and it is the default the operator gets until they drag: half the
+ * column, and still half after the window is resized, which no pixel height would be.
+ *
+ * `max-height` is what stops the drag closing the list, and it is arithmetic here because
+ * flex shrink could not do it: the list's basis is zero (below), so a negative free space
+ * lands entirely on this row and its own `min-height` would then push the column into
+ * overflow. Capping the pane instead is what makes a stored height taller than the window
+ * come back as "as tall as it goes" — which is why the setting has no ceiling. 148px is the
+ * list's minimum plus the handle.
+ */
+.machining-split .machining-3d-layout {
+    flex: 0 0 var(--machining-split, 50%);
+    max-height: calc(100% - 148px);
+    min-height: 180px;
+    margin-bottom: 0;
+}
+
+.machining-split .machining-3d,
+.machining-split .machining-3d-legend {
+    height: 100%;
+}
+
+.machining-oplist {
+    /* Basis **zero**, not `auto`. `auto` is the content height, and the content here is an
+       op table that can run to hundreds of rows — so the list claimed the whole column and
+       the flex algorithm squeezed the 3D pane down to its own minimum, whatever the divider
+       said. Growing from zero into what is left is the only version of this that a long
+       list does not break. */
+    flex: 1 1 0;
+    /* A definite minimum rather than `min-height: 0`, and it does two jobs: it keeps the
+       divider from closing the list (a header and a row or two survive any drag), and it
+       overrides the `auto` a flex item defaults to — which is its content height, and
+       which would make the pane grow instead of scrolling. */
+    min-height: 140px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-top: 12px;
+}
+
+/*
+ * While the divider is moving, nothing else may take the pointer.
+ *
+ * The canvas is the reason: three.js's orbit controls listen on it, so a drag that carried
+ * the pointer up over the 3D pane both span the model and — where the controls consume the
+ * event — stopped feeding the divider. Switching pointer events off for the duration fixes
+ * the divider and the accidental orbit in one move, and `user-select` stops the drag
+ * selecting the op table's text on the way down.
+ */
+.machining-split.is-dragging {
+    user-select: none;
+    cursor: row-resize;
+}
+
+.machining-split.is-dragging .machining-3d,
+.machining-split.is-dragging .machining-oplist {
+    pointer-events: none;
+}
+
+/* A row that says which operation it is on the canvas, so it has to look clickable. */
+.machining-op-row {
+    cursor: pointer;
+}
+
+.machining-op-row:hover > td {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/*
+ * Declared after the hover, so pointing at the selected row does not repaint it as merely
+ * hovered — the same ordering trap the catalogue's selected row documents.
+ */
+.machining-op-row.is-selected > td {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    font-weight: 600;
+}
+
 .machining-3d {
     position: relative;
     width: 100%;
@@ -5600,6 +5741,70 @@ mod tests {
             selected > hover,
             "the selected background must be declared after the hover it ties with, or a \
              hovered row would lose its selected tint"
+        );
+    }
+
+    /// **The Machining split's default lives here**, and nowhere else, so this is where it
+    /// is pinned.
+    ///
+    /// `machining_split_height` is null until the operator drags the divider, and the view
+    /// then writes no custom property at all — so what decides the layout of every job
+    /// nobody has resized is this one fallback in this one declaration. Rust cannot assert
+    /// it by holding a copy: a constant that only a test compares against itself proves
+    /// nothing and reads as though it does, which is how the last one came to be dead code.
+    ///
+    /// The basis has to be a **ratio**, not a length. Half stays half when the window is
+    /// resized; a pixel default would be right on the display it was written for and wrong
+    /// on the next.
+    #[test]
+    fn the_machining_split_defaults_to_half_the_column() {
+        let (_, body) = rules()
+            .into_iter()
+            .find(|(selector, body)| {
+                selector == ".machining-split .machining-3d-layout" && body.contains("flex")
+            })
+            .expect("the sheet sizes the 3D pane");
+
+        assert!(
+            body.contains("var(--machining-split, 50%)"),
+            "the pane's basis must fall back to half the column when nothing is stored: {body}"
+        );
+        assert!(
+            !body.contains("var(--machining-split)"),
+            "and it must carry that fallback, or an untouched job gets no basis at all: {body}"
+        );
+    }
+
+    /// The selected op row must stay visible under the cursor, for the reason the catalogue
+    /// row above must.
+    ///
+    /// A second instance of the same trap, and worth pinning separately: these two rules
+    /// tie on specificity by a different route — two classes plus an element against one
+    /// class, one pseudo-class and an element — so somebody checking by eye could easily
+    /// conclude the selected one wins outright. It does not; source order decides. And the
+    /// row being pointed at is by definition the row whose state matters most, because
+    /// pointing at it is how it was selected.
+    #[test]
+    fn a_selected_op_row_is_declared_after_the_hover_it_ties_with() {
+        let rules = rules();
+        let index_of = |wanted: &str| {
+            rules
+                .iter()
+                .position(|(selector, body)| selector == wanted && body.contains("background"))
+                .unwrap_or_else(|| panic!("the sheet declares a `{wanted}` background rule"))
+        };
+
+        let hover = index_of(".machining-op-row:hover > td");
+        let selected = index_of(".machining-op-row.is-selected > td");
+        assert_eq!(
+            class_count(".machining-op-row.is-selected > td"),
+            class_count(".machining-op-row:hover > td"),
+            "if these stop tying, this test is measuring the wrong thing"
+        );
+        assert!(
+            selected > hover,
+            "the selected background must be declared after the hover it ties with, or the \
+             row under the pointer would lose the tint that says it is the one on the canvas"
         );
     }
 

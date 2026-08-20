@@ -71,10 +71,35 @@ properties:
       Width in pixels of the docked Job column, as left by the split handle. Treated
       as a preference, not a guarantee — the layout still caps it against the window
       so the screen beside it stays usable.
+
+      Floored but **not capped**, which is deliberate and is what the code does too
+      (`MIN_JOB_PIN_WIDTH`): what bounds this from above is the window, which is not
+      knowable here, so the layout reserves the screen beside it and lets the dock
+      have the rest. A stored width wider than the window means "as wide as it goes",
+      which is what the operator meant by dragging it there.
+
+      A `maximum` here used to say 1200 while the drag handle enforced no such thing,
+      so dragging past it wrote a file the next launch refused — the width silently
+      reset and a validation warning appeared in the log. Two rules for one number is
+      one rule too many.
     type: integer
     minimum: 320
-    maximum: 1200
     default: 560
+
+  machining_split_height:
+    description: |
+      Height in pixels of the 3D pane in the Machining view, as left by its divider —
+      the op list below takes whatever is left and scrolls inside it.
+
+      Null until the divider is dragged, and that is not the same as a number: absent
+      means "half the column", which follows the window as it is resized, where any
+      pixel height would not. Only an operator who has actually chosen a height gets
+      one. A preference rather than a guarantee either way — a value taller than the
+      window comes back as "as tall as it goes", so the list keeps a usable height on
+      any display.
+    type: [integer, "null"]
+    minimum: 180
+    default: null
 
   export_directories:
     description: |

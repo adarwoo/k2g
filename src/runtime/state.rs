@@ -97,6 +97,7 @@ impl AppState {
             last_removable_media_path: load_persisted_string("last_removable_media_path"),
             job_view_pinned: load_persisted_flag("job_view_pinned", false),
             job_pin_width: load_persisted_job_pin_width(),
+            machining_split_height: load_persisted_machining_split(),
             window_width: load_persisted_window_dimension(
                 "window_width",
                 DEFAULT_WINDOW_WIDTH,
@@ -345,6 +346,7 @@ impl AppState {
             "last_removable_media_path": self.last_removable_media_path,
             "job_view_pinned": self.job_view_pinned,
             "job_pin_width": self.job_pin_width,
+            "machining_split_height": self.machining_split_height,
             "window_width": self.window_width,
             "window_height": self.window_height,
             "window_maximized": self.window_maximized,
@@ -639,6 +641,18 @@ impl AppState {
             return;
         }
         self.job_pin_width = width;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records the Machining view's divider position after a drag. On release rather than
+    /// on every mouse move, so a drag is one settings write and not hundreds — the same
+    /// rule [`Self::set_job_pin_width`] follows, and for the same reason.
+    pub fn set_machining_split_height(&mut self, height: i64) {
+        let height = Some(height.max(MIN_MACHINING_SPLIT));
+        if self.machining_split_height == height {
+            return;
+        }
+        self.machining_split_height = height;
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
@@ -2635,6 +2649,22 @@ fn load_persisted_job_pin_width() -> i64 {
         .max(MIN_JOB_PIN_WIDTH)
 }
 
+/// The persisted Machining split, floored for the same reason the dock width is: a
+/// hand-edited settings file must not open a pane too short to be a 3D view. Not
+/// ceilinged — the op list below keeps its own minimum height and the pane takes the rest,
+/// so an over-large stored value means "as tall as it goes"
+/// (see [`crate::runtime::MIN_MACHINING_SPLIT`]).
+///
+/// `None` when the key is absent or null, which is what a divider nobody has dragged looks
+/// like — and which the view renders as half the column rather than as any number.
+fn load_persisted_machining_split() -> Option<i64> {
+    persistence_state()
+        .and_then(|state| {
+            state.global_settings.get("machining_split_height").and_then(Value::as_i64)
+        })
+        .map(|height| height.max(MIN_MACHINING_SPLIT))
+}
+
 /// A persisted window dimension, clamped so a stale or hand-edited settings file cannot
 /// open a window too small to operate (or absurdly large). `minimum` differs per axis;
 /// the upper rail does not.
@@ -3232,6 +3262,43 @@ mod settings_payload_tests {
         assert_eq!(clamp(7, 0), 0, "nor with a step index left over from one that had them");
         assert_eq!(clamp(99, 3), 2, "a shortened profile reopens on its last step");
         assert_eq!(clamp(1, 3), 1, "a step that still exists is left alone");
+    }
+
+    /// The Machining divider is floored on the way in and on the way out, so neither a
+    /// hand-edited settings file nor a drag can leave a 3D pane too short to be one.
+    ///
+    /// Floored, never ceilinged — deliberately, and the same choice the dock's width makes.
+    /// What bounds the pane from above is the window, which this layer cannot see; the
+    /// stylesheet's flex shrink caps it against the column instead, so an over-large stored
+    /// value comes back as "as tall as it goes" rather than as an op list nobody can reach.
+    #[test]
+    fn the_machining_split_is_floored_but_not_capped() {
+        let load = |stored: Option<i64>| stored.map(|h| h.max(MIN_MACHINING_SPLIT));
+        let drag = |height: i64| Some(height.max(MIN_MACHINING_SPLIT));
+
+        assert_eq!(load(Some(0)), Some(MIN_MACHINING_SPLIT), "a zero in the settings file");
+        assert_eq!(load(Some(-400)), Some(MIN_MACHINING_SPLIT), "or a negative one");
+        assert_eq!(drag(MIN_MACHINING_SPLIT - 1), Some(MIN_MACHINING_SPLIT), "or a short drag");
+        assert_eq!(load(Some(640)), Some(640), "a height that is fine is left alone");
+        assert_eq!(
+            load(Some(9_000)),
+            Some(9_000),
+            "and an over-large one is the layout's to cap, not ours",
+        );
+    }
+
+    /// **Absent is not zero, and not a default height either.** A divider nobody has
+    /// dragged means half the column — which the stylesheet supplies, and which keeps being
+    /// half when the window is resized.
+    ///
+    /// Substituting a pixel default at load would look identical on the window it was
+    /// chosen for and wrong on every other, and would also make "never touched" and
+    /// "deliberately set to 420" the same state, so the setting could never go back.
+    #[test]
+    fn an_untouched_machining_split_stays_absent() {
+        let load = |stored: Option<i64>| stored.map(|h| h.max(MIN_MACHINING_SPLIT));
+
+        assert_eq!(load(None), None, "no key, no null, no substitute");
     }
 }
 

@@ -370,9 +370,13 @@ pub fn SettingsDialog(
                                 "directory the first time it runs — start KiCad once, then come back."
                             }
                         } else {
-                            for (install , status) in kicad_rows.into_iter() {
+                            // Position in the key as well as the version: two installs of
+                            // one version in two directories is an ordinary thing to have,
+                            // and on its own the version is then a duplicate key — which
+                            // Dioxus does not survive.
+                            for (idx , (install , status)) in kicad_rows.into_iter().enumerate() {
                                 KicadInstallRow {
-                                    key: "{install.version}",
+                                    key: "{idx}-{install.version}",
                                     install,
                                     status,
                                     running: kicad_running,

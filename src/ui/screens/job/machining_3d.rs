@@ -86,11 +86,12 @@ const BOOTSTRAP_SCRIPT: &str = r#"
   const board = BOARD_PLACEHOLDER;
   const traces = TRACES_PLACEHOLDER;
   const fixture = FIXTURE_PLACEHOLDER;
+  const highlight = HIGHLIGHT_PLACEHOLDER;
 
   // Already running on this canvas: hand the new plan to the renderer that is up and
   // return. Everything below this line is one-per-canvas and must not run twice.
   if (canvas.__k2g_draw) {
-    try { canvas.__k2g_draw(board, traces, fixture); dioxus.send(""); }
+    try { canvas.__k2g_draw(board, traces, fixture, highlight); dioxus.send(""); }
     catch (err) { dioxus.send(String((err && err.stack) || err)); }
     return;
   }
@@ -110,7 +111,22 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     let camera = persp;
 
     const controls = new T.OrbitControls(camera, canvas);
+    // Damping on, but barely. It is kept because it smooths the step between one mouse
+    // sample and the next — dragging with it off is visibly notchy — and turned well up
+    // from three.js's own 0.05 because that default is *inertia*, not smoothing: the view
+    // carries on drifting for the best part of a second after the hand comes off, which on
+    // a board being inspected feels like lag rather than like polish.
+    //
+    // The factor is the fraction of the remaining movement applied per frame, so larger is
+    // less damping. At 0.3 the camera has caught up with the pointer within a few frames
+    // and the drift is gone, while a single jumpy sample still does not snap the view.
+    //
+    // It has to stay non-zero for a second reason: `saveView` runs on the controls' `end`
+    // event, which fires when the button is released — so anything still coasting after
+    // that point is motion the remembered view never sees. Less damping is also less of
+    // that discrepancy.
     controls.enableDamping = true;
+    controls.dampingFactor = 0.3;
 
     // Which way up the board is lying, so the face views know which side of it to stand
     // on. Kept from the last `addBoard`; false until one arrives, which is the same
@@ -160,6 +176,10 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // behind, which is what a toolpath view is for.
     const BOARD_ORDER = 0;
     const TRACE_ORDER = 1;
+    // Above the traces, because the highlight redraws a line that is already there: at the
+    // same order the two z-fight and the selected op flickers between its tool's colour and
+    // the accent as the camera moves.
+    const HIGHLIGHT_ORDER = 2;
 
     scene.add(new T.HemisphereLight(0xffffff, 0x334455, 2.0));
     const key = new T.DirectionalLight(0xffffff, 1.2);
@@ -323,17 +343,62 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // pairs internally, so pre-expanding them here and handing the lot to one
     // LineSegments2 costs no extra memory — it only stops the scene graph carrying a
     // thousand objects that all draw with the same two materials.
+    // A run list flattened into the segment pairs LineSegmentsGeometry wants, split by
+    // move kind. Shared with `addHighlight`, which needs exactly the same expansion and
+    // differs only in the material it hangs on the result.
+    function segmentsByKind(moves) {
+      const bucket = { feed: [], rapid: [] };
+      (moves || []).forEach(function (run) {
+        const into = run.kind === "rapid" ? bucket.rapid : bucket.feed;
+        const pts = run.points;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i];
+          into.push(a.x, a.y, a.z, b.x, b.y, b.z);
+        }
+      });
+      return bucket;
+    }
+
+    // One op, drawn over the top of the line it duplicates — how a row in the table beside
+    // this is found among hundreds of lines on the canvas.
+    //
+    // Heavier than the trace beneath it and undashed whichever kind it is: this is not
+    // saying "cut" or "travel", it is saying "this one", and a dashed highlight over a
+    // dashed rapid reads as neither.
+    function addHighlight(runs) {
+      if (!runs || !runs.length) return;
+      const bucket = segmentsByKind(runs);
+      const flat = bucket.feed.concat(bucket.rapid);
+      if (flat.length < 6) return;
+
+      const geometry = new T.LineSegmentsGeometry();
+      geometry.setPositions(flat);
+      const material = new T.LineMaterial({
+        // Magenta, and fixed rather than taken from the theme's accent. Two constraints
+        // leave very little room: it has to be absent from TOOL_PALETTE, which already
+        // spends blue, amber, green, rose, violet, yellow, cyan and orange — and it has to
+        // read against *both* themed panel backgrounds, because the renderer clears to
+        // transparent and the panel shows through. White fails the second on a light theme
+        // and the accent fails the first, being the same blue as the palette's first tool.
+        color: 0xff2ec4,
+        linewidth: 6.0,
+        transparent: true,
+        opacity: 0.95,
+        // Depth test off, so the selected op shows through the board when it is on the far
+        // side. A highlight that can be hidden by the workpiece fails at the one job it
+        // has, which is to say where something is.
+        depthTest: false,
+        worldUnits: false,
+      });
+      materials.push(material);
+      const line = new T.LineSegments2(geometry, material);
+      line.renderOrder = HIGHLIGHT_ORDER;
+      content.add(line);
+    }
+
     function addTraces(traces) {
       (traces || []).forEach(function (trace) {
-        const bucket = { feed: [], rapid: [] };
-        trace.moves.forEach(function (run) {
-          const into = run.kind === "rapid" ? bucket.rapid : bucket.feed;
-          const pts = run.points;
-          for (let i = 1; i < pts.length; i++) {
-            const a = pts[i - 1], b = pts[i];
-            into.push(a.x, a.y, a.z, b.x, b.y, b.z);
-          }
-        });
+        const bucket = segmentsByKind(trace.moves);
 
         ["feed", "rapid"].forEach(function (kind) {
           const flat = bucket[kind];
@@ -573,11 +638,12 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // The whole of what a plan change changes. Kept on the canvas because that is the
     // only handle a later `eval` — which runs in page scope, with no reference to this
     // closure — can find it by.
-    canvas.__k2g_draw = function (board, traces, fixture) {
+    canvas.__k2g_draw = function (board, traces, fixture, highlight) {
       clearContent();
       addBoard(board);
       addFixture(fixture);
       addTraces(traces);
+      addHighlight(highlight);
       resize();          // the new fat-line materials have no resolution until this runs
       frameScene();
     };
@@ -591,7 +657,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
     // Read before the first draw, because that draw frames the scene and records the
     // framing it chose — which would overwrite the very thing being restored.
     const remembered = window.__K2G_VIEW;
-    canvas.__k2g_draw(board, traces, fixture);
+    canvas.__k2g_draw(board, traces, fixture, highlight);
     // After the first draw, never before: that draw is what establishes the bounds the
     // remembered view is judged against.
     restoreView(remembered);
@@ -685,6 +751,16 @@ struct ScenePayload {
     /// back on. Part of the payload so the memo that suppresses no-op redraws suppresses
     /// no-op legend rebuilds with it.
     legend: Vec<LegendRow>,
+    /// The op the operator has picked in the list beside this, as its own serialised run
+    /// list — or `null`. Drawn over the scene so a row in the table can be found among the
+    /// lines on the canvas.
+    ///
+    /// Part of the payload rather than sent on a channel of its own, so the memo that
+    /// suppresses no-op redraws covers a selection that has not changed too. It is also why
+    /// changing the selection is cheap: the re-eval finds `__k2g_draw` already on the canvas
+    /// and reuses the renderer, so a click costs a rebuild of the line objects and not of
+    /// the scene.
+    highlight: String,
 }
 
 /// One tool in the legend beside the canvas.
@@ -733,9 +809,33 @@ impl ScenePayload {
     /// dropping geometry does not snap the camera back. The colour survives the filter
     /// because it was fixed to the trace when it was built, not by counting position in
     /// this list.
-    fn build(ctx: &AppCtx, step: usize, hidden: &BTreeSet<String>) -> Self {
+    fn build(
+        ctx: &AppCtx,
+        step: usize,
+        hidden: &BTreeSet<String>,
+        picked: Option<crate::ui::screens::job::machining::OpRef>,
+    ) -> Self {
         let plan = cached_plan(ctx);
         let all = plan.steps.get(step).map(scene::trace_step).unwrap_or_default();
+
+        // Built from the plan rather than looked for in `all`: the traces have had their
+        // op boundaries merged away for the renderer's sake, so the only way to point at
+        // one op is to build that op again. See `scene::trace_op`.
+        //
+        // A hidden tool's op is not highlighted. Switching a tool off is a statement that
+        // its lines should not be on screen, and an exception for the selected one would
+        // draw the very line the operator has just hidden.
+        let highlight = picked
+            .filter(|at| {
+                plan.steps
+                    .get(step)
+                    .and_then(|step| step.blocks.get(at.block))
+                    .is_some_and(|block| !hidden.contains(&block.tool_id))
+            })
+            .and_then(|at| {
+                let block = plan.steps.get(step)?.blocks.get(at.block)?;
+                scene::trace_op(block, at.op)
+            });
 
         // The legend lists every tool of the step, hidden ones included — it is the only
         // way back to one that has been switched off.
@@ -762,6 +862,7 @@ impl ScenePayload {
             traces: serde_json::to_string(&shown).unwrap_or_else(|_| "[]".to_string()),
             board: serde_json::to_string(&board).unwrap_or_else(|_| "null".to_string()),
             fixture: serde_json::to_string(&fixture).unwrap_or_else(|_| "null".to_string()),
+            highlight: serde_json::to_string(&highlight).unwrap_or_else(|_| "null".to_string()),
             legend,
         }
     }
@@ -773,7 +874,22 @@ impl ScenePayload {
 /// `ResizeObserver` follows the element. Setting them in the markup would fight the
 /// layout and give a blurry, stretched drawing on a HiDPI display.
 #[component]
-pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
+pub fn Machining3dView(
+    state: Signal<AppCtx>,
+    /// The op picked in the list beside this.
+    ///
+    /// **A signal, not the plain `Option` it looks like it could be.** The payload below is
+    /// a [`use_memo`], which registers its closure once and re-runs it when something it
+    /// *reads* changes — so a plain prop is captured at first render and frozen there. As a
+    /// value this arrived as `None`, stayed `None`, and no click ever reached the canvas;
+    /// as a signal, reading it inside the memo is what subscribes the memo to it. Exactly
+    /// the trap the note on `use_effect` below describes, one layer up.
+    ///
+    /// Carries the *raw* selection rather than a validated one, because the memo has the
+    /// plan in hand and `ScenePayload::build` bounds-checks it anyway. The list beside this
+    /// does its own resolving for its own highlight.
+    picked: Signal<Option<crate::ui::screens::job::machining::OpRef>>,
+) -> Element {
     // Two sources have to be watched, because a plan has two ways of changing. The
     // fixture, stock and board come off `state`; the machining profile — the operation
     // toggles, the per-operation settings — is a schema-driven AppData edit that only
@@ -789,9 +905,10 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
         let _ = crate::ui::bindings::data_revision();
         let snapshot = state.read().clone();
         let step = snapshot.selected_step;
-        // Read inside the memo so ticking a box rebuilds the payload; read outside, the
-        // toggle would restyle the legend and never reach the canvas.
-        ScenePayload::build(&snapshot, step, &hidden.read())
+        // Both read inside the memo, and for one reason: a read in here is what subscribes
+        // the memo to them. Read outside, ticking a legend box would restyle the legend and
+        // never reach the canvas, and clicking an op row would do nothing at all.
+        ScenePayload::build(&snapshot, step, &hidden.read(), *picked.read())
     });
 
     // `use_effect` runs after the node exists, which is the whole point — the script
@@ -804,7 +921,8 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
     use_effect(move || {
         let payload = payload();
         spawn(async move {
-            let ScenePayload { traces, board, fixture, tool_count, point_count, .. } = payload;
+            let ScenePayload { traces, board, fixture, highlight, tool_count, point_count, .. } =
+                payload;
             // Logged at info, not debug: the default filter is `info`, and a 3D view
             // that quietly does nothing is the failure mode this whole module exists to
             // prevent. Both ends are logged so a hang in between is distinguishable
@@ -816,7 +934,8 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
                 .replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID)
                 .replace("TRACES_PLACEHOLDER", &traces)
                 .replace("BOARD_PLACEHOLDER", &board)
-                .replace("FIXTURE_PLACEHOLDER", &fixture);
+                .replace("FIXTURE_PLACEHOLDER", &fixture)
+                .replace("HIGHLIGHT_PLACEHOLDER", &highlight);
             match document::eval(&script).recv::<String>().await {
                 Ok(message) if message.is_empty() => {
                     log::info!("3D machining view: drawn");
@@ -910,9 +1029,26 @@ pub fn Machining3dView(state: Signal<AppCtx>) -> Element {
             if !legend.is_empty() {
                 aside { class: "machining-3d-legend",
                     div { class: "machining-3d-legend-title", "Tools" }
-                    for row in legend.iter() {
+                    // Keyed by **position**, with the tool id only along for stability.
+                    //
+                    // A legend row is a tool *block*, not a tool, and two blocks can run
+                    // the same tool: the route phase groups by tool within itself, but a
+                    // router that mills a slot and a router that cuts an opening arrive as
+                    // separate blocks, and they may be the same cutter. Keyed on the tool
+                    // id alone that is two siblings with one key, which Dioxus does not
+                    // tolerate — it panics the whole application out of the event loop
+                    // mid-render (`keyed siblings must each have a unique key`), which is
+                    // how this was found: four blocks, three tools, and the window gone.
+                    //
+                    // The rows stay one-per-block rather than being merged, because each
+                    // one names a colour that is on the canvas — and the colour is picked
+                    // by block order, so a tool used twice genuinely draws in two. The
+                    // checkbox is still per tool: `hidden` is keyed by id, so switching one
+                    // of a tool's rows off switches all of that tool's work off, which is
+                    // what "hide this tool" should mean.
+                    for (index , row) in legend.iter().enumerate() {
                         label {
-                            key: "{row.tool_id}",
+                            key: "{index}-{row.tool_id}",
                             class: if row.hidden { "machining-3d-legend-row is-hidden" } else { "machining-3d-legend-row" },
                             input {
                                 r#type: "checkbox",
@@ -965,6 +1101,106 @@ async fn report_page_errors() {
             }
         }
         Err(err) => log::debug!("could not drain WebView errors: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod reactivity_tests {
+    /// Everything this view draws from must reach it as a **signal**, and be read inside
+    /// the memo that builds the scene.
+    ///
+    /// [`use_memo`] registers its closure once and re-runs it when something the closure
+    /// *reads* changes. A prop that arrives as a plain value is therefore captured at first
+    /// render and frozen: the memo goes on using whatever it was handed at mount, forever,
+    /// and the canvas silently stops following it. Nothing about that is visible in a
+    /// review — the code reads perfectly — and nothing about it is visible at runtime
+    /// either, because the view keeps drawing a correct picture of a stale input.
+    ///
+    /// It has happened twice here. Once when the payload was derived in the component body
+    /// and captured by the `use_effect`, which pinned the canvas to the plan as it stood on
+    /// the first render. Once when `picked` was a plain `Option<OpRef>`, which meant every
+    /// click on the op list changed the row's colour and nothing else. Both were found by
+    /// someone using the application, not by a test — so this is the test.
+    ///
+    /// Read as source, because there is nothing else to read it as: the fault is in *how*
+    /// the closure was written, and a virtual DOM would have to be driven through a real
+    /// render cycle to catch what a regex catches here for nothing.
+    #[test]
+    fn every_scene_input_is_a_signal_read_inside_the_memo() {
+        let source = include_str!("machining_3d.rs");
+
+        let props = source
+            .split_once("pub fn Machining3dView(")
+            .expect("the component is declared")
+            .1
+            .split_once(") -> Element")
+            .expect("its parameter list ends")
+            .0;
+        for prop in ["state", "picked"] {
+            let declared = props
+                .lines()
+                .find_map(|line| line.trim().strip_prefix(&format!("{prop}: ")))
+                .unwrap_or_else(|| panic!("`{prop}` is a prop of Machining3dView"));
+            assert!(
+                declared.starts_with("Signal<"),
+                "`{prop}` must reach this view as a Signal, or the scene memo freezes it at \
+                 the value it had on the first render — it was declared `{declared}`",
+            );
+        }
+
+        // To the end of the statement, not to the first `)` — the arguments contain calls
+        // of their own, which is rather the point of the assertions below.
+        let build = source
+            .split_once("ScenePayload::build(")
+            .expect("the memo builds the payload")
+            .1
+            .split_once("\n    });")
+            .expect("the memo closure ends")
+            .0;
+        assert!(
+            build.contains("state") || build.contains("snapshot"),
+            "the payload is built from the context: {build}",
+        );
+        for read in ["hidden.read()", "picked.read()"] {
+            assert!(
+                build.contains(read),
+                "`{read}` must happen inside the memo — reading it in the component body \
+                 subscribes nothing, and the canvas stops following it: {build}",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod legend_key_tests {
+    /// **A legend row is a block, not a tool, and two blocks can run the same tool.**
+    ///
+    /// Keyed on the tool id alone that is two siblings with one key. Dioxus asserts on it
+    /// mid-render and takes the whole application out of the event loop — no dialog, no
+    /// log line, the window simply gone. It was reached by toggling a machining operation
+    /// on a job whose step then had four blocks across three tools.
+    ///
+    /// A source test because the fault is in the *key expression* and there is nothing else
+    /// to inspect: the panic lives in `dioxus-core`'s differ, which a unit test cannot
+    /// reach without standing up a virtual DOM and driving a real render through a
+    /// reconciliation that changes the list.
+    #[test]
+    fn the_legend_key_cannot_repeat_when_two_blocks_share_a_tool() {
+        let source = include_str!("machining_3d.rs");
+        let loop_ = source
+            .split_once("for (index , row) in legend.iter().enumerate() {")
+            .map(|(_, rest)| rest)
+            .expect("the legend is rendered by enumerating its rows");
+        let key = loop_
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("key: "))
+            .expect("each legend row carries a key");
+
+        assert!(
+            key.contains("{index}"),
+            "the key must include the row's position, or a tool used by two blocks gives \
+             two siblings one key and the differ panics: {key}",
+        );
     }
 }
 

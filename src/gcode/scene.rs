@@ -233,6 +233,27 @@ pub fn trace_step(step: &StepPlan) -> Vec<ToolTrace> {
     step.blocks.iter().enumerate().map(|(index, block)| trace_block(block, index)).collect()
 }
 
+/// One op's motion on its own — for a view that has to point at a single op.
+///
+/// **Not findable in [`trace_step`]'s output**, which is why this exists. [`push_run`]
+/// merges consecutive runs of the same kind that meet, so by the time a block is a
+/// [`ToolTrace`] a hole's plunge has been welded to the rapid that arrived and the one that
+/// leaves, and a spiral is one polyline rather than the hundreds it was built from. That
+/// merge is the difference between a handful of line objects per tool and thousands, so the
+/// answer to "which of these lines is op 37?" is to build op 37 again rather than to stop
+/// merging.
+///
+/// Deliberately *only* the op's own motion: no joining rapid from wherever the tool was.
+/// The question being answered is "where is this feature", and a lead-in from the previous
+/// hole is a different feature's business.
+///
+/// `None` when the block has no such op, which is what an index left over from a plan that
+/// has since changed looks like.
+pub fn trace_op(block: &ToolBlock, op: usize) -> Option<Vec<Polyline>> {
+    let op = block.ops.get(op)?;
+    Some(expand_op(op.kind.clone(), op.entry, op.exit, op.z, block.diameter))
+}
+
 /// Walks one block's ops into runs of motion.
 ///
 /// `index` is the block's place in the **step**, which is what picks the colour. Taken as
@@ -478,6 +499,97 @@ mod tests {
             tool_id: tool_id.into(),
             ..block(diameter, vec![op(OpKind::Drill, pt(5.0, 5.0), pt(5.0, 5.0))])
         }
+    }
+
+
+    /// **The reason `trace_op` exists.** No run of the trace the renderer is handed is one
+    /// op: `push_run` welds each hole's retract to the transit that follows it, so a single
+    /// polyline spans two features and there is nothing in the payload to point at.
+    ///
+    /// That merge is worth keeping — it is the difference between a handful of line objects
+    /// per tool and thousands — so the way to highlight one op is to build it again rather
+    /// than to stop merging.
+    #[test]
+    fn no_run_of_the_merged_trace_is_one_op() {
+        let block = block(
+            0.8,
+            vec![
+                op(OpKind::Drill, pt(0.0, 0.0), pt(0.0, 0.0)),
+                op(OpKind::Drill, pt(10.0, 0.0), pt(10.0, 0.0)),
+                op(OpKind::Drill, pt(20.0, 0.0), pt(20.0, 0.0)),
+            ],
+        );
+        let trace = trace_block(&block, 0);
+
+        let spans_two_holes = trace.moves.iter().any(|run| {
+            let xs: std::collections::BTreeSet<i64> =
+                run.points.iter().map(|p| p.x as i64).collect();
+            xs.len() > 1
+        });
+        assert!(
+            spans_two_holes,
+            "the merge is what this test is about, and it did not happen: {:?}",
+            trace.moves,
+        );
+
+        let second = trace_op(&block, 1).expect("op 1 exists");
+        assert!(!second.is_empty(), "yet the op still has geometry of its own");
+        assert!(
+            second.iter().flat_map(|run| &run.points).all(|p| p.x == 10.0),
+            "which is the second hole's and nothing else's: {second:?}",
+        );
+    }
+
+    /// The highlight has to sit on the line it points at, so it must be built from the
+    /// same expansion the trace was — not from the op's entry point, and not re-derived.
+    #[test]
+    fn the_highlight_is_the_same_geometry_the_trace_drew() {
+        let block = block(1.0, vec![op(OpKind::Drill, pt(4.0, 7.0), pt(4.0, 7.0))]);
+
+        let alone = trace_op(&block, 0).expect("op 0 exists");
+        let drawn = trace_block(&block, 0);
+
+        // A single-op block has nothing to merge with, so the trace *is* the op — which is
+        // what makes the two comparable at all.
+        let points: Vec<ScenePoint> =
+            drawn.moves.iter().flat_map(|run| run.points.iter().copied()).collect();
+        let highlighted: Vec<ScenePoint> =
+            alone.iter().flat_map(|run| run.points.iter().copied()).collect();
+        assert_eq!(highlighted, points);
+    }
+
+    /// A rapid between features belongs to neither of them, so a highlight must not claim
+    /// it: the question a selection asks is "where is this feature", and a lead-in from the
+    /// previous hole would answer it by drawing somewhere the feature is not.
+    #[test]
+    fn a_highlight_carries_no_lead_in_from_the_previous_op() {
+        let block = block(
+            0.8,
+            vec![
+                op(OpKind::Drill, pt(0.0, 0.0), pt(0.0, 0.0)),
+                op(OpKind::Drill, pt(50.0, 0.0), pt(50.0, 0.0)),
+            ],
+        );
+
+        let second = trace_op(&block, 1).expect("op 1 exists");
+
+        assert!(
+            second.iter().flat_map(|run| &run.points).all(|p| p.x == 50.0),
+            "nothing from the first hole, and no transit between them: {second:?}",
+        );
+    }
+
+    /// An index left over from a plan that has since changed must come back empty rather
+    /// than panic. The view checks its selection every render, but a check that could be
+    /// forgotten is one this has to survive being forgotten.
+    #[test]
+    fn an_op_index_past_the_end_is_none() {
+        let one = block(0.8, vec![op(OpKind::Drill, pt(0.0, 0.0), pt(0.0, 0.0))]);
+        let none = block(0.8, vec![]);
+
+        assert!(trace_op(&one, 0).is_some());
+        assert!(trace_op(&one, 1).is_none());
+        assert!(trace_op(&none, 0).is_none(), "nor does an empty block panic");
     }
 
     /// Tools take palette colours in block order, and the palette wraps rather than

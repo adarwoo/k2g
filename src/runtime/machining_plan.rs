@@ -1273,6 +1273,10 @@ fn plan_cutout_spans(
             continue;
         };
 
+        // This opening's own cutter, not the edge kerf: a cutout's router is chosen by fit,
+        // so what a tab here has to give up to leave its material is whatever fitted.
+        let cutter_mm = router.diameter.as_mm();
+
         // A slug this step does not hold is a slug the roughing pass cuts loose, so there
         // is nothing left to finish against. An opening that leaves no slug at all — one
         // nowhere wider than twice the cutter — is cleared entirely by the wall pass and
@@ -1412,7 +1416,7 @@ fn plan_cutout_spans(
         if let Some(rough) = rough {
             if let Some(path) = outline::Loop::new(&outline::oriented(place(&rough), false)) {
                 let fractions = tab_fractions(&path, &anchors);
-                for (n, span) in outline::cut_spans(&path, &fractions, width_mm)
+                for (n, span) in outline::cut_spans(&path, &fractions, width_mm, cutter_mm)
                     .into_iter()
                     .enumerate()
                 {
@@ -1435,7 +1439,7 @@ fn plan_cutout_spans(
         let fractions = tab_fractions(&path, &anchors);
         let suffix = if two_pass { PASS_SUFFIX[1] } else { "" };
 
-        for (n, span) in outline::cut_spans(&path, &fractions, width_mm)
+        for (n, span) in outline::cut_spans(&path, &fractions, width_mm, cutter_mm)
             .into_iter()
             .enumerate()
         {
@@ -1564,6 +1568,11 @@ fn plan_outline_spans(
     let mut uncut_openings = 0usize;
     // Tabs asked to be perforated that the rack holds no drill for.
     let mut unperforated = 0usize;
+    // Tabs whose bridge is too narrow to carry a hole at the drill's own clearances, and
+    // the drill that could not be fitted into them — kept for the note, which is only
+    // useful if it names the bridge a bite would have needed.
+    let mut too_narrow = 0usize;
+    let mut unbitten = Length::from_mm(0.0);
     // Contours that wanted a finishing pass but ended up with no tab to hold them.
     let mut unheld = 0usize;
     // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
@@ -1625,7 +1634,11 @@ fn plan_outline_spans(
         };
 
         let retention = edge.outline;
+        // The material a tab leaves standing, and the cutter that decides what the spans
+        // either side of it have to give up to leave that much. The two travel together
+        // from here on: a tab width without a kerf is a tab width that means nothing.
         let width_mm = retention.width.as_mm();
+        let kerf_mm = router.diameter.as_mm();
 
         // Where the tabs go. Distribution runs on the contour's own **straight
         // segments**, not on the offset polyline — the offset flattens every rounded
@@ -1634,7 +1647,12 @@ fn plan_outline_spans(
         // an outward offset of a straight run is exactly the perpendicular foot.
         let anchors: Vec<Point> = if retention.tabs {
             let found =
-                outline::distribute_tabs(&straight_segments_mm(contour), retention.count, width_mm);
+                outline::distribute_tabs(
+                    &straight_segments_mm(contour),
+                    retention.count,
+                    width_mm,
+                    kerf_mm,
+                );
             if found.len() < retention.count {
                 crowded += retention.count - found.len();
             }
@@ -1683,7 +1701,10 @@ fn plan_outline_spans(
         {
             if let Some(path) = outline::Loop::new(&outline::oriented(place(rough), true)) {
                 let tabs = tab_fractions(&path, &anchors);
-                for (n, span) in outline::cut_spans(&path, &tabs, width_mm).into_iter().enumerate() {
+                for (n, span) in outline::cut_spans(&path, &tabs, width_mm, kerf_mm)
+                    .into_iter()
+                    .enumerate()
+                {
                     rough_spans.push(OutlineSpan {
                         source: format!("{label}#{kind_index}.span{n}{}", PASS_SUFFIX[0]),
                         path: span,
@@ -1702,7 +1723,7 @@ fn plan_outline_spans(
         let tabs = tab_fractions(&path, &anchors);
         let suffix = if two_pass { PASS_SUFFIX[1] } else { "" };
 
-        for (n, span) in outline::cut_spans(&path, &tabs, width_mm)
+        for (n, span) in outline::cut_spans(&path, &tabs, width_mm, kerf_mm)
             .into_iter()
             .enumerate()
         {
@@ -1729,6 +1750,19 @@ fn plan_outline_spans(
                         // than a drill's runout.
                         let centres =
                             outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
+                        // A bridge too narrow to carry a hole at its clearances is a
+                        // different fault from a rack with no drill in it, and wants a
+                        // different sentence: this one is fixed by widening the tab or
+                        // fitting a finer drill, neither of which the other note suggests.
+                        if centres.is_empty() {
+                            // The widest drill that failed, so the note quotes the bridge
+                            // that would actually have been needed rather than an easier
+                            // number from some other tab.
+                            if bite_tool.1.as_mm() > unbitten.as_mm() {
+                                unbitten = bite_tool.1;
+                            }
+                            too_narrow += 1;
+                        }
                         for (h, centre) in centres.into_iter().enumerate() {
                             drill_targets.push(DrillTarget {
                                 source: format!("{label}#{kind_index}.bite{n}.{h}"),
@@ -1763,6 +1797,16 @@ fn plan_outline_spans(
             "{unperforated} retaining tab(s) are left solid: they are wide enough to want mouse \
              bites, but this step loads no drill to perforate them. Add a small drill to the \
              toolset, or expect to cut these tabs rather than snap them."
+        ));
+    }
+    if too_narrow > 0 {
+        warnings.push(format!(
+            "{too_narrow} retaining tab(s) are left solid: a mouse bite needs {} of tab to hold \
+             one {} hole with a drill's width of board either side of it, and these are narrower \
+             than that. Widen the tabs, fit a finer drill, or expect to cut them rather than \
+             snap them.",
+            fmt_len(ctx, Length::from_mm(outline::mouse_bite_span_mm(1, unbitten.as_mm()))),
+            fmt_len(ctx, unbitten),
         ));
     }
     if crowded > 0 {

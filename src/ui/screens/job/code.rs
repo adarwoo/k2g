@@ -157,8 +157,12 @@ pub fn CodeView(state: Signal<AppCtx>) -> Element {
                             div { class: "gcode-empty-block",
                                 div { class: "gcode-empty-title", "No program yet — the job isn't ready:" }
                                 ul { class: "gcode-empty-reasons",
-                                    for reason in nogo_reasons.iter() {
-                                        li { key: "{reason}", "{reason}" }
+                                    // Keyed by position, not by the text. Two steps can
+                                    // fail the same way — the same broken profile named in
+                                    // both — and two siblings with one key panic the differ
+                                    // and take the application with it.
+                                    for (idx , reason) in nogo_reasons.iter().enumerate() {
+                                        li { key: "{idx}", "{reason}" }
                                     }
                                 }
                             }

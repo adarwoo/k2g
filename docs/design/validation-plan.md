@@ -118,8 +118,12 @@ The newest capability, and the one with a depth *tolerance* rather than a depth.
 
 | # | Case | How | Expect |
 |---|---|---|---|
-| E1 | Tab count and width | Four tabs, 2 mm | Four bridges, longest side favoured, about 2 mm each **bench**, measured |
+| E1 | Tab count and width | Four tabs, 2 mm | Four bridges, longest side favoured, **measuring 2 mm on the board** — not 2 mm minus the cutter. The regression for a board that came off its tabs mid-cut **bench**, measured |
+| E1a | The gap is wider than the tab | E1, in Job → Code | The gap between consecutive outline spans is the tab **plus the kerf** — 4 mm of contour for a 2 mm tab behind a 2 mm cutter **read** |
 | E2 | Mouse bites | Enable on E1 | Perforated tabs that snap cleanly and file to nothing **bench** |
+| E2a | A drill of board everywhere | E2 in 3D, and on the board | One drill diameter between holes **and** between the end holes and where each span stops. Nothing within half a drill of the cut **read** + **bench** |
+| E2b | A tab too narrow is left whole | 2 mm tab with a 0.8 mm bite drill | The tab comes out solid and the step note names the 2.4 mm it would have needed. Never perforated to nothing **read** |
+| E2c | Bites survive the whole cut | E2 with a finishing allowance set | The board is still attached after the roughing pass *and* the finishing pass, and snaps out by hand afterwards **bench** |
 | E3 | No retention | Mode none, taped stock | One pass, part free **bench**, only with hold-down |
 | E4 | A cutout holds its slug | A 20 mm opening | The slug is held by one tab, not thrown **bench** |
 | E5 | Corner relief | A cutout with square internal corners | Corners drilled tangent, never cutting past the drawing **read** + **bench** |
@@ -143,6 +147,28 @@ The newest capability, and the one with a depth *tolerance* rather than a depth.
 | F3 | The drill map matches KiCad | Any board | Counts and positions match the KiCad drill table **read** |
 | F4 | Buried vias are refused | A board with one | An explicit error, not silence **read** |
 | F5 | Modal cycle | One cycle per hole, then a modal template | Both forms drill identically **bench** |
+
+## F½. The Machining view
+
+Cheap to check and easy to break, because the two halves are wired together by index.
+
+| # | Case | How | Expect |
+|---|---|---|---|
+| FA1 | The divider moves both panes | Drag it up and down | The canvas resizes as it moves — its `ResizeObserver` follows — and the op list takes the rest **read** |
+| FA2 | Each pane scrolls on its own | A step with several tool blocks | The op list scrolls inside its own pane; the page does not scroll as one, and the 3D view never leaves the screen **read** |
+| FA3 | The divider is remembered | Drag it, restart | It reopens where it was left **read** |
+| FA4 | Neither pane can be closed | Drag the divider hard to each end | The 3D pane stops at its floor; the list keeps a header and a row or two whatever the window height **read** |
+| FA5 | A selected op is findable | Click an op row on a drilling step | That hole alone is drawn heavy and magenta, over the top of everything, visible through the board from behind **read** |
+| FA6 | Selection is a toggle | Click the selected row again | The highlight clears **read** |
+| FA7 | The camera does not move | Click through several rows | The view stays exactly where it was put — the point of highlighting rather than framing, and `5562b12`'s rule **read** |
+| FA8 | A stale selection clears | Select an op, then switch step | Nothing is highlighted; in particular not whatever op inherited the index **read** |
+| FA9 | A hidden tool stays hidden | Select an op, then untick its tool in the legend | The highlight goes with the trace. Switching a tool off must not be overridden by a selection **read** |
+| FA10 | The list is not silently truncated | A board past 500 ops on one tool | The `+N more` row says how many are not listed **read** |
+| FA11 | The arrows walk the step | Click an op, then hold ↓ | The selection and the highlight advance one op at a time, in the order the machine runs them — the sequence unfolding on the canvas **read** |
+| FA12 | …across tool changes | Hold ↓ past the end of a tool block | It carries on into the next block's first op rather than stopping at the tool change **read** |
+| FA13 | The row follows | Hold ↓ until the selection leaves the visible list | The list scrolls to keep the selected row in view, and only as far as it must **read** |
+| FA14 | The ends hold | ↓ on the last op, ↑ on the first | The selection stays put; it must not clear at either end **read** |
+| FA15 | The arrows do not fight the view keys | Press 0–3 while an op is selected | The camera commands still work and the selection is unchanged **read** |
 
 ## G. Program output and dialects
 

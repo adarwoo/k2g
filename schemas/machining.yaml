@@ -167,7 +167,12 @@ $defs:
         default: 4
         x-show-when: { mode: [tabs] }
       width:
-        description: Length of contour each tab leaves uncut.
+        description: >-
+          How much board each tab leaves standing. The **material**, not the gap
+          between the two cuts: the channel is a whole kerf wider than this,
+          because the cutter takes half of one out of each end of the tab as it
+          stops. So a 2mm tab behind a 2mm cutter opens a 4mm gap in the
+          toolpath and leaves 2mm of board in the middle of it.
         $ref: "units.yaml#/$defs/size"
         default: 2.0mm
         x-show-when: { mode: [tabs] }
@@ -176,6 +181,11 @@ $defs:
           Perforate each tab with a row of small drills so it snaps cleanly and
           leaves a much smaller nib than a solid tab. The holes are drilled while
           the board is still whole.
+
+          Spaced a drill's width apart, and kept a drill's width clear of the cut
+          at each end — so a tab needs three times the drill diameter before it
+          can take even one hole. A tab narrower than that is left solid and the
+          step says so.
         type: boolean
         default: false
         x-show-when: { mode: [tabs] }

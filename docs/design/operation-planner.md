@@ -291,6 +291,35 @@ finish — so the allowance is dropped, the cut is made to size in one pass, and
 so in its notes. A cutout too tight to stand the cutter one allowance further in is dropped
 the same way: the opening is still cut to its drawn size, only the second pass is missing.
 
+### 5.3½ A tab is material, not a gap
+
+`retention.width` is **how much board the tab leaves standing**, and the gap in the toolpath
+is a whole kerf wider than it. A span stops the tool *centre* at the tab's edge, so the
+cutter has already removed half a kerf beyond it — from both sides — and the bridge that
+survives is `tab_width − kerf` unless the gap pays for it.
+
+Nothing paid for it. At the schema's own defaults, a 2 mm tab and the 2 mm edge kerf, that
+left **nothing at all**: the board was free the moment the roughing pass closed the loop.
+`cut_spans` and `distribute_tabs` now take the cutter and open each gap to
+`tab_width + kerf`, so a tab is worth what it says. It is the opening's own cutter for an
+interior cutout, since those are chosen by fit rather than by the edge kerf.
+
+The compensation is **along** the path. The finishing allowance (§5.3) widens the channel
+*across* it, and both passes stop at the same anchor points, so each leaves the same bridge
+and their union is that bridge — the kerf alone is the right number.
+
+**Mouse bites follow one rule: a drill's width of board between a hole and the next thing.**
+Between two holes, and between the outermost holes and the cut at each end. So the pitch is
+`2D` and `n` holes need `D·(2n + 1)` of bridge, giving `n = floor((B/D − 1) / 2)`; the run is
+centred, which leaves the two end webs equal and at least the diameter they are owed. A
+bridge that cannot carry one hole is left **solid** and the step says so, naming the `3 × D`
+it would have needed — a solid tab is a working tab, one to cut rather than snap, where a
+bridge perforated past what it can carry is a board on the floor. The old layout inset the
+first hole by half a *pitch*, putting the thinnest web exactly where the cut arrives, and
+measured across the tab as *requested* — so on a real board most holes were drilled into
+material the router was about to remove and the one that landed in the bridge sat dead
+centre.
+
 ### 5.4 The isolation width chooses the V-bit, through the copper
 
 A V-bit cuts as wide as it is deep, and depth here is measured from the **board surface** —

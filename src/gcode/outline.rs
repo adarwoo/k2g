@@ -29,6 +29,23 @@ use crate::gcode::plan::Point;
 /// right up to it would leave a whisker rather than something to snap.
 const MIN_TAB_MM: f64 = 0.05;
 
+/// How much of the contour one tab of `tab_width_mm` costs, cut by a `kerf_mm` cutter.
+///
+/// **A tab is the material left standing, not the gap between two tool positions.** The
+/// cutter is a disc of `kerf/2`, so a span that stops its *centre* at the tab's edge has
+/// already removed half a kerf beyond it — and the same again from the other side. The
+/// bridge that survives is therefore `tab_width − kerf` unless the gap is opened by a
+/// whole kerf to pay for it.
+///
+/// Nothing used to pay for it. At the schema's own defaults — a 2 mm tab and the 2 mm edge
+/// kerf — that left **nothing at all**, and a board came off its tabs during the routing
+/// pass with every mouse bite drilled into material the router was about to remove anyway.
+/// The setting said 2 mm, the board had 0 mm, and no view or note anywhere showed the
+/// difference.
+fn tab_footprint_mm(tab_width_mm: f64, kerf_mm: f64) -> f64 {
+    tab_width_mm + kerf_mm.max(0.0)
+}
+
 /// Clear space, as a multiple of the tab width, that must separate a tab from a corner
 /// and from the next tab.
 ///
@@ -54,16 +71,20 @@ pub struct TabAnchor {
     pub point: (f64, f64),
 }
 
-/// How many tabs a segment of `length_mm` can hold at `tab_width_mm`.
+/// How many tabs a segment of `length_mm` can hold, each costing `footprint_mm` of contour.
 ///
-/// `k` tabs need `k` widths of material plus `k + 1` clear gaps between them and the two
-/// corners, so `W(4k + 3) ≤ L` at the default clearance. A segment shorter than seven tab
-/// widths holds none — which is the right answer for the short side of a narrow board.
-fn segment_capacity(length_mm: f64, tab_width_mm: f64) -> usize {
-    if tab_width_mm <= 0.0 {
+/// `k` tabs need `k` footprints plus `k + 1` clear gaps between them and the two corners, so
+/// `W(4k + 3) ≤ L` at the default clearance. A segment shorter than seven footprints holds
+/// none — which is the right answer for the short side of a narrow board.
+///
+/// The **footprint**, not the tab width: what a tab costs the side it sits on includes the
+/// kerf the cut takes out of it, and measuring in bare widths let two tabs be placed close
+/// enough that the span between them was shorter than the cutter that had to run it.
+fn segment_capacity(length_mm: f64, footprint_mm: f64) -> usize {
+    if footprint_mm <= 0.0 {
         return 0;
     }
-    let k = (length_mm / tab_width_mm - TAB_CLEARANCE_WIDTHS) / (1.0 + TAB_CLEARANCE_WIDTHS);
+    let k = (length_mm / footprint_mm - TAB_CLEARANCE_WIDTHS) / (1.0 + TAB_CLEARANCE_WIDTHS);
     if k < 1.0 {
         0
     } else {
@@ -99,16 +120,18 @@ pub fn distribute_tabs(
     segments: &[(f64, f64, f64, f64)],
     count: usize,
     tab_width_mm: f64,
+    kerf_mm: f64,
 ) -> Vec<TabAnchor> {
     if count == 0 || segments.is_empty() || tab_width_mm < MIN_TAB_MM {
         return Vec::new();
     }
+    let footprint = tab_footprint_mm(tab_width_mm, kerf_mm);
 
     let length =
         |&(x0, y0, x1, y1): &(f64, f64, f64, f64)| ((x1 - x0).powi(2) + (y1 - y0).powi(2)).sqrt();
     let capacity: Vec<usize> = segments
         .iter()
-        .map(|s| segment_capacity(length(s), tab_width_mm))
+        .map(|s| segment_capacity(length(s), footprint))
         .collect();
 
     // Longest first; ties on the lower index so the result is a total function of the
@@ -354,8 +377,13 @@ pub fn tab_positions(placed: &[f64], count: usize) -> Vec<f64> {
     positions
 }
 
-/// Splits a loop into the spans the cutter travels, leaving a `tab_width_mm` gap centred
-/// on each tab.
+/// Splits a loop into the spans the cutter travels, leaving `tab_width_mm` of **material**
+/// standing at each tab.
+///
+/// Material, not a gap between two tool positions — the gap is a whole kerf wider than the
+/// tab, because the cutter eats half of one past each end. `kerf_mm` is the diameter of the
+/// cutter that will run these spans; see [`tab_footprint_mm`] for what it buys and for the
+/// board that came off its tabs before it was paid.
 ///
 /// With no tabs the result is the whole loop as one closed span — correct for a board held
 /// down some other way (double-sided tape, a vacuum bed), which is what `retention: none`
@@ -366,8 +394,16 @@ pub fn tab_positions(placed: &[f64], count: usize) -> Vec<f64> {
 /// together exceed the loop leave nothing to cut (an empty result, which the caller reports
 /// rather than emitting a program that frees nothing), and a tab narrower than
 /// [`MIN_TAB_MM`] is dropped as a rounding artefact.
-pub fn cut_spans(loop_: &Loop, tabs: &[f64], tab_width_mm: f64) -> Vec<Vec<Point>> {
+pub fn cut_spans(
+    loop_: &Loop,
+    tabs: &[f64],
+    tab_width_mm: f64,
+    kerf_mm: f64,
+) -> Vec<Vec<Point>> {
     let total = loop_.length_mm();
+    // What the tab actually costs the contour: its own width, plus the kerf the cutter
+    // takes out of it from the two spans either side. See [`tab_footprint_mm`].
+    let footprint = tab_footprint_mm(tab_width_mm, kerf_mm);
     let tabs: Vec<f64> = tab_positions(tabs, 0)
         .into_iter()
         .filter(|_| tab_width_mm >= MIN_TAB_MM)
@@ -384,11 +420,11 @@ pub fn cut_spans(loop_: &Loop, tabs: &[f64], tab_width_mm: f64) -> Vec<Vec<Point
         // program that drilled a single hole where an outline should have been.
         return vec![loop_.points.clone()];
     }
-    if tab_width_mm * tabs.len() as f64 >= total {
+    if footprint * tabs.len() as f64 >= total {
         return Vec::new();
     }
 
-    let half = tab_width_mm / 2.0;
+    let half = footprint / 2.0;
     tabs.iter()
         .enumerate()
         .map(|(i, &tab)| {
@@ -399,26 +435,72 @@ pub fn cut_spans(loop_: &Loop, tabs: &[f64], tab_width_mm: f64) -> Vec<Vec<Point
         .collect()
 }
 
-/// Pitch of a mouse bite's holes, as a multiple of the drill diameter.
+/// Material left between one mouse-bite hole and the next thing along, as a multiple of the
+/// drill diameter.
 ///
-/// Twice the diameter leaves about half the tab as web — weak enough to snap by hand,
-/// strong enough to hold through the cut. It is the usual 0.5 mm-on-1 mm proportion.
+/// **One rule, applied everywhere:** a drill's width of board between two holes, and the
+/// same between the outermost holes and the routed edge either side. So the pitch is twice
+/// the diameter — a hole, then a hole's worth of web — and the run of holes is inset one
+/// and a half diameters from each end of the bridge.
+///
+/// It has to hold at the ends as much as in the middle, and that is what was missing. The
+/// old layout inset the first hole by half a *pitch*, leaving half a drill of board between
+/// it and the cut where every other gap had a whole one; and it measured across the tab as
+/// *requested* rather than the tab that survives the cutter, so on a real board most of the
+/// holes were drilled into material the router was about to remove and the one that landed
+/// in the bridge sat dead centre — a hole through the middle of the only thing holding the
+/// part.
 ///
 /// **Not a setting.** How many holes perforate a tab is not a preference; it follows from
-/// the tab width and the drill, and asking the operator to supply a count is asking them
-/// to re-derive this. (There *was* a `bite_holes` field; it is gone.)
-const MOUSE_BITE_PITCH_DIAMETERS: f64 = 2.0;
+/// the bridge and the drill, and asking the operator to supply a count is asking them to
+/// re-derive this. (There *was* a `bite_holes` field; it is gone.)
+const MOUSE_BITE_WEB_DIAMETERS: f64 = 1.0;
+
+/// The bridge a mouse bite of `n` holes needs, in millimetres.
+///
+/// `n` holes, `n − 1` webs between them and one at each end: `D·(2n + 1)` at a web of one
+/// diameter. Inverted by [`mouse_bite_holes`].
+pub fn mouse_bite_span_mm(holes: usize, diameter_mm: f64) -> f64 {
+    let web = MOUSE_BITE_WEB_DIAMETERS * diameter_mm;
+    holes as f64 * diameter_mm + (holes + 1) as f64 * web
+}
+
+/// How many holes fit in `bridge_mm` of material at `diameter_mm`, honouring the web at
+/// both ends as well as between them.
+///
+/// Zero when the bridge cannot take even one — which is a real answer and not a failure.
+/// The caller leaves the tab solid and says so: a solid tab is a working tab, just one to
+/// cut rather than snap, where a bridge perforated past what it can carry is a board on the
+/// floor. The old floor of two holes is gone with the clearances it could not honour.
+pub fn mouse_bite_holes(bridge_mm: f64, diameter_mm: f64) -> usize {
+    if bridge_mm <= 0.0 || diameter_mm <= 0.0 {
+        return 0;
+    }
+    // Inverting `D(2n + 1) <= B` at a one-diameter web. A shade of tolerance, so a bridge
+    // that is exactly three diameters takes its one hole rather than losing it to the last
+    // bit of a floating-point division.
+    let n = (bridge_mm / diameter_mm - MOUSE_BITE_WEB_DIAMETERS + 1e-9)
+        / (1.0 + MOUSE_BITE_WEB_DIAMETERS);
+    if n < 1.0 {
+        0
+    } else {
+        n.floor() as usize
+    }
+}
 
 /// The drill centres for one mouse-bite tab, on the loop, in machine coordinates.
 ///
 /// A mouse bite replaces the snap-and-file of a solid tab with a perforated line that
 /// breaks cleanly and leaves a much smaller nib. The holes sit **on the offset path**, so
-/// the perforation runs down the middle of what the tab would have been — the first and
-/// last are inset half a pitch from the tab's edges, so no hole breaks into the routed
-/// span on either side.
+/// the perforation runs down the middle of the channel the router cuts.
 ///
-/// The count comes from the tab width at [`MOUSE_BITE_PITCH_DIAMETERS`], floored at two:
-/// a single hole is a stress riser, not a perforation.
+/// `tab_width_mm` is the **material left standing**, which is what the holes have to fit
+/// inside — not the gap between the two spans, which is a whole kerf wider (see
+/// [`tab_footprint_mm`]). The run is centred in it at a pitch of two diameters, which puts
+/// exactly one diameter of board between each pair and at least one at each end.
+///
+/// Empty when the bridge cannot carry a single hole at those clearances. That is the
+/// caller's signal to leave the tab solid, not to squeeze one in anyway.
 pub fn mouse_bite_centres(
     loop_: &Loop,
     tab: f64,
@@ -429,12 +511,19 @@ pub fn mouse_bite_centres(
     if tab_width_mm < MIN_TAB_MM || diameter <= 0.0 {
         return Vec::new();
     }
-    let holes = ((tab_width_mm / (MOUSE_BITE_PITCH_DIAMETERS * diameter)).round() as usize).max(2);
+    let holes = mouse_bite_holes(tab_width_mm, diameter);
+    if holes == 0 {
+        return Vec::new();
+    }
 
     let total = loop_.length_mm();
     let centre = tab.rem_euclid(1.0) * total;
-    let pitch = tab_width_mm / holes as f64;
-    let first = centre - tab_width_mm / 2.0 + pitch / 2.0;
+    // Two diameters between centres: one of hole, one of web.
+    let pitch = diameter * (1.0 + MOUSE_BITE_WEB_DIAMETERS);
+    // Centred in the bridge rather than measured from one end, so the two end webs come out
+    // equal — and at least the one diameter they are owed, since the count was chosen to
+    // leave it. Any slack the division left over is shared between them.
+    let first = centre - pitch * (holes - 1) as f64 / 2.0;
     (0..holes)
         .map(|i| loop_.point_at(first + pitch * i as f64))
         .collect()
@@ -660,7 +749,7 @@ mod tests {
     #[test]
     fn no_tabs_cuts_one_closed_loop() {
         let r = rectangle();
-        let spans = cut_spans(&r, &[], 2.0);
+        let spans = cut_spans(&r, &[], 2.0, 0.0);
         assert_eq!(spans.len(), 1);
         let span = &spans[0];
         assert_eq!(span[0], span[span.len() - 1], "the pass closes on itself");
@@ -670,27 +759,56 @@ mod tests {
         assert_eq!(span.len(), 5, "four corners, the first repeated to close");
     }
 
-    /// Every tab is a gap of exactly the asked-for width, and the spans between them cover
-    /// the rest of the loop — nothing cut twice, nothing left joined that should not be.
+    /// **The board that came off its tabs.** A tab leaves the material it asks for, behind
+    /// whatever cutter is running the spans.
+    ///
+    /// The gap between two spans is a whole kerf wider than the tab, because the cutter
+    /// stops its *centre* at the span's end and takes half a kerf beyond it — from both
+    /// sides. This test used to assert the gap was the tab width, which is the same thing
+    /// as asserting the bridge is `tab − kerf`: at the schema's own defaults, a 2 mm tab
+    /// and the 2 mm edge kerf, that is nothing at all. The number it pinned was the bug.
     #[test]
-    fn tabs_leave_gaps_of_the_asked_for_width() {
+    fn a_tab_leaves_its_width_of_material_behind_the_cutter() {
         let r = rectangle();
         let tabs = vec![0.0, 0.25, 0.5, 0.75];
-        let spans = cut_spans(&r, &tabs, 2.0);
-        assert_eq!(spans.len(), 4, "four tabs cut the loop into four spans");
-
         let span_length =
             |span: &Vec<Point>| -> f64 { span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum() };
+
+        // The reported case exactly: 2 mm of tab asked for, 2 mm of cutter.
+        let spans = cut_spans(&r, &tabs, 2.0, 2.0);
+        assert_eq!(spans.len(), 4, "four tabs cut the loop into four spans");
+
         let cut: f64 = spans.iter().map(span_length).sum();
         assert!(
-            (cut - (120.0 - 4.0 * 2.0)).abs() < 1e-6,
-            "cut length is the loop less the four 2 mm tabs, got {cut}"
+            (cut - (120.0 - 4.0 * 4.0)).abs() < 1e-6,
+            "each gap is the 2 mm tab plus the 2 mm kerf that pays for it, got {cut} mm cut"
         );
 
-        // Each span begins 1 mm past its tab centre and ends 1 mm before the next.
-        assert!((spans[0][0].distance_mm(&r.point_at(1.0))).abs() < 1e-6);
+        // The first span starts 2 mm past the tab centre — a millimetre of tab and a
+        // millimetre of cutter radius — so the cut begins exactly at the tab's edge.
+        assert!((spans[0][0].distance_mm(&r.point_at(2.0))).abs() < 1e-6);
         let first_end = spans[0][spans[0].len() - 1];
-        assert!((first_end.distance_mm(&r.point_at(29.0))).abs() < 1e-6);
+        assert!((first_end.distance_mm(&r.point_at(28.0))).abs() < 1e-6);
+    }
+
+    /// The material left standing is the setting, whatever the cutter — which is the whole
+    /// claim, so it is checked across a range of cutters rather than at one.
+    #[test]
+    fn the_bridge_is_the_setting_for_any_cutter() {
+        let r = rectangle();
+        let span_length =
+            |span: &Vec<Point>| -> f64 { span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum() };
+
+        for kerf in [0.0, 0.8, 1.0, 2.0, 3.175] {
+            let spans = cut_spans(&r, &[0.0, 0.5], 2.0, kerf);
+            let cut: f64 = spans.iter().map(span_length).sum();
+            // Two gaps, each the tab plus the kerf; the material left is the two tabs.
+            let bridge = (120.0 - cut) / 2.0 - kerf;
+            assert!(
+                (bridge - 2.0).abs() < 1e-6,
+                "a 2 mm tab behind a {kerf} mm cutter left {bridge} mm of board",
+            );
+        }
     }
 
     /// A span that crosses a corner keeps the corner: the cutter must turn there, and a
@@ -699,7 +817,7 @@ mod tests {
     fn a_span_across_a_corner_keeps_the_corner() {
         let r = rectangle();
         // One tab at the start, so the single span runs 1 → 119 mm, over three corners.
-        let spans = cut_spans(&r, &[0.0], 2.0);
+        let spans = cut_spans(&r, &[0.0], 2.0, 0.0);
         assert_eq!(spans.len(), 1);
         for corner in [(40.0, 0.0), (40.0, 20.0), (0.0, 20.0)] {
             assert!(
@@ -724,7 +842,7 @@ mod tests {
             |span: &Vec<Point>| -> f64 { span.windows(2).map(|w| w[0].distance_mm(&w[1])).sum() };
 
         // One 2 mm tab at the start: the span runs 1 → 119 mm, across three corners.
-        let spans = cut_spans(&r, &[0.0], 2.0);
+        let spans = cut_spans(&r, &[0.0], 2.0, 0.0);
         assert_eq!(spans.len(), 1);
         assert!(
             (length(&spans[0]) - 118.0).abs() < 1e-6,
@@ -746,7 +864,7 @@ mod tests {
         }
 
         // A span that wraps past the loop's own start point is the same story.
-        let wrapped = cut_spans(&r, &[0.5], 2.0);
+        let wrapped = cut_spans(&r, &[0.5], 2.0, 0.0);
         assert_eq!(wrapped.len(), 1);
         assert!(
             (length(&wrapped[0]) - 118.0).abs() < 1e-6,
@@ -759,7 +877,7 @@ mod tests {
     /// caller reports than a program that spins the tool and frees nothing.
     #[test]
     fn tabs_that_swallow_the_loop_cut_nothing() {
-        assert!(cut_spans(&rectangle(), &[0.0, 0.5], 60.0).is_empty());
+        assert!(cut_spans(&rectangle(), &[0.0, 0.5], 60.0, 0.0).is_empty());
     }
 
     /// Absent an operator placement, tabs are spread evenly from the loop start.
@@ -807,7 +925,7 @@ mod tests {
     fn tabs_are_shared_out_by_segment_longest_first() {
         let t = triangle();
         // Sides are 90, ~91.4, ~91.9 — so segment 0 is the shortest.
-        let five = distribute_tabs(&t, 5, 2.0);
+        let five = distribute_tabs(&t, 5, 2.0, 0.0);
         assert_eq!(five.len(), 5);
         assert_eq!(
             per_segment(&five, 3),
@@ -815,14 +933,14 @@ mod tests {
             "5 over 3 → 2, 2, 1 by length"
         );
 
-        let two = distribute_tabs(&t, 2, 2.0);
+        let two = distribute_tabs(&t, 2, 2.0, 0.0);
         assert_eq!(
             per_segment(&two, 3),
             vec![0, 1, 1],
             "2 over 3 → one each on the longest two"
         );
 
-        let three = distribute_tabs(&t, 3, 2.0);
+        let three = distribute_tabs(&t, 3, 2.0, 0.0);
         assert_eq!(
             per_segment(&three, 3),
             vec![1, 1, 1],
@@ -834,7 +952,7 @@ mod tests {
     /// two corners — the spacing the clearance rule is stated against.
     #[test]
     fn tabs_are_evenly_spaced_within_a_segment_including_its_corners() {
-        let single = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 1, 2.0);
+        let single = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 1, 2.0, 0.0);
         assert_eq!(single.len(), 1);
         assert!(
             (single[0].t - 0.5).abs() < 1e-9,
@@ -842,7 +960,7 @@ mod tests {
         );
         assert!((single[0].point.0 - 50.0).abs() < 1e-9);
 
-        let three = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 3, 2.0);
+        let three = distribute_tabs(&[(0.0, 0.0, 100.0, 0.0)], 3, 2.0, 0.0);
         let ts: Vec<f64> = three.iter().map(|a| a.t).collect();
         for (got, want) in ts.iter().zip([0.25, 0.5, 0.75]) {
             assert!((got - want).abs() < 1e-9, "even quarters, got {ts:?}");
@@ -857,7 +975,7 @@ mod tests {
         // Capacity of a 100 mm side: (100/2 − 3) / 4 = 11.75 → 11 tabs.
         let seg = [(0.0, 0.0, 100.0, 0.0)];
         assert_eq!(segment_capacity(100.0, width), 11);
-        let anchors = distribute_tabs(&seg, 11, width);
+        let anchors = distribute_tabs(&seg, 11, width, 0.0);
         assert_eq!(anchors.len(), 11);
 
         let mut edges: Vec<(f64, f64)> = anchors
@@ -894,7 +1012,7 @@ mod tests {
             0,
             "a 5 mm stub holds no 2 mm tab"
         );
-        let anchors = distribute_tabs(&segments, 4, 2.0);
+        let anchors = distribute_tabs(&segments, 4, 2.0, 0.0);
         assert_eq!(anchors.len(), 4, "none are lost");
         let counts = per_segment(&anchors, 3);
         assert_eq!(counts[1], 0, "the stub gets none");
@@ -912,16 +1030,16 @@ mod tests {
             (10.0, 10.0, 0.0, 10.0),
             (0.0, 10.0, 0.0, 0.0),
         ];
-        assert!(distribute_tabs(&square, 4, 3.0).is_empty());
+        assert!(distribute_tabs(&square, 4, 3.0, 0.0).is_empty());
         // The same square holds one 1 mm tab per side.
-        assert_eq!(distribute_tabs(&square, 4, 1.0).len(), 4);
+        assert_eq!(distribute_tabs(&square, 4, 1.0, 0.0).len(), 4);
     }
 
     /// Anchors come back in contour order, so a job keying per-tab offsets to their
     /// position in this list keeps the same tab when the count does not change.
     #[test]
     fn anchors_are_returned_in_contour_order() {
-        let anchors = distribute_tabs(&triangle(), 5, 2.0);
+        let anchors = distribute_tabs(&triangle(), 5, 2.0, 0.0);
         let keys: Vec<(usize, f64)> = anchors.iter().map(|a| (a.segment, a.t)).collect();
         let mut sorted = keys.clone();
         sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.partial_cmp(&b.1).unwrap()));
@@ -932,56 +1050,131 @@ mod tests {
     #[test]
     fn degenerate_distributions_are_empty() {
         assert!(
-            distribute_tabs(&triangle(), 0, 2.0).is_empty(),
+            distribute_tabs(&triangle(), 0, 2.0, 0.0).is_empty(),
             "no tabs asked for"
         );
         assert!(
-            distribute_tabs(&[], 4, 2.0).is_empty(),
+            distribute_tabs(&[], 4, 2.0, 0.0).is_empty(),
             "no segments to place them on"
         );
         assert!(
-            distribute_tabs(&triangle(), 4, 0.0).is_empty(),
+            distribute_tabs(&triangle(), 4, 0.0, 0.0).is_empty(),
             "a zero-width tab is not a tab"
         );
     }
 
-    /// Mouse-bite holes sit inside the tab, evenly pitched, without breaking into the
-    /// routed spans on either side.
+    /// **One rule everywhere: a drill's width of board between a hole and the next thing.**
+    ///
+    /// Between two holes, and between the outermost holes and the cut at each end. It was
+    /// the ends that failed: the old layout inset the first hole by half a *pitch*, which
+    /// left half a drill of board where every gap in the middle had a whole one — the
+    /// weakest point of the tab put exactly where the cut arrives.
     #[test]
-    fn mouse_bites_perforate_the_tab_without_reaching_its_edges() {
+    fn bite_holes_keep_a_drill_of_board_between_them_and_from_the_cut() {
         let r = rectangle();
-        // A 3 mm tab with a 0.5 mm drill: 3 / (2 × 0.5) = 3 holes, pitched 1 mm.
-        let centres = mouse_bite_centres(&r, 0.0, 3.0, Length::from_mm(0.5));
-        assert_eq!(
-            centres.len(),
-            3,
-            "the count comes from the tab and the drill"
-        );
-        // Tab spans 118.5 → 1.5 mm, so the holes sit at 119, 120 and 1 mm.
-        for (centre, distance) in centres.iter().zip([119.0, 120.0, 1.0]) {
+        let drill = 0.5;
+        let bridge = 4.0;
+        // The tab is centred on the loop's start, so it runs 118 → 2 mm.
+        let centres = mouse_bite_centres(&r, 0.0, bridge, Length::from_mm(drill));
+        assert!(!centres.is_empty(), "a 4 mm bridge holds bites at 0.5 mm");
+
+        // Where each hole sits along the loop, unwrapped around the seam.
+        let along: Vec<f64> = centres
+            .iter()
+            .map(|c| {
+                let at = r.nearest_fraction(*c) * 120.0;
+                if at > 60.0 { at - 120.0 } else { at }
+            })
+            .collect();
+
+        for pair in along.windows(2) {
+            let web = (pair[1] - pair[0]) - drill;
             assert!(
-                centre.distance_mm(&r.point_at(distance)) < 1e-6,
-                "hole should be at {distance} mm, got {:?}",
-                at(*centre)
+                (web - drill).abs() < 1e-6,
+                "exactly one drill of board between holes, got {web} mm at {along:?}",
             );
+        }
+
+        // The bridge runs from -2 to +2 about the tab centre; the end webs are what is left
+        // between the outermost hole edges and those edges.
+        let head = (along[0] - drill / 2.0) - (-bridge / 2.0);
+        let tail = (bridge / 2.0) - (along[along.len() - 1] + drill / 2.0);
+        assert!(
+            head >= drill - 1e-6 && tail >= drill - 1e-6,
+            "at least a drill of board to the cut at each end, got {head} and {tail} at {along:?}",
+        );
+        assert!(
+            (head - tail).abs() < 1e-6,
+            "and the run is centred, so the two ends match: {head} against {tail}",
+        );
+    }
+
+    /// The count follows the bridge and the drill: `n` holes need `D·(2n + 1)`, so a bridge
+    /// buys `floor((B/D − 1) / 2)` of them.
+    #[test]
+    fn the_bite_count_is_what_the_bridge_can_carry() {
+        let r = rectangle();
+        let holes = |bridge, drill| mouse_bite_centres(&r, 0.25, bridge, Length::from_mm(drill)).len();
+
+        assert_eq!(holes(1.5, 0.5), 1, "three diameters is exactly one hole");
+        assert_eq!(holes(2.5, 0.5), 2, "five is two");
+        assert_eq!(holes(4.0, 0.5), 3, "and the count grows with the bridge");
+        assert_eq!(holes(4.0, 1.0), 1, "a bigger drill takes fewer");
+        assert_eq!(holes(6.0, 0.5), 5);
+
+        // The closed form the layout is derived from, swept rather than spot-checked.
+        for bridge in [1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 8.0, 12.0] {
+            for drill in [0.3, 0.5, 0.8, 1.0] {
+                let want = mouse_bite_holes(bridge, drill);
+                assert_eq!(
+                    holes(bridge, drill),
+                    want,
+                    "bridge {bridge} at drill {drill}",
+                );
+                if want > 0 {
+                    assert!(
+                        mouse_bite_span_mm(want, drill) <= bridge + 1e-9,
+                        "{want} holes claim {} mm of a {bridge} mm bridge",
+                        mouse_bite_span_mm(want, drill),
+                    );
+                    assert!(
+                        mouse_bite_span_mm(want + 1, drill) > bridge + 1e-9,
+                        "one more would have fitted, so {want} is not the count",
+                    );
+                }
+            }
         }
     }
 
-    /// The perforation count follows the tab width and the drill, and never drops to one
-    /// — a single hole is a stress riser, not a perforation.
+    /// **A bridge too narrow is left whole, not perforated anyway.**
+    ///
+    /// The old rule floored the count at two on the argument that a single hole is a stress
+    /// riser rather than a perforation. That is true, and it is not the question: two holes
+    /// forced into a bridge with no room for them is a tab that does not hold, which is how
+    /// a board ended up on the floor. A solid tab still works — it is one to cut rather
+    /// than snap — so the count is whatever fits, and none is an answer.
     #[test]
-    fn the_mouse_bite_count_is_derived_and_never_below_two() {
+    fn a_bridge_that_cannot_take_a_hole_gets_none() {
         let r = rectangle();
-        let holes =
-            |width, drill| mouse_bite_centres(&r, 0.25, width, Length::from_mm(drill)).len();
-        assert_eq!(holes(3.0, 0.5), 3);
-        assert_eq!(holes(6.0, 0.5), 6, "a wider tab takes more");
-        assert_eq!(holes(3.0, 1.0), 2, "a bigger drill takes fewer");
-        assert_eq!(holes(1.0, 1.0), 2, "floored at two, not rounded to one");
+
+        assert!(
+            mouse_bite_centres(&r, 0.0, 1.4, Length::from_mm(0.5)).is_empty(),
+            "under three diameters there is nowhere to put one",
+        );
+        assert_eq!(
+            mouse_bite_centres(&r, 0.0, 1.5, Length::from_mm(0.5)).len(),
+            1,
+            "and at exactly three, there is",
+        );
+        assert!(
+            mouse_bite_centres(&r, 0.0, 2.0, Length::from_mm(0.8)).is_empty(),
+            "the reported shape: a 2 mm tab is too narrow for a 0.8 mm drill",
+        );
         assert!(
             mouse_bite_centres(&r, 0.0, 3.0, Length::from_mm(0.0)).is_empty(),
-            "no drill"
+            "no drill",
         );
+        assert_eq!(mouse_bite_holes(0.0, 0.5), 0, "nor does a bridge of nothing");
     }
 
     /// A perfectly round slug must still get its tab.
@@ -1056,7 +1249,7 @@ mod tests {
             path.length_mm()
         );
         assert!(
-            !cut_spans(&path, &[tab.at], tab.width_mm).is_empty(),
+            !cut_spans(&path, &[tab.at], tab.width_mm, 0.0).is_empty(),
             "something is still cut"
         );
     }
@@ -1092,3 +1285,4 @@ mod tests {
         assert!(!narrow.mouse_bites, "a 1mm tab snaps on its own");
     }
 }
+
