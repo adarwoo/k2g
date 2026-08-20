@@ -805,20 +805,22 @@ fn plan_step(
     // The board outline. Planned before the blocks are built because its mouse bites are
     // *drilled*, and they have to join the drill phase — the board must still be whole
     // when they are made, or the perforation is cut into a board that is already loose.
+    let mut outline_rough: Vec<OutlineSpan> = Vec::new();
     let mut outline_spans: Vec<OutlineSpan> = Vec::new();
     if has_route {
         if raw.route_board.cuts_through() {
             match plan_outline_spans(ctx, raw, &routers, &placement, &mut drill_targets, &slots) {
-                Ok((spans, warnings)) => {
-                    notes.extend(warnings);
-                    if spans.is_empty() {
+                Ok(passes) => {
+                    notes.extend(passes.warnings);
+                    if passes.finish.is_empty() {
                         notes.push(
                             "The retaining tabs are wider than the outline they sit on, so \
                              nothing would be cut. Reduce the tab width or the tab count."
                                 .into(),
                         );
                     }
-                    outline_spans = spans;
+                    outline_rough = passes.rough;
+                    outline_spans = passes.finish;
                 }
                 Err(reason) => notes.push(reason),
             }
@@ -835,9 +837,10 @@ fn plan_step(
     // The interior openings, when the step claims them in their own right. Planned
     // before the blocks for the same reason the outline is: its corner relief and mouse
     // bites are drilled, and they belong to the drill phase.
-    let mut cutout_spans: std::collections::BTreeMap<String, Vec<OutlineSpan>> = Default::default();
+    let mut cutout_rough: SpansByRouter = Default::default();
+    let mut cutout_spans: SpansByRouter = Default::default();
     if raw.routes_cutouts() {
-        let (spans, warnings) = plan_cutout_spans(
+        let passes = plan_cutout_spans(
             ctx,
             raw,
             &routers,
@@ -846,8 +849,9 @@ fn plan_step(
             &slots,
             &setup,
         );
-        notes.extend(warnings);
-        cutout_spans = spans;
+        notes.extend(passes.warnings);
+        cutout_rough = passes.rough;
+        cutout_spans = passes.finish;
     }
 
     // The isolation pass, first of all the blocks. `Phase` is never read — block order is
@@ -887,11 +891,15 @@ fn plan_step(
                 ));
             }
             // The cutouts cut with this same tool ride in the same block, so a step that
-            // routes both with one cutter pays one tool change rather than two.
+            // routes both with one cutter pays one tool change rather than two. They join
+            // the **roughing** pass, which keeps them ahead of the perimeter's finishing
+            // cut and so keeps op-planner §4's "interior before perimeter" true.
+            let mut rough = outline_rough.clone();
+            rough.extend(cutout_rough.remove(outline_router).unwrap_or_default());
             let mut spans = outline_spans.clone();
             spans.extend(cutout_spans.remove(outline_router).unwrap_or_default());
             blocks.extend(plan_outline(
-                &spans,
+                &[&rough, &spans],
                 outline_router,
                 tool.diameter,
                 // Negative machine-Z depth (board top is Z0; op-planner §6).
@@ -922,7 +930,10 @@ fn plan_step(
             ));
         }
         blocks.extend(plan_outline(
-            spans,
+            &[
+                cutout_rough.get(router_id).map(Vec::as_slice).unwrap_or_default(),
+                spans,
+            ],
             router_id,
             tool.diameter,
             Length::from_mm(-z_bottom.as_mm()),
@@ -1000,10 +1011,15 @@ fn plan_step(
 ///    path, so a tab is the width asked for where the cutter actually passes.
 /// 4. **Perforate**, when the retention mode asks for mouse bites.
 ///
+/// 5. **Rough, then finish**, when the step leaves a finishing allowance: the same loop
+///    taken one allowance further onto the waste side and cut conventional, then the loop
+///    that makes the edge, cut climb. The two come back separately because they must reach
+///    the machine in that order — see [`plan_outline`].
+///
 /// Returns `Err` with an operator-facing reason when the outline cannot be cut at all.
 /// Per-contour shortfalls — a contour that vanishes under the kerf, tabs the sides have
-/// no room for — come back as warnings alongside the spans, because the rest of the
-/// outline is still worth cutting.
+/// no room for, an allowance that cannot be honoured — come back as warnings alongside the
+/// spans, because the rest of the outline is still worth cutting.
 /// How many net pairs a note names before it gives up and counts the rest.
 ///
 /// A board laid out to one clearance rule narrows in dozens of places at once — 89 on the
@@ -1162,6 +1178,12 @@ fn narrowing_notes(ctx: &AppCtx, narrowed: &[pcb::NarrowedPair]) -> Vec<String> 
 /// Both the corner relief and the mouse bites are drills, so they join the drill phase
 /// and are made while the board is still whole and still registered — `Phase::Drill`
 /// sorts before `Phase::Route`, so that ordering costs nothing here.
+///
+/// The step's finishing allowance applies here too, and for the same reason it does on the
+/// boundary — a wall is a wall. It comes back as a **second** map of spans, so the caller
+/// can put every roughing pass in front of every finishing one. The allowance is per
+/// cutout: the cutter was chosen to fit the opening as drawn, and an opening tight enough
+/// to only just admit it has no room to stand one allowance further in.
 #[allow(clippy::too_many_arguments)]
 fn plan_cutout_spans(
     ctx: &AppCtx,
@@ -1171,21 +1193,21 @@ fn plan_cutout_spans(
     drill_targets: &mut Vec<DrillTarget>,
     slots: &std::collections::BTreeMap<String, u8>,
     setup: &assigner::Setup,
-) -> (
-    std::collections::BTreeMap<String, Vec<OutlineSpan>>,
-    Vec<String>,
-) {
-    let mut by_router: std::collections::BTreeMap<String, Vec<OutlineSpan>> = Default::default();
+) -> Passes<SpansByRouter> {
+    let mut rough_by_router: SpansByRouter = Default::default();
+    let mut by_router: SpansByRouter = Default::default();
     let mut notes: Vec<String> = Vec::new();
 
     let Some(stitched) = ctx.stitched_board_data.as_ref() else {
-        return (by_router, notes);
+        return Passes { rough: rough_by_router, finish: by_router, warnings: notes };
     };
     let cfg = &raw.route_cutouts;
     let placed_tabs = with_appdata(|data| data.job_edge_tabs());
     let mut corners_skipped = 0usize;
     // Island tabs asked to be perforated that the rack holds no drill for.
     let mut unperforated = 0usize;
+    // Cutouts too tight to stand the cutter one allowance further in.
+    let mut too_tight = 0usize;
 
     // Numbered among the cutouts, as `job.yaml#/edge_tabs/index` means it.
     for (kind_index, (contour_index, contour)) in stitched
@@ -1202,20 +1224,63 @@ fn plan_cutout_spans(
             continue; // chosen when the routers were planned, but no longer in stock
         }
         let label = TabContour::Cutout.as_str();
-
-        let points: Vec<Point> = fit
-            .wall_path
-            .iter()
-            .map(|&(x, y)| {
-                placement.xy(&pcb::BoardPoint {
-                    x: Length::from_mm(x as f64 / 1e6),
-                    y: Length::from_mm(y as f64 / 1e6),
-                })
-            })
-            .collect();
-        let Some(path) = outline::Loop::new(&points) else {
+        let Some(router) = ctx.tools.iter().find(|t| &t.id == router_id) else {
             continue;
         };
+
+        let place = |path: &[(i64, i64)]| -> Vec<Point> {
+            path.iter()
+                .map(|&(x, y)| {
+                    placement.xy(&pcb::BoardPoint {
+                        x: Length::from_mm(x as f64 / 1e6),
+                        y: Length::from_mm(y as f64 / 1e6),
+                    })
+                })
+                .collect()
+        };
+        let points = place(&fit.wall_path);
+
+        // The wall loop as the fit produced it, no orientation forced — the loop the
+        // operator's stored tab nudges were measured along. See the same note on the
+        // boundary: a nudge is a signed distance, so it has to be resolved to a point
+        // before either pass turns the loop round.
+        let Some(native) = outline::Loop::new(&points) else {
+            continue;
+        };
+
+        // A slug this step does not hold is a slug the roughing pass cuts loose, so there
+        // is nothing left to finish against. An opening that leaves no slug at all — one
+        // nowhere wider than twice the cutter — is cleared entirely by the wall pass and
+        // has nothing to throw, so it takes its finishing pass like the boundary does.
+        let held = cfg.retain_island || fit.slugs.is_empty();
+        let (finishing_nm, note) = finishing_allowance(
+            ctx.unit_system,
+            raw.route_board.finishing,
+            (router.diameter.as_mm() * 1e6).round() as i64,
+            held,
+            "interior openings",
+        );
+        // One reason, however many openings share it: the config that produced it is one
+        // config, and a note per cutout would say the same sentence a dozen times.
+        if let Some(note) = note {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+
+        // Eroding the wall path by the allowance is exactly `erode(C, R + f)` — erosion
+        // composes — so the roughing loop costs one offset rather than a second `fit_cutout`
+        // over the whole opening. Empty means the cutter cannot stand that far in at all;
+        // more fragments than the wall path had means the allowance pinches the opening in
+        // two, and cutting both lobes frees neither. Either way the opening is cut to size
+        // in one pass rather than badly in two.
+        let rough = (finishing_nm > 0)
+            .then(|| pcb::offset_paths(&fit.wall_path, -(finishing_nm as f64)))
+            .filter(|fragments| fragments.len() == 1)
+            .and_then(|fragments| fragments.into_iter().next());
+        if finishing_nm > 0 && rough.is_none() {
+            too_tight += 1;
+        }
 
         // --- corner relief, before anything is cut ---
         if cfg.drill_sharp_corners {
@@ -1265,7 +1330,9 @@ fn plan_cutout_spans(
         }
 
         // --- the slug, and the tab that holds it ---
-        let mut tabs: Vec<(f64, f64, bool)> = Vec::new(); // (fraction, width, bites)
+        // Anchored as machine-space points, for the reason `tab_fractions` gives: the two
+        // passes run different loops, and only a point means the same bridge on both.
+        let mut tabs: Vec<(Point, f64, bool)> = Vec::new(); // (anchor, width, bites)
         if cfg.retain_island {
             for (k, slug) in fit.slugs.iter().enumerate() {
                 let perimeter_mm = pcb::path_perimeter_nm(slug) / 1e6;
@@ -1280,7 +1347,7 @@ fn plan_cutout_spans(
                     x: Length::from_mm(anchor.0),
                     y: Length::from_mm(anchor.1),
                 });
-                let Some(tab) = outline::island_tab(&path, perimeter_mm, anchor, cfg.tab_ratio)
+                let Some(tab) = outline::island_tab(&native, perimeter_mm, anchor, cfg.tab_ratio)
                 else {
                     continue;
                 };
@@ -1293,7 +1360,7 @@ fn plan_cutout_spans(
                     .map(|t| t.offset.as_mm())
                     .unwrap_or(0.0);
                 tabs.push((
-                    (tab.at + nudge / path.length_mm()).rem_euclid(1.0),
+                    native.point_at(tab.at * native.length_mm() + nudge),
                     tab.width_mm,
                     tab.mouse_bites,
                 ));
@@ -1303,7 +1370,45 @@ fn plan_cutout_spans(
         // One width for the whole loop, since `cut_spans` cuts a single loop: the widest
         // of this cutout's tabs, so no island is held by less than it asked for.
         let width_mm = tabs.iter().map(|t| t.1).fold(0.0_f64, f64::max);
-        let fractions: Vec<f64> = tabs.iter().map(|t| t.0).collect();
+        let anchors: Vec<Point> = tabs.iter().map(|t| t.0).collect();
+
+        // `retain_island` is a wish until a tab actually lands: `island_tab` declines a
+        // slug the loop has no room to hold. A slug left with none is a slug the roughing
+        // pass cuts loose, so the finishing pass goes with it — the same rule the boundary
+        // applies to its own tabs, and knowable only here, per opening.
+        let two_pass = finishing_nm > 0 && (fit.slugs.is_empty() || !anchors.is_empty());
+        let rough = two_pass.then_some(rough).flatten();
+
+        // The roughing pass: further **in** from the wall by the allowance, and cut
+        // clockwise. The material being finished is the opening's wall, which lies outside
+        // this loop, so a clockwise traveller keeps it on the left — conventional. It is
+        // the mirror of the boundary's rule, and the same rule `gcode::routing` states for
+        // every pocket.
+        if let Some(rough) = rough {
+            if let Some(path) = outline::Loop::new(&outline::oriented(place(&rough), false)) {
+                let fractions = tab_fractions(&path, &anchors);
+                for (n, span) in outline::cut_spans(&path, &fractions, width_mm)
+                    .into_iter()
+                    .enumerate()
+                {
+                    rough_by_router
+                        .entry(router_id.clone())
+                        .or_default()
+                        .push(OutlineSpan {
+                            source: format!("{label}#{kind_index}.span{n}{}", PASS_SUFFIX[0]),
+                            path: span,
+                        });
+                }
+            }
+        }
+
+        // The pass that makes the wall: counter-clockwise, so the wall is on the cutter's
+        // right and the cut is climb.
+        let Some(path) = outline::Loop::new(&outline::oriented(points, true)) else {
+            continue;
+        };
+        let fractions = tab_fractions(&path, &anchors);
+        let suffix = if two_pass { PASS_SUFFIX[1] } else { "" };
 
         for (n, span) in outline::cut_spans(&path, &fractions, width_mm)
             .into_iter()
@@ -1313,12 +1418,12 @@ fn plan_cutout_spans(
                 .entry(router_id.clone())
                 .or_default()
                 .push(OutlineSpan {
-                    source: format!("{label}#{kind_index}.span{n}"),
+                    source: format!("{label}#{kind_index}.span{n}{suffix}"),
                     path: span,
                 });
         }
 
-        for (n, (fraction, _, bites)) in tabs.iter().enumerate() {
+        for (n, (_, _, bites)) in tabs.iter().enumerate() {
             if !bites {
                 continue;
             }
@@ -1326,9 +1431,11 @@ fn plan_cutout_spans(
                 unperforated += 1;
                 continue;
             };
-            for (h, centre) in outline::mouse_bite_centres(&path, *fraction, width_mm, bite_tool.1)
-                .into_iter()
-                .enumerate()
+            // On the final wall loop and once, as on the boundary.
+            for (h, centre) in
+                outline::mouse_bite_centres(&path, fractions[n], width_mm, bite_tool.1)
+                    .into_iter()
+                    .enumerate()
             {
                 drill_targets.push(DrillTarget {
                     source: format!("{label}#{kind_index}.bite{n}.{h}"),
@@ -1356,7 +1463,14 @@ fn plan_cutout_spans(
              uncut web. Add a smaller drill to the toolset."
         ));
     }
-    (by_router, notes)
+    if too_tight > 0 {
+        notes.push(format!(
+            "{too_tight} interior opening(s) are cut to size in one pass: they have no room \
+             for the finishing allowance as well as the cutter that fits them. The opening \
+             is still cut to its drawn size — only the finishing pass is missing."
+        ));
+    }
+    Passes { rough: rough_by_router, finish: by_router, warnings: notes }
 }
 
 fn plan_outline_spans(
@@ -1366,7 +1480,7 @@ fn plan_outline_spans(
     placement: &Placement,
     drill_targets: &mut Vec<DrillTarget>,
     slots: &std::collections::BTreeMap<String, u8>,
-) -> Result<(Vec<OutlineSpan>, Vec<String>), String> {
+) -> Result<Passes<Vec<OutlineSpan>>, String> {
     let Some(stitched) = ctx.stitched_board_data.as_ref() else {
         return Err(
             "The board outline has not been stitched yet — refresh the board snapshot.".into(),
@@ -1397,6 +1511,26 @@ fn plan_outline_spans(
     let placed_tabs = with_appdata(|data| data.job_edge_tabs());
     let edge = &raw.route_board;
 
+    // How much wall this step leaves for the finishing pass, and the offsets that rough it
+    // out. The roughing loop is simply the same offset taken one allowance further onto
+    // the waste side — `routing_offset` already grows the boundary, so a larger radius is
+    // the whole of the change and the `pcb` crate needs nothing new.
+    //
+    // Note what this does to the channel: it ends up `kerf + finishing` wide rather than
+    // `kerf`. The board still comes out at its drawn size — the finishing pass puts the
+    // final wall exactly where the single pass used to — and all the extra width is on the
+    // waste side.
+    let (finishing_nm, finishing_note) = finishing_allowance(
+        ctx.unit_system,
+        edge.finishing,
+        radius_nm * 2,
+        edge.outline.tabs,
+        "board outline",
+    );
+    let rough_offsets = (finishing_nm > 0)
+        .then(|| pcb::routing_offset(&stitched.contours, radius_nm + finishing_nm));
+
+    let mut rough_spans: Vec<OutlineSpan> = Vec::new();
     let mut spans: Vec<OutlineSpan> = Vec::new();
     let mut vanished = 0usize;
     // Tabs the outline had no room for, at the clearance the distribution keeps.
@@ -1405,10 +1539,12 @@ fn plan_outline_spans(
     let mut uncut_openings = 0usize;
     // Tabs asked to be perforated that the rack holds no drill for.
     let mut unperforated = 0usize;
+    // Contours that wanted a finishing pass but ended up with no tab to hold them.
+    let mut unheld = 0usize;
     // Cutouts are numbered among themselves, as `job.yaml#/edge_tabs/index` means it.
     let (mut outer_n, mut cutout_n) = (0usize, 0usize);
 
-    for (contour, offset) in stitched.contours.iter().zip(offsets) {
+    for (contour_n, (contour, offset)) in stitched.contours.iter().zip(offsets).enumerate() {
         let kind = if contour.is_hole {
             TabContour::Cutout
         } else {
@@ -1438,16 +1574,28 @@ fn plan_outline_spans(
             vanished += 1;
             continue;
         };
-        let points: Vec<Point> = offset
-            .iter()
-            .map(|&(x, y)| {
-                placement.xy(&pcb::BoardPoint {
-                    x: Length::from_mm(x as f64 / 1e6),
-                    y: Length::from_mm(y as f64 / 1e6),
+        let place = |path: &[(i64, i64)]| -> Vec<Point> {
+            path.iter()
+                .map(|&(x, y)| {
+                    placement.xy(&pcb::BoardPoint {
+                        x: Length::from_mm(x as f64 / 1e6),
+                        y: Length::from_mm(y as f64 / 1e6),
+                    })
                 })
-            })
-            .collect();
-        let Some(path) = outline::Loop::new(&points) else {
+                .collect()
+        };
+        let points = place(&offset);
+
+        // The loop as the offset library hands it back — no orientation forced on it.
+        //
+        // It exists only to resolve the operator's stored tab nudges, and that is exactly
+        // why it is left alone: a nudge is a *signed distance along the loop*, so its
+        // meaning flips the moment the loop is turned round. Resolving nudges here, on the
+        // one loop whose winding no longer depends on anything this change does, is what
+        // lets every tab already positioned on every existing job keep the position it was
+        // given. What comes out is a point, and a point means the same thing whichever way
+        // either pass runs.
+        let Some(native) = outline::Loop::new(&points) else {
             continue;
         };
 
@@ -1459,39 +1607,82 @@ fn plan_outline_spans(
         // corner into dozens of chords, so "segments" there would be meaningless. Each
         // computed anchor is then placed and projected onto the offset path, which for
         // an outward offset of a straight run is exactly the perpendicular foot.
-        let tabs: Vec<f64> = if retention.tabs {
-            let anchors =
+        let anchors: Vec<Point> = if retention.tabs {
+            let found =
                 outline::distribute_tabs(&straight_segments_mm(contour), retention.count, width_mm);
-            if anchors.len() < retention.count {
-                crowded += retention.count - anchors.len();
+            if found.len() < retention.count {
+                crowded += retention.count - found.len();
             }
-            anchors
+            found
                 .iter()
                 .enumerate()
                 .map(|(n, anchor)| {
-                    let at = path.nearest_fraction(placement.xy(&pcb::BoardPoint {
+                    let at = native.nearest_fraction(placement.xy(&pcb::BoardPoint {
                         x: Length::from_mm(anchor.point.0),
                         y: Length::from_mm(anchor.point.1),
                     }));
-                    // The operator's own nudge, as a fraction of the loop.
+                    // The operator's own nudge, along the loop from the computed anchor.
                     let nudge = placed_tabs
                         .iter()
                         .find(|t| t.contour == kind && t.index == kind_index && t.tab == n)
                         .map(|t| t.offset.as_mm())
                         .unwrap_or(0.0);
-                    (at + nudge / path.length_mm()).rem_euclid(1.0)
+                    native.point_at(at * native.length_mm() + nudge)
                 })
                 .collect()
         } else {
             Vec::new()
         };
 
+        // Retention is a mode until a tab actually lands. `count: 0`, or sides with no
+        // room for the ones asked for, both leave this contour with none — and a loop cut
+        // with no tabs is a loop cut free, whatever the mode says. Checked here rather
+        // than with the mode, because it is only knowable per contour.
+        let two_pass = finishing_nm > 0 && !anchors.is_empty();
+        if finishing_nm > 0 && anchors.is_empty() {
+            unheld += 1;
+        }
+
+        // The roughing pass, when there is one: further out by the allowance, and cut
+        // **conventional**. The finishing pass below runs the other way round the same
+        // wall, which is what makes it climb.
+        //
+        // The board is inside this loop, so material lies to the left of a
+        // counter-clockwise traveller — conventional. (The rule, and the handedness
+        // argument it rests on, is in `gcode::routing`.)
+        if let Some(rough) = two_pass
+            .then_some(rough_offsets.as_ref())
+            .flatten()
+            .and_then(|offsets| offsets.get(contour_n))
+            .and_then(|offset| offset.as_ref())
+        {
+            if let Some(path) = outline::Loop::new(&outline::oriented(place(rough), true)) {
+                let tabs = tab_fractions(&path, &anchors);
+                for (n, span) in outline::cut_spans(&path, &tabs, width_mm).into_iter().enumerate() {
+                    rough_spans.push(OutlineSpan {
+                        source: format!("{label}#{kind_index}.span{n}{}", PASS_SUFFIX[0]),
+                        path: span,
+                    });
+                }
+            }
+        }
+
+        // The pass that makes the edge: clockwise round the boundary, so the board is to
+        // the cutter's right and the cut is climb. When there is no roughing pass this is
+        // simply the whole cut, taken to size in one go — the only thing the allowance
+        // changed is that there is now something in front of it.
+        let Some(path) = outline::Loop::new(&outline::oriented(points, false)) else {
+            continue;
+        };
+        let tabs = tab_fractions(&path, &anchors);
+        let suffix = if two_pass { PASS_SUFFIX[1] } else { "" };
+
         for (n, span) in outline::cut_spans(&path, &tabs, width_mm)
             .into_iter()
             .enumerate()
         {
             spans.push(OutlineSpan {
-                source: format!("{label}#{kind_index}.span{n}"),
+                source: format!("{label}#{kind_index}.span{n}{suffix}"),
                 path: span,
             });
         }
@@ -1504,6 +1695,13 @@ fn plan_outline_spans(
                 None => unperforated += tabs.len(),
                 Some(bite_tool) => {
                     for (n, tab) in tabs.iter().enumerate() {
+                        // Placed on the **final** wall loop, and once, however many passes
+                        // cut it. The bridge they perforate spans the whole channel, which
+                        // an allowance widens to `kerf + finishing`, so a hole centred on
+                        // this loop sits half an allowance off the bridge's middle — 50 µm
+                        // at the default, inside a bridge millimetres across. Chasing that
+                        // would cost a third offset of every contour to move a hole by less
+                        // than a drill's runout.
                         let centres =
                             outline::mouse_bite_centres(&path, *tab, width_mm, bite_tool.1);
                         for (h, centre) in centres.into_iter().enumerate() {
@@ -1527,6 +1725,7 @@ fn plan_outline_spans(
     }
 
     let mut warnings: Vec<String> = Vec::new();
+    warnings.extend(finishing_note);
     if uncut_openings > 0 {
         warnings.push(format!(
             "{uncut_openings} interior opening(s) are left in the board: the edge pass cuts \
@@ -1548,6 +1747,13 @@ fn plan_outline_spans(
              the tabs, or ask for fewer."
         ));
     }
+    if unheld > 0 {
+        warnings.push(format!(
+            "{unheld} outline contour(s) are cut to size in one pass: retention is set to \
+             tabs, but none was placed on them, so the roughing pass would already have cut \
+             them free. Ask for at least one tab, or set the finishing allowance to 0."
+        ));
+    }
     if vanished > 0 {
         return Err(format!(
             "{vanished} outline contour(s) are smaller than the {} router and vanish under \
@@ -1555,7 +1761,94 @@ fn plan_outline_spans(
             router.name
         ));
     }
-    Ok((spans, warnings))
+    Ok(Passes { rough: rough_spans, finish: spans, warnings })
+}
+
+/// Cut spans grouped by the router that cuts them — a cutout's cutter is chosen by fit,
+/// so two openings on one board may want two.
+type SpansByRouter = std::collections::BTreeMap<String, Vec<OutlineSpan>>;
+
+/// What one contour-planning call produced: the two passes, and what the operator should
+/// know about them.
+///
+/// Named rather than returned as a tuple because the two fields are the same type and the
+/// order between them is the whole point — a caller that puts them the wrong way round
+/// finishes every wall before roughing it, which no type would catch and no test of the
+/// geometry would either. `rough` is empty whenever the step leaves no allowance, which is
+/// the common case and not a shortcoming.
+struct Passes<T> {
+    rough: T,
+    finish: T,
+    warnings: Vec<String>,
+}
+
+/// What each pass adds to a span's feature id, in cut order.
+///
+/// Empty for a single-pass cut: a step with no finishing allowance keeps exactly the
+/// feature ids it had before this existed, so nothing that reads them — the Machining
+/// view's op table, a diagnostic, an operator comparing two programs — has to learn a new
+/// spelling for a job that did not change.
+const PASS_SUFFIX: [&str; 2] = [".rough", ".finish"];
+
+/// The finishing allowance this step can actually honour, in nanometres, with the reason
+/// when it cannot honour the one that was asked for.
+///
+/// Zero is not a failure — it is the single-pass cut, and the answer for the great many
+/// steps that leave `finishing` at nothing. A reason comes back only when an allowance
+/// *was* asked for and had to be dropped, because that is the case the operator set a
+/// value for and would otherwise never learn was ignored.
+///
+/// `kerf_nm` is the cutter's full diameter. The two passes sweep `f .. kerf+f` and
+/// `0 .. kerf`, so they overlap only while `f < kerf`; at or beyond it the roughing pass
+/// and the finishing pass would leave a ring of material between them and the piece would
+/// not come free at all.
+fn finishing_allowance(
+    units: units::UserUnitSystem,
+    finishing: Length,
+    kerf_nm: i64,
+    retained: bool,
+    what: &str,
+) -> (i64, Option<String>) {
+    let asked_nm = (finishing.as_mm() * 1e6).round() as i64;
+    if asked_nm <= 0 {
+        return (0, None);
+    }
+    if !retained {
+        return (
+            0,
+            Some(format!(
+                "The finishing pass on the {what} was dropped and it is cut to size in one \
+                 pass: the roughing pass would already have cut it free, and a finishing \
+                 pass has to cut a wall that is still held. Retain it with tabs, or set the \
+                 finishing allowance to 0."
+            )),
+        );
+    }
+    if asked_nm >= kerf_nm {
+        return (
+            0,
+            Some(format!(
+                "The finishing allowance ({}) is not smaller than the cutter that would \
+                 remove it, so the two passes would not overlap and a ring of material \
+                 would be left uncut. The {what} is cut to size in one pass. Reduce the \
+                 allowance well below the kerf.",
+                finishing.unit_display(units).user,
+            )),
+        );
+    }
+    (asked_nm, None)
+}
+
+/// Where this pass's tabs sit on *its own* loop, as fractions of it.
+///
+/// The tabs arrive as machine-space **points** rather than as fractions, and this is why:
+/// the roughing loop and the finishing loop are different lengths (the roughing one runs
+/// one allowance further out), and they may run opposite ways round, so the same fraction
+/// on the two is not the same place on the board. A tab has to be the same physical bridge
+/// on both passes or the finishing pass cuts through what the roughing pass left holding
+/// the piece. Projecting the point onto each loop is what makes it so.
+fn tab_fractions(path: &outline::Loop, anchors: &[Point]) -> Vec<f64> {
+    anchors.iter().map(|&anchor| path.nearest_fraction(anchor)).collect()
 }
 
 /// A contour's straight sides as `(x0, y0, x1, y1)` in board millimetres — the only
@@ -1681,6 +1974,70 @@ fn format_assign_error(error: &AssignError) -> Vec<String> {
         AssignError::RackTooSmall { minimal, capacity } => vec![format!(
             "Rack too small: needs {minimal} tools but {capacity} usable slot(s) — see the Tooling tab."
         )],
+    }
+}
+
+#[cfg(test)]
+mod finishing_tests {
+    use super::*;
+
+    /// A 2 mm cutter, the schema's default kerf, in nanometres.
+    const KERF_NM: i64 = 2_000_000;
+
+    fn allowance(mm: f64, retained: bool) -> (i64, Option<String>) {
+        finishing_allowance(
+            units::UserUnitSystem::Metric,
+            Length::from_mm(mm),
+            KERF_NM,
+            retained,
+            "board outline",
+        )
+    }
+
+    /// The ordinary case: the allowance asked for is the allowance left on the wall.
+    #[test]
+    fn a_workable_allowance_is_honoured_without_comment() {
+        let (nm, note) = allowance(0.1, true);
+        assert_eq!(nm, 100_000);
+        assert!(note.is_none(), "nothing went wrong, so there is nothing to say");
+    }
+
+    /// Zero is the single-pass cut, not a failure — and by far the commonest answer. It
+    /// must not produce a note, or every job that leaves the field alone grows one.
+    #[test]
+    fn no_allowance_is_silent() {
+        assert_eq!(allowance(0.0, true), (0, None));
+        assert_eq!(allowance(0.0, false), (0, None), "not even with nothing holding it");
+    }
+
+    /// The rule the operator asked for: a finishing pass cuts a wall, and a wall the
+    /// roughing pass has already cut free is not a wall any more.
+    #[test]
+    fn an_unheld_piece_loses_its_finishing_pass_and_is_told_so() {
+        let (nm, note) = allowance(0.1, false);
+        assert_eq!(nm, 0, "cut to size in one pass instead");
+        assert!(note.expect("the operator set a value and must learn it was dropped").contains("tabs"));
+    }
+
+    /// The two passes sweep `f..kerf+f` and `0..kerf`, so at `f == kerf` they stop
+    /// overlapping and a ring of material survives between them — the board would not come
+    /// free at all. Refused at the boundary, not just past it.
+    #[test]
+    fn an_allowance_the_cutter_cannot_span_is_refused() {
+        assert_eq!(allowance(2.0, true).0, 0, "exactly the kerf already fails to overlap");
+        assert_eq!(allowance(3.0, true).0, 0, "and wider is worse");
+        assert!(allowance(2.0, true).1.expect("said out loud").contains("overlap"));
+
+        assert_eq!(allowance(1.999, true).0, 1_999_000, "just inside still overlaps");
+    }
+
+    /// Retention is checked before the kerf: a piece nothing holds cannot be finished
+    /// whatever the allowance, and being told about the kerf instead would send the
+    /// operator to fix the wrong field.
+    #[test]
+    fn the_holding_rule_is_reported_ahead_of_the_kerf_rule() {
+        let note = allowance(5.0, false).1.expect("both rules are broken");
+        assert!(note.contains("tabs"), "the one that has to be fixed first: {note}");
     }
 }
 

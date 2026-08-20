@@ -9,8 +9,9 @@ use super::profiles_common::{
 use crate::data::Profile;
 use crate::ui::bindings::{
     add_step, clone_named, create_named, export_yaml, import_yaml, machining_operations, move_step,
-    remove_profile_result, remove_step, use_conflicting_operations, use_field, use_operations,
-    use_profiles, use_step_count, BindingPicker, OperationsEditor, SchemaField, SchemaForm,
+    remove_profile_result, remove_step, use_conflicting_operations, use_field,
+    use_job_machining_profile, use_operations, use_profiles, use_step_count, BindingPicker,
+    OperationsEditor, SchemaField, SchemaForm,
 };
 
 /// Machining ("process") profile screen, fully backed by the `AppData` datastore.
@@ -34,7 +35,8 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
     let mut selected = use_signal(|| None::<Uuid>);
 
     let profiles = use_profiles(Profile::Machining);
-    let current = (*selected.read()).or_else(|| profiles.first().map(|(id, _)| *id));
+
+    let current = profile_on_show(*selected.read(), use_job_machining_profile(), &profiles);
     let current_name = current
         .and_then(|id| profiles.iter().find(|(pid, _)| *pid == id).map(|(_, n)| n.clone()));
     let toolbar_profiles = profiles
@@ -206,6 +208,32 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
             }
         }
     }
+}
+
+/// Which profile the screen shows: what the operator picked here, else the one the live
+/// job runs, else the first there is.
+///
+/// The job's profile comes before the head of the list because switching to this screen
+/// is nearly always "let me look at what the job runs". Opening on an unrelated profile
+/// merely because it sorts first is not only wrong but quietly dangerous — the toolbar's
+/// Delete, Clone and Export all act on whatever happens to be showing.
+///
+/// `picked` is the local override and always wins, so choosing a profile here is not
+/// undone on the next render. It resets on its own: the screen is unmounted whenever the
+/// view changes, so a return to this screen asks the job again.
+///
+/// `job` is filtered against `profiles` rather than trusted — a job left pointing at a
+/// since-deleted profile must fall through to a real one, not blank the editor.
+fn profile_on_show(
+    picked: Option<Uuid>,
+    job: Option<Uuid>,
+    profiles: &[(Uuid, String)],
+) -> Option<Uuid> {
+    let known = |id: Uuid| profiles.iter().any(|(pid, _)| *pid == id);
+    picked
+        .filter(|id| known(*id))
+        .or_else(|| job.filter(|id| known(*id)))
+        .or_else(|| profiles.first().map(|(id, _)| *id))
 }
 
 /// The machining detail editor: identity, then the ordered list of steps. Each
@@ -505,6 +533,61 @@ fn StepCard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    /// Three profiles with stable, distinguishable ids.
+    fn profiles() -> Vec<(Uuid, String)> {
+        (1u8..=3)
+            .map(|n| (Uuid::from_bytes([n; 16]), format!("Profile {n}")))
+            .collect()
+    }
+
+    fn id(n: u8) -> Uuid {
+        Uuid::from_bytes([n; 16])
+    }
+
+    /// The point of the rule: arriving on this screen shows what the job runs, not
+    /// whichever profile happens to be first in the list.
+    #[test]
+    fn the_screen_opens_on_the_profile_the_job_runs() {
+        assert_eq!(profile_on_show(None, Some(id(3)), &profiles()), Some(id(3)));
+    }
+
+    /// Picking here overrides the job, so the screen does not snap back to the job's
+    /// profile on the next render.
+    #[test]
+    fn a_profile_picked_here_wins_over_the_jobs() {
+        assert_eq!(profile_on_show(Some(id(2)), Some(id(3)), &profiles()), Some(id(2)));
+    }
+
+    /// A job with no profile yet still has to land the operator somewhere editable.
+    #[test]
+    fn with_no_job_profile_the_first_one_is_shown() {
+        assert_eq!(profile_on_show(None, None, &profiles()), Some(id(1)));
+    }
+
+    /// A reference to something deleted must fall back, not blank the editor — the
+    /// panel would otherwise read "select or add a profile" with profiles right there
+    /// in the dropdown.
+    #[test]
+    fn a_stale_reference_falls_back_to_a_real_profile() {
+        assert_eq!(profile_on_show(None, Some(id(9)), &profiles()), Some(id(1)), "job's is gone");
+        assert_eq!(
+            profile_on_show(Some(id(9)), Some(id(3)), &profiles()),
+            Some(id(3)),
+            "the pick is gone, so the job speaks again",
+        );
+    }
+
+    /// Nothing to show when there is nothing at all — the empty-state panel.
+    #[test]
+    fn an_empty_library_selects_nothing() {
+        assert_eq!(profile_on_show(Some(id(1)), Some(id(2)), &[]), None);
     }
 }
 

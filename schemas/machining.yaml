@@ -279,7 +279,8 @@ $defs:
         description: >-
           Width of the channel routed around the board, which is also the
           diameter of the cutter that routes it. Matched exactly — a step with
-          no router this size cannot run.
+          no router this size cannot run. A finishing allowance widens the
+          channel by its own amount, on the waste side.
         $ref: "units.yaml#/$defs/size"
         default: 2.0mm
 
@@ -287,14 +288,52 @@ $defs:
       # A length rather than a flag plus a length: 0 means no finishing pass, so
       # one field carries both the decision and the amount.
       #
-      # There was also a `direction: conventional | climb` here. It is gone: for an
-      # internal pocket or a part being cut out, climb is the only sensible
-      # direction (it is what keeps FR4's top copper from lifting), and the
-      # toolpaths pick it from the geometry — see `src/gcode/routing.rs`.
+      # What it actually plans, with cutter radius R and allowance f:
+      #
+      #   roughing pass  cutter centre at R + f   conventional
+      #   finishing pass cutter centre at R       climb
+      #
+      # so the finished wall is made by a light cut that never sees full
+      # engagement. The roughing pass runs the opposite way round on purpose: it
+      # is the pass that meets a loaded cutter, and conventional is the more
+      # forgiving of the two there, while climb on the finishing pass is what
+      # keeps FR4's top copper from lifting. Which direction *is* climb depends on
+      # which side of the loop the material is (inside for the board's boundary,
+      # outside for a cutout wall), so it is read off the placed geometry rather
+      # than set here — the handedness argument is in `src/gcode/routing.rs`, and
+      # there was once a `direction: conventional | climb` field, now gone.
+      #
+      # Two consequences worth knowing:
+      #
+      #   * The routed **channel** becomes `kerf + finishing` wide, not `kerf`.
+      #     The board still comes out at its drawn size — the finishing pass puts
+      #     the final wall exactly where a single pass would have — and all the
+      #     extra width goes on the waste side.
+      #   * The allowance must stay **below the kerf**, or the two passes stop
+      #     overlapping and leave a ring of uncut material between them. Well
+      #     below it, in practice: this is a spring cut, not a second roughing
+      #     pass.
+      #
+      # This applies to the interior openings as well (`route_cutouts`) — a wall
+      # is a wall — with one extra caveat there: a cutout's cutter is chosen to
+      # *fit* the opening, and an opening that only just admits it has no room to
+      # stand an allowance further in. Such a cutout is cut to size in one pass.
+      #
+      # It cannot be honoured at all when nothing holds the piece while that wall
+      # is cut — `outline.retention.mode: none` for the board, `retain_island:
+      # false` for a cutout that leaves a slug. The roughing pass has already cut
+      # the piece free by then, so there is no wall left to finish. The planner
+      # drops the finishing pass and says so in the step's notes rather than
+      # refusing to generate. This cannot be an `x-show-when` — those name a
+      # *sibling* key (see `src/ui/show_when.rs`) and the retention mode is two
+      # levels away — so the rule is stated here and enforced where it can be
+      # explained.
       finishing:
         description: >-
-          Material left on the wall for a final finishing pass. 0 means the
-          roughing pass is the finished cut.
+          Material left on the wall for a final light climb pass, after a
+          conventional roughing pass one allowance further out. 0 means one pass,
+          cut straight to size. Must be smaller than the kerf, and is dropped
+          (with a note) when nothing holds the piece while its wall is cut.
         $ref: "units.yaml#/$defs/size"
         default: 0.1mm
     required: [outline]

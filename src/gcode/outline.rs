@@ -163,6 +163,49 @@ pub fn distribute_tabs(
     anchors
 }
 
+/// Whether a closed path runs counter-clockwise, by the shoelace sign.
+///
+/// **Machine space only.** The sign is a statement about a frame, and this one is only
+/// meaningful in the right-handed, Y-up frame
+/// [`Placement`](super::placement::Placement) delivers — which is also why it is asked
+/// *after* placement rather than of the board-space contour: a back-face step is mirrored
+/// on the way through, and a mirror reverses winding. Asking in board space would cut one
+/// face climb and the other conventional, from the same profile, with nothing on screen to
+/// say so.
+///
+/// The first vertex may or may not be repeated at the end; a zero-length closing edge
+/// contributes nothing to the sum either way.
+pub fn is_ccw(points: &[Point]) -> bool {
+    let mut twice_area = 0.0;
+    for idx in 0..points.len() {
+        let (from, to) = (points[idx], points[(idx + 1) % points.len()]);
+        twice_area += from.x.as_mm() * to.y.as_mm() - to.x.as_mm() * from.y.as_mm();
+    }
+    twice_area > 0.0
+}
+
+/// `points`, reversed if it does not already run the way `ccw` asks.
+///
+/// This is how a pass chooses climb or conventional: with an M03 spindle the cut is climb
+/// when the material lies to the **right** of the direction of travel (the argument is
+/// made in full in [`routing`](super::routing)), so the direction that means climb depends
+/// on which side of the loop the material is:
+///
+/// | loop | material | climb | conventional |
+/// |---|---|---|---|
+/// | board boundary | inside | CW | CCW |
+/// | cutout wall | outside | CCW | CW |
+///
+/// Applied to the placed point list **before** [`Loop::new`], so [`cut_spans`] hands back
+/// spans that already run in the cut direction and nothing downstream has to know a
+/// direction was chosen at all.
+pub fn oriented(mut points: Vec<Point>, ccw: bool) -> Vec<Point> {
+    if is_ccw(&points) != ccw {
+        points.reverse();
+    }
+    points
+}
+
 /// A closed toolpath loop with its arc-length parameterisation precomputed.
 ///
 /// Built once per contour so every tab lookup is a binary search rather than another walk
@@ -519,6 +562,52 @@ mod tests {
 
     fn at(p: Point) -> (f64, f64) {
         (p.x.as_mm(), p.y.as_mm())
+    }
+
+    /// The rectangle's vertices as a bare point list, without the closing repeat.
+    fn corners() -> Vec<Point> {
+        [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect()
+    }
+
+    /// The sign the whole direction choice rests on. Read in the machine frame (Y up), so
+    /// a rectangle walked origin → +X → +Y is counter-clockwise.
+    #[test]
+    fn winding_is_read_from_the_shoelace_sign() {
+        let ccw = corners();
+        let mut cw = ccw.clone();
+        cw.reverse();
+
+        assert!(is_ccw(&ccw));
+        assert!(!is_ccw(&cw));
+    }
+
+    /// A repeated first vertex is what [`Loop`] stores, so the sign must not depend on
+    /// whether the caller has closed the path — the closing edge has zero length either
+    /// way and contributes nothing.
+    #[test]
+    fn a_closed_path_winds_the_same_way_as_an_open_one() {
+        let mut closed = corners();
+        closed.push(closed[0]);
+
+        assert_eq!(is_ccw(&closed), is_ccw(&corners()));
+    }
+
+    /// Orienting is a reversal or nothing: the same vertices, never a different loop.
+    #[test]
+    fn orienting_reverses_only_when_it_has_to() {
+        let ccw = corners();
+
+        assert_eq!(oriented(ccw.clone(), true), ccw, "already the way round asked for");
+
+        let flipped = oriented(ccw.clone(), false);
+        assert!(!is_ccw(&flipped), "now clockwise");
+        assert_eq!(flipped.len(), ccw.len(), "the same vertices");
+        let mut back = flipped;
+        back.reverse();
+        assert_eq!(back, ccw, "and nothing but a reversal");
     }
 
     #[test]

@@ -199,6 +199,22 @@ pub fn use_profiles(kind: crate::data::Profile) -> Vec<(Uuid, String)> {
     })
 }
 
+/// The machining profile the live job references, if any (subscribes to store
+/// mutations).
+///
+/// The job's reference is the operator's own answer to "which profile am I working on",
+/// so the machining screen opens on it rather than on whichever profile happens to sort
+/// first. Not validated here — the caller has the profile list in hand and filters
+/// against it, because a job left pointing at a deleted profile must fall back to a real
+/// one rather than select nothing.
+pub fn use_job_machining_profile() -> Option<Uuid> {
+    subscribe();
+    if !appdata_ready() {
+        return None;
+    }
+    with_appdata(|data| data.job_machining_profile())
+}
+
 /// Removes a profile, returning a user-facing message if it is blocked because
 /// something still references it (or was not found).
 pub fn remove_profile_result(id: Uuid) -> Result<(), String> {

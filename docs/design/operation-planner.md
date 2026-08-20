@@ -250,6 +250,47 @@ Slots (oblong holes) are chosen separately and by their own geometry, `pick_slot
 taking the widest cutter that fits the slot. A cutout narrower than the kerf is reported as
 vanishing under it rather than cut with something else.
 
+### 5.3 Roughing and finishing the wall
+
+`route_board.finishing` (0.1 mm by default) leaves material on the wall for a second pass.
+With cutter radius `R` and allowance `f`, one wall becomes two passes:
+
+| pass | cutter centre | sweeps | direction |
+|---|---|---|---|
+| rough | `R + f` | `f .. 2R+f` | conventional |
+| finish | `R` | `0 .. 2R` | climb |
+
+So the finished edge is made by a light cut that never meets full engagement, while the
+pass that does meet it — with a fully loaded cutter and the whole depth of the board —
+runs conventional, which is the more forgiving of the two there. `f = 0` is one pass
+straight to size, and is what most steps do.
+
+**The channel is `kerf + f` wide, not `kerf`.** The board still comes out at its drawn
+size — the finishing pass puts the final wall exactly where a single pass would have — and
+the extra width is all on the waste side. The two passes overlap only while `f < kerf`; at
+or beyond it a ring of material survives between them and the piece never comes free, so
+the planner refuses such an allowance and cuts in one pass instead.
+
+**Direction is read off the placed geometry, not configured.** Climb is "material to the
+right of travel" (§`gcode::routing`), so it is *clockwise* round the board's boundary —
+where the material is inside the loop — and *counter-clockwise* round a cutout wall, where
+it is outside. The sign is taken in **machine** space, after the placement has applied any
+back-face mirror; taken in board space, a mirrored step would come out conventional on both
+passes from the same profile, with nothing on screen to say so.
+
+**Passes are ordered, not travel-optimised against each other.** `plan_outline` takes an
+ordered list of passes and TSPs *within* each, so no stretch is ever finished before it is
+roughed. Interior cutouts join the roughing pass, which is also what keeps "interior before
+perimeter" (§4) true. Each pass tours from where the previous one left the cutter, so the
+seam costs no more travel than it must.
+
+**It needs something to hold the piece.** A finishing pass cuts a wall, and by the time it
+runs the roughing pass has cut everything except the tabs. With `retention: none` on the
+boundary, or `retain_island: false` on a cutout that leaves a slug, there is no wall left to
+finish — so the allowance is dropped, the cut is made to size in one pass, and the step says
+so in its notes. A cutout too tight to stand the cutter one allowance further in is dropped
+the same way: the opening is still cut to its drawn size, only the second pass is missing.
+
 ---
 
 ## 6. Coordinate placement

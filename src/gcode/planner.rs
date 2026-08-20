@@ -295,11 +295,19 @@ pub struct OutlineSpan {
 /// `None` when there is nothing to cut, so the caller adds no empty block (and so no
 /// pointless tool change) to the step.
 ///
-/// Span order is a pure travel optimisation. It does not affect how well the board is held:
-/// the tabs between spans are what hold it, and they survive until the operator breaks
-/// them, so no span order can release the board early.
+/// `passes` are cut **in the order given**, and travel is optimised only *within* each
+/// one. That ordering is not a preference: a finishing pass exists to take a light cut off
+/// a wall the roughing pass has already opened, and a flat TSP over both would happily
+/// finish a stretch of edge before roughing it — putting the finishing cut in at full
+/// engagement, which is exactly the cut it was added to avoid. Each pass starts its own
+/// tour from where the previous one left the cutter, so the seam between them costs no
+/// more travel than it has to.
+///
+/// Within a pass, span order is a pure travel optimisation and cannot release the board
+/// early: the tabs between spans are what hold it, and they survive until the operator
+/// breaks them.
 pub fn plan_outline(
-    spans: &[OutlineSpan],
+    passes: &[&[OutlineSpan]],
     tool_id: &str,
     tool_diameter: Length,
     z_bottom: Length,
@@ -307,18 +315,21 @@ pub fn plan_outline(
     start: Point,
     slots: &BTreeMap<String, u8>,
 ) -> Option<ToolBlock> {
-    let usable: Vec<&OutlineSpan> = spans.iter().filter(|s| s.path.len() >= 2).collect();
-    if usable.is_empty() {
-        return None;
-    }
+    let mut ops: Vec<AtomicOp> = Vec::new();
+    let mut travel_mm = 0.0;
+    let mut at = start;
 
-    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
-    let order = tsp_order(start, &entries);
-    let travel_mm = route_length(start, &entries, &order);
+    for spans in passes {
+        let usable: Vec<&OutlineSpan> = spans.iter().filter(|s| s.path.len() >= 2).collect();
+        if usable.is_empty() {
+            continue;
+        }
 
-    let ops: Vec<AtomicOp> = order
-        .iter()
-        .map(|&i| {
+        let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
+        let order = tsp_order(at, &entries);
+        travel_mm += route_length(at, &entries, &order);
+
+        ops.extend(order.iter().map(|&i| {
             let span = usable[i];
             AtomicOp {
                 phase: Phase::Route,
@@ -330,8 +341,15 @@ pub fn plan_outline(
                 primitive: "route_contour",
                 source: span.source.clone(),
             }
-        })
-        .collect();
+        }));
+
+        // The next pass tours from where this one finished, not from the block's start.
+        at = ops[ops.len() - 1].exit;
+    }
+
+    if ops.is_empty() {
+        return None;
+    }
 
     Some(ToolBlock {
         slot: slots.get(tool_id).copied(),
@@ -767,7 +785,7 @@ mod tests {
             OutlineSpan { source: "outer#0.span2".into(), path: vec![] },
         ];
         let block = plan_outline(
-            &spans,
+            &[&spans],
             "router",
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
@@ -786,6 +804,89 @@ mod tests {
         assert!(matches!(&block.ops[0].kind, OpKind::RouteContour { path } if *path == spans[1].path));
     }
 
+    /// A later pass never starts before an earlier one has finished, however much travel
+    /// interleaving them would save.
+    ///
+    /// This is the whole reason `plan_outline` takes passes rather than one span list. The
+    /// finishing pass takes a light cut off a wall the roughing pass has already opened;
+    /// run the two through a single TSP and the nearest span wins regardless of which pass
+    /// it belongs to, so a stretch gets finished at full engagement before it is roughed.
+    /// The geometry is chosen so a flat TSP would visibly reorder them: every finish span
+    /// sits nearer the start than any rough span.
+    #[test]
+    fn every_span_of_a_pass_is_cut_before_the_next_pass_begins() {
+        let span = |source: &str, from: (f64, f64), to: (f64, f64)| OutlineSpan {
+            source: source.to_string(),
+            path: vec![
+                Point::new(Length::from_mm(from.0), Length::from_mm(from.1)),
+                Point::new(Length::from_mm(to.0), Length::from_mm(to.1)),
+            ],
+        };
+        let rough = vec![
+            span("outer#0.span0.rough", (80.0, 0.0), (90.0, 0.0)),
+            span("outer#0.span1.rough", (50.0, 0.0), (60.0, 0.0)),
+        ];
+        let finish = vec![
+            span("outer#0.span0.finish", (2.0, 0.0), (3.0, 0.0)),
+            span("outer#0.span1.finish", (1.0, 0.0), (1.5, 0.0)),
+        ];
+        let block = plan_outline(
+            &[&rough, &finish],
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .expect("there is an outline to cut");
+
+        let sources: Vec<&str> = block.ops.iter().map(|op| op.source.as_str()).collect();
+        assert_eq!(
+            sources,
+            [
+                // Roughing tours from the block's start at the origin, so the span at 50
+                // comes before the one at 80 and the cutter finishes at 90.
+                "outer#0.span1.rough",
+                "outer#0.span0.rough",
+                // Finishing tours from *there*, not from the origin — which is why the
+                // span at 2 beats the one at 1. Every rough span is still cut first,
+                // which is the law; the order inside the pass is only travel.
+                "outer#0.span0.finish",
+                "outer#0.span1.finish",
+            ],
+            "roughing first, and travel-ordered inside each pass",
+        );
+        assert!(block.travel_mm > 0.0, "travel accumulates across both passes");
+    }
+
+    /// A pass with nothing in it is skipped rather than ending the block — which is what
+    /// a step whose finishing allowance is zero, or whose board is held by nothing, looks
+    /// like from here.
+    #[test]
+    fn an_empty_pass_does_not_stop_the_ones_after_it() {
+        let finish = vec![OutlineSpan {
+            source: "outer#0.span0.finish".into(),
+            path: vec![
+                Point::new(Length::from_mm(1.0), Length::from_mm(0.0)),
+                Point::new(Length::from_mm(9.0), Length::from_mm(0.0)),
+            ],
+        }];
+        let block = plan_outline(
+            &[&[], &finish],
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .expect("the second pass still has spans");
+
+        assert_eq!(block.op_count(), 1);
+        assert_eq!(block.ops[0].source, "outer#0.span0.finish");
+    }
+
     /// Nothing to cut means no block at all — an empty block would still cost a tool
     /// change, which is the one thing block grouping exists to avoid.
     #[test]
@@ -800,6 +901,19 @@ mod tests {
             &BTreeMap::new(),
         )
         .is_none());
+        assert!(
+            plan_outline(
+                &[&[], &[]],
+                "router",
+                Length::from_mm(2.0),
+                Length::from_mm(-2.1),
+                Length::from_mm(5.0),
+                Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+                &BTreeMap::new(),
+            )
+            .is_none(),
+            "nor do two empty passes make a block",
+        );
     }
 
     /// Holes and slots milled by the same router share one block, so the step pays for a

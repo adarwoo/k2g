@@ -142,16 +142,37 @@ pub fn ProfileLifecycleToolbar(
     on_import: EventHandler<MouseEvent>,
 ) -> Element {
     let has_profiles = !profiles.is_empty();
+    let selected_id = selected_profile_id.unwrap_or_default();
+
+    // Which option the list must show as chosen, decided here rather than in the markup.
+    //
+    // Dioxus does not reflect a `<select>`'s `value:` onto the rendered element, so an
+    // option that does not say `selected:` for itself leaves the browser showing the
+    // first entry — whatever the screen actually has open. That is how a screen opening
+    // on the job's machining profile would still read as if the first profile were
+    // loaded. (Same fix as the rack slot picker and the job sidebar's profile select.)
+    let options = profiles
+        .into_iter()
+        .map(|(id, name)| {
+            let is_selected = id == selected_id;
+            (id, name, is_selected)
+        })
+        .collect::<Vec<_>>();
 
     rsx! {
         div { class: "actions profile-actions",
             if has_profiles {
                 select {
                     class: "stock-toolbar-select",
-                    value: selected_profile_id.unwrap_or_default(),
+                    value: "{selected_id}",
                     onchange: move |evt| on_select.call(evt.value()),
-                    for (idx , (id , name)) in profiles.into_iter().enumerate() {
-                        option { key: "profile-opt-{idx}", value: "{id}", "{name}" }
+                    for (idx , (id , name , is_selected)) in options.into_iter().enumerate() {
+                        option {
+                            key: "profile-opt-{idx}",
+                            value: "{id}",
+                            selected: is_selected,
+                            "{name}"
+                        }
                     }
                 }
                 button {

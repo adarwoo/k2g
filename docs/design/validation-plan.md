@@ -118,7 +118,12 @@ The newest capability, and the one with a depth *tolerance* rather than a depth.
 | E7 | A curved outline | Board with an arc edge | Arc words emitted, not hundreds of chords **read** |
 | E8 | No arc word | A CNC profile with `cut_arc` emptied | Arcs become short straight moves; geometry intact **read** |
 | E9 | score and vgroove | Set either | **No outline pass at all**, and the step says so. Declared, not implemented — do not chase **read** |
-| E10 | Finishing | Set finishing to 0.3 mm | **No change to the toolpath.** Known: read, consumed by nothing **read** |
+| E10 | Finishing leaves a wall | 0.3 mm on E1's board | Twice the outline ops, every `.rough` before every `.finish`; 3D shows two loops 0.3 mm apart with the tab gaps aligned **read** |
+| E11 | Finishing cuts to size | Cut E10, and the same board at 0 | Both measure to the drawing; the 0.3 mm one has the better wall and a channel 0.3 mm wider on the waste side **bench**, measured |
+| E12 | Finishing is climb | E10 | The `.finish` spans run the opposite way round the boundary from the `.rough` ones — clockwise, seen from above **read** |
+| E13 | …after a flip | E10 on a `board_face: back` step | Still clockwise. The direction is taken after the mirror, so a mirrored step must not silently go conventional **read** |
+| E14 | Nothing to hold it | E10 with retention `none` | One pass, and a note saying the finishing pass was dropped. Same for a cutout with `retain_island: false` **read** |
+| E15 | An allowance wider than the kerf | Finishing 2 mm against a 2 mm kerf | One pass, and a note about the passes not overlapping **read** |
 
 ## F. Drilling
 
@@ -204,7 +209,9 @@ Confirmed by reading the code, not assumed. Chasing them wastes bench time.
   KiCad moves on. No Gerber import either — the KiCad API is the only way in.
 - **No program editing** in the Code view, and no send-to-machine.
 - **No panelisation, tool-life counting, multi-pass depth, marking engraving, or undo.**
-- **score, vgroove and finishing** are accepted and do nothing (E9, E10).
+- **score and vgroove** are accepted and do nothing (E9).
+- **No per-pass feeds.** The finishing pass cuts at the same feed as the roughing one
+  (E10–E15); a tool has one lateral rate and nothing scales it per pass.
 - **Tab nudging** — the planner honours a stored offset; nothing in the UI sets one.
 
 ## M. Standing gates
