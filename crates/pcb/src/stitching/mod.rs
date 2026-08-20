@@ -987,6 +987,42 @@ pub fn stroke_open_path(points: &[(i64, i64)], half_width_nm: f64) -> Vec<Vec<(i
     .collect()
 }
 
+/// [`stroke_open_path`] for a whole set of polylines, in one offset call.
+///
+/// The isolation pass strokes the stretches one rung of its width ladder could not cut, to
+/// hand the next rung down the ground it has to make up. That is dozens of short spans at
+/// once, and paying Clipper's setup per span is the difference between a cheap step and a
+/// noticeable one.
+pub fn stroke_open_paths(paths: &[Vec<(i64, i64)>], half_width_nm: f64) -> Vec<Vec<(i64, i64)>> {
+    use clipper2_rust::{
+        core::Paths64,
+        inflate_paths_64,
+        offset::{EndType, JoinType},
+    };
+
+    let input: Paths64 = paths
+        .iter()
+        .filter(|p| p.len() >= 2)
+        .map(|p| p.iter().map(|&(x, y)| Point64 { x, y }).collect::<Path64>())
+        .collect();
+    if input.is_empty() || half_width_nm <= 0.0 {
+        return Vec::new();
+    }
+
+    inflate_paths_64(
+        &input,
+        half_width_nm,
+        JoinType::Round,
+        EndType::Round,
+        2.0,
+        OFFSET_ARC_TOLERANCE_NM,
+    )
+    .iter()
+    .map(|p| p.iter().map(|pt| (pt.x, pt.y)).collect::<Vec<(i64, i64)>>())
+    .filter(|p| p.len() >= 3)
+    .collect()
+}
+
 /// Perimeter of a closed polygon, in nanometres.
 pub fn path_perimeter_nm(path: &[(i64, i64)]) -> f64 {
     if path.len() < 2 {

@@ -104,6 +104,9 @@ The newest capability, and the one with a depth *tolerance* rather than a depth.
 | D4 | Both faces at once | Engrave on a front step and a back step | One generation settles; no repeating `isolation_ready` in the Logs; both faces engraved **read** — regression for `37351c8` |
 | D5 | Depth on real copper | D1 on scrap clad | Copper cleared, substrate barely marked; measure the channel against the request **bench** |
 | D6 | Warp sensitivity | D5 on a board deliberately not flat | **Expected to fail** — there is no height map. Record how badly. This is the evidence for building one |
+| D7 | The width set to the board's own clearance | 0.2 mm on an 8 mil board, 0.1 mm tip | Every trace keeps a channel on **both** sides. The regression for the fault where stretches went missing and nothing was reported **read** + **bench**, continuity-test the fan-out |
+| D8 | Silence means success | Sweep the width 0.1 → 0.4 in 0.05 steps on a dense board | At every step, either the copper is fully separated or a note or banner says what could not be cut. A quiet pass must never be a joined board **read** |
+| D9 | Joined copper is raised even when the outlines look perfect | A board with two pads closer than the tip | The "cannot be separated" banner fires although every contour is a tidy closed loop — `intact_fraction` cannot see this and must not be the only check **read** |
 
 ## E. Outline, cutouts and retention
 

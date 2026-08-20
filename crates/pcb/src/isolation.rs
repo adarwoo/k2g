@@ -22,6 +22,21 @@
 //! approximation. The exact answer is a medial axis — a large piece of work — and the
 //! error is one ladder step against a width the operator picked to two decimal places.
 //!
+//! **The descent ends when the geometry says so, never when an estimate says so.** The
+//! rung list was once computed up front, from a cheaper measurement of the same question —
+//! how far apart two nets' *copper* is, rather than whether a *contour* drawn between them
+//! clears the copper on its far side. Two measurements of one thing, over polygons whose
+//! curves are chord approximations, do not always agree; and where they did not, the list
+//! held one rung, the stretch that rung could not cut had nothing beneath it to fall to,
+//! and it left here cut by nothing and mentioned by nothing. A board was machined with its
+//! nets still joined and every diagnostic on the screen silent.
+//!
+//! So [`walk_ladder`] descends on what it actually failed to cut, and whatever survives the
+//! floor rung comes back as [`UncutStretch`] to be reported. The estimate is still made —
+//! it is the right shape for telling an operator what a clearance cost them, and it makes a
+//! useful *hint* about which rung to try next — but it decides nothing. **A stretch of this
+//! board is cut, or it is reported. There is no third outcome.**
+//!
 //! A contour whose width changes along its length is **split into spans**, because a span
 //! is what becomes an operation and an operation has one depth. A contour that took one
 //! width the whole way round stays a closed loop, which is what lets the planner choose
@@ -63,6 +78,19 @@ pub struct NarrowedPair {
     pub width_nm: i64,
 }
 
+/// Contour a net needed and no rung of the ladder could cut.
+///
+/// Separate from [`NarrowedPair`] because it is a different fact, arrived at a different
+/// way. A narrowed pair is a *prediction* about two nets' copper, made before anything is
+/// cut. This is the *outcome*: the ladder ran, and this much of the net's boundary came out
+/// of it uncut. When the two disagree, this one is the one that happened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UncutStretch {
+    pub net: String,
+    /// Length of contour left uncut, nm.
+    pub length_nm: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct IsolationResult {
     pub layer_id: i32,
@@ -70,6 +98,14 @@ pub struct IsolationResult {
     /// Every pair that had to give up width. Silence here would mean a board that looks
     /// isolated and is not.
     pub narrowed: Vec<NarrowedPair>,
+    /// Contour the ladder could not cut at any width, by net.
+    ///
+    /// The pass's own account of what it failed to do, kept because nothing else in this
+    /// result can show it: `contours` lists what *was* cut, and a stretch that is missing
+    /// from it is indistinguishable from a stretch that was never needed. That gap is
+    /// exactly how a board once came off the machine with nets joined and every diagnostic
+    /// silent.
+    pub uncut: Vec<UncutStretch>,
     pub warnings: Vec<String>,
 }
 
@@ -104,6 +140,20 @@ impl IsolationResult {
     }
 }
 
+/// How many nets the uncut warning names before it gives up and states the total.
+///
+/// A board whose width simply does not suit it can leave every net short, and a warning
+/// that lists two hundred of them is a warning nobody reads to the end.
+const UNCUT_NETS_NAMED: usize = 5;
+
+/// Length of a polyline, nm.
+fn polyline_len_nm(points: &[(i64, i64)]) -> f64 {
+    points
+        .windows(2)
+        .map(|w| ((w[1].0 - w[0].0) as f64).hypot((w[1].1 - w[0].1) as f64))
+        .sum()
+}
+
 /// The step between rungs of the width ladder.
 ///
 /// 25 µm is a step no operator would notice against a width they chose in hundredths of a
@@ -114,9 +164,23 @@ pub const LADDER_STEP_NM: i64 = 25_000;
 /// Slack allowed when deciding whether a cut touches copper it should not.
 ///
 /// A gap of exactly the cut width is the commonest case on a board laid out to a clearance
-/// rule, and it is a *fit*, not a collision. Without this, every such pair would come back
-/// narrowed by one whole rung because the geometry grazes itself to the nanometre.
-const TANGENCY_SLACK_NM: f64 = 1_000.0;
+/// rule — it is what setting the isolation width to the board's own clearance gives you,
+/// which is the obvious thing to do — and it is a *fit*, not a collision. Without this,
+/// every such pair would come back narrowed by one whole rung because the geometry grazes
+/// itself to the nanometre.
+///
+/// **Stated as a multiple of the chord error it has to absorb**, not as a bare number that
+/// happens to equal it. Every question here is asked of polygons whose curves are chord
+/// approximations good to `OFFSET_ARC_TOLERANCE_NM`, and a single comparison can stack two
+/// of them — a contour offset against a forbidden-region offset — before Clipper's own
+/// integer rounding. At parity with the tessellator, which is where this constant started,
+/// the slack could not absorb even one of those, so whether a channel got cut came down to
+/// which side of a rounded pad the chords happened to fall.
+///
+/// The price is that a cut may pass this much nearer another net than the requested width
+/// nominally allows. Four microns is smaller than the runout of the bit that cuts it, and
+/// an order below the narrowest copper feature it could reach.
+const TANGENCY_SLACK_NM: f64 = 4.0 * crate::stitching::OFFSET_ARC_TOLERANCE_NM;
 
 type Ring = Vec<(i64, i64)>;
 
@@ -172,8 +236,32 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
             continue;
         }
 
-        let achieved = record_narrowed(&nets, index, &intrusion, &rungs, &mut narrowed);
-        walk_ladder(net, &others, &walked_rungs(width_nm, &achieved), &mut result);
+        let hint = record_narrowed(&nets, index, &intrusion, &rungs, &mut narrowed);
+        let uncut = walk_ladder(net, &others, &rungs, &hint, &mut result);
+        let length_nm: f64 = uncut.iter().map(|span| polyline_len_nm(span)).sum();
+        if length_nm > 0.0 {
+            result.uncut.push(UncutStretch { net: net.name.clone(), length_nm });
+        }
+    }
+
+    // Said whatever `narrowed` says. The two are arrived at differently on purpose — this
+    // is what the ladder actually failed to cut, and it is the one that has been machined.
+    if !result.uncut.is_empty() {
+        let total: f64 = result.uncut.iter().map(|u| u.length_nm).sum();
+        let mut worst: Vec<&UncutStretch> = result.uncut.iter().collect();
+        worst.sort_by(|a, b| b.length_nm.total_cmp(&a.length_nm));
+        result.warnings.push(format!(
+            "{:.2} mm of channel could not be cut at any width, so the copper it should \
+             have separated stays joined — worst on {}. Reduce the isolation width, or use \
+             a bit with a finer tip.",
+            total / 1e6,
+            worst
+                .iter()
+                .take(UNCUT_NETS_NAMED)
+                .map(|u| format!("{} ({:.2} mm)", u.net, u.length_nm / 1e6))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
     }
 
     for ((a, b), width) in narrowed {
@@ -201,60 +289,70 @@ fn ladder(width_nm: i64, min_width_nm: i64) -> Vec<i64> {
     rungs
 }
 
-/// The rungs one net's contour is actually walked at: full width, and the widths its own
-/// crowded neighbours turned out to allow.
+/// Walks the ladder for one net, emitting the widest cut that fits at every point, and
+/// returning the stretches **no** rung could cut.
 ///
-/// The full ladder is the *vocabulary* of widths; it is not a list of passes to make. A
-/// rung between the requested width and the widest gap this net has is a rung that fits
-/// nowhere on it, and walking it would cost two polygon offsets over the whole net to
-/// produce nothing. On a board where the layout has one clearance rule this collapses
-/// thirteen rungs to two, which is the difference between a plan that appears and a plan
-/// that is waited for.
+/// Each rung does two things with its contour. It emits what it may legally cut — the part
+/// that stays clear of copper this net does not own — and it hands what it could *not* cut
+/// down to the next rung as that rung's job. The descent stops the moment a rung blocks
+/// nothing, which for most crowded nets is the second rung.
 ///
-/// Skipping rungs cannot cut anything it should not: a rung only ever takes what the
-/// previous *walked* rung had to leave, so a wider skipped rung simply means the stretch
-/// it would have claimed is cut at the next width down. Conservative, never generous.
-fn walked_rungs(width_nm: i64, achieved: &[i64]) -> Vec<i64> {
-    let mut rungs = vec![width_nm];
-    rungs.extend(achieved.iter().copied().filter(|&w| w > 0 && w < width_nm));
-    rungs.sort_unstable_by(|a, b| b.cmp(a));
-    rungs.dedup();
-    rungs
-}
+/// **`blocked` decides when the descent stops; `hint` only decides where it looks next.**
+/// The rung list used to be computed up front by [`record_narrowed`], which asks whether
+/// two nets' *copper* is far enough apart, while this asks whether a *contour* drawn
+/// between them clears the copper on the far side. Those are the same question with a
+/// different number of polygon offsets under it, so they can disagree — and when they did
+/// the list held a single rung, the stretch this rung dropped had nothing beneath it to be
+/// picked up by, and it left `isolate` cut by nothing and mentioned by nothing. A board came
+/// off the machine with nets joined and every diagnostic silent. A prediction may say where
+/// to look; it may never be what declares a stretch finished with.
+///
+/// So the hint is followed while it works and abandoned the moment it does not: a wrong
+/// hint costs one rung of extra searching, where trusting it cost the channel.
+///
+/// Following it matters for the *output*, not only the clock. Stepping rung by rung grades
+/// the transition either side of a tight spot into slivers 25 µm apart in width — each its
+/// own op, its own depth, its own rapid — where jumping to the width that fits leaves the
+/// two spans an operator would draw by hand.
+fn walk_ladder(
+    net: &NetCopper,
+    others: &[Ring],
+    rungs: &[i64],
+    hint: &[i64],
+    out: &mut IsolationResult,
+) -> Vec<Ring> {
+    // Where the previous rung failed, as the region this rung has to work inside. `None`
+    // on the first rung, whose business is the whole contour.
+    let mut pending: Option<Vec<Ring>> = None;
+    let mut n = 0;
 
-/// Walks the ladder for one net, emitting the widest cut that fits at every point.
-///
-/// Each rung is clipped twice. First against the copper it must not touch, which is what
-/// makes the rung legal. Then against the reach of the rung above, which is what stops it
-/// re-cutting ground already taken at a wider setting: a point is only this rung's work if
-/// the previous rung could not have it.
-fn walk_ladder(net: &NetCopper, others: &[Ring], rungs: &[i64], out: &mut IsolationResult) {
-    let mut previous: Option<i64> = None;
-    for &width in rungs {
+    while let Some(&width) = rungs.get(n) {
         let half = width as f64 / 2.0;
-        let contour = offset_group(&net.region, half);
+
+        // After the first rung only the neighbourhood of the failure is still in play, so
+        // only that much of the net is worth offsetting. Cropping wide and keeping narrow
+        // (the rule `record_narrowed` states at its own windows): the straight edge a crop
+        // invents is four widths away from anything `pending` will keep, and the offset
+        // grows it by half a width.
+        let region = match pending.as_ref().and_then(|p| BBox::of(p)) {
+            Some(near) => intersect(&net.region, &[near.expand(4 * rungs[0]).ring()]),
+            None => net.region.clone(),
+        };
+        let contour = offset_group(&region, half);
         if contour.is_empty() {
-            continue;
+            return Vec::new();
         }
         let forbidden = offset_group(others, half - TANGENCY_SLACK_NM);
 
         let mut pieces: Vec<Piece> = contour.into_iter().map(Piece::Closed).collect();
-        pieces = clip_pieces(pieces, &forbidden, ClipType::Difference);
-        if let Some(previous) = previous {
-            // The rung above kept a stretch when the neighbouring copper was more than
-            // `previous/2 - slack` from a contour drawn at `previous/2` — that is, when
-            // the gap exceeded `previous - slack`. What it dropped is everything at or
-            // under that, which on *this* contour, drawn at `half`, is everything within
-            // `previous - half - slack` of the copper.
-            //
-            // The slack is subtracted for the same reason it was added up there, and the
-            // two conditions are then exact complements: one is `>`, the other `<=`. Get
-            // the sign wrong and each rung re-cuts the last stretch of its predecessor's.
-            let taken = offset_group(others, previous as f64 - half - TANGENCY_SLACK_NM);
-            pieces = clip_pieces(pieces, &taken, ClipType::Intersection);
+        if let Some(pending) = pending.as_ref() {
+            pieces = clip_pieces(pieces, pending, ClipType::Intersection);
         }
 
-        for piece in pieces {
+        // What this rung cannot have, and what it can. Taken from the same `pieces` so the
+        // two are exact complements by construction rather than by arithmetic.
+        let blocked = spans_of(clip_pieces(pieces.clone(), &forbidden, ClipType::Intersection));
+        for piece in clip_pieces(pieces, &forbidden, ClipType::Difference) {
             let (path, closed) = match piece {
                 Piece::Closed(ring) => (ring, true),
                 Piece::Open(span) => (span, false),
@@ -269,16 +367,63 @@ fn walk_ladder(net: &NetCopper, others: &[Ring], rungs: &[i64], out: &mut Isolat
                 width_nm: width,
             });
         }
-        previous = Some(width);
+
+        if blocked.is_empty() {
+            return Vec::new();
+        }
+        if n + 1 == rungs.len() {
+            return blocked; // the floor could not cut it either
+        }
+
+        // Where to look next: the widest width the prediction says this net's crowded pairs
+        // can take, if that is narrower than the rung just tried. Otherwise one rung down —
+        // which is also what happens on the second time round, since the hint has by then
+        // been tried and found wanting.
+        n = hint
+            .iter()
+            .copied()
+            .filter(|&w| w < width)
+            .max()
+            .and_then(|w| rungs.iter().position(|&rung| rung == w))
+            .filter(|&at| at > n)
+            .unwrap_or(n + 1);
+        let next = rungs[n];
+
+        // The next rung's contour runs `(width - next)/2` nearer the copper than this one,
+        // so the ground this rung failed on lies within that of what it just traced. The
+        // slack is the same tolerance the clips are drawn with; being a shade generous here
+        // costs a little overlap between two rungs' cuts, where being a shade mean costs a
+        // stretch of channel.
+        let shift = (width - next) as f64 / 2.0 + TANGENCY_SLACK_NM;
+        pending = Some(crate::stitching::stroke_open_paths(&blocked, shift));
     }
+    Vec::new()
 }
 
-/// Records, for every net crowding `index`, the widest rung that fits between the two, and
-/// returns those widths so the contour can be walked at exactly them.
+/// The rings out of a set of pieces, whether they closed or not.
+fn spans_of(pieces: Vec<Piece>) -> Vec<Ring> {
+    pieces
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Closed(ring) | Piece::Open(ring) => ring,
+        })
+        .filter(|ring| ring.len() >= 2)
+        .collect()
+}
+
+/// Records, for every net crowding `index`, the widest rung that fits between the two.
 ///
 /// Done per *pair* rather than per span: the number the operator needs is "these two nets
 /// only got 0.2 mm", and asking the question of the pair directly gives it exactly, with
 /// no dependence on how the spans happened to be cut up.
+///
+/// The widths it found come back as a **hint** for [`walk_ladder`] — where to look next
+/// when a rung is blocked, so the search jumps to the width that fits rather than grinding
+/// down the ladder a rung at a time. It used to be taken as the definitive rung list, which
+/// it cannot be: it measures the gap between two nets' *copper*, where the ladder measures
+/// whether a *contour* drawn in that gap clears the copper on its far side. Those agree on
+/// paper and not always in integers, and a stretch the ladder dropped with no rung beneath
+/// it was simply lost — uncut, unreported, and machined.
 ///
 /// `intrusion` — where the full-width cut would land on copper that is not this net's — is
 /// what makes this affordable. It names the only nets that can possibly be narrowed, so a
@@ -731,6 +876,181 @@ mod tests {
         r.contours.iter().filter(|c| c.net == net).collect()
     }
 
+    /// A round pad, tessellated the way KiCad's geometry arrives.
+    fn disc(cx: i64, cy: i64, radius: i64) -> Polygon {
+        let mut outline = Vec::new();
+        crate::stitching::tessellate::tessellate_circle(
+            &mut outline,
+            cx as f64,
+            cy as f64,
+            (cx + radius) as f64,
+            cy as f64,
+        );
+        Polygon { outline, holes: Vec::new() }
+    }
+
+    /// How much contour one net got, at any width.
+    fn emitted_len(r: &IsolationResult, net: &str) -> f64 {
+        contours_of(r, net)
+            .iter()
+            .map(|c| {
+                let mut path = c.path.clone();
+                if c.closed {
+                    path.push(c.path[0]);
+                }
+                polyline_len_nm(&path)
+            })
+            .sum()
+    }
+
+    /// A column of round pads on one net, like the pad chains on the reported board.
+    fn pad_column(cx: i64, radius: i64, pitch: i64, count: i64) -> Vec<Polygon> {
+        (0..count).map(|n| disc(cx, n * pitch, radius)).collect()
+    }
+
+    /// **The invariant the pass exists to keep**: a channel is either cut, or reported.
+    /// Never quietly absent.
+    ///
+    /// Driven across the clearances a real layout produces, at the width an operator
+    /// actually picks — the board's own clearance rule. The fault this guards needed no
+    /// unusual input at all, which is why it survived a full test file: the contour was
+    /// clipped away where it would have grazed a neighbour, the rung list held one entry so
+    /// no narrower rung picked it up, and `narrowed` stayed empty because the prediction
+    /// that built that list measured the two nets' *copper* while the clip measured the
+    /// *contour* between them. Cut by nothing, mentioned by nothing.
+    #[test]
+    fn no_gap_loses_a_channel_without_saying_so() {
+        let radius = 500_000;
+        for gap in [
+            80_000, 120_000, 150_000, 175_000, 190_000, 195_000, 198_000, 199_000, 200_000,
+            203_200, 210_000, 250_000,
+        ] {
+            let pitch = 2 * radius + gap;
+            let board = snapshot(vec![
+                feature("A", pad_column(0, radius, pitch, 6)),
+                feature("B", pad_column(2 * radius + gap, radius, pitch, 6)),
+            ]);
+            let result = isolate(&board, 200_000, 100_000);
+
+            // The same copper with nothing near it: the whole channel this net needs.
+            let alone = isolate(
+                &snapshot(vec![feature("A", pad_column(0, radius, pitch, 6))]),
+                200_000,
+                100_000,
+            );
+            let want = emitted_len(&alone, "A");
+            let got = emitted_len(&result, "A");
+            let told = !result.narrowed.is_empty() || !result.uncut.is_empty();
+
+            assert!(
+                got > want * 0.98 || told,
+                "gap {gap}: net A got {got:.0} nm of the {want:.0} nm of channel it needs, \
+                 and nothing was reported — narrowed {:?}, uncut {:?}",
+                result.narrowed,
+                result.uncut,
+            );
+        }
+    }
+
+    /// **The fix, stated directly.** A hint that says "full width fits" when it does not
+    /// must cost a little searching and nothing else.
+    ///
+    /// This is the exact shape of the reported fault. `record_narrowed` returns an empty
+    /// list when it believes every crowded pair takes the requested width; that list used
+    /// to *be* the rungs, so a stretch the first rung could not cut had nothing beneath it
+    /// and vanished. Here the hint is empty and the gap plainly cannot take full width, so
+    /// if the descent still depended on the hint the tight stretch would come back uncut and
+    /// unreported.
+    #[test]
+    fn a_hint_that_is_wrong_still_gets_the_channel_cut() {
+        // Edges at 0.5 mm and 0.8 mm: a 0.3 mm gap, asked for a 0.4 mm channel.
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, MM / 2)]),
+            feature("B", vec![square(1_300_000, 0, MM / 2)]),
+        ]);
+        let nets = net_regions(&board);
+        let others = neighbouring_copper(&nets, 0, 400_000);
+        let mut out = IsolationResult::default();
+
+        let uncut = walk_ladder(&nets[0], &others, &ladder(400_000, 50_000), &[], &mut out);
+
+        assert!(uncut.is_empty(), "a 0.3 mm gap takes a 0.3 mm cut — nothing is uncuttable");
+        let widths: std::collections::BTreeSet<i64> =
+            out.contours.iter().map(|c| c.width_nm).collect();
+        assert!(widths.contains(&400_000), "full width where there is room: {widths:?}");
+        assert!(
+            widths.iter().any(|&w| w <= 300_000),
+            "and the facing stretch cut at a width the gap allows: {widths:?}",
+        );
+    }
+
+    /// Copper the ladder could not separate is measured and named.
+    ///
+    /// `narrowed` is a *prediction* about two nets' copper, made before anything is cut;
+    /// this is the *outcome* of walking the ladder. They are reached differently on purpose,
+    /// and it is the outcome that gets machined — so it is the outcome that has to reach the
+    /// operator, whatever the prediction believed.
+    #[test]
+    fn what_the_ladder_could_not_cut_is_measured_and_named() {
+        // A 20 µm gap, well under the 50 µm floor.
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, MM / 2)]),
+            feature("B", vec![square(1_020_000, 0, MM / 2)]),
+        ]);
+        let result = isolate(&board, 400_000, 50_000);
+
+        let names: Vec<&str> = result.uncut.iter().map(|u| u.net.as_str()).collect();
+        assert_eq!(names, ["A", "B"], "both sides of the gap went uncut");
+        assert!(
+            result.uncut.iter().all(|u| u.length_nm > 0.0),
+            "a stretch reported as uncut must have a length: {:?}",
+            result.uncut,
+        );
+        assert!(
+            result.warnings.iter().any(|w| w.contains("could not be cut at any width")),
+            "warnings were {:?}",
+            result.warnings,
+        );
+    }
+
+    /// Room everywhere means nothing to report, which is what makes the report worth
+    /// reading. A pass that cried uncut on a board it cut perfectly would be ignored on the
+    /// board it did not.
+    #[test]
+    fn a_board_with_room_reports_nothing_uncut() {
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, MM / 2)]),
+            feature("B", vec![square(2 * MM, 0, MM / 2)]),
+        ]);
+        let result = isolate(&board, 400_000, 50_000);
+
+        assert!(result.uncut.is_empty(), "{:?}", result.uncut);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    /// The descent stops as soon as a rung blocks nothing.
+    ///
+    /// The ladder from 0.4 mm to a 0.05 mm floor is fourteen rungs, and each one costs a
+    /// polygon offset of a net that may be a board-sized pour. A pair crowded at one width
+    /// must cost two rungs, not fourteen — which shows up here as the number of distinct
+    /// widths the net's contour comes back at.
+    #[test]
+    fn a_crowded_net_stops_descending_once_nothing_is_blocked() {
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, MM / 2)]),
+            feature("B", vec![square(1_300_000, 0, MM / 2)]), // a 0.3 mm gap
+        ]);
+        let result = isolate(&board, 400_000, 50_000);
+
+        let widths: std::collections::BTreeSet<i64> =
+            contours_of(&result, "A").iter().map(|c| c.width_nm).collect();
+        assert_eq!(
+            widths.len(),
+            2,
+            "full width, then the one rung the gap allows — got {widths:?}",
+        );
+    }
+
     /// The base case, and the one that says the offset went the right way: with room to
     /// spare, every net gets one uninterrupted loop at exactly the width asked for.
     #[test]
@@ -892,6 +1212,8 @@ mod tests {
         ]);
         let result = isolate(&board, 400_000, 50_000);
 
+        println!("uncut {:?}
+warnings {:?}", result.uncut, result.warnings);
         assert_eq!(result.narrowed, vec![NarrowedPair { nets: ("A".into(), "B".into()), width_nm: 0 }]);
         assert!(
             result.warnings.iter().any(|w| w.contains("not isolated")),
