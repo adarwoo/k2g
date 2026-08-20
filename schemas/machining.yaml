@@ -410,19 +410,40 @@ $defs:
   # round every piece of copper.
   #
   # The board starts as solid copper and this takes a groove out around each
-  # net, leaving its traces standing as islands. So the cut width is the only
-  # thing worth asking about, and depth is *not* asked for at all: a V-bit cuts
-  # as wide as it is deep, so the depth follows from the width and the bit that
-  # happens to be in the rack (`assigner::engrave_depth_mm`). Asking for both
-  # would be asking the operator to solve for a tool they have not chosen yet.
+  # net, leaving its traces standing as islands. So the width is the only thing
+  # worth asking about, and depth is *not* asked for at all — but it does not
+  # follow from the width alone either.
   #
-  # Where the board is too cramped for the requested width — two nets closer
-  # together than the cut — the pass narrows only across that stretch and says
-  # which nets it narrowed, in the step's notes. It never widens, and it never
+  # A V-bit's channel is `tip + 2·depth·tan(angle/2)`, and `depth` is measured
+  # from the board *surface*: it has to spend the copper thickness before it is
+  # cutting a channel at all. So
+  #
+  #     depth = copper thickness + substrate penetration
+  #
+  # with the copper read from KiCad's stackup (35um assumed, and said, when the
+  # stackup is silent) and the penetration bounded by two global settings. Those
+  # bounds are what make the question decidable: the minimum is why a channel is
+  # a channel, the maximum is what stops a fine tip being driven a third of the
+  # way through the board to reach a width it was never suited to.
+  #
+  # That is why the width below is a **minimum** rather than a target. Exactly
+  # one depth hits any given width, and it is a coincidence when that depth is
+  # one the copper and the budget allow. Asking for a floor instead lets the
+  # picker take the bit that overshoots least — and the channel it actually
+  # cuts is reported in the Tooling table, because it is the number the board's
+  # clearances have to accommodate.
+  #
+  # Where the board is too cramped even for that — two nets closer together
+  # than the cut — the pass narrows only across that stretch and says which nets
+  # it narrowed, in the step's notes. It can narrow no further than the chosen
+  # bit's own minimum-penetration width; copper it cannot separate at all is
+  # reported rather than left uncut in silence. It never widens, and it never
   # cuts into a neighbour.
   #
   # Only the outer copper: a mill reaches F.Cu and B.Cu and no others. Which of
-  # the two is the step's own `board_face`.
+  # the two is the step's own `board_face` — and the copper thickness is read
+  # for that face, since a two-ounce front over a one-ounce back is a real
+  # board.
   # -------------------------------------------------------------------------
   engrave_copper:
     type: object
@@ -430,13 +451,15 @@ $defs:
       width: 0.25mm
     properties:
       width:
-        title: Isolation width
+        title: Minimum isolation width
         description: >-
-          How wide a channel to cut between the nets. This is an electrical
-          decision, not a tooling one — wider is a better-isolated board and a
-          slower, deeper cut. The bit is chosen to suit, and the depth it needs
-          is worked out from it; a width narrower than every V-bit tip in stock
-          cannot be cut and is reported rather than approximated.
+          The narrowest channel to accept between the nets. This is an
+          electrical decision, not a tooling one — wider is a better-isolated
+          board and a slower, deeper cut. A floor rather than a target: the
+          V-bit and its depth are chosen to meet it with the least overshoot the
+          stock allows, and the channel actually cut is shown in the Tooling
+          table. A width no bit in stock can reach within the substrate
+          penetration allowed in Settings is reported rather than approximated.
         $ref: "units.yaml#/$defs/size"
         default: 0.25mm
     required: [width]

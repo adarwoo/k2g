@@ -1835,6 +1835,7 @@ mod tests {
         let board = BoardSnapshot {
             name: "t".into(),
             thickness: None,
+            copper_thickness: Default::default(),
             bounding_box: Some(pcb::BoardBoundingBox {
                 x: Length::from_mm(0.0),
                 y: Length::from_mm(0.0),
@@ -1866,6 +1867,7 @@ mod tests {
         let board = BoardSnapshot {
             name: "t".into(),
             thickness: None,
+            copper_thickness: Default::default(),
             bounding_box: Some(pcb::BoardBoundingBox {
                 x: Length::from_mm(0.0),
                 y: Length::from_mm(0.0),

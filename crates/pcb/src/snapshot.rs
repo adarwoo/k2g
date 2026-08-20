@@ -27,6 +27,19 @@ pub struct BoardSnapshot {
     /// from the enumerated `PcbInfo`; empty when unknown.
     pub name: String,
     pub thickness: Option<Length>,
+    /// Copper thickness per layer, keyed by KiCad layer id.
+    ///
+    /// Kept **per layer** rather than summed, unlike [`Self::thickness`], because the one
+    /// question asked of it is per face: isolation engraving has to cut through the copper
+    /// on the side it is machining, and a two-ounce front over a one-ounce back is a real
+    /// board. Only [`crate::FRONT_COPPER`] and [`crate::BACK_COPPER`] are ever looked up,
+    /// but every copper layer is kept — filtering here would only move the decision.
+    ///
+    /// A layer is **absent** rather than zero when the stackup does not state a thickness.
+    /// The two are not the same: absent means "KiCad was not told", which the caller
+    /// answers with an assumption and a note, where zero would mean a face with no copper
+    /// on it and a cut of no depth.
+    pub copper_thickness: std::collections::BTreeMap<i32, Length>,
     pub bounding_box: Option<BoardBoundingBox>,
     pub edge_shapes: Vec<BoardEdgeShape>,
     pub holes: Vec<BoardHole>,
@@ -247,13 +260,18 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
         return Ok(BoardSnapshot {
             name: String::new(),
             thickness: None,
+            copper_thickness: Default::default(),
             bounding_box: None,
             edge_shapes: Vec::new(),
             holes: Vec::new(),
         });
     }
 
-    let board_thickness = collect_board_thickness_from_stackup(client);
+    // One stackup read answers both: the board's total thickness and the copper on each
+    // face. Asking twice would be two round trips for one document.
+    let stackup = client.get_board_stackup().ok();
+    let board_thickness = stackup.as_ref().and_then(board_thickness_from_stackup);
+    let copper_thickness = stackup.as_ref().map(copper_thickness_from_stackup).unwrap_or_default();
 
     let mut edge_shapes = Vec::new();
     let mut edge_item_ids = Vec::new();
@@ -444,15 +462,14 @@ pub(crate) fn collect(client: &Client) -> Result<BoardSnapshot, String> {
     Ok(BoardSnapshot {
         name: String::new(),
         thickness: board_thickness,
+        copper_thickness,
         bounding_box,
         edge_shapes,
         holes,
     })
 }
 
-fn collect_board_thickness_from_stackup(client: &Client) -> Option<Length> {
-    let stackup = client.get_board_stackup().ok()?;
-
+fn board_thickness_from_stackup(stackup: &kicad_ipc_rs::BoardStackup) -> Option<Length> {
     let sum_nm: i64 = stackup
         .layers
         .iter()
@@ -471,6 +488,30 @@ fn collect_board_thickness_from_stackup(client: &Client) -> Option<Length> {
     }
 
     None
+}
+
+/// Copper thickness per layer, from the stackup — the other half of the same read.
+///
+/// Kept apart from the board total rather than derived from it: the total is a sum over
+/// copper *and* dielectric, and no arithmetic on one number recovers what a single face
+/// carries. Isolation engraving has to cut through the copper on the side it machines, so
+/// that is the number it needs.
+///
+/// A layer with no stated thickness, or a thickness of zero, is **left out**. A caller that
+/// finds nothing for its face knows KiCad was never told, and can say so; a zero entry
+/// would read as a face with no copper and produce a cut of no depth.
+fn copper_thickness_from_stackup(
+    stackup: &kicad_ipc_rs::BoardStackup,
+) -> std::collections::BTreeMap<i32, Length> {
+    stackup
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer.layer_type, BoardStackupLayerType::Copper))
+        .filter_map(|layer| {
+            let thickness_nm = layer.thickness_nm.filter(|nm| *nm > 0)?;
+            Some((layer.layer.id, Length::from_nm(thickness_nm)))
+        })
+        .collect()
 }
 
 fn safe_get_items_by_type_codes(client: &Client, type_codes: Vec<i32>) -> Vec<PcbItem> {

@@ -254,6 +254,20 @@ impl AppData {
         self.store.set_value(&self.settings_path, pointer, value)
     }
 
+    /// Sets a settings field from a raw input string, schema-decoded — the write path for
+    /// the schema-driven fields in the Settings dialog, mirroring [`Self::set_stock_str`].
+    /// `Some(true)` if set, `Some(false)` if `raw` could not be decoded, `None` if the
+    /// pointer is unknown.
+    ///
+    /// The settings singleton is otherwise written whole, by
+    /// [`Self::replace_settings_from_value`], mirroring the runtime's in-memory copy. That
+    /// stays the path for everything the runtime holds; this one is for fields the runtime
+    /// does not, and which the operator edits directly.
+    pub fn set_setting_str(&mut self, pointer: &str, raw: &str) -> Option<bool> {
+        let path = self.settings_path.clone();
+        self.store.set_value_str(&path, pointer, raw)
+    }
+
     /// Replaces the entire settings document from a plain value, re-parsing it
     /// against the schema and scheduling the write. The single-writer bridge for
     /// `global.setting.yaml`: the runtime's in-memory settings (units, theme,

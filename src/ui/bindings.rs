@@ -53,13 +53,20 @@ pub struct FieldView {
 }
 
 /// Where a bound field lives: a profile document addressed by root identity, or
-/// the identity-less **stock singleton** addressed by its file. Lets one field
-/// widget and one form renderer serve both the id-based profile screens and the
-/// path-based stock screen without duplicating the widget logic.
+/// one of the identity-less **singletons** addressed by its file. Lets one field
+/// widget and one form renderer serve the id-based profile screens, the stock
+/// screen and the settings dialog without duplicating the widget logic.
+///
+/// `Settings` earns its place for the same reason `Stock` did. The settings dialog is
+/// otherwise hand-written toggles, which suits a boolean and suits nothing else: a length
+/// needs a label, help text, unit parsing in whatever system the operator works in, and a
+/// schema range to reject nonsense against. All four already exist in `settings.yaml` and
+/// all four would have to be written again by hand to put a field there any other way.
 #[derive(Clone, Copy, PartialEq)]
 pub enum FieldAddr {
     Doc(Uuid),
     Stock,
+    Settings,
 }
 
 /// Projects a resolved node into the owned [`FieldView`] a widget renders from
@@ -96,6 +103,7 @@ fn addr_field(addr: FieldAddr, ptr: &str) -> Option<FieldView> {
         let doc = match addr {
             FieldAddr::Doc(id) => data.get(id)?,
             FieldAddr::Stock => data.stock()?,
+            FieldAddr::Settings => data.settings()?,
         };
         doc.root.get_pointer(ptr).map(project_field)
     })
@@ -110,6 +118,7 @@ fn addr_object_children(addr: FieldAddr, ptr: &str) -> Vec<String> {
         let doc = match addr {
             FieldAddr::Doc(id) => data.get(id),
             FieldAddr::Stock => data.stock(),
+            FieldAddr::Settings => data.settings(),
         };
         doc.and_then(|doc| doc.root.get_pointer(ptr))
             .map(|node| match &node.value {
@@ -126,6 +135,7 @@ fn addr_set_input(addr: FieldAddr, ptr: &str, raw: &str) {
     with_appdata_mut(|data| match addr {
         FieldAddr::Doc(id) => data.set_str(id, ptr, raw),
         FieldAddr::Stock => data.set_stock_str(ptr, raw),
+        FieldAddr::Settings => data.set_setting_str(ptr, raw),
     });
     bump_render();
 }
@@ -135,6 +145,7 @@ fn addr_set_value(addr: FieldAddr, ptr: &str, value: NodeValue) {
     with_appdata_mut(|data| match addr {
         FieldAddr::Doc(id) => data.set_field(id, ptr, value),
         FieldAddr::Stock => data.set_stock_value(ptr, value),
+        FieldAddr::Settings => data.set_setting(ptr, value),
     });
     bump_render();
 }
@@ -1160,6 +1171,18 @@ pub fn SchemaField(id: Uuid, ptr: String) -> Element {
 #[component]
 pub fn StockField(ptr: String) -> Element {
     field_widget(FieldAddr::Stock, ptr)
+}
+
+/// The settings-singleton twin of [`SchemaField`], editing `settings.yaml` at `ptr`
+/// (e.g. `/engrave_penetration_min`).
+///
+/// The Settings dialog is hand-written toggles elsewhere, which is right for a boolean and
+/// wrong for a measurement: the label, the help text, the unit the operator works in and
+/// the values that are refusable all live in the schema already, and a hand-rolled input
+/// would restate every one of them in a second place.
+#[component]
+pub fn SettingsField(ptr: String) -> Element {
+    field_widget(FieldAddr::Settings, ptr)
 }
 
 /// Shared field-widget body behind [`SchemaField`] and [`StockField`]: reads the

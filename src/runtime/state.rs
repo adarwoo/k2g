@@ -322,7 +322,7 @@ impl AppState {
     }
 
     fn make_global_settings_payload(&self) -> Value {
-        json!({
+        let mut payload = json!({
             "schema_version": 1,
             "units": self.unit_system.as_settings_str(),
             "theme": match self.theme {
@@ -360,7 +360,43 @@ impl AppState {
             "update_skipped_version": self.update_skipped_version,
             "update_postponed_until": self.update_postponed_until,
             "security_log_enabled": self.security_log_enabled,
-        })
+        });
+
+        // Settings the runtime does not hold, carried through from the stored document.
+        //
+        // This payload rebuilds `settings.yaml` **whole**, so a key `AppState` does not
+        // model is not merely un-persisted — it is reset to its schema default by the next
+        // unrelated write. Every other setting here avoids that by living on `AppState`,
+        // which suits a value the runtime acts on. These do not: they are read once per
+        // plan, by the machining planner, straight out of the store — and they are edited
+        // straight into it too, by the Settings dialog's schema-driven fields. Mirroring
+        // them onto `AppState` would buy a second copy of a number nothing else needs, and
+        // a second place for it to be wrong.
+        //
+        // `every_settings_property_is_written_by_the_payload` is what makes this a rule
+        // rather than a habit: add a property to the schema and it fails until the property
+        // is either modelled above or listed here.
+        if let Some(object) = payload.as_object_mut() {
+            let stored = crate::data::appdata_ready()
+                .then(|| crate::data::with_appdata(|data| data.settings().map(|doc| doc.to_value())))
+                .flatten();
+            let fallback = crate::runtime::tooling::PenetrationBudget::default();
+            let as_um = |length: units::Length| json!(format!("{}um", length.as_mm() * 1000.0));
+
+            for (key, default) in [
+                ("engrave_penetration_min", fallback.min),
+                ("engrave_penetration_max", fallback.max),
+            ] {
+                let value = stored
+                    .as_ref()
+                    .and_then(|settings| settings.get(key).cloned())
+                    .filter(|value| !value.is_null())
+                    .unwrap_or_else(|| as_um(default));
+                object.insert(key.to_string(), value);
+            }
+        }
+
+        payload
     }
 
     // Runtime event log helper for UI notifications.
@@ -3043,6 +3079,7 @@ mod export_tests {
         app.board = Some(pcb::BoardSnapshot {
             name: name.to_string(),
             thickness: None,
+            copper_thickness: Default::default(),
             bounding_box: None,
             edge_shapes: Vec::new(),
             holes: Vec::new(),

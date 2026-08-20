@@ -20,6 +20,7 @@ use dioxus::prelude::*;
 use crate::runtime::kicad_integration::{
     self, IntegrationStatus, KicadInstall, KicadRunning,
 };
+use crate::ui::bindings::SettingsField;
 use crate::ui::navigation::Theme;
 
 /// One labelled switch with an explanation beneath it.
@@ -328,6 +329,28 @@ pub fn SettingsDialog(
                                 super::mutate_ctx(state, |s| s.set_reopen_where_left_off(enabled));
                             },
                         }
+                    }
+
+                    // The one card here that is machining policy rather than preference.
+                    // It sits in the global settings because it is a property of the
+                    // *process* — the same pair suits every board this machine cuts — and
+                    // because it is what makes the V-bit choice decidable at all. See the
+                    // block comment in `schemas/settings.yaml`.
+                    section { class: "settings-card",
+                        h2 { class: "settings-card-title", "Copper isolation" }
+
+                        p { class: "settings-card-intro",
+                            "A V-bit cuts as wide as it is deep, so an isolation channel's width is "
+                            "decided by how far the bit goes below the board surface. It has to clear "
+                            "the copper before it is cutting a channel at all — KiCad's stackup says "
+                            "how thick that is — and everything past the copper is cut into the "
+                            "laminate underneath. These two bound that part, and between them they "
+                            "decide which V-bits in stock can serve a given width, and which channel "
+                            "the chosen one actually cuts."
+                        }
+
+                        SettingsField { ptr: "/engrave_penetration_min".to_string() }
+                        SettingsField { ptr: "/engrave_penetration_max".to_string() }
                     }
 
                     section { class: "settings-card",

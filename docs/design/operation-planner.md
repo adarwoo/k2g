@@ -291,6 +291,47 @@ finish — so the allowance is dropped, the cut is made to size in one pass, and
 so in its notes. A cutout too tight to stand the cutter one allowance further in is dropped
 the same way: the opening is still cut to its drawn size, only the second pass is missing.
 
+### 5.4 The isolation width chooses the V-bit, through the copper
+
+A V-bit cuts as wide as it is deep, and depth here is measured from the **board surface** —
+so it has to spend the copper thickness before it is cutting a channel at all:
+
+```text
+    depth = copper thickness + substrate penetration
+    width = tip + 2·depth·tan(angle/2)
+```
+
+The copper comes from KiCad's stackup, **per face** (`BoardSnapshot::copper_thickness`),
+because a two-ounce front over a one-ounce back is a real board and a step machines one
+side. When the stackup is silent, 35 µm is assumed and the step says so. The penetration is
+bounded by two global settings, `engrave_penetration_min` / `engrave_penetration_max`
+(20 µm / 100 µm): the minimum is why a channel is a channel, the maximum is what stops a
+fine tip being driven a third of the way through the board to reach a width it was never
+suited to.
+
+**`engrave_copper.width` is a minimum, not a target.** Exactly one depth hits any given
+width, and it is a coincidence when that depth is one the copper and the budget allow.
+Asking for a floor makes the question answerable: a bit qualifies when it reaches the
+minimum inside the budget, and among those the one that **overshoots least** wins, ties
+going to the shallowest cone — the older argument, unchanged, that depth error is width
+error. What is actually cut is reported in the Tooling table, because it is the number the
+board's clearances have to accommodate.
+
+Two consequences the operator meets:
+
+- **The channel is always wider than the tip.** A 0.2 mm tip at 35 µm of copper and 20 µm
+  of penetration cuts 0.2295 mm, and cannot cut narrower — so a 0.2 mm minimum on a board
+  laid out to an 8 mil (0.2032 mm) clearance will legitimately report copper it cannot
+  separate. The way out is a finer tip, not a smaller number.
+- **A bit has a ceiling as well as a floor.** That same bit tops out near 0.27 mm inside the
+  budget; past it a broader or steeper tip is chosen, and if none reaches, the step is
+  refused naming the budget rather than the bit.
+
+Both bounds feed the isolation pass: `IsolationSpec::width_nm` is what the chosen bit cuts
+and `min_width_nm` is its minimum-penetration width — **not** its tip, which is a figure it
+can never produce. That is the floor the narrowing ladder may descend to, and below it the
+pass reports uncut copper (§`pcb::isolate`).
+
 ---
 
 ## 6. Coordinate placement

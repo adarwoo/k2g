@@ -286,6 +286,49 @@ properties:
     type: boolean
     default: true
 
+  # ---------------------------------------------------------------------------
+  # Isolation engraving — how far into the substrate the V-bit is allowed to go.
+  #
+  # A V-bit cuts as wide as it is deep, so the channel it makes is
+  #
+  #     width = tip + 2·depth·tan(angle/2)
+  #
+  # and `depth` here is measured from the board surface: it has to clear the
+  # copper before a single micron of it is doing anything, and everything past
+  # that is cut into the laminate. So the depth is the copper thickness (from
+  # KiCad's stackup) **plus** a penetration into the substrate, and it is the
+  # penetration these two bound.
+  #
+  # They are here rather than on a machining profile because they are properties
+  # of the process, not of a job: the same pair suits every board this machine
+  # cuts, and one place to set them is one place to get them right.
+  #
+  # Between them they are also what chooses the bit. Every V-bit in stock can be
+  # asked "what width do you cut at each end of that range?", and the answer
+  # decides which are eligible at all — see `pick_engraver`.
+  # ---------------------------------------------------------------------------
+  engrave_penetration_min:
+    title: Minimum substrate penetration
+    description: >-
+      How far past the copper the V-bit must go, at the least. Copper thickness
+      alone would leave the tip cutting exactly nothing, so this is what makes
+      the channel a channel — and with it, the narrowest cut any given bit can
+      make. Raise it if isolation cuts come out incomplete, at the cost of a
+      wider channel everywhere.
+    $ref: "units.yaml#/$defs/size"
+    default: 20um
+
+  engrave_penetration_max:
+    title: Maximum substrate penetration
+    description: >-
+      How far past the copper the V-bit may go at most, and so how wide a
+      channel a given bit is allowed to open out to. This is what stops a fine
+      tip being driven a third of the way through the board to reach a width it
+      was never suited to — a bit that needs more than this to reach the
+      requested width is not eligible, and a broader tip is chosen instead.
+    $ref: "units.yaml#/$defs/size"
+    default: 100um
+
 required:
   [
     units,

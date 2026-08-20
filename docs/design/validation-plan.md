@@ -107,6 +107,12 @@ The newest capability, and the one with a depth *tolerance* rather than a depth.
 | D7 | The width set to the board's own clearance | 0.2 mm on an 8 mil board, 0.1 mm tip | Every trace keeps a channel on **both** sides. The regression for the fault where stretches went missing and nothing was reported **read** + **bench**, continuity-test the fan-out |
 | D8 | Silence means success | Sweep the width 0.1 → 0.4 in 0.05 steps on a dense board | At every step, either the copper is fully separated or a note or banner says what could not be cut. A quiet pass must never be a joined board **read** |
 | D9 | Joined copper is raised even when the outlines look perfect | A board with two pads closer than the tip | The "cannot be separated" banner fires although every contour is a tidy closed loop — `intact_fraction` cannot see this and must not be the only check **read** |
+| D10 | The bit matches the width asked for | 0.2 mm minimum with 0.2 mm V-bits in stock | Tooling names a **0.2 mm** bit at about 55 µm deep, cutting about 0.23 mm — not a 0.1 mm bit at 0.57 mm. The regression for the picker choosing the most depth-sensitive tool it owns **read** |
+| D11 | Depth is copper plus penetration | D10, then set the stackup to 2 oz | The depth rises by the copper difference and the channel is unchanged; the bit does not change **read** |
+| D12 | The penetration cap is what refuses a bit | Raise `engrave_penetration_max` to 500 µm with only 0.1 mm bits in stock | The fine bits become eligible again — the cap must be visibly the rule, since the refusal message blames it **read** |
+| D13 | A silent stackup is assumed, not fatal | Clear the copper thickness in KiCad | The job still plans, and a step note names the 35 µm assumption **read** |
+| D14 | The channel actually cut is on screen | Any engraving step | Tooling shows the achieved width and depth, and the Δ column the overshoot over the minimum. It is available nowhere else **read** |
+| D15 | Measure it | D10 on scrap clad | The channel measures what Tooling said, within the flatness of the board **bench**, measured
 
 ## E. Outline, cutouts and retention
 

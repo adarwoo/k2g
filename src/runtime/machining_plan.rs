@@ -50,7 +50,8 @@ use crate::gcode::{oblong, outline, pins, scene};
 use crate::runtime::isolation::IsolationSpec;
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_engraver,
-    pick_pin_tool, plan_routers, read_steps, HoleGroup, PinTool, RouterPlan, StepRaw,
+    pick_pin_tool, plan_routers, read_steps, EngraveChoice, HoleGroup, PenetrationBudget, PinTool,
+    RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
 
@@ -550,8 +551,14 @@ fn plan_step(
     // with the same wording — which is what puts it in the diagnostics banner and shuts
     // the generation gate. A program that drilled and routed and quietly did not engrave
     // would look finished to anyone who ran it.
+    // The depth is the copper plus a penetration into the laminate beneath it, so the bit
+    // cannot be chosen without knowing how much copper there is. KiCad's stackup says, per
+    // face; when it does not, one ounce is assumed and the step says so below.
+    let budget = PenetrationBudget::current();
+    let (copper, copper_assumed) =
+        crate::runtime::tooling::copper_thickness(ctx.board.as_ref(), raw.machines_back);
     let engraver = if raw.engraves_copper() {
-        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width) {
+        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width, copper, budget) {
             Some(picked) => Some(picked),
             None => {
                 return failed(
@@ -560,6 +567,8 @@ fn plan_step(
                     vec![crate::runtime::tooling::no_engraver_reason(
                         ctx,
                         raw.engrave_copper.width,
+                        copper,
+                        budget,
                     )],
                 )
             }
@@ -609,8 +618,8 @@ fn plan_step(
     // The engraver too, and for the same reason: a step that only engraves demands no
     // holes at all, so nothing else would reserve it a slot and the one bit the step
     // exists to use would be the one bit the rack does not hold.
-    if let Some((tool_id, _)) = engraver.as_ref() {
-        mandatory.push(tool_id.clone());
+    if let Some(choice) = engraver.as_ref() {
+        mandatory.push(choice.tool_id.clone());
     }
     mandatory.sort();
     mandatory.dedup();
@@ -859,13 +868,22 @@ fn plan_step(
     // undrilled: every hole made first is a place the surface can lift or the bit can
     // catch, and the engraving is the one operation whose quality is a depth tolerance.
     let mut blocks = Vec::new();
-    if let Some((tool_id, depth)) = engraver.as_ref() {
-        if let Some(bit) = ctx.tools.iter().find(|t| &t.id == tool_id) {
-            let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, *depth, &placement);
+    if let Some(choice) = engraver.as_ref() {
+        if let Some(bit) = ctx.tools.iter().find(|t| t.id == choice.tool_id) {
+            if copper_assumed {
+                notes.push(format!(
+                    "KiCad's stackup states no copper thickness for this face, so {} (1 oz) \
+                     was assumed. The isolation depth is that plus the substrate \
+                     penetration, and the channel width follows from it — set the stackup \
+                     if the board is not 1 oz.",
+                    fmt_len(ctx, copper),
+                ));
+            }
+            let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, choice, &placement);
             notes.extend(warnings);
             blocks.extend(plan_engrave(
                 &spans,
-                tool_id,
+                &choice.tool_id,
                 bit.diameter,
                 placement.z_retract(),
                 start,
@@ -1039,7 +1057,7 @@ fn plan_engrave_spans(
     ctx: &AppCtx,
     raw: &StepRaw,
     bit: &Tool,
-    depth: Length,
+    choice: &EngraveChoice,
     placement: &Placement,
 ) -> (Vec<EngraveSpan>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
@@ -1050,14 +1068,21 @@ fn plan_engrave_spans(
     // A mill reaches the surface, so the face the step machines decides the layer. The
     // placement already mirrors a back-face step, and copper arrives in the same board
     // coordinates the holes do, so B.Cu needs nothing further.
+    //
+    // Both widths come from the **chosen bit**, not from the step's setting. The setting is
+    // a minimum the operator states; what the pass has to lay out is the channel the bit in
+    // the rack actually cuts, and how far that bit can be backed off where the board is
+    // tight. Neither is knowable before a bit is picked.
     let spec = IsolationSpec {
         board_name: board.name.clone(),
         board_epoch: ctx.board_epoch,
         layer_id: if raw.machines_back { pcb::BACK_COPPER } else { pcb::FRONT_COPPER },
-        width_nm: (raw.engrave_copper.width.as_mm() * 1e6).round() as i64,
-        // The bit's diameter is its tip — the narrowest channel it can cut — so it is
-        // the floor of every width the pass may fall back to.
-        min_width_nm: (bit.diameter.as_mm() * 1e6).round() as i64,
+        width_nm: (choice.width.as_mm() * 1e6).round() as i64,
+        // The narrowest cut this bit can make, at minimum penetration — **not** its tip.
+        // The tip is a width it can never produce: a V-bit sunk to nothing cuts nothing,
+        // and one that has only just cleared the copper is already wider than its tip. The
+        // pass narrows down to here and reports whatever it still could not fit.
+        min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
     };
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
@@ -1104,7 +1129,7 @@ fn plan_engrave_spans(
             // Negative machine-Z depth (board top is Z0; op-planner §6). Scaled from the
             // width this stretch actually achieved, not from the width that was asked for:
             // a narrowed stretch is a shallower cut, and that is the whole mechanism.
-            z_bottom: Length::from_mm(-span_depth_mm(bit, contour.width_nm, depth)),
+            z_bottom: Length::from_mm(-span_depth_mm(bit, contour.width_nm, choice.depth)),
         })
         .collect();
 
