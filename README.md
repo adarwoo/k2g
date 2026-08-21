@@ -1,8 +1,11 @@
-# k2g — KiCad to GCode
+# K2G — KiCad to GCode
 
-**CAM for making PCBs on a hobby CNC.** k2g reads the board open in KiCad and writes the
+**You design in KiCad, you have a CNC, you're 3 clicks away from making the board!** 
+K2G reads the board open in KiCad and writes the
 GCode that drills and cuts it out: holes, oblong slots, board outline with breakaway
 tabs.
+
+<img width="1887" height="1176" alt="image" src="https://github.com/user-attachments/assets/9390f33c-4419-41e0-822c-5f4310a6f827" />
 
 It is not a generic CAM package. It knows what a PCB is — plated and non-plated holes,
 pad stacks, board outline, cutouts — and what your machine is, so the questions it asks
