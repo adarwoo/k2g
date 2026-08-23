@@ -443,12 +443,34 @@ $defs:
   # cuts is reported in the Tooling table, because it is the number the board's
   # clearances have to accommodate.
   #
-  # Where the board is too cramped even for that — two nets closer together
+  # **It is a process floor, not the board's clearance.** The number to put here
+  # is how narrow a channel this machine can cut and still separate copper
+  # reliably — a property of the spindle, the bit and how flat the work is held,
+  # not of the layout. The pass will exceed it wherever there is room, which is
+  # most of the board.
+  #
+  # Setting it to the board's own clearance instead — which this note used to
+  # recommend, and which reads as the obvious thing to do — asks for a channel
+  # exactly as wide as the gap it goes in. Three things follow, none of them
+  # wanted. Every fine V-bit is refused, because a 0.1 mm tip cannot open out to
+  # 0.25 mm inside the penetration budget however good a fit it is for the
+  # board. The bit that *is* chosen has almost no narrowing range left, which is
+  # the range the pass needs where the layout is tight. And the cut runs down
+  # the middle of every gap, which is where the neighbour's cut runs too — so
+  # each channel gets machined twice until the pass collapses them.
+  #
+  # Where the board is too cramped even for the floor — two nets closer together
   # than the cut — the pass narrows only across that stretch and says which nets
   # it narrowed, in the step's notes. It can narrow no further than the chosen
   # bit's own minimum-penetration width; copper it cannot separate at all is
   # reported rather than left uncut in silence. It never widens, and it never
   # cuts into a neighbour.
+  #
+  # If no bit in stock reaches the minimum, the board is machined at the widest
+  # channel the stock *can* cut and the step says so. The alternative — refusing
+  # — turned a few percent of shortfall into no program at all, at a threshold
+  # that falls out of whichever cone angles happen to be in stock and is shown
+  # nowhere.
   #
   # Only the outer copper: a mill reaches F.Cu and B.Cu and no others. Which of
   # the two is the step's own `board_face` — and the copper thickness is read
@@ -458,20 +480,23 @@ $defs:
   engrave_copper:
     type: object
     default:
-      width: 0.25mm
+      width: 0.15mm
     properties:
       width:
         title: Minimum isolation width
         description: >-
-          The narrowest channel to accept between the nets. This is an
-          electrical decision, not a tooling one — wider is a better-isolated
-          board and a slower, deeper cut. A floor rather than a target: the
-          V-bit and its depth are chosen to meet it with the least overshoot the
-          stock allows, and the channel actually cut is shown in the Tooling
-          table. A width no bit in stock can reach within the substrate
-          penetration allowed in Settings is reported rather than approximated.
+          The narrowest channel that still separates copper reliably on this
+          machine. A floor, not a target: the pass cuts wider wherever the board
+          has room, and the V-bit and its depth are chosen to meet this with the
+          least overshoot the stock allows. The channel actually cut is shown in
+          the Tooling table. Set it from your process — spindle runout, how flat
+          the work is held — and not from the board's clearance: asking for a
+          channel as wide as the gap it goes in refuses every fine V-bit and
+          leaves the pass no room to narrow where the layout is tight. If no bit
+          in stock reaches it, the board is cut at the widest channel the stock
+          can make and the step says so.
         $ref: "units.yaml#/$defs/size"
-        default: 0.25mm
+        default: 0.15mm
     required: [width]
     additionalProperties: false
 

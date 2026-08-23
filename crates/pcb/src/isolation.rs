@@ -278,6 +278,21 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
         ));
     }
 
+    // **Nothing cut, and nothing said, is the one outcome this pass may not have.** Every
+    // path above that produces no contours has its own account — no copper on the layer, a
+    // width of zero, copper the ladder could not separate — but they are separate paths and
+    // a future one need not remember to. This is the backstop: the result is empty and no
+    // reason is attached, so a reason is attached. Silence here reaches the operator as a
+    // step that engraved nothing and looked complete, which is exactly the fault that put
+    // a board on the machine with its nets still joined.
+    if result.contours.is_empty() && result.warnings.is_empty() {
+        result.warnings.push(
+            "The isolation pass produced no cuts at all for this layer, and cannot say \
+             which part of the board defeated it. The copper will not be separated."
+                .into(),
+        );
+    }
+
     for ((a, b), width) in narrowed {
         if width == 0 {
             result.warnings.push(format!(
@@ -1496,6 +1511,33 @@ mod tests {
             "{} nets took {elapsed:?}, over the {budget}s ceiling — the collapse has most              likely gone quadratic again",
             cols * rows,
         );
+    }
+
+    /// **An empty result always carries a reason.** Whichever path produced no contours,
+    /// the operator gets a sentence rather than a step that engraved nothing and looked
+    /// complete — the shape of the reported fault.
+    #[test]
+    fn a_pass_that_cuts_nothing_always_says_why() {
+        let cases: Vec<(&str, IsolationResult)> = vec![
+            ("no copper on the layer", isolate(&snapshot(vec![]), 254_000, 150_000)),
+            (
+                "a width of zero",
+                isolate(&snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]), 0, 0),
+            ),
+            (
+                "copper with no polygons",
+                isolate(&snapshot(vec![feature("A", vec![])]), 254_000, 150_000),
+            ),
+        ];
+
+        for (label, result) in cases {
+            if result.contours.is_empty() {
+                assert!(
+                    !result.warnings.is_empty(),
+                    "{label}: no contours and no reason given",
+                );
+            }
+        }
     }
 
     /// **The invariant the pass exists to keep**: a channel is either cut, or reported.

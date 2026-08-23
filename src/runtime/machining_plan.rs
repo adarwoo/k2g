@@ -561,21 +561,26 @@ fn plan_step(
         match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width, copper, budget) {
             Some(picked) => Some(picked),
             None => {
-                return failed(
-                    index,
-                    name,
-                    vec![crate::runtime::tooling::no_engraver_reason(
-                        ctx,
-                        raw.engrave_copper.width,
-                        copper,
-                        budget,
-                    )],
-                )
+                return failed(index, name, vec![crate::runtime::tooling::no_engraver_reason()])
             }
         }
     } else {
         None
     };
+    // A bit that falls short of the requested width machines the board and says so. The
+    // note goes on before anything else the step has to say, because it is the one thing
+    // here that means the board will not meet the specification it was asked for.
+    if let Some(choice) = engraver.as_ref() {
+        if let Some(wanted) = choice.fell_short_of {
+            notes.push(crate::runtime::tooling::narrower_channel_reason(
+                ctx,
+                wanted,
+                choice.width,
+                copper,
+                budget,
+            ));
+        }
+    }
 
     // Nothing to assign *and* nothing to route. Cutouts count as work in their own right:
     // a step that only cuts interior openings has no holes, no outline and no pins, and
@@ -881,14 +886,28 @@ fn plan_step(
             }
             let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, choice, &placement);
             notes.extend(warnings);
-            blocks.extend(plan_engrave(
+            let engraved = plan_engrave(
                 &spans,
                 &choice.tool_id,
                 bit.diameter,
                 placement.z_retract(),
                 start,
                 &slots,
-            ));
+            );
+            // **A step that asks to engrave and produces no engraving is a fault**, not a
+            // step that happened to be quiet. Nothing checked this, which is how a program
+            // came out drilled, routed and with its copper untouched while every view
+            // showed it as complete. Whatever the reason — contours still computing, a
+            // board with no copper on this face — the reason is in `notes` by now; this is
+            // what stops the plan looking finished without it being read.
+            if engraved.is_none() {
+                notes.push(
+                    "This step engraves copper but produced no isolation toolpath — the \
+                     program will not separate the nets. Do not run it as it is."
+                        .to_string(),
+                );
+            }
+            blocks.extend(engraved);
         }
     }
 
@@ -1045,6 +1064,62 @@ fn plan_step(
 /// whose notes nobody reads.
 const NARROWED_PAIRS_NAMED: usize = 5;
 
+/// Says which part of the isolation question is unanswered, field by field.
+///
+/// A miss is normal — the first plan after a board loads always misses, and the answer
+/// lands a second later. It is a *persistent* miss that is the fault, and from the outside
+/// the two look identical: no engraving, and a plan that keeps asking. The spec is five
+/// fields and any one of them can differ, so this names the one that does rather than
+/// leaving it to be guessed at from a screenshot.
+///
+/// At `info` deliberately. It is not a warning — nothing is wrong the first several times —
+/// but it has to be in the log the operator can hand over, not behind `RUST_LOG=debug`
+/// nobody sets before the fault rather than after it.
+fn log_isolation_miss(held: &crate::runtime::isolation::IsolationState, wanted: &IsolationSpec) {
+    match held.ready.get(&wanted.layer_id) {
+        None => log::info!(
+            "Isolation not ready for layer {}: nothing held for this face yet \
+             (board {:?} epoch {}, width {} nm, floor {} nm)",
+            wanted.layer_id,
+            wanted.board_name,
+            wanted.board_epoch,
+            wanted.width_nm,
+            wanted.min_width_nm,
+        ),
+        Some(held) => {
+            let held = &held.spec;
+            let mut differs: Vec<String> = Vec::new();
+            if held.board_name != wanted.board_name {
+                differs.push(format!("board {:?} != {:?}", held.board_name, wanted.board_name));
+            }
+            if held.board_epoch != wanted.board_epoch {
+                differs.push(format!("epoch {} != {}", held.board_epoch, wanted.board_epoch));
+            }
+            if held.width_nm != wanted.width_nm {
+                differs.push(format!("width {} != {} nm", held.width_nm, wanted.width_nm));
+            }
+            if held.min_width_nm != wanted.min_width_nm {
+                differs.push(format!(
+                    "floor {} != {} nm",
+                    held.min_width_nm, wanted.min_width_nm
+                ));
+            }
+            log::info!(
+                "Isolation not ready for layer {}: held answers a different question — {}",
+                wanted.layer_id,
+                match differs.is_empty() {
+                    // Equal on every field this compares, yet `matching` refused it: the
+                    // spec has grown a field and this function was not told.
+                    true => "nothing this check knows about (a spec field is unaccounted \
+                             for here)"
+                        .to_string(),
+                    false => differs.join(", "),
+                },
+            );
+        }
+    }
+}
+
 /// The isolation cuts for this step's copper face, and what the operator should know.
 ///
 /// Asks the [isolation worker](crate::runtime::isolation) rather than computing anything:
@@ -1086,14 +1161,27 @@ fn plan_engrave_spans(
     };
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
-        crate::runtime::isolation::request_isolation(spec);
-        // Only a failure is worth a note. Work still in progress is not a shortcoming of
-        // the job and does not belong in a list of them — the views say so themselves,
-        // while it is happening, and stop saying it when it stops being true. A note
-        // would have to be written now and would still be sitting there afterwards.
+        // **Say so.** This used to return silently, on the argument that work in progress
+        // is not a shortcoming of the job and that a note written now would still be
+        // sitting there afterwards. The second half of that is simply false — the plan is
+        // rebuilt every time the worker publishes, so the note clears itself — and the
+        // first half cost an operator an afternoon: contours that never arrived produced a
+        // step with no engrave block, which renders as a complete, green, empty job. The
+        // copper was not engraved and nothing anywhere said why.
         if let Some(error) = ctx.isolation.error.as_ref() {
             warnings.push(format!("The copper could not be read: {error}"));
+        } else {
+            warnings.push(
+                "The isolation contours for this face are still being computed, so the \
+                 copper is not engraved in this program yet."
+                    .to_string(),
+            );
         }
+        // What is being waited on, against what is held. If this ever sticks, the log names
+        // the field that differs — which is the whole difference between a fault anyone can
+        // fix and the one that took a board off the machine with its copper untouched.
+        log_isolation_miss(&ctx.isolation, &spec);
+        crate::runtime::isolation::request_isolation(spec);
         return (Vec::new(), warnings);
     };
 
@@ -2287,5 +2375,133 @@ mod cache_tests {
 
         let current = cache.get_or_build(key(2, 1), || marker("from the current one"));
         assert_eq!(current.note.as_deref(), Some("from the current one"));
+    }
+}
+
+/// The diagnostics that stand between a step that could not engrave and a program that
+/// looks finished without it.
+///
+/// These are the guards for the fault an operator hit on the bench: contours that never
+/// arrived produced a step with no engrave block, which rendered as a complete, green,
+/// empty job with nothing anywhere saying the copper had not been touched.
+#[cfg(test)]
+mod engrave_diagnostic_tests {
+    use super::*;
+    use crate::runtime::isolation::{Isolation, IsolationSpec};
+
+    fn spec(width_nm: i64, epoch: u64) -> IsolationSpec {
+        IsolationSpec {
+            board_name: "demo".into(),
+            board_epoch: epoch,
+            layer_id: pcb::FRONT_COPPER,
+            width_nm,
+            min_width_nm: 150_000,
+        }
+    }
+
+    fn state_holding(held: Option<IsolationSpec>) -> crate::runtime::isolation::IsolationState {
+        let mut state = crate::runtime::isolation::IsolationState::default();
+        if let Some(held) = held {
+            state.ready.insert(
+                held.layer_id,
+                std::sync::Arc::new(Isolation {
+                    spec: held,
+                    result: Default::default(),
+                    copper_warnings: Vec::new(),
+                    copper_layer_count: 2,
+                }),
+            );
+        }
+        state
+    }
+
+    /// **The miss names the field that differs.** The spec is five fields and any one of
+    /// them can hold an answer back; from the outside every case looks the same — no
+    /// engraving, and a plan that keeps asking. This is what makes a persistent miss
+    /// diagnosable from a log the operator can hand over.
+    ///
+    /// Asserted through the same comparison `matching` makes, so the two cannot drift into
+    /// disagreeing about what counts as the same question.
+    #[test]
+    fn a_spec_that_differs_in_one_field_does_not_match() {
+        let held = spec(254_000, 1);
+        let state = state_holding(Some(held.clone()));
+
+        assert!(state.matching(&held).is_some(), "the identical question matches");
+
+        for (label, other) in [
+            ("width", IsolationSpec { width_nm: 172_000, ..held.clone() }),
+            ("floor", IsolationSpec { min_width_nm: 109_000, ..held.clone() }),
+            ("epoch", IsolationSpec { board_epoch: 2, ..held.clone() }),
+            ("board", IsolationSpec { board_name: "other".into(), ..held.clone() }),
+            ("layer", IsolationSpec { layer_id: pcb::BACK_COPPER, ..held.clone() }),
+        ] {
+            assert!(
+                state.matching(&other).is_none(),
+                "a spec differing only in its {label} must not match",
+            );
+            // And it must not panic on the way to saying so, whichever field it is.
+            log_isolation_miss(&state, &other);
+        }
+    }
+
+    /// Nothing held at all is the ordinary first plan after a board loads, and it has to be
+    /// reportable too — not just the case where a stale answer is present.
+    #[test]
+    fn a_miss_with_nothing_held_is_still_reported() {
+        log_isolation_miss(&state_holding(None), &spec(254_000, 1));
+    }
+
+    /// **The note that broke the silence.** `plan_engrave_spans` returning nothing used to
+    /// push no note at all, on the argument that work in progress is not a shortcoming. The
+    /// plan is rebuilt on every publish, so the note clears itself — and without it the
+    /// step is indistinguishable from one that had no copper to cut.
+    #[test]
+    fn a_step_waiting_on_contours_says_so_rather_than_returning_quietly() {
+        // Asserted on the source rather than by driving a plan, which needs a live board,
+        // a datastore and a KiCad connection. What is being guarded is that the early
+        // return is not silent, and that is a property of the text.
+        let source = include_str!("machining_plan.rs");
+        // Anchored on the not-ready block itself, not on the function: `plan_engrave_spans`
+        // returns `(Vec::new(), warnings)` from its no-board guard first, and scanning to
+        // the first of those measures the wrong early return entirely.
+        let body = source
+            .split_once("ctx.isolation.matching(&spec) else {")
+            .expect("the not-ready path is a let-else on `matching`")
+            .1;
+        let early_return = body
+            .find("return (Vec::new(), warnings);")
+            .expect("the not-ready path returns early");
+        let head = &body[..early_return];
+
+        assert!(
+            head.contains("still being computed"),
+            "the not-ready path must push a note before returning, or a step whose \
+             contours never arrive renders as a complete, empty job",
+        );
+        assert!(
+            head.contains("log_isolation_miss"),
+            "and must log which field differs, or a persistent miss is undiagnosable",
+        );
+    }
+
+    /// **A step that engraves and produces no engraving is a fault.** The one invariant
+    /// nothing checked, and the reason a program came off the planner drilled, routed and
+    /// with its copper untouched while every view showed it complete.
+    #[test]
+    fn a_step_that_engraves_nothing_is_flagged() {
+        let source = include_str!("machining_plan.rs");
+        let body = source
+            .split_once("let engraved = plan_engrave(")
+            .expect("the engrave block is built here")
+            .1;
+
+        let check = body.find("engraved.is_none()").expect("the empty case is checked");
+        let pushed = body.find("Do not run it as it is").expect("and says what it means");
+        assert!(check < pushed, "the check has to be what raises the note");
+        assert!(
+            check < body.find("blocks.extend(engraved)").expect("the block is added"),
+            "checked before it is folded into the plan, while it can still be told apart",
+        );
     }
 }

@@ -1518,24 +1518,21 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
     // rack has to come out identical: this view is where the operator reads which bit goes
     // in which slot.
     //
-    // A step that asks to engrave and has nothing to engrave with **fails**, rather than
+    // A step that asks to engrave and has **nothing to engrave with** fails, rather than
     // planning its other work and mentioning the gap. The program would otherwise come
     // out looking complete — drilled, routed, and not isolated — and be run by someone
     // who had no reason to doubt it. Refused for the reason a missing locating-pin drill
     // is refused: there is no degraded output worth having.
+    //
+    // A bit that exists but falls short of the requested width is a different case and is
+    // *not* refused — see [`narrower_channel_reason`]. This view has no place to put a
+    // warning, so the shortfall is said by the machining plan, which does.
     let budget = PenetrationBudget::current();
     let (copper, _assumed) = copper_thickness(ctx.board.as_ref(), raw.machines_back);
     let engraver = if raw.engraves_copper() {
         match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width, copper, budget) {
             Some(picked) => Some(picked),
-            None => {
-                return StepOutcome::Failed(vec![no_engraver_reason(
-                    ctx,
-                    raw.engrave_copper.width,
-                    copper,
-                    budget,
-                )])
-            }
+            None => return StepOutcome::Failed(vec![no_engraver_reason()]),
         }
     } else {
         None
@@ -2195,8 +2192,9 @@ pub(crate) struct EngraveChoice {
     pub(crate) tool_id: String,
     /// Below the board surface: the copper, plus the penetration into the substrate.
     pub(crate) depth: Length,
-    /// The channel this actually cuts — at least the requested minimum, and usually a
-    /// little over, because a bit that fits exactly is a coincidence.
+    /// The channel this actually cuts — usually a little over the requested minimum,
+    /// because a bit that fits exactly is a coincidence, and occasionally **under** it: see
+    /// `shortfall`.
     pub(crate) width: Length,
     /// The narrowest channel this bit can cut at all, at minimum penetration.
     ///
@@ -2204,6 +2202,15 @@ pub(crate) struct EngraveChoice {
     /// can never actually produce; the narrowest real cut is the one that just clears the
     /// copper. This is the floor the isolation ladder may narrow to and no further.
     pub(crate) floor: Length,
+    /// The requested minimum, when no bit in stock could reach it — so `width` below is
+    /// the widest channel the stock can make and is *narrower* than was asked for.
+    ///
+    /// The step machines anyway and says so. A board isolated at 10.72 mil when 11 was
+    /// asked for is a usable board, and refusing turned a 3% shortfall into no program at
+    /// all — for a threshold the operator cannot see, since it falls out of the cone angles
+    /// that happen to be in stock. What is not acceptable is machining it *quietly*, so
+    /// this exists to be reported rather than to be handled.
+    pub(crate) fell_short_of: Option<Length>,
 }
 
 /// The V-bit that cuts an isolation channel of **at least** `min_width`, and how deep.
@@ -2276,6 +2283,8 @@ pub(crate) fn pick_engraver(
         if width_at(pmax) + 1e-9 < wanted {
             return None; // cannot reach the minimum inside the budget
         }
+        // From here the bit does reach the minimum, so the cut it makes is at least that
+        // wide and `fell_short_of` stays empty. The under-reaching case is `widest` below.
         // The penetration that lands exactly on the minimum, clamped into the budget. Below
         // it the bit overshoots and that is simply what it cuts; above it, it is not
         // eligible and we have already returned.
@@ -2293,7 +2302,53 @@ pub(crate) fn pick_engraver(
             depth: Length::from_mm(depth_mm),
             width: Length::from_mm(width_at(penetration)),
             floor: Length::from_mm(width_at(pmin)),
+            fell_short_of: None,
         })
+    };
+
+    // The widest channel a bit can cut at all: driven to the budget's limit, whatever was
+    // asked for. Used **only** when nothing reaches the minimum, so that a request the
+    // stock falls short of machines the board and says so rather than refusing.
+    //
+    // Not expressed through `suits`, which answers a different question — it solves for a
+    // width and returns nothing when that width is out of reach, which here is every
+    // candidate by definition. The eligibility rule it applies is repeated instead: a bit
+    // rated for a deeper cut than this one is no more usable in the fallback than in the
+    // ordinary path.
+    let widest = |candidates: Vec<&Tool>| -> Option<EngraveChoice> {
+        let mut scored: Vec<(i64, &str, EngraveChoice)> = candidates
+            .iter()
+            .filter_map(|tool| {
+                let tip = tool.diameter.as_mm();
+                let half = (tool.point_angle.as_degrees() / 2.0).to_radians();
+                let k = if tool.point_angle.as_degrees() >= 180.0 { 0.0 } else { 2.0 * half.tan() };
+                let width_at = |p: f64| tip + k * (copper_mm + p);
+
+                let depth_mm = copper_mm + pmax;
+                if depth_mm <= 0.0 {
+                    return None;
+                }
+                if tool.z_min_depth.is_some_and(|min| depth_mm < min.as_mm()) {
+                    return None;
+                }
+                let reach = width_at(pmax);
+                Some((
+                    (reach * 1e6).round() as i64,
+                    tool.id.as_str(),
+                    EngraveChoice {
+                        tool_id: tool.id.clone(),
+                        depth: Length::from_mm(depth_mm),
+                        width: Length::from_mm(reach),
+                        floor: Length::from_mm(width_at(pmin)),
+                        fell_short_of: Some(min_width),
+                    },
+                ))
+            })
+            .collect();
+        // Widest first; the id breaks ties so the choice is a total function of the stock
+        // list rather than of the order it is stored in, as in `best`.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+        scored.into_iter().next().map(|(_, _, choice)| choice)
     };
 
     // Least overshoot first, shallowest cone next, so the first that suits is the best that
@@ -2326,7 +2381,14 @@ pub(crate) fn pick_engraver(
         .filter(|t| is_engraver_tool(t) && t.status == crate::data::model::ToolStatus::InStock)
         .collect();
 
-    best(fixed).or_else(|| best(stock))
+    // A bit that meets the request beats one that does not, wherever it is: a racked bit
+    // is preferred only among equals, and "already in the rack" is not worth machining the
+    // board to the wrong specification for. Only when neither list can meet the request at
+    // all does the fallback run, and then over both for the same reason.
+    best(fixed.clone())
+        .or_else(|| best(stock.clone()))
+        .or_else(|| widest(fixed))
+        .or_else(|| widest(stock))
 }
 
 /// The router that mills a slot `width` across: the **largest** cutter that still fits.
@@ -2486,30 +2548,58 @@ impl RouterPlan {
     }
 }
 
-/// Why a step that asks to engrave cannot.
+/// That the channel being cut is narrower than the step asked for, and why.
 ///
 /// One wording, used by both the Tooling tab and the machining plan, so the operator does
-/// not meet two accounts of one fault. It names the way out, which a blocking error owes
-/// the reader — and it names the **budget**, because that is nearly always what refused the
-/// bit: a fine tip can reach almost any width given enough depth, and the maximum
-/// penetration is precisely the rule that stops it. "No bit can cut 0.20 mm" would send the
-/// operator shopping for a tool they already own.
-pub(crate) fn no_engraver_reason(
+/// not meet two accounts of one fact. It names the **budget**, because that is nearly
+/// always what limited the bit: a fine tip can reach almost any width given enough depth,
+/// and the maximum penetration is precisely the rule that stops it. "No bit can cut
+/// 0.20 mm" would send the operator shopping for a tool they already own.
+///
+/// # Why this is a warning and no longer a refusal
+///
+/// It used to fail the step, on the argument that there is no degraded output worth having.
+/// That argument does not survive the numbers. With the shipped catalogue the threshold
+/// falls at 10.72 mil — a figure that comes out of which cone angles happen to be in stock,
+/// appears nowhere on screen, and moves when the stock does. Asking for 11 mil on a board
+/// whose clearance is 10 produced no program at all while 10.5 produced one; nothing said
+/// why, and re-entering the value that had worked did not bring it back, because the value
+/// was never what changed.
+///
+/// A board isolated at 10.72 mil when 11 was asked for is a usable board, and refusing
+/// turned a 3% shortfall into a dead end. What is *not* acceptable is machining it quietly
+/// — which is what this text exists to prevent, so it has to read as a specification not
+/// met rather than as a note about tooling.
+pub(crate) fn narrower_channel_reason(
     ctx: &AppState,
     min_width: Length,
+    achieved: Length,
     copper: Length,
     budget: PenetrationBudget,
 ) -> String {
     format!(
-        "No V-bit in stock reaches a {} isolation channel within {} of substrate \
-         penetration. The cut has to clear {} of copper before it widens at all, and every \
-         tip in stock would need to go deeper than that to open out this far — or is rated \
-         for a deeper cut than this one. Stock a broader V-bit or a steeper one, raise the \
-         maximum penetration in Settings, or lower the minimum width on this step.",
+        "The isolation channel will be {}, not the {} this step asks for. No V-bit in \
+         stock reaches that within {} of substrate penetration — the cut has to clear {} \
+         of copper before it widens at all, and every tip in stock would need to go deeper \
+         than that. Stock a broader V-bit or a steeper one, raise the maximum penetration \
+         in Settings, or lower the minimum width on this step to what the stock can do.",
+        fmt_len(ctx, achieved),
         fmt_len(ctx, min_width),
         fmt_len(ctx, budget.max),
         fmt_len(ctx, copper),
     )
+}
+
+/// Why a step that asks to engrave cannot — the one refusal that remains.
+///
+/// Nothing engraver-shaped in stock at all, which no argument about depth or width can work
+/// around. Distinct from [`narrower_channel_reason`], which is about a bit that exists and
+/// falls short: that one machines the board and says so, this one has nothing to machine
+/// it with.
+pub(crate) fn no_engraver_reason() -> String {
+    "No V-bit or engraver in stock, so there is nothing to cut an isolation channel with. \
+     Add one to the stock list, or turn off copper engraving for this step."
+        .to_string()
 }
 
 /// The band of drill diameters that relieves a corner of interior angle `θ` cut by a
@@ -4666,16 +4756,20 @@ mod engraver_tests {
         assert!(choice.width.as_mm() < 0.24, "but only just: {}", choice.width.as_mm());
     }
 
-    /// The maximum penetration is what refuses the absurd plunge — and it must be *that*
+    /// The maximum penetration is what stops the absurd plunge — and it must be *that*
     /// rule doing it rather than the bit being unusable, or the operator is sent shopping
-    /// for a tool they already own. Raise the budget and the same bit becomes eligible.
+    /// for a tool they already own. Raise the budget and the same bit meets the width
+    /// outright.
     #[test]
-    fn a_bit_that_would_have_to_be_buried_to_reach_the_width_is_refused() {
+    fn a_bit_that_would_have_to_be_buried_to_reach_the_width_falls_short_of_it() {
         let fine = vec![vbit("v10-0.1", 0.1, 10.0)];
-        assert!(
-            pick(&fine, 0.2).is_none(),
+        let capped = pick(&fine, 0.2).expect("it is still the only bit there is");
+        assert_eq!(
+            capped.fell_short_of,
+            Some(Length::from_mm(0.2)),
             "0.1mm of tip needs over half a millimetre of depth to open out to 0.2mm",
         );
+        assert!(capped.width.as_mm() < 0.2, "so what it cuts is narrower: {}", capped.width.as_mm());
 
         let generous = pick_engraver(
             &fine,
@@ -4693,9 +4787,14 @@ mod engraver_tests {
     #[test]
     fn the_bit_that_overshoots_least_wins() {
         let choice = pick(&catalogue(), 0.2).expect("something serves it");
+        // Only bits that actually **meet** the request are in the running. A bit picked on
+        // its own now falls back to its own ceiling rather than declining, so without this
+        // filter the tightest "available" width would be one that misses the floor — which
+        // is the opposite of what the rule is for.
         let tightest = catalogue()
             .iter()
             .filter_map(|tool| pick(std::slice::from_ref(tool), 0.2))
+            .filter(|c| c.fell_short_of.is_none())
             .map(|c| c.width.as_mm())
             .fold(f64::INFINITY, f64::min);
 
@@ -4792,7 +4891,16 @@ mod engraver_tests {
         let ceiling = pick(&bit, 0.27).expect("0.27 is inside its reach").width.as_mm();
 
         assert!((0.26..0.28).contains(&ceiling), "ceiling was {ceiling}");
-        assert!(pick(&bit, 0.28).is_none(), "and past it the bit is simply not eligible");
+
+        // Past it the bit no longer *meets* the request — but it is still the only bit
+        // there is, so it cuts what it can and the shortfall is reported. What it cuts is
+        // its true reach, which is a shade over the 0.27 it was asked for above: that
+        // request was met exactly, this one is met as far as the budget allows.
+        let past = pick(&bit, 0.28).expect("the board is machined rather than refused");
+        assert_eq!(past.fell_short_of, Some(Length::from_mm(0.28)));
+        assert!(past.width.as_mm() >= ceiling, "it is driven at least to the width it met");
+        assert!(past.width.as_mm() < 0.28, "but still short of the ask");
+        assert!((0.27..0.275).contains(&past.width.as_mm()), "reach was {}", past.width.as_mm());
     }
 
     /// A bit whose tip already exceeds the minimum still serves it — the width is a floor,
@@ -4825,12 +4933,88 @@ mod engraver_tests {
         );
     }
 
-    /// A width no bit can reach yields nothing, and it is on that `None` that the step is
-    /// refused rather than planned without its engraving. A program that drilled and routed
-    /// and quietly did not isolate would look finished to whoever ran it.
+    /// **A width no bit can reach is machined at the widest one that can, and said.**
+    ///
+    /// The reported fault: with the shipped catalogue the threshold falls at 10.72 mil,
+    /// which comes out of whichever cone angles happen to be in stock and appears nowhere
+    /// on screen. Refusing turned a few percent of shortfall into no program at all.
     #[test]
-    fn a_width_no_bit_can_reach_yields_nothing_to_engrave_with() {
-        assert!(pick(&catalogue(), 2.0).is_none(), "no tip opens out that far inside the budget");
+    fn a_width_no_bit_can_reach_is_cut_at_the_widest_that_can() {
+        let choice = pick(&catalogue(), 2.0).expect("the widest bit still cuts something");
+
+        assert_eq!(choice.tool_id, "v90-0.3", "the widest reach in the catalogue");
+        assert_eq!(choice.fell_short_of, Some(Length::from_mm(2.0)));
+        assert!(
+            (0.56..0.58).contains(&choice.width.as_mm()),
+            "driven to its ceiling, {}",
+            choice.width.as_mm(),
+        );
+    }
+
+    /// **The reported cliff, pinned.** 10.5 mil is met by the 0.2/30; 11 mil is not, and
+    /// with no steeper bit in stock the board is machined at 10.72 mil rather than not at
+    /// all. This is the exact pair of values that behaved differently on the bench.
+    #[test]
+    fn the_reported_cliff_machines_the_board_instead_of_vanishing() {
+        let stock = vec![vbit("v30-0.1", 0.1, 30.0), vbit("v30-0.2", 0.2, 30.0)];
+        const MIL: f64 = 0.0254;
+
+        let under = pick(&stock, 10.5 * MIL).expect("inside the 0.2/30's reach");
+        assert_eq!(under.fell_short_of, None, "10.5 mil is met outright");
+
+        let over = pick(&stock, 11.0 * MIL).expect("machined, not refused");
+        assert_eq!(over.tool_id, "v30-0.2");
+        assert_eq!(over.fell_short_of, Some(Length::from_mm(11.0 * MIL)));
+        assert!(
+            (over.width.as_mm() / MIL - 10.72).abs() < 0.02,
+            "the ceiling is 10.72 mil, got {}",
+            over.width.as_mm() / MIL,
+        );
+    }
+
+    /// **A bit that meets the request always beats one that falls short**, however much
+    /// tighter the short one looks.
+    ///
+    /// The fallback is a last resort, not a competitor. A 0.1 mm tip asked for a 0.25 mm
+    /// channel would "overshoot" by nothing at all — because it never gets there — and a
+    /// rule that scored the two together would pick it every time and quietly under-cut
+    /// every board.
+    #[test]
+    fn a_bit_that_meets_the_request_beats_a_tighter_one_that_cannot() {
+        let stock = vec![vbit("v10-0.1", 0.1, 10.0), vbit("v30-0.2", 0.2, 30.0)];
+        let choice = pick(&stock, 0.25).expect("the 0.2/30 reaches it");
+
+        assert_eq!(choice.tool_id, "v30-0.2");
+        assert_eq!(choice.fell_short_of, None);
+    }
+
+    /// And a racked bit does not win by being racked when it cannot do the job: "already in
+    /// the rack" is worth a tool change, not a board machined to the wrong specification.
+    #[test]
+    fn a_racked_bit_that_falls_short_loses_to_one_in_stock_that_does_not() {
+        let tools = vec![vbit("racked-fine", 0.1, 10.0), vbit("stock-broad", 0.2, 30.0)];
+        let choice = pick_engraver(
+            &tools,
+            &super::tests::toolset_with_fixed(&["racked-fine"]),
+            Length::from_mm(0.25),
+            COPPER,
+            budget(),
+        )
+        .expect("the broad bit serves it");
+
+        assert_eq!(choice.tool_id, "stock-broad");
+        assert_eq!(choice.fell_short_of, None);
+    }
+
+    /// The one refusal left: nothing engraver-shaped in stock at all. No argument about
+    /// depth or width works around an empty list, and the step is failed on it.
+    #[test]
+    fn no_engraver_in_stock_at_all_still_yields_nothing() {
+        assert!(pick(&[], 0.2).is_none());
+        assert!(
+            pick(&[super::tests::router("router", 0.2)], 0.2).is_none(),
+            "a router is not an engraver however wide the ask",
+        );
     }
 
     /// A router has one width whatever it is asked for, so letting one into this list would

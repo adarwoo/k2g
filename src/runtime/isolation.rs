@@ -38,11 +38,6 @@
 //! lock, exactly like `enqueue_generation`. Taking one there would deadlock silently,
 //! since that guard is held across the entire sync.
 
-// Nothing asks for contours yet — the engrave operation that will is the next piece of
-// work, and it lands on top of this rather than beside it. Deliberately in this order:
-// wiring the operation first would put a two-second board read on the render path, which
-// is the one arrangement that cannot be fixed afterwards without being noticed.
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
