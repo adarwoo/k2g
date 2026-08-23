@@ -28,6 +28,20 @@ jobs:
       - run: cargo build --workspace --verbose
       - run: cargo test --workspace --verbose
 
+      # Release **compiles**, which is not implied by the debug build above.
+      #
+      # Dioxus's `rsx!` expands differently with `debug_assertions` off — a text node
+      # interpolating two values becomes an addition, and it picks the operands so that
+      # `"{a}{b}"` with a `String` and a `&str` compiles in debug and fails in release.
+      # Nothing about the markup says which profile it is for.
+      #
+      # Only `release.yml` built that way, so the first thing to find out was a release
+      # that had already been tagged. `cargo check` rather than a full build or test run:
+      # this is guarding against a *compile* error, and paying a second full optimised
+      # build on every push to catch one would not be worth it.
+      - name: Check the release profile compiles
+        run: cargo check --workspace --all-targets --release
+
   linux:
     runs-on: ubuntu-latest
     steps:

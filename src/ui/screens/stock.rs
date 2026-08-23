@@ -152,6 +152,13 @@ fn SortHeader(
     } else {
         format!("{title}\n\nSort by {label}")
     };
+    // Built here rather than interpolated as `"{label}{arrow}"` in the node below.
+    // `rsx!` expands a text node with two interpolations into an addition, and it picks
+    // the operands differently with `debug_assertions` off — so the two-value form
+    // compiles in debug and fails in release with `String + &String`. Nothing about the
+    // markup says which profile it is being built for, and only the release job builds
+    // that way, so it would have surfaced first as a failed release.
+    let caption = format!("{label}{arrow}");
 
     rsx! {
         th {
@@ -165,7 +172,7 @@ fn SortHeader(
             onclick: move |_| {
                 super::mutate_ctx(state, |ctx| ctx.app.set_stock_sort(column, next_descending));
             },
-            "{label}{arrow}"
+            "{caption}"
         }
     }
 }
