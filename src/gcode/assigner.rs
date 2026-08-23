@@ -354,14 +354,25 @@ struct ZFit {
     bed_ok: bool,
     /// The plunge target `T + Lp + m`.
     z_bottom_mm: f64,
-    /// True when the tool has no declared flute length (reach not verified).
-    reach_unverified: bool,
 }
 
 /// Can this tool make the hole cleanly through the board without the tip reaching
 /// the machine bed? Requires both **reach** (usable length ≥ plunge) and **bed
-/// safety** (breakthrough ≤ fixture clearance). An absent flute length is not a
-/// disqualifier here — the caller raises a "reach not verified" warning instead.
+/// safety** (breakthrough ≤ fixture clearance).
+///
+/// # An absent flute length is silent
+///
+/// It is neither a disqualifier nor a warning. It used to be the latter: every chosen tool
+/// without a declared flute length was listed in a "reach not verified" diagnostic. No tool
+/// in any shipped catalogue declares one — the catalogues carry a
+/// `default_flute_length_unit` and never a value — so that warning fired on every tool of
+/// every job and could not be silenced by anything an operator could reasonably do. A
+/// diagnostic that is always present says nothing about the job in front of you; it was a
+/// statement about the catalogue, made once per run.
+///
+/// The check itself stays, and bites the moment a length *is* declared — the tool editor
+/// takes one, so an operator with a short bit and a thick board can still be stopped. What
+/// went is the nagging about its absence.
 fn z_feasibility(diameter_mm: f64, point_angle_deg: f64, flute_mm: Option<f64>, setup: &Setup) -> ZFit {
     let thickness = setup.board_thickness.as_mm();
     let clearance = setup.bed_clearance.as_mm();
@@ -372,12 +383,11 @@ fn z_feasibility(diameter_mm: f64, point_angle_deg: f64, flute_mm: Option<f64>, 
     let z_break = thickness + breakthrough; // plunge past the top surface
 
     let bed_ok = breakthrough <= clearance + EPS_MM;
-    let (reach_ok, reach_unverified) = match flute_mm {
-        Some(flute) => (flute + EPS_MM >= z_break, false),
-        None => (true, true),
-    };
+    // An absent flute length is not a disqualifier: it is a fact about the catalogue,
+    // not about the tool, and refusing every undeclared bit would refuse every job.
+    let reach_ok = flute_mm.is_none_or(|flute| flute + EPS_MM >= z_break);
 
-    ZFit { feasible: bed_ok && reach_ok, reach_ok, bed_ok, z_bottom_mm: z_break, reach_unverified }
+    ZFit { feasible: bed_ok && reach_ok, reach_ok, bed_ok, z_bottom_mm: z_break }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +403,6 @@ struct Candidate<'a> {
     tool_um: i64,
     fit_um: i64,
     z_bottom_mm: f64,
-    reach_unverified: bool,
     score: f64,
 }
 
@@ -502,7 +511,6 @@ fn build_candidates<'a>(
                         tool_um,
                         fit_um,
                         z_bottom_mm: z.z_bottom_mm,
-                        reach_unverified: z.reach_unverified,
                         score,
                     });
                 } else if best_infeasible.as_ref().map_or(true, |(f, _)| fit_um < *f) {
@@ -538,7 +546,6 @@ fn build_candidates<'a>(
                     tool_um,
                     fit_um: 0,
                     z_bottom_mm: z.z_bottom_mm,
-                    reach_unverified: z.reach_unverified,
                     score,
                 });
             }
@@ -649,10 +656,7 @@ pub fn assign(
     // 4. Pilot pass for routed holes (reusing drills already in the rack).
     let pilots = assign_pilots(&works, tools, cfg, setup, &rack_tools, &mut diagnostics);
 
-    // 5. Reach-not-verified warning for chosen tools with no flute length.
-    warn_unverified_reach(&works, &mut diagnostics);
-
-    // 6. Materialise the outputs.
+    // 5. Materialise the outputs.
     let assignment_holes: Vec<HoleAssignment> = works
         .iter()
         .enumerate()
@@ -848,27 +852,6 @@ fn assign_pilots(
     pilots
 }
 
-/// Warns once, listing chosen tools whose reach could not be verified (no declared
-/// flute length). The bed-safety check still held; only reach is unverified.
-fn warn_unverified_reach(works: &[HoleWork], diagnostics: &mut Vec<Diagnostic>) {
-    let mut names: BTreeSet<String> = BTreeSet::new();
-    for work in works {
-        let chosen = &work.candidates[work.chosen];
-        if chosen.reach_unverified {
-            names.insert(chosen.tool.display_name());
-        }
-    }
-    if !names.is_empty() {
-        diagnostics.push(Diagnostic {
-            severity: Severity::Warning,
-            message: format!(
-                "reach not verified (no flute length) for: {}",
-                names.into_iter().collect::<Vec<_>>().join(", ")
-            ),
-        });
-    }
-}
-
 /// Lays out the rack as **one row per distinct tool** the job needs, on the
 /// toolset's real slots. A fixed tool keeps its pinned slot (its first, if pinned in
 /// several); every other tool fills the next `spare_slot` in order, by diameter then
@@ -1039,6 +1022,32 @@ mod tests {
         }
     }
 
+    /// **A tool with no declared flute length raises nothing at all.**
+    ///
+    /// No tool in any shipped catalogue declares one, so a warning about the absence fired
+    /// on every tool of every job and could not be cleared by anything short of hand-typing
+    /// a length for each bit in stock. A diagnostic that is always on carries no
+    /// information and trains the operator to skim the list it lives in — which is the list
+    /// that also carries the ones that matter.
+    #[test]
+    fn a_tool_with_no_flute_length_is_assigned_without_comment() {
+        // No flute length, which is what every tool in every shipped catalogue looks
+        // like — they carry a `default_flute_length_unit` and never a value.
+        let tools = vec![Tool { flute_length: None, ..drill("plain", 1.0) }];
+
+        let holes = vec![round_hole("h1", 1.0)];
+        let assignment = assign(&holes, &tools, &config(false), &rack(4), &roomy_setup())
+            .expect("an undeclared flute length must not block the job");
+
+        assert!(
+            assignment.diagnostics.is_empty(),
+            "an undeclared flute length must be silent, got {:?}",
+            assignment.diagnostics,
+        );
+    }
+
+    /// And the check still bites when a length *is* declared — removing the nagging must
+    /// not have removed the guard it was nagging about.
     #[test]
     fn z_feasibility_rejects_a_bit_too_short_to_reach_through() {
         // Board 1.6 mm; a 1 mm 118° drill needs ~1.6 + 0.30 + 0.5 ≈ 2.4 mm of reach,
