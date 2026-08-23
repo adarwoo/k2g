@@ -3331,7 +3331,7 @@ mod settings_payload_tests {
     fn the_stock_sort_round_trips_through_its_token() {
         use crate::ui::navigation::StockSortColumn as C;
 
-        for column in [C::Recent, C::Type, C::Diameter, C::Name, C::Source, C::Preference, C::Atc, C::Status] {
+        for column in [C::Recent, C::Type, C::Diameter, C::Name, C::Source, C::Preference, C::Usage, C::Status] {
             assert_eq!(
                 C::from_settings_str(column.as_settings_str()),
                 column,

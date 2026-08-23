@@ -17,6 +17,11 @@ pub const APP_STYLE: &str = r#"
     --warn: #d7a03f;
     --err: #d05959;
     --shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+    /* The Usage dots. Their own tokens rather than --ok/--accent because green and blue are
+       the *meaning* here, not a role: --accent is amber in the shell themes, which would
+       both lose the blue and put the dot a shade away from --warn. */
+    --usage-job: #2ca66d;
+    --usage-toolset: #2f7ae5;
 }
 
 .theme-light {
@@ -33,6 +38,8 @@ pub const APP_STYLE: &str = r#"
     --warn: #b27611;
     --err: #b93636;
     --shadow: 0 8px 22px rgba(0, 0, 0, 0.1);
+    --usage-job: #1c8d57;
+    --usage-toolset: #1d63c6;
 }
 
 .shell-theme-dark {
@@ -48,6 +55,8 @@ pub const APP_STYLE: &str = r#"
     --ok: #4ade80;
     --warn: #fbbf24;
     --err: #f87171;
+    --usage-job: #4ade80;
+    --usage-toolset: #60a5fa;
 }
 
 .shell-theme-light {
@@ -64,6 +73,8 @@ pub const APP_STYLE: &str = r#"
     --warn: #b45309;
     --err: #b91c1c;
     --shadow: 0 12px 34px rgba(15, 23, 42, 0.08);
+    --usage-job: #15803d;
+    --usage-toolset: #1d4ed8;
 }
 
 html,
@@ -3028,24 +3039,46 @@ th {
     background: color-mix(in srgb, var(--err) 20%, transparent);
 }
 
-.atc-indicator {
+/*
+ * Usage: two dots for two independent facts — loaded by the job on screen, and pinned in a
+ * toolset. Either, both, or neither, so a tool wanted in both places shows both rather than
+ * being reduced to one verdict.
+ *
+ * Green and blue are the theme's own `--ok` and `--accent` rather than fixed hex, so both
+ * follow the palette — including the amber-accented theme, where the "blue" dot is amber
+ * and still the one that is not green, which is the distinction the column rests on.
+ *
+ * The whole cell is the hover target: two 8px dots is a small thing to have to hit for a
+ * tooltip that is the point of the column.
+ */
+.usage-indicator {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: var(--ok);
-    font-weight: 600;
-    font-size: 12px;
+    min-width: 2.5rem;
+    min-height: 1.25rem;
+    cursor: help;
 }
 
-.atc-dot {
+.usage-dot {
     display: inline-block;
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--ok);
+    /* A ring rather than a bare circle: at 8px on a busy row two adjacent dots read as one
+       smear without something separating them from the background. */
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg-elev) 70%, transparent);
 }
 
-.atc-empty {
+.usage-dot.is-job {
+    background: var(--usage-job);
+}
+
+.usage-dot.is-toolset {
+    background: var(--usage-toolset);
+}
+
+.usage-empty {
     display: inline-block;
     color: var(--text-subtle);
     font-size: 12px;
@@ -5902,6 +5935,57 @@ mod tests {
             "expected at least the settings and export dialogs to be checked, saw {checked} \
              — if the naming convention changed, this test is measuring nothing"
         );
+    }
+
+    /// **Every palette defines the Usage dots, and defines them green and blue.**
+    ///
+    /// The dots encode a meaning the operator was given in those words — green for the job,
+    /// blue for a toolset — so they are the one pair of colours a palette may not
+    /// reinterpret. A palette that leaves a token out inherits `:root`'s, which is the right
+    /// hue but the dark theme's lightness; one that redefines it off-hue silently changes
+    /// what the column says. The earlier version read `var(--accent)`, which is amber in the
+    /// shell themes and a shade from `--warn`, and that is what this stops coming back.
+    #[test]
+    fn every_palette_paints_the_usage_dots_green_and_blue() {
+        let rules = rules();
+        let palettes = [":root", ".theme-light", ".shell-theme-dark", ".shell-theme-light"];
+
+        for palette in palettes {
+            let body = rules
+                .iter()
+                .find(|(selector, body)| selector == palette && body.contains("--usage-job"))
+                .map(|(_, body)| body.clone())
+                .unwrap_or_else(|| panic!("`{palette}` defines --usage-job and --usage-toolset"));
+
+            for token in ["--usage-job", "--usage-toolset"] {
+                let hex = body
+                    .split(';')
+                    .find_map(|decl| decl.split_once(':').filter(|(k, _)| k.trim() == token))
+                    .map(|(_, value)| value.trim().to_string())
+                    .unwrap_or_else(|| panic!("`{palette}` defines `{token}`"));
+
+                // A literal hex, so the hue can actually be read here rather than chased
+                // through another token that a palette is free to repoint.
+                let channels = u32::from_str_radix(hex.trim_start_matches('#'), 16)
+                    .unwrap_or_else(|_| panic!("`{palette}` sets `{token}` to a hex, got {hex:?}"));
+                let (r, g, b) = (
+                    (channels >> 16) & 0xff,
+                    (channels >> 8) & 0xff,
+                    channels & 0xff,
+                );
+
+                match token {
+                    "--usage-job" => assert!(
+                        g > r && g > b,
+                        "`{palette}` paints the in-job dot {hex}, which is not green"
+                    ),
+                    _ => assert!(
+                        b > r && b > g,
+                        "`{palette}` paints the toolset dot {hex}, which is not blue"
+                    ),
+                }
+            }
+        }
     }
 }
 

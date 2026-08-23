@@ -20,7 +20,7 @@ fn sort_stock(
     tools: &mut [(usize, &Tool)],
     column: StockSortColumn,
     descending: bool,
-    pinning: &crate::runtime::tooling::RackPinning,
+    usage: &crate::runtime::tooling::ToolUsage,
 ) {
     use std::cmp::Ordering;
 
@@ -34,15 +34,18 @@ fn sort_stock(
         return;
     }
 
-    // The first slot a rack pins the tool in, so the ATC column orders by "what is in the
-    // changer" — unpinned tools last, whichever way it is turned, because they are not an
-    // answer to that question at all.
-    let first_slot = |tool: &Tool| {
-        pinning
-            .for_tool(&tool.id)
-            .first()
-            .map(|pinned| pinned.slot)
-            .unwrap_or(u8::MAX)
+    // How spoken-for a tool is, so the Usage column sorts by the thing it displays: what
+    // the job loads first, then what a toolset merely pins, then the rest. Ascending puts
+    // the busiest at the top, because "what does this job use" is the question the column
+    // was added to answer and nobody clicks a header hoping to see the unused bits first.
+    let usage_rank = |tool: &Tool| {
+        let uses = usage.for_tool(&tool.id);
+        match (uses.in_current_job(), uses.referenced()) {
+            (true, true) => 0,
+            (true, false) => 1,
+            (false, true) => 2,
+            (false, false) => 3,
+        }
     };
 
     tools.sort_by(|left, right| {
@@ -69,7 +72,7 @@ fn sort_stock(
                 .cmp(&right.1.source_catalog.to_ascii_lowercase()),
             StockSortColumn::Preference => stock_tool_preference_rank(left.1.preference)
                 .cmp(&stock_tool_preference_rank(right.1.preference)),
-            StockSortColumn::Atc => first_slot(left.1).cmp(&first_slot(right.1)),
+            StockSortColumn::Usage => usage_rank(left.1).cmp(&usage_rank(right.1)),
             StockSortColumn::Status => {
                 stock_tool_status_rank(left.1.status).cmp(&stock_tool_status_rank(right.1.status))
             }
@@ -77,6 +80,40 @@ fn sort_stock(
         let ordering = if descending { ordering.reverse() } else { ordering };
         ordering.then_with(|| right.0.cmp(&left.0))
     });
+}
+
+/// What the Usage dots mean for one tool, spelled out.
+///
+/// The dots say *whether*; this says *where*, which is the half that is actually
+/// actionable — "pinned somewhere" is not much use until you know it is T4 of the toolset
+/// you were about to edit.
+///
+/// `planned` false is its own sentence rather than an omission. With no board there is no
+/// tooling plan, so nothing can be in the job — and a tooltip that simply left the job
+/// section out would read as "this job does not use it", which is a different and wrong
+/// answer.
+fn usage_tooltip(uses: &crate::runtime::tooling::ToolUse, planned: bool) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    for (slot, toolset) in &uses.in_toolsets {
+        lines.push(format!("{slot} in '{toolset}'"));
+    }
+    if lines.is_empty() {
+        lines.push("Not pinned in any toolset".to_string());
+    }
+
+    if !planned {
+        lines.push("\n…and in the job: not planned yet — load a board".to_string());
+    } else if uses.in_job.is_empty() {
+        lines.push("\n…and in the job: not used".to_string());
+    } else {
+        lines.push("\n…and in the job:".to_string());
+        for (slot, cnc) in &uses.in_job {
+            lines.push(format!("{slot} in '{cnc}'"));
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// One sortable column heading.
@@ -186,23 +223,29 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     // in-memory `tools` this table reads, so table and detail stay coherent without this
     // screen having to watch for it.
     let snapshot = state.read().clone();
-    // Where each tool is pinned across *every* rack, not just one machine's: a tool may
-    // be expected in several changers at once, and a stock row that shows one slot for a
-    // machine it never names cannot say which. Computed once for the table, then indexed
-    // per row.
-    let pinning = crate::runtime::tooling::pinned_rack_slots(&snapshot);
-    let has_atc = pinning.rack_count > 0;
-    // A rack a step names but that resolves to nothing is a missing column entry, and a
-    // missing entry reads exactly like "this tool is not pinned there". Say so in the
-    // header rather than letting the numbers under it be quietly short.
-    let atc_header_title = if pinning.unresolved > 0 {
-        format!(
-            "The slot this job's racks pin this tool to, one entry per rack. \
-             {} rack(s) are not shown: a step names a machine or toolset that no longer exists.",
-            pinning.unresolved
-        )
+    // Who wants each tool: the toolsets that pin it, and the racks this job loads it into.
+    //
+    // Computed once for the whole table and then indexed per row — the job half runs the
+    // assigner, so asking it per row would plan the job once per tool in stock.
+    //
+    // Memoised on the context alone, which is what keeps typing in the search box from
+    // re-planning: the filter and the sort are separate state, so a keystroke re-renders
+    // the table without touching anything this reads.
+    let usage_memo = use_memo(move || {
+        let ctx = state.read();
+        crate::runtime::tooling::tool_usage(&ctx.app, ctx.stitched_board_data.as_ref())
+    });
+    let usage = usage_memo.read();
+    let usage_header_title = if usage.planned {
+        "Green: loaded by the job on screen. Blue: pinned in a toolset. Hover a row for \
+         the slots and where they are."
+            .to_string()
     } else {
-        "The slot this job's racks pin this tool to, one entry per rack".to_string()
+        // Nothing green with no plan behind it, and that is not the same as nothing being
+        // used — say so in the header rather than letting an empty column read as an answer.
+        "Blue: pinned in a toolset. Nothing shows as in-job because there is no plan yet — \
+         load a board and select a machining profile."
+            .to_string()
     };
     let unit_system = snapshot.unit_system;
 
@@ -270,7 +313,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
         })
         .collect();
 
-    sort_stock(&mut filtered_tools, sort_column, sort_descending, &pinning);
+    sort_stock(&mut filtered_tools, sort_column, sort_descending, &usage);
 
     let filtered_tools_is_empty = filtered_tools.is_empty();
     let visible_tool_ids: Vec<String> = filtered_tools.iter().map(|(_, tool)| tool.id.clone()).collect();
@@ -770,12 +813,15 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                     active: sort_column, descending: sort_descending,
                                     label: "Preference", title: String::new(),
                                 }
-                                if has_atc {
-                                    SortHeader {
-                                        state, column: StockSortColumn::Atc,
-                                        active: sort_column, descending: sort_descending,
-                                        label: "ATC", title: atc_header_title.clone(),
-                                    }
+                                // Always shown, where the ATC column was hidden without a
+                                // tool changer. Usage is an answer either way: a job on a
+                                // manual-change machine still loads tools, and until now the
+                                // one setup that has to plan its changes by hand was the one
+                                // that could not see what it needed.
+                                SortHeader {
+                                    state, column: StockSortColumn::Usage,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Usage", title: usage_header_title.clone(),
                                 }
                                 SortHeader {
                                     state, column: StockSortColumn::Status,
@@ -797,11 +843,12 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                         let is_selected = selected_stock_tool_ids
                                             .read()
                                             .contains(tool_id.as_str());
-                                        // One `Tn` per rack that pins this tool, in the
-                                        // same order for every row; the title names the
-                                        // machine each belongs to.
-                                        let atc_slots = pinning.slots_label(&tool_id);
-                                        let atc_detail = pinning.detail(&tool_id);
+                                        // Two independent facts, two dots, and the detail
+                                        // on hover: pinned in a toolset, loaded by this job,
+                                        // or both — "both" being the case a single verdict
+                                        // would have hidden.
+                                        let uses = usage.for_tool(&tool_id);
+                                        let usage_detail = usage_tooltip(&uses, usage.planned);
                                         rsx! {
                                             tr {
                                                 key: "{tool_id}",
@@ -856,15 +903,18 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                         option { value: "not_preferred", "Not preferred" }
                                                     }
                                                 }
-                                                if has_atc {
-                                                    td {
-                                                        if atc_slots.is_empty() {
-                                                            span { class: "atc-empty", "-" }
-                                                        } else {
-                                                            span { class: "atc-indicator", title: "{atc_detail}",
-                                                                span { class: "atc-dot" }
-                                                                span { "{atc_slots}" }
-                                                            }
+                                                td {
+                                                    span {
+                                                        class: "usage-indicator",
+                                                        title: "{usage_detail}",
+                                                        if uses.in_current_job() {
+                                                            span { class: "usage-dot is-job" }
+                                                        }
+                                                        if uses.referenced() {
+                                                            span { class: "usage-dot is-toolset" }
+                                                        }
+                                                        if !uses.in_current_job() && !uses.referenced() {
+                                                            span { class: "usage-empty", "–" }
                                                         }
                                                     }
                                                 }
@@ -1134,7 +1184,7 @@ mod tests {
 #[cfg(test)]
 mod sort_tests {
     use super::*;
-    use crate::runtime::tooling::RackPinning;
+    use crate::runtime::tooling::ToolUsage;
 
     /// A stock tool. Only the fields the comparators read are meaningful.
     fn tool(id: &str, kind: &str, diameter_mm: f64, name: &str, source: &str) -> Tool {
@@ -1175,7 +1225,7 @@ mod sort_tests {
     /// The ids in the order the sort put them.
     fn order(tools: &[Tool], column: StockSortColumn, descending: bool) -> Vec<&str> {
         let mut rows: Vec<(usize, &Tool)> = tools.iter().enumerate().collect();
-        sort_stock(&mut rows, column, descending, &RackPinning::default());
+        sort_stock(&mut rows, column, descending, &ToolUsage::default());
         rows.iter().map(|(_, tool)| tool.id.as_str()).collect()
     }
 
@@ -1195,7 +1245,7 @@ mod sort_tests {
             StockSortColumn::Name,
             StockSortColumn::Source,
             StockSortColumn::Preference,
-            StockSortColumn::Atc,
+            StockSortColumn::Usage,
             StockSortColumn::Status,
         ] {
             for descending in [false, true] {
@@ -1292,8 +1342,78 @@ mod sort_tests {
     /// An empty shelf sorts to nothing rather than panicking, on every column.
     #[test]
     fn an_empty_shelf_sorts_to_nothing() {
-        for column in [StockSortColumn::Recent, StockSortColumn::Diameter, StockSortColumn::Atc] {
+        for column in [StockSortColumn::Recent, StockSortColumn::Diameter, StockSortColumn::Usage] {
             assert!(order(&[], column, false).is_empty());
         }
+    }
+}
+
+/// The Usage column's tooltip — the only place the two halves are put into words, so the
+/// wording is the thing under test.
+#[cfg(test)]
+mod usage_tooltip_tests {
+    use super::*;
+    use crate::runtime::tooling::ToolUse;
+
+    fn uses(toolsets: &[(&str, &str)], job: &[(&str, &str)]) -> ToolUse {
+        let pair = |(slot, name): &(&str, &str)| (slot.to_string(), name.to_string());
+        ToolUse {
+            in_toolsets: toolsets.iter().map(pair).collect(),
+            in_job: job.iter().map(pair).collect(),
+        }
+    }
+
+    /// The shape that was asked for: a line per toolset, then the job's own section.
+    #[test]
+    fn both_halves_read_as_two_sections() {
+        let tip = usage_tooltip(&uses(&[("T4", "Metric"), ("T2", "Imperial")], &[("T2", "CNC 4")]), true);
+
+        assert_eq!(
+            tip,
+            "T4 in 'Metric'\nT2 in 'Imperial'\n\n…and in the job:\nT2 in 'CNC 4'",
+        );
+    }
+
+    /// Green with no blue: the job loaded it out of a spare slot and no toolset pins it.
+    /// The first section has to *say* that rather than be missing, or the tooltip opens on
+    /// the job section and reads as though it were the whole answer.
+    #[test]
+    fn a_tool_only_the_job_loads_says_it_is_pinned_nowhere() {
+        let tip = usage_tooltip(&uses(&[], &[("T3", "Mill")]), true);
+
+        assert!(tip.starts_with("Not pinned in any toolset"));
+        assert!(tip.ends_with("…and in the job:\nT3 in 'Mill'"));
+    }
+
+    /// Blue with no green: pinned, and this job does not want it. Not the same sentence as
+    /// "nothing has been planned", which is the next test — the dot is empty either way and
+    /// the tooltip is what tells them apart.
+    #[test]
+    fn a_pinned_tool_the_job_skips_says_not_used() {
+        let tip = usage_tooltip(&uses(&[("T1", "Metric")], &[]), true);
+
+        assert_eq!(tip, "T1 in 'Metric'\n\n…and in the job: not used");
+    }
+
+    /// **No plan is not "unused".** With no board there is no answer to give, and saying
+    /// "not used" would be inventing one.
+    #[test]
+    fn with_nothing_planned_the_job_half_withholds_rather_than_denies() {
+        let tip = usage_tooltip(&uses(&[("T1", "Metric")], &[]), false);
+
+        assert!(
+            tip.ends_with("…and in the job: not planned yet — load a board"),
+            "got {tip:?}",
+        );
+        assert!(!tip.contains("not used"));
+    }
+
+    /// A tool nothing mentions still produces both sentences, so an operator clicking a
+    /// grey row learns why it is grey.
+    #[test]
+    fn an_unused_tool_still_answers_both_questions() {
+        let tip = usage_tooltip(&ToolUse::default(), true);
+
+        assert_eq!(tip, "Not pinned in any toolset\n\n…and in the job: not used");
     }
 }

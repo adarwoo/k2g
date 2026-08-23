@@ -120,7 +120,7 @@ properties:
       a column that no longer exists reads as `recent` rather than refusing the
       file.
     type: string
-    enum: [recent, type, diameter, name, source, preference, atc, status]
+    enum: [recent, type, diameter, name, source, preference, usage, status]
     default: recent
 
   stock_sort_descending:

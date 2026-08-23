@@ -129,7 +129,7 @@ pub enum StockSortColumn {
     Name,
     Source,
     Preference,
-    Atc,
+    Usage,
     Status,
 }
 
@@ -143,7 +143,7 @@ impl StockSortColumn {
             Self::Name => "name",
             Self::Source => "source",
             Self::Preference => "preference",
-            Self::Atc => "atc",
+            Self::Usage => "usage",
             Self::Status => "status",
         }
     }
@@ -157,7 +157,7 @@ impl StockSortColumn {
             "name" => Self::Name,
             "source" => Self::Source,
             "preference" => Self::Preference,
-            "atc" => Self::Atc,
+            "usage" => Self::Usage,
             "status" => Self::Status,
             _ => Self::Recent,
         }

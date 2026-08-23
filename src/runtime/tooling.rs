@@ -176,6 +176,12 @@ pub struct StepResolved {
     /// Distinct tool ids the step loads, in slot order — the input the cross-step rack
     /// scheduler needs (the display rows carry labels, not ids).
     pub(crate) tool_ids: Vec<String>,
+    /// The machine this step runs on, for anything that has to say *whose* T3 it means.
+    ///
+    /// `RackSchedule` carries the same name, but only for machines that have a changer —
+    /// a step on a manual-change machine still loads tools, and still has to be able to
+    /// name where. See [`tool_usage`].
+    pub(crate) cnc_name: String,
 }
 
 pub struct RackRow {
@@ -866,213 +872,116 @@ fn pick_slot(
         .copied()
 }
 
-/// One rack that holds a tool: whose rack it is, and where in it the tool sits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PinnedSlot {
-    /// The machine whose changer holds it.
-    pub cnc_name: String,
-    /// The toolset that rack is loaded to — a machine used with two toolsets has two
-    /// racks, and the same tool may sit in a different slot in each.
-    pub toolset_name: String,
-    /// The slot index: `1` is `T1`.
-    pub slot: u8,
-}
-
-/// Where every pinned tool sits across the racks **the live job** loads.
+/// Where one tool is spoken for.
 ///
-/// A rack is a `(CNC, toolset)` pair (Specification §11.7), and those pairs are made in
-/// machining-profile steps — the only place a machine meets a toolset. So this walks the
-/// steps of the job's own machining profile.
-///
-/// # Nothing is selected here
-///
-/// Only **fixed** slots count, the same predicate the assigner's rack spec uses: a slot the
-/// operator has locked to a tool by hand. A spare slot holds whatever a step's plan puts in
-/// it, which is a property of a board rather than of the tool on the shelf, and it
-/// contributes nothing.
-///
-/// So this runs no assigner and makes no choice — it reads locked slots out of a toolset
-/// document. Worth saying because the column reporting tools across several profiles reads
-/// like the planner being run once per profile, and it never was: the dynamic selection
-/// happens once, for the job, in [`crate::runtime::machining_plan::plan_step`].
-///
-/// # Why the job and not the library
-///
-/// It walked **every** machining profile until 0.13, on the argument that the Stock screen
-/// is inventory and "which of my machines expects this bit" is not a question about the job
-/// that happens to be loaded. That reads well and answered badly. A pin belongs to the
-/// *toolset*; the CNC contributes nothing but the `atc_slot_count` clip — so one declared
-/// pin, in one toolset, bound by two machining profiles to two machines, came out as
-/// `T9, T9`: a single slot reported twice, looking for all the world like two tools to own.
-/// On a config that has a `Copy of My cnc` in it — which is most configs, eventually — the
-/// number was simply wrong about the workshop.
-///
-/// Scoped to the job it answers the question the screen is actually next to: which slot of
-/// the rack I am about to load does this bit go in. The cost is that a tool pinned only by a
-/// profile this job does not run shows no slot — it is still in stock, the column just has
-/// nothing to say about it.
-#[derive(Default)]
-pub struct RackPinning {
-    /// How many racks were examined, pinning or not. Nothing about a rack can be shown
-    /// when there is no rack — this is what the ATC column's presence turns on.
-    pub rack_count: usize,
-    /// Racks a step names but that could not be resolved to a machine and a toolset.
+/// Two independent facts, deliberately not collapsed into one verdict: a bit can be pinned
+/// in a toolset the job never touches, loaded by the job out of a spare slot with no pin
+/// anywhere, or both. "Both" is the interesting case and a single ranking would hide it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolUse {
+    /// `(slot, toolset name)` — every toolset profile that locks the tool to a slot,
+    /// whatever job is loaded.
+    pub in_toolsets: Vec<(String, String)>,
+    /// `(slot, CNC name)` — every rack the current job loads it into.
     ///
-    /// Counted rather than skipped in silence. This column once lost a whole rack to a
-    /// stale projection and showed `T1` where two machines each expected the tool, which
-    /// looks exactly like a correct answer — an absence is the one kind of wrong reading
-    /// nothing about the display can betray. A step bound to a since-deleted machine is
-    /// the honest remaining cause, and it is worth saying out loud.
-    pub unresolved: usize,
-    /// Tool id → the racks holding it, ordered by machine then toolset.
-    by_tool: std::collections::BTreeMap<String, Vec<PinnedSlot>>,
+    /// From the tooling plan, so it counts the slots the assigner fills as well as the
+    /// pinned ones. That is the whole point: on an ordinary job most bits land in spare
+    /// slots, and a usage column built from pins alone would call them unused.
+    pub in_job: Vec<(String, String)>,
 }
 
-impl RackPinning {
-    /// The racks holding `tool_id`, in display order. Empty when nothing pins it.
-    pub fn for_tool(&self, tool_id: &str) -> &[PinnedSlot] {
-        self.by_tool.get(tool_id).map(Vec::as_slice).unwrap_or(&[])
+impl ToolUse {
+    /// Pinned in at least one toolset, whether or not this job uses it.
+    pub fn referenced(&self) -> bool {
+        !self.in_toolsets.is_empty()
     }
 
-    /// The slots as one line — `T1, T1, T4`.
-    ///
-    /// One entry per rack even when the numbers repeat, because they are answers to
-    /// different questions: a tool pinned in three machines' racks is three tools to own,
-    /// and collapsing the list to `T1` would say the opposite. Which machine is which is
-    /// [`Self::detail`]'s business.
-    pub fn slots_label(&self, tool_id: &str) -> String {
-        self.for_tool(tool_id)
-            .iter()
-            .map(|pinned| format!("T{}", pinned.slot))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// The same list named, one rack per line, for a tooltip.
-    pub fn detail(&self, tool_id: &str) -> String {
-        self.for_tool(tool_id)
-            .iter()
-            .map(|pinned| {
-                format!(
-                    "{} · {} — T{}",
-                    pinned.cnc_name, pinned.toolset_name, pinned.slot
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Loaded by the job on screen.
+    pub fn in_current_job(&self) -> bool {
+        !self.in_job.is_empty()
     }
 }
 
-/// Builds [`RackPinning`] for the racks the live job loads.
+/// Where every tool is spoken for: the toolsets that pin it, and the racks this job loads
+/// it into.
 ///
-/// Split in two: which racks exist comes from the machining documents (AppData), and what
-/// is in them comes from the legacy projection. The second half is
-/// [`rack_pinning_for`] — pure, and therefore testable, which the whole of this was not.
+/// # The two questions are asked of different things
 ///
-/// No machining profile selected means no racks, and so no ATC column at all — which is the
-/// same shape the screen already takes for a machine with no changer, and the honest answer
-/// to "which slot does this go in" when nothing says there is a rack.
-pub fn pinned_rack_slots(ctx: &AppState) -> RackPinning {
-    let empty = || RackPinning {
-        rack_count: 0,
-        unresolved: 0,
-        by_tool: std::collections::BTreeMap::new(),
-    };
-    if !appdata_ready() {
-        return empty();
-    }
-    let Some(profile_id) = ctx
-        .selected_process_profile_id
-        .as_ref()
-        .and_then(|id| Uuid::parse_str(id).ok())
-    else {
-        return empty();
-    };
-
-    rack_pinning_for(ctx, &job_racks(&read_steps(profile_id)))
+/// **Toolsets** are read straight from the profiles — a locked, enabled slot naming a tool.
+/// No machine is involved and nothing is clipped to a changer's size: a pin is a statement
+/// the operator made in a toolset, and it is still that statement on a machine that cannot
+/// reach the slot.
+///
+/// **The job** comes from the tooling plan, which runs the assigner. That is the expensive
+/// half and the reason this is one call rather than a lookup per row — and it is also why
+/// [`ToolUsage::planned`] exists: without a board there is no plan, so nothing is in the
+/// job, and a column that just showed no green would be saying something untrue.
+/// `PartialEq` so a `use_memo` can hold it: the Stock table re-renders on every keystroke
+/// in its search box, and the memo only recomputes when this compares unequal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolUsage {
+    by_tool: std::collections::BTreeMap<String, ToolUse>,
+    /// Whether the job half could be computed at all. `false` when there is no board, no
+    /// machining profile, or nothing planned — in which case `in_job` is empty everywhere
+    /// for want of an answer rather than because the tools are unused.
+    pub planned: bool,
 }
 
-/// The distinct racks a machining profile's steps bind, as `(cnc id, toolset id)`.
-///
-/// A pair bound by several steps is still one rack and is listed once — a profile that
-/// drills, flips and routes on one machine loads one rack, not three. Two machines are two,
-/// which is the case the ATC column exists to show.
-///
-/// Takes the steps rather than reading them, so the rule is a pure function of a profile's
-/// bindings and can be tested without a datastore behind it. The reading is the caller's.
-fn job_racks(steps: &[StepRaw]) -> Vec<(String, String)> {
-    let mut racks: Vec<(String, String)> = Vec::new();
-    for step in steps {
-        let (Some(cnc_id), Some(toolset_id)) = (step.cnc_id, step.toolset_id) else {
-            continue;
-        };
-        let pair = (cnc_id.to_string(), toolset_id.to_string());
-        if !racks.contains(&pair) {
-            racks.push(pair);
-        }
+impl ToolUsage {
+    /// What is known about `tool_id`. Tools nothing mentions come back empty rather than
+    /// absent, so a caller never has to distinguish the two.
+    pub fn for_tool(&self, tool_id: &str) -> ToolUse {
+        self.by_tool.get(tool_id).cloned().unwrap_or_default()
     }
-    racks
 }
 
-/// Resolves each `(cnc id, toolset id)` rack against the legacy projection and collects
-/// what every rack pins.
-fn rack_pinning_for(ctx: &AppState, racks: &[(String, String)]) -> RackPinning {
-    let mut pinning = RackPinning {
-        rack_count: 0,
-        unresolved: 0,
-        by_tool: std::collections::BTreeMap::new(),
-    };
+/// Builds [`ToolUsage`] for every tool the configuration mentions.
+///
+/// Called **once per render of the Stock table**, not once per row: the job half plans the
+/// whole job, and doing that per row would run the assigner a hundred times to answer one
+/// question a hundred ways.
+pub fn tool_usage(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> ToolUsage {
+    let mut by_tool: std::collections::BTreeMap<String, ToolUse> = Default::default();
 
-    // Resolve each rack to its profiles. Two ways not to end up with one, kept apart
-    // because only one of them is a fault: a machine with no changer holds nothing between
-    // tool changes, so no slot of its own can be said to expect a tool, while a machine or
-    // toolset that cannot be found at all means a step names something that is not there.
-    let mut resolved: Vec<(
-        &crate::data::model::MachineProfile,
-        &crate::data::model::ToolsetProfile,
-    )> = Vec::new();
-    for (cnc_id, toolset_id) in racks {
-        let machine = ctx.machines.iter().find(|m| m.id == *cnc_id);
-        let toolset = ctx.toolsets.iter().find(|t| t.id == *toolset_id);
-        match (machine, toolset) {
-            (Some(machine), Some(_)) if machine.atc_slot_count == 0 => {}
-            (Some(machine), Some(toolset)) => resolved.push((machine, toolset)),
-            _ => pinning.unresolved += 1,
-        }
-    }
-    // Ordered by machine so the numbers read down the column in a fixed order rather than
-    // in whichever order the machining profiles happened to bind them.
-    resolved.sort_by(|(left_cnc, left_ts), (right_cnc, right_ts)| {
-        left_cnc
-            .name
-            .cmp(&right_cnc.name)
-            .then_with(|| left_ts.name.cmp(&right_ts.name))
-    });
-    pinning.rack_count = resolved.len();
-
-    for (machine, toolset) in resolved {
+    // Toolsets first, and on their own terms: every locked slot that names a tool. A
+    // disabled slot is one the operator has switched off, so it pins nothing.
+    for toolset in &ctx.toolsets {
         for (index, slot) in toolset.slots.iter() {
-            // Clipped exactly as the rack schedule clips: a slot past the machine's
-            // changer is not a slot on this machine, whatever the toolset says.
-            if slot.disabled || !slot.locked || *index > machine.atc_slot_count {
+            if slot.disabled || !slot.locked {
                 continue;
             }
             let Some(tool_id) = slot.tool_id.as_ref() else {
                 continue;
             };
-            pinning
-                .by_tool
+            by_tool
                 .entry(tool_id.clone())
                 .or_default()
-                .push(PinnedSlot {
-                    cnc_name: machine.name.clone(),
-                    toolset_name: toolset.name.clone(),
-                    slot: *index,
-                });
+                .in_toolsets
+                .push((format!("T{index}"), toolset.name.clone()));
         }
     }
 
-    pinning
+    // Then the job. `plan_tooling` answers with a note rather than steps when there is no
+    // board or no profile, which is exactly the case `planned` has to distinguish.
+    let plan = plan_tooling(ctx, stitched);
+    let mut planned = false;
+    for step in &plan.steps {
+        let StepOutcome::Resolved(resolved) = &step.outcome else {
+            continue;
+        };
+        planned = true;
+        for row in &resolved.rack {
+            let entry = (row.slot.clone(), resolved.cnc_name.clone());
+            let uses = by_tool.entry(row.tool_id.clone()).or_default();
+            // A two-step job on one machine loads the same bit into the same slot twice;
+            // that is one line in the tooltip, not two.
+            if !uses.in_job.contains(&entry) {
+                uses.in_job.push(entry);
+            }
+        }
+    }
+
+    ToolUsage { by_tool, planned }
 }
 
 /// Reads every step's operations, bindings and drill config from the profile document.
@@ -1788,6 +1697,7 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
                 requirements,
                 warnings,
                 tool_ids,
+                cnc_name: machine.name.clone(),
             })
         }
         Err(error) => StepOutcome::Failed(format_error(ctx, &error)),
@@ -4256,48 +4166,7 @@ mod tests {
             "a step on no rack (manual tool changes) has none to show"
         );
     }
-
-    /// A tool pinned in three racks is three tools to own, so the stock row lists a slot
-    /// per rack — repeats included. Collapsing `T1, T1, T4` to `T1, T4` would say two
-    /// machines expect it when three do.
-    #[test]
-    fn a_tool_pinned_in_several_racks_lists_one_slot_per_rack() {
-        let pinned = |cnc: &str, toolset: &str, slot: u8| PinnedSlot {
-            cnc_name: cnc.to_string(),
-            toolset_name: toolset.to_string(),
-            slot,
-        };
-        let pinning = RackPinning {
-            rack_count: 3,
-            unresolved: 0,
-            by_tool: [(
-                "drill".to_string(),
-                vec![
-                    pinned("Driller", "Metric", 1),
-                    pinned("Router", "Metric", 1),
-                    pinned("Mill", "Imperial", 4),
-                ],
-            )]
-            .into_iter()
-            .collect(),
-        };
-
-        assert_eq!(pinning.slots_label("drill"), "T1, T1, T4");
-        assert_eq!(
-            pinning.detail("drill"),
-            "Driller · Metric — T1\nRouter · Metric — T1\nMill · Imperial — T4",
-            "the tooltip says which rack each slot belongs to"
-        );
-
-        assert!(pinning.for_tool("cutter").is_empty());
-        assert_eq!(
-            pinning.slots_label("cutter"),
-            "",
-            "a tool no rack pins reads as nothing, not as T0"
-        );
-    }
-
-    /// A machine with a changer, for the rack-resolution tests below.
+    /// A machine with a changer, for the usage tests below.
     fn atc_machine(id: &str, name: &str, slots: u8) -> crate::data::model::MachineProfile {
         crate::data::model::MachineProfile {
             id: id.to_string(),
@@ -4321,177 +4190,169 @@ mod tests {
         app
     }
 
-    /// A toolset named apart from [`toolset_with_fixed`]'s default, so two racks in one
-    /// test can share it or not as the test intends.
-    fn shared_toolset(
-        id: &str,
-        name: &str,
-        fixed: &[&str],
-    ) -> crate::data::model::ToolsetProfile {
+    /// A toolset named apart from [`toolset_with_fixed`]'s default, so two of them in one
+    /// test can be told apart by the name the tooltip would print.
+    fn shared_toolset(id: &str, name: &str, fixed: &[&str]) -> crate::data::model::ToolsetProfile {
         let mut toolset = toolset_with_fixed(fixed);
         toolset.id = id.to_string();
         toolset.name = name.to_string();
         toolset
     }
 
-
-    /// A step bound to a named machine and toolset, for the rack-scoping tests.
-    fn step_binding(cnc: Uuid, toolset: Uuid) -> StepRaw {
-        StepRaw {
-            cnc_id: Some(cnc),
-            toolset_id: Some(toolset),
-            ..step_on("step", false)
-        }
+    /// The toolset half of a tool's usage, in the shape the tooltip prints it.
+    fn toolset_refs(app: &AppState, tool_id: &str) -> Vec<String> {
+        tool_usage(app, None)
+            .for_tool(tool_id)
+            .in_toolsets
+            .iter()
+            .map(|(slot, name)| format!("{slot} in '{name}'"))
+            .collect()
     }
 
-    /// **The reported reading.** One profile, one machine, however many steps — one rack,
-    /// so a tool fixed in its toolset is named once.
+    /// The blue half: a locked slot naming a tool, in any toolset, whatever job is loaded.
     ///
-    /// The column read `T9, T9` for a job on a single machine because the racks were
-    /// gathered from *every* machining profile in the library, and a second profile bound a
-    /// second CNC — `Copy of My cnc`, a duplicate nobody was running. Scoped to the job's
-    /// own profile, the machine it does not use contributes nothing.
+    /// Read from the toolset alone — no machine, and nothing clipped to a changer's size. A
+    /// pin is a statement the operator made in a profile, and it is still that statement on
+    /// a machine that could not reach the slot.
     #[test]
-    fn a_profile_on_one_machine_loads_one_rack() {
-        let cnc = Uuid::now_v7();
-        let toolset = Uuid::now_v7();
-
-        let racks = job_racks(&[
-            step_binding(cnc, toolset),
-            step_binding(cnc, toolset),
-            step_binding(cnc, toolset),
-        ]);
-
-        assert_eq!(racks.len(), 1, "three steps on one machine are one rack: {racks:?}");
-        assert_eq!(racks[0], (cnc.to_string(), toolset.to_string()));
-    }
-
-    /// Two machines *within the job* are still two racks — that is the case the column is
-    /// for, and scoping it to the job must not lose it. A profile that drills on one machine
-    /// and routes on another expects the shared bit in both changers.
-    #[test]
-    fn two_machines_in_one_profile_are_two_racks() {
-        let toolset = Uuid::now_v7();
-        let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
-
-        let racks = job_racks(&[step_binding(first, toolset), step_binding(second, toolset)]);
-
-        assert_eq!(racks.len(), 2, "{racks:?}");
-    }
-
-    /// The same machine with two toolsets is two racks: a rack is the pair, and swapping the
-    /// loadout is a different rack even on one table.
-    #[test]
-    fn one_machine_with_two_toolsets_is_two_racks() {
-        let cnc = Uuid::now_v7();
-        let racks = job_racks(&[
-            step_binding(cnc, Uuid::now_v7()),
-            step_binding(cnc, Uuid::now_v7()),
-        ]);
-
-        assert_eq!(racks.len(), 2, "{racks:?}");
-    }
-
-    /// A step with a binding missing is not a rack. A freshly added step starts with none,
-    /// and it must not be counted as a machine expecting anything.
-    #[test]
-    fn an_unbound_step_contributes_no_rack() {
-        let bound = step_binding(Uuid::now_v7(), Uuid::now_v7());
-        let no_cnc = StepRaw { cnc_id: None, ..step_on("s", false) };
-        let no_toolset = StepRaw { toolset_id: None, ..step_on("s", false) };
-
-        assert_eq!(job_racks(&[no_cnc, no_toolset]).len(), 0);
-        assert_eq!(job_racks(&[bound]).len(), 1, "and a bound one still counts");
-        assert_eq!(job_racks(&[]).len(), 0, "a profile with no steps has no racks");
-    }
-
-    /// **Nothing is selected here.** A spare slot contributes nothing however many racks
-    /// hold it: the column reports slots the operator locked by hand, and what a spare slot
-    /// ends up holding is the assigner's answer for one board — which is not a fact about
-    /// the tool on the shelf, and is not computed on this path at all.
-    #[test]
-    fn a_spare_slot_pins_nothing() {
-        // `toolset_with_fixed` locks the ids it is given and leaves the rest spare.
+    fn a_locked_slot_is_a_toolset_reference() {
         let app = app_with(
             vec![atc_machine("mill", "Mill", 4)],
-            vec![shared_toolset("shared", "Shared", &["locked"])],
+            vec![shared_toolset("shared", "Shared", &["drill"])],
         );
-        let racks = vec![("mill".to_string(), "shared".to_string())];
 
-        let pinning = rack_pinning_for(&app, &racks);
+        let usage = tool_usage(&app, None);
+        let drill = usage.for_tool("drill");
 
-        assert_eq!(pinning.slots_label("locked"), "T1", "the locked slot is reported");
+        assert!(drill.referenced(), "a locked slot is a reference");
         assert_eq!(
-            pinning.slots_label("whatever-the-assigner-picks"),
-            "",
-            "and a tool that would only ever land in a spare slot is not pinned anywhere",
+            drill.in_toolsets,
+            vec![("T1".to_string(), "Shared".to_string())]
         );
+        assert!(!drill.in_current_job(), "and says nothing about the job");
     }
 
-    /// The reported bug, at the layer that had it: two steps, two machines, one tool fixed
-    /// at T1 in the toolset they share. The display half of this has always been right —
-    /// what was never covered is the half that resolves a rack against the machines, which
-    /// dropped a rack it could not find and left the column reading `T1` where two
-    /// machines each expect the tool.
+    /// One tool pinned by two toolsets is two references, each naming its own — which is
+    /// what the tooltip is for. Collapsing them to a count would lose the only thing that
+    /// makes the line actionable: *which* toolset to go and edit.
     #[test]
-    fn one_tool_fixed_in_two_machines_racks_is_pinned_once_per_machine() {
+    fn a_tool_pinned_by_two_toolsets_names_both() {
         let app = app_with(
+            vec![atc_machine("mill", "Mill", 4)],
             vec![
-                atc_machine("driller", "Driller", 4),
-                atc_machine("router", "Router", 4),
+                shared_toolset("a", "Alpha", &["drill"]),
+                shared_toolset("b", "Beta", &["drill"]),
             ],
-            vec![shared_toolset("shared", "Shared", &["drill"])],
         );
-        let racks = vec![
-            ("driller".to_string(), "shared".to_string()),
-            ("router".to_string(), "shared".to_string()),
-        ];
 
-        let pinning = rack_pinning_for(&app, &racks);
-
-        assert_eq!(pinning.rack_count, 2, "two machines are two racks");
-        assert_eq!(pinning.unresolved, 0);
         assert_eq!(
-            pinning.slots_label("drill"),
-            "T1, T1",
-            "one entry per rack — two machines each expecting the tool is two to own"
+            toolset_refs(&app, "drill"),
+            ["T1 in 'Alpha'", "T1 in 'Beta'"]
         );
     }
 
-    /// A rack whose machine cannot be found is counted, not skipped. Skipping produced a
-    /// column that was short by exactly one entry and looked entirely correct.
+    /// A machine with no changer, or none at all, changes nothing: the pin is in the
+    /// toolset and the toolset is what is read.
+    ///
+    /// The old rack-scoped column resolved `(cnc, toolset)` pairs and clipped every slot to
+    /// `atc_slot_count`, so a pin past the end of a changer — or on a machine the library
+    /// had lost — silently vanished. The blue dot is not a claim about a rack, so it does
+    /// not depend on one existing.
     #[test]
-    fn a_rack_naming_a_machine_that_is_not_there_is_counted() {
+    fn a_reference_does_not_need_a_machine() {
         let app = app_with(
-            vec![atc_machine("driller", "Driller", 4)],
-            vec![shared_toolset("shared", "Shared", &["drill"])],
+            vec![],
+            vec![shared_toolset("shared", "Shared", &["a", "b", "c", "d", "e"])],
         );
-        let racks = vec![
-            ("driller".to_string(), "shared".to_string()),
-            ("deleted".to_string(), "shared".to_string()),
-        ];
 
-        let pinning = rack_pinning_for(&app, &racks);
-
-        assert_eq!(pinning.rack_count, 1);
-        assert_eq!(pinning.unresolved, 1, "the missing machine is reported");
-        assert_eq!(pinning.slots_label("drill"), "T1");
+        assert!(tool_usage(&app, None).for_tool("e").referenced());
+        assert_eq!(toolset_refs(&app, "e"), ["T5 in 'Shared'"]);
     }
 
-    /// A machine with no changer is not a fault: it has no rack to pin anything in, which
-    /// is a different statement from "its rack could not be read".
+    /// **A spare slot is not a reference.** What a spare slot ends up holding is the
+    /// assigner's answer for one board, which is the *green* question — so a tool that only
+    /// ever lands in spare slots is not blue, however much room the toolsets leave for it.
+    ///
+    /// This is the invariant behind "the tool selection is not being run for every profile":
+    /// the toolset pass reads declarations, and only the job pass plans anything.
     #[test]
-    fn a_machine_without_a_changer_is_not_an_unresolved_rack() {
+    fn a_spare_slot_is_not_a_reference() {
+        let mut toolset = shared_toolset("shared", "Shared", &["locked"]);
+        toolset.slots.insert(
+            2,
+            crate::data::model::state::RackSlot {
+                tool_id: None,
+                locked: false,
+                disabled: false,
+            },
+        );
+        let app = app_with(vec![atc_machine("mill", "Mill", 4)], vec![toolset]);
+
+        let usage = tool_usage(&app, None);
+
+        assert!(usage.for_tool("locked").referenced());
+        assert!(
+            !usage.for_tool("whatever-the-assigner-picks").referenced(),
+            "a tool that would only ever land in a spare slot is pinned nowhere",
+        );
+    }
+
+    /// An unlocked slot still carrying an id pins nothing — it is the last thing the
+    /// assigner left there, not a choice the operator made.
+    #[test]
+    fn an_unlocked_slot_pins_nothing() {
+        let mut toolset = shared_toolset("shared", "Shared", &["drill"]);
+        for slot in toolset.slots.values_mut() {
+            slot.locked = false;
+        }
+        let app = app_with(vec![atc_machine("mill", "Mill", 4)], vec![toolset]);
+
+        assert!(!tool_usage(&app, None).for_tool("drill").referenced());
+    }
+
+    /// A disabled slot pins nothing either: the operator has switched it off, so whatever
+    /// id it still carries is not a statement that the tool is wanted there.
+    #[test]
+    fn a_disabled_slot_pins_nothing() {
+        let mut toolset = shared_toolset("shared", "Shared", &["drill"]);
+        for slot in toolset.slots.values_mut() {
+            slot.disabled = true;
+        }
+        let app = app_with(vec![atc_machine("mill", "Mill", 4)], vec![toolset]);
+
+        assert!(!tool_usage(&app, None).for_tool("drill").referenced());
+    }
+
+    /// **No plan is not "unused".** Without a board there is no tooling plan, so nothing can
+    /// be in the job — and the flag is what lets the column say that, instead of showing no
+    /// green and letting the absence read as an answer.
+    #[test]
+    fn with_no_board_nothing_is_in_the_job_and_it_says_so() {
         let app = app_with(
-            vec![atc_machine("manual", "Manual", 0)],
+            vec![atc_machine("mill", "Mill", 4)],
             vec![shared_toolset("shared", "Shared", &["drill"])],
         );
 
-        let pinning = rack_pinning_for(&app, &[("manual".to_string(), "shared".to_string())]);
+        let usage = tool_usage(&app, None);
 
-        assert_eq!(pinning.rack_count, 0);
-        assert_eq!(pinning.unresolved, 0, "no changer is not a missing changer");
-        assert_eq!(pinning.slots_label("drill"), "");
+        assert!(!usage.planned, "no board, no plan");
+        assert!(usage.for_tool("drill").in_job.is_empty());
+        assert!(
+            usage.for_tool("drill").referenced(),
+            "the toolset half still answers — it never needed a board",
+        );
+    }
+
+    /// A tool nothing mentions comes back empty rather than absent, so no caller has to
+    /// tell the two apart.
+    #[test]
+    fn an_unmentioned_tool_is_empty_not_missing() {
+        let app = app_with(vec![], vec![]);
+        let uses = tool_usage(&app, None).for_tool("never-heard-of-it");
+
+        assert!(!uses.referenced());
+        assert!(!uses.in_current_job());
+        assert_eq!(uses, ToolUse::default());
     }
 
     #[test]
