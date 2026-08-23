@@ -67,6 +67,12 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let _ = state;
 
     let version = env!("CARGO_PKG_VERSION");
+    // The **running process** reporting on itself, which is the half `k2g --version`
+    // cannot answer: that command describes the file on disk, while this says which
+    // build the window in front of you is actually executing. With six ways to start
+    // k2g — the KiCad toolbar button, a shortcut, the installed build, the portable
+    // zip, `cargo run`, `dx serve` — they are routinely different files.
+    let build = crate::build_info::current();
     let description = env!("CARGO_PKG_DESCRIPTION");
     let repository = env!("CARGO_PKG_REPOSITORY");
     let license = env!("CARGO_PKG_LICENSE");
@@ -87,6 +93,34 @@ pub fn AboutScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                     div { class: "about-fact",
                         dt { "Version" }
                         dd { class: "mono", "{version}" }
+                    }
+                    // Omitted rather than shown empty when there is nothing to say — a
+                    // build from a source tarball has no commit, and a blank row reads
+                    // as a broken screen rather than as an absence of data.
+                    if !build.commit.is_empty() || !build.built.is_empty() {
+                        div { class: "about-fact",
+                            dt { "Build" }
+                            dd { class: "mono about-build",
+                                if !build.commit.is_empty() {
+                                    "{build.commit}"
+                                    if build.dirty {
+                                        span { class: "about-build-dirty", " uncommitted changes" }
+                                    }
+                                }
+                                if !build.ci.is_empty() {
+                                    span { class: "about-build-part", " · {build.ci}" }
+                                }
+                                if !build.built.is_empty() {
+                                    span { class: "about-build-part", " · built {build.built}" }
+                                }
+                            }
+                        }
+                    }
+                    if !build.exe.is_empty() {
+                        div { class: "about-fact",
+                            dt { "Executable" }
+                            dd { class: "mono about-build", "{build.exe}" }
+                        }
                     }
                     div { class: "about-fact",
                         dt { "Author" }

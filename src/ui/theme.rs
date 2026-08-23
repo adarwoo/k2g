@@ -4970,6 +4970,34 @@ summary {
     word-break: break-word;
 }
 
+/* The build stamp and the executable path. A Windows path is one unbroken token with
+   no spaces to wrap at, and `.about-facts` is a `max-content 1fr` grid — so a value that
+   cannot break inside itself widens the track and pushes the card past its max-width.
+   `anywhere` is the value that both breaks mid-token and shrinks the track's min-content
+   size; the smaller type keeps a 100-character path from dominating a card whose other
+   rows are three words each.
+
+   Qualified `.about-fact dd.about-build` rather than `.about-build` for specificity, not
+   for reach: `.about-fact dd` above is (0,1,1) and would out-rank a bare `.about-build`
+   at (0,1,0) whatever the source order. Nothing there sets `overflow-wrap` today, and
+   the day something does is exactly the day the card silently blows out. */
+.about-fact dd.about-build {
+    overflow-wrap: anywhere;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.about-build-part {
+    color: var(--text-subtle);
+}
+
+/* Said in words rather than punctuation. `(dirty)` is jargon on a screen an operator
+   reads, and the fact it carries — this build contains work that is not in any commit —
+   is worth a colour of its own. */
+.about-build-dirty {
+    color: var(--warn);
+}
+
 /* A <button>, not an <a>: an href would still let a middle-click or a keyboard
    Enter navigate the application's own WebView, which is the whole thing these
    links exist to avoid. Stripped back to look like the link it behaves as. */
@@ -5934,6 +5962,40 @@ mod tests {
             checked >= 2,
             "expected at least the settings and export dialogs to be checked, saw {checked} \
              — if the naming convention changed, this test is measuring nothing"
+        );
+    }
+
+    /// **The executable path can break inside itself, and out-ranks the row rule.**
+    ///
+    /// `.about-facts` is a `max-content 1fr` grid and an installed path is one token with
+    /// no spaces — `C:\Users\…\k2g-portable-windows-x64\k2g.exe`. Only `overflow-wrap:
+    /// anywhere` both breaks mid-token *and* shrinks the track's min-content size, so
+    /// without it the About card widens past its 560px max-width.
+    ///
+    /// The specificity half is the part that needs guarding: `.about-fact dd` is (0,1,1)
+    /// and beats a bare `.about-build` at (0,1,0) regardless of source order, so the rule
+    /// has to stay qualified. Nothing sets `overflow-wrap` on the row today; the day
+    /// something does is the day this silently stops applying.
+    #[test]
+    fn the_executable_path_keeps_a_rule_that_can_break_it() {
+        let rules = rules();
+        let find = |wanted: &str| {
+            rules
+                .iter()
+                .find(|(selector, _)| selector == wanted)
+                .unwrap_or_else(|| panic!("the sheet declares `{wanted}`"))
+        };
+
+        let (selector, body) = find(".about-fact dd.about-build");
+        assert!(
+            body.contains("overflow-wrap: anywhere"),
+            "the executable path needs `overflow-wrap: anywhere` to break inside itself; \
+             `word-break: break-word` on the row does not shrink a grid track"
+        );
+        assert!(
+            class_count(selector) > class_count(".about-fact dd"),
+            "`{selector}` must out-specify `.about-fact dd`, or a future `overflow-wrap` \
+             there wins whatever the source order and the About card blows out"
         );
     }
 

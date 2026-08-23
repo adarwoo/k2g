@@ -25,13 +25,122 @@ mod version;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/version.rs");
     println!("cargo:rerun-if-changed=assets/icons/icon.png");
+    // The whole source tree, not just `version.rs`. Cargo walks a directory, and the
+    // build stamp below has to be recomputed whenever the binary is — a stamp that
+    // says `clean` because a `.rs` edit did not re-run this script is worse than no
+    // stamp at all. `render_ico` skips its work when the icon is already current, so
+    // the wider watch costs a `git` call rather than six Lanczos resizes.
+    println!("cargo:rerun-if-changed=src");
 
     warn_on_version_drift();
+    emit_build_stamp();
 
     #[cfg(windows)]
     windows_icon::embed();
+}
+
+/// Compiles the git commit, its dirty flag and the CI run into the binary, for
+/// `build_info::current()` to report.
+///
+/// # Why this is not in the version number
+///
+/// The obvious shape — patch digit as a build counter, `0.13.124` — breaks
+/// [`version::is_newer`], which orders releases on `(major, minor, patch)`. A build
+/// stamped `0.13.124` computes `is_newer("v0.13.1", "0.13.124") == false`, so the
+/// updater would refuse a genuine hotfix. The release version stays semantic and the
+/// build identifies itself alongside it.
+///
+/// # Every value is always emitted, empty when unknown
+///
+/// `env!` is a compile error on an unset variable, and a build from a source tarball
+/// has no git to ask. Emitting an empty string keeps the crate compiling anywhere and
+/// leaves "unknown" a value the reporting code can handle — which it does, by omitting
+/// the line rather than printing a blank one. Nothing in this file ever fails a build
+/// over metadata (see the module docs).
+///
+/// # What can still go stale
+///
+/// The commit and its dirty flag are a *provenance* answer and are only as fresh as the
+/// last time this script ran. The freshness question — is this the build I just made —
+/// is answered at runtime from the executable's own mtime, which cannot go stale. See
+/// `build_info` for that half.
+fn emit_build_stamp() {
+    // A commit lands without `.git/HEAD` moving (it names a branch, and the branch's
+    // ref file is what advances), so watch the resolved ref as well as HEAD itself.
+    //
+    // `.git/index` is deliberately **not** watched. It looks like the right file and it
+    // is a trap: `git status` refreshes the index's stat cache, so a build script that
+    // both watches the index and runs `git status` invalidates itself — every build
+    // triggers one more, each costing a full relink. Nothing is lost by leaving it out.
+    // Staging a file does not change whether the tree is dirty; a commit moves the ref
+    // below; and any edit to a tracked source file is caught by the `src` watch above.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            println!("cargo:rerun-if-changed=.git/{reference}");
+        }
+    }
+
+    let commit = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_default();
+    // Non-empty porcelain output is any uncommitted change, staged or not. An error
+    // (no git, no repository) reads as clean rather than dirty: claiming a tarball
+    // build carries uncommitted work would be inventing a fact.
+    let dirty = match git(&["status", "--porcelain"]) {
+        Some(status) if !status.is_empty() => "1",
+        _ => "",
+    };
+
+    println!("cargo:rustc-env=K2G_COMMIT={commit}");
+    println!("cargo:rustc-env=K2G_COMMIT_DIRTY={dirty}");
+    println!("cargo:rustc-env=K2G_CI={}", ci_run());
+}
+
+/// `"Rust run 124"` for a GitHub Actions build, empty for a local one.
+///
+/// The attempt is appended only when it is not the first: `GITHUB_RUN_NUMBER` is stable
+/// across a re-run of the same workflow run, so `Rust run 124.2` is the only way to tell
+/// a re-run's artifacts from the original's — and printing `.1` on every ordinary build
+/// would be noise.
+fn ci_run() -> String {
+    // Not `rerun-if-changed`: an environment variable needs its own declaration, or a
+    // cached build script result would carry a stale run number into a later run.
+    for name in ["GITHUB_WORKFLOW", "GITHUB_RUN_NUMBER", "GITHUB_RUN_ATTEMPT"] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+
+    let (Ok(workflow), Ok(number)) = (
+        std::env::var("GITHUB_WORKFLOW"),
+        std::env::var("GITHUB_RUN_NUMBER"),
+    ) else {
+        return String::new();
+    };
+
+    let attempt = std::env::var("GITHUB_RUN_ATTEMPT").unwrap_or_default();
+    match attempt.as_str() {
+        "" | "1" => format!("{workflow} run {number}"),
+        other => format!("{workflow} run {number}.{other}"),
+    }
+}
+
+/// Trimmed stdout of a successful `git`, or `None` for any failure at all — no git on
+/// PATH, not a repository, a non-zero exit, non-UTF-8 output.
+///
+/// Always `--no-optional-locks`, so reading the repository never writes to it. Without
+/// it `git status` rewrites `.git/index` to refresh its stat cache, which is a build
+/// script mutating the source tree it is inspecting — and it is what makes watching the
+/// index self-invalidating. A build must be able to run on a read-only checkout, and on
+/// two checkouts at once.
+fn git(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("--no-optional-locks")
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8(output.stdout).ok()?.trim().to_string())
 }
 
 /// Warns when `Cargo.toml`'s version has fallen behind the newest release tag.
@@ -135,7 +244,19 @@ mod windows_icon {
     }
 
     /// Renders the PNG into a multi-size `.ico` under `OUT_DIR`, returning its path.
+    ///
+    /// Skipped entirely when the `.ico` under `OUT_DIR` is already newer than the PNG.
+    /// This build script now re-runs on any source change — it has to, or the git stamp
+    /// it emits would be a build behind — and six Lanczos resizes on every incremental
+    /// build is exactly the cost the old narrow watch list was avoiding. The artwork
+    /// changes about once a year; the source changes every minute.
     fn render_ico() -> Result<PathBuf, String> {
+        let out_dir = std::env::var("OUT_DIR").map_err(|e| format!("no OUT_DIR: {e}"))?;
+        let cached = PathBuf::from(&out_dir).join("k2g.ico");
+        if is_current(&cached) {
+            return Ok(cached);
+        }
+
         let source = image::open(ICON_PNG)
             .map_err(|e| format!("cannot read {ICON_PNG}: {e}"))?
             .into_rgba8();
@@ -151,14 +272,28 @@ mod windows_icon {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let out_dir = std::env::var("OUT_DIR").map_err(|e| format!("no OUT_DIR: {e}"))?;
-        let path = PathBuf::from(out_dir).join("k2g.ico");
-        let file = std::fs::File::create(&path)
-            .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+        let file = std::fs::File::create(&cached)
+            .map_err(|e| format!("cannot create {}: {e}", cached.display()))?;
         IcoEncoder::new(BufWriter::new(file))
             .encode_images(&frames)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        Ok(path)
+            .map_err(|e| format!("cannot write {}: {e}", cached.display()))?;
+        Ok(cached)
+    }
+
+    /// Whether `ico` exists and is at least as new as the artwork it is rendered from.
+    ///
+    /// `false` for every uncertainty — no file, no timestamp on this filesystem, an
+    /// unreadable source — so the only way to skip the render is a positive answer.
+    /// Re-rendering unnecessarily costs a fraction of a second; skipping when the
+    /// artwork has moved ships the old icon until someone runs `cargo clean`.
+    fn is_current(ico: &PathBuf) -> bool {
+        let modified = |path: &dyn AsRef<std::path::Path>| {
+            std::fs::metadata(path).and_then(|meta| meta.modified()).ok()
+        };
+        match (modified(&ico), modified(&ICON_PNG)) {
+            (Some(built), Some(source)) => built >= source,
+            _ => false,
+        }
     }
 
     fn warn(message: &str) {

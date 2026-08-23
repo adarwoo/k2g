@@ -1,3 +1,4 @@
+mod build_info;
 mod catalog_io;
 mod runtime;
 mod data;
@@ -11,6 +12,16 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 
 fn main() {
+    // First, before anything at all. Two reasons, and the second is the one that
+    // matters: the log registry below would interleave its output with the block being
+    // printed, and `claim_single_instance` further down holds a lock for the life of
+    // the process — so a `--version` placed after it would print nothing while a k2g
+    // window is open, which is precisely when the question gets asked.
+    if let Some(text) = respond_to_arguments(std::env::args().skip(1)) {
+        println!("{text}");
+        return;
+    }
+
     // Two parallel sinks under one shared filter: the usual stdout formatter, plus
     // an in-memory capture that backs the in-app Logs viewer (see
     // `runtime::log_capture`). The `EnvFilter` on the registry gates both, so the
@@ -24,7 +35,9 @@ fn main() {
 
     dioxus_logger::initialize_default();
 
-    log::info!("Starting k2g {}", env!("CARGO_PKG_VERSION"));
+    // The full build stamp, not just the version: this line is what a session log has
+    // to answer "which build was that" with, months later, when the binary is gone.
+    log::info!("Starting {}", build_info::one_line());
 
     // WebKitGTK renders through a DMABUF path that assumes the GPU stack can share
     // buffers between the web process and the compositor. Where it can't, the web
@@ -125,5 +138,157 @@ fn claim_single_instance() -> Option<runtime::single_instance::Claim> {
             }
             None
         }
+    }
+}
+
+/// What to print and exit for, or `None` to launch the application.
+///
+/// # Deliberately permissive
+///
+/// Only `--version`/`-V` and `--help`/`-h` are recognised; **everything else falls
+/// through and launches the GUI exactly as before**. Six things start this binary — the
+/// KiCad toolbar shim, a desktop shortcut, the installed build, the portable zip,
+/// `cargo run` and `dx serve` — and a strict parser that rejected an unrecognised
+/// argument would be a way to break one of those launch paths for no gain. There is
+/// nothing here that needs a parser library; it is a match on two strings.
+fn respond_to_arguments(args: impl Iterator<Item = String>) -> Option<String> {
+    for arg in args {
+        match arg.as_str() {
+            "--version" | "-V" => return Some(build_info::describe()),
+            "--help" | "-h" => return Some(usage()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `--help` output. Short on purpose: k2g is a desktop application with no command-line
+/// interface to document, and these two flags are the whole of it.
+fn usage() -> String {
+    format!(
+        "k2g — KiCad → GCode, CAM for machining PCBs\n\
+         \n\
+         Usage: k2g [OPTIONS]\n\
+         \n\
+         Run with no arguments to open the application.\n\
+         \n\
+         Options:\n\
+         \x20 -V, --version  Report the running build — commit, build time and path\n\
+         \x20 -h, --help     Show this message\n\
+         \n\
+         {}",
+        build_info::describe()
+    )
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    fn respond(args: &[&str]) -> Option<String> {
+        respond_to_arguments(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn both_spellings_of_version_report_the_build() {
+        for flag in ["--version", "-V"] {
+            let text = respond(&[flag]).unwrap_or_else(|| panic!("{flag} is not recognised"));
+            assert_eq!(text, build_info::describe());
+        }
+    }
+
+    #[test]
+    fn both_spellings_of_help_explain_the_two_flags() {
+        for flag in ["--help", "-h"] {
+            let text = respond(&[flag]).unwrap_or_else(|| panic!("{flag} is not recognised"));
+            assert!(text.contains("--version"));
+            assert!(text.contains("--help"));
+            // Help ends with the build stamp, so `k2g -h` answers the same question.
+            assert!(text.ends_with(&build_info::describe()));
+        }
+    }
+
+    /// **Nothing else stops the launch.** This is the invariant that keeps six launch
+    /// paths working: an argument this does not recognise means "open the application",
+    /// never "refuse and print usage".
+    #[test]
+    fn anything_else_launches_the_application() {
+        let unknown = [
+            vec![],
+            vec![""],
+            vec!["--serve"],
+            vec!["--hot-reload"],
+            vec![r"E:\boards\panel.kicad_pcb"],
+            vec!["-v"],           // lower case is not the version flag
+            vec!["version"],      // no leading dashes
+            vec!["--versions"],   // near miss
+        ];
+
+        for args in unknown {
+            assert!(
+                respond(&args).is_none(),
+                "{args:?} must launch the application, not print and exit"
+            );
+        }
+    }
+
+    /// `--` is not an end-of-flags marker here, and that is a decision rather than an
+    /// omission: k2g takes no positional arguments, so there is nothing for `--` to
+    /// protect from being read as a flag. Implementing the convention would add a rule
+    /// to a two-flag scanner in order to change the behaviour of an invocation nobody
+    /// has a reason to type.
+    #[test]
+    fn a_double_dash_separator_is_not_treated_as_one() {
+        assert!(respond(&["--", "--version"]).is_some());
+    }
+
+    /// A recognised flag anywhere in the list still answers, so `dx serve`-style
+    /// wrappers that prepend their own arguments do not hide it.
+    #[test]
+    fn a_flag_is_found_wherever_it_sits() {
+        assert!(respond(&["--profile", "release", "--version"]).is_some());
+    }
+
+    /// **The arguments are answered before the single-instance lock is taken.**
+    ///
+    /// A source scan, because the failure is silent rather than a compile error: put
+    /// `respond_to_arguments` after `claim_single_instance` and `k2g --version` prints
+    /// nothing whenever a k2g window is open — which is the one situation in which
+    /// somebody runs it. Nothing in the type system prevents that reordering.
+    #[test]
+    fn the_arguments_are_answered_before_the_instance_lock() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("fn main() {")
+            .expect("main.rs declares fn main")
+            .1;
+
+        let args = body
+            .find("respond_to_arguments")
+            .expect("main() calls respond_to_arguments");
+        let lock = body
+            .find("claim_single_instance()")
+            .expect("main() calls claim_single_instance");
+
+        assert!(
+            args < lock,
+            "main() takes the single-instance lock before answering --version, so the \
+             flag prints nothing while a k2g window is open. Move the \
+             `respond_to_arguments` block back to the top of main()."
+        );
+    }
+
+    /// And before the log registry, so the block is not interleaved with log lines.
+    #[test]
+    fn the_arguments_are_answered_before_logging_starts() {
+        let source = include_str!("main.rs");
+        let body = source.split_once("fn main() {").expect("fn main").1;
+
+        let args = body.find("respond_to_arguments").expect("respond_to_arguments");
+        let logging = body
+            .find("tracing_subscriber::registry()")
+            .expect("main() initialises the log registry");
+
+        assert!(args < logging, "--version output would be interleaved with log lines");
     }
 }
