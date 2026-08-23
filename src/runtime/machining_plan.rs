@@ -685,6 +685,7 @@ fn plan_step(
                         // One run: the chain order is already chosen, so the TSP must
                         // place the chain without resequencing inside it.
                         chain: Some(source.clone()),
+                        is_pin: false,
                     });
                 }
             }
@@ -734,6 +735,7 @@ fn plan_step(
                 diameter: tool_diameter,
                 z_bottom: assigned.z_bottom,
                 chain: None,
+                is_pin: false,
             });
         } else {
             route_targets.push(RouteTarget {
@@ -798,6 +800,7 @@ fn plan_step(
                     // being scattered through the tour with the board's own holes between
                     // them. They are the datum: they want making together.
                     chain: Some("pin".to_string()),
+                    is_pin: true,
                 }),
                 PinTool::Router {
                     id,
@@ -913,44 +916,26 @@ fn plan_step(
 
     blocks.extend(plan_drilling(&drill_targets, &placement, start, &slots));
     blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
-    if let Some(outline_router) = routers.outline.as_deref() {
-        let tool = ctx.tools.iter().find(|t| t.id == outline_router);
-        if let Some(tool) = tool {
-            let z_bottom = assigner::router_plunge(&setup);
-            if tool
-                .flute_length
-                .is_some_and(|f| f.as_mm() < z_bottom.as_mm())
-            {
-                notes.push(format!(
-                    "Outline router '{}' cannot reach through the board — the outline will \
-                     not be cut free. Stock a longer cutter.",
-                    tool.name
-                ));
-            }
-            // The cutouts cut with this same tool ride in the same block, so a step that
-            // routes both with one cutter pays one tool change rather than two. They join
-            // the **roughing** pass, which keeps them ahead of the perimeter's finishing
-            // cut and so keeps op-planner §4's "interior before perimeter" true.
-            let mut rough = outline_rough.clone();
-            rough.extend(cutout_rough.remove(outline_router).unwrap_or_default());
-            let mut spans = outline_spans.clone();
-            spans.extend(cutout_spans.remove(outline_router).unwrap_or_default());
-            blocks.extend(plan_outline(
-                &[&rough, &spans],
-                outline_router,
-                tool.diameter,
-                // Negative machine-Z depth (board top is Z0; op-planner §6).
-                Length::from_mm(-z_bottom.as_mm()),
-                placement.z_retract(),
-                start,
-                &slots,
-            ));
-        }
-    }
 
-    // Cutouts on any cutter the outline did not already use — one block each, since
-    // `plan_outline` groups nothing across calls and two calls for one tool would read
-    // as two tool changes.
+    // The interior openings, on every cutter the outline does not itself use — **before**
+    // the outline block, because the perimeter is what releases the part and nothing
+    // should be machined on a board that has already been let go of (op-planner §4). One
+    // block each, since `plan_outline` groups nothing across calls and two calls for one
+    // tool would read as two tool changes.
+    //
+    // The cutter the outline *does* use is taken out of these maps first and cut inside
+    // that block, as its leading passes.
+    let shared_cutout_rough = routers
+        .outline
+        .as_deref()
+        .and_then(|id| cutout_rough.remove(id))
+        .unwrap_or_default();
+    let shared_cutout_spans = routers
+        .outline
+        .as_deref()
+        .and_then(|id| cutout_spans.remove(id))
+        .unwrap_or_default();
+
     for (router_id, spans) in &cutout_spans {
         let Some(tool) = ctx.tools.iter().find(|t| &t.id == router_id) else {
             continue;
@@ -978,6 +963,53 @@ fn plan_step(
             start,
             &slots,
         ));
+    }
+
+    if let Some(outline_router) = routers.outline.as_deref() {
+        let tool = ctx.tools.iter().find(|t| t.id == outline_router);
+        if let Some(tool) = tool {
+            let z_bottom = assigner::router_plunge(&setup);
+            if tool
+                .flute_length
+                .is_some_and(|f| f.as_mm() < z_bottom.as_mm())
+            {
+                notes.push(format!(
+                    "Outline router '{}' cannot reach through the board — the outline will \
+                     not be cut free. Stock a longer cutter.",
+                    tool.name
+                ));
+            }
+            // The cutouts cut with this same tool ride in the same block, so a step that
+            // routes both with one cutter pays one tool change rather than two — but as
+            // their **own passes, ahead of the outline's**.
+            //
+            // They used to be merged into the outline's two pass lists, on the argument
+            // that joining the roughing pass kept them ahead of the perimeter's finishing
+            // cut and so kept op-planner §4's "interior before perimeter" true. It did not.
+            // `Passes::rough` is empty whenever the step leaves no finishing allowance —
+            // the common case — so every cutout and the whole perimeter landed in one pass
+            // ordered by travel, and a cutout could be machined after the perimeter had
+            // been cut through. Separate passes make the rule hold whether or not there is
+            // an allowance, which is what it was always supposed to mean.
+            //
+            // `plan_outline` runs its passes in order and tours each from where the last
+            // left the cutter, so this is still one block and costs no tool change.
+            blocks.extend(plan_outline(
+                &[
+                    &shared_cutout_rough,
+                    &shared_cutout_spans,
+                    &outline_rough,
+                    &outline_spans,
+                ],
+                outline_router,
+                tool.diameter,
+                // Negative machine-Z depth (board top is Z0; op-planner §6).
+                Length::from_mm(-z_bottom.as_mm()),
+                placement.z_retract(),
+                start,
+                &slots,
+            ));
+        }
     }
 
     // The back-face program opens with a "Back face up?" prompt, and that
@@ -1442,6 +1474,7 @@ fn plan_cutout_spans(
                     // One run per cutout so the relief holes are drilled round the
                     // opening in order rather than scattered through the tour.
                     chain: Some(format!("{label}#{kind_index}.corners")),
+                    is_pin: false,
                 });
             }
         }
@@ -1561,6 +1594,7 @@ fn plan_cutout_spans(
                     diameter: bite_tool.1,
                     z_bottom: bite_tool.2,
                     chain: Some(format!("{label}#{kind_index}.bite{n}")),
+                    is_pin: false,
                 });
             }
         }
@@ -1863,6 +1897,7 @@ fn plan_outline_spans(
                                 // One run, so the perforation is drilled in order along
                                 // the tab rather than being scattered through the tour.
                                 chain: Some(format!("{label}#{kind_index}.bite{n}")),
+                                is_pin: false,
                             });
                         }
                     }
@@ -2502,6 +2537,103 @@ mod engrave_diagnostic_tests {
         assert!(
             check < body.find("blocks.extend(engraved)").expect("the block is added"),
             "checked before it is folded into the plan, while it can still be told apart",
+        );
+    }
+}
+
+/// The order the blocks come out in, guarded at the source.
+///
+/// Block order is **push order** — there is no sort, no `Phase` comparison, nothing that
+/// would fail to compile if two pushes were swapped. So the sequence a board is made in
+/// lives in the order of a few statements, and these are what stop an innocuous-looking
+/// edit reordering the program.
+#[cfg(test)]
+mod block_order_tests {
+    /// The body of `plan_step`, from the engrave block to the end.
+    fn body() -> &'static str {
+        let source = include_str!("machining_plan.rs");
+        source
+            .split_once("    let mut blocks = Vec::new();")
+            .expect("plan_step builds its blocks in one place")
+            .1
+    }
+
+    fn at(needle: &str) -> usize {
+        body().find(needle).unwrap_or_else(|| panic!("{needle:?} is not in plan_step"))
+    }
+
+    /// **Engraving is the first thing in the program.** Z0 is verified against an
+    /// unmachined surface, so the program has to open by selecting the engraving tool —
+    /// which it does by the engrave block being pushed before any other.
+    ///
+    /// It is also the right order physically: the copper is cut while the board is whole,
+    /// flat and undrilled, and every hole made first is a place the surface can lift or the
+    /// bit can catch.
+    #[test]
+    fn the_engrave_block_is_pushed_before_any_other() {
+        let engrave = at("blocks.extend(engraved);");
+
+        for later in [
+            "blocks.extend(plan_drilling(",
+            "blocks.extend(plan_routing(",
+            "blocks.extend(plan_outline(",
+        ] {
+            assert!(
+                engrave < at(later),
+                "`{later}` is pushed before the engrave block, so the program would not \
+                 open with the engraving tool",
+            );
+        }
+    }
+
+    /// **Drilling before routing** — a hard constraint, not a preference (op-planner §4.1).
+    /// Routing releases the part, so all drilling must finish while the board is fully
+    /// attached and flat.
+    #[test]
+    fn every_hole_is_drilled_before_anything_is_routed() {
+        assert!(at("blocks.extend(plan_drilling(") < at("blocks.extend(plan_routing("));
+        assert!(at("blocks.extend(plan_routing(") < at("blocks.extend(plan_outline("));
+    }
+
+    /// **Interior cutouts before the perimeter, on their own cutter too.**
+    ///
+    /// The cutouts sharing the outline's cutter are ordered by the pass list inside one
+    /// block; the ones on any *other* cutter are separate blocks, and those have to be
+    /// pushed first. They used to be pushed last — after the outline had already released
+    /// the part — which is the same fault the pass list fixes, in the other half of the
+    /// problem.
+    #[test]
+    fn cutouts_on_their_own_cutter_are_cut_before_the_outline() {
+        let loop_start = at("for (router_id, spans) in &cutout_spans {");
+        let outline_block = at("if let Some(outline_router) = routers.outline.as_deref() {");
+
+        assert!(
+            loop_start < outline_block,
+            "cutout blocks on other cutters must be pushed before the outline block",
+        );
+    }
+
+    /// And the shared cutter's cutouts lead the outline's own passes within their block.
+    /// `plan_outline` runs passes in the order given, so this array *is* the cut order.
+    #[test]
+    fn the_shared_cutters_cutouts_lead_the_outline_passes() {
+        let passes = body()
+            .split_once("blocks.extend(plan_outline(")
+            .expect("the outline block is planned here")
+            .1;
+        let order: Vec<usize> = [
+            "&shared_cutout_rough",
+            "&shared_cutout_spans",
+            "&outline_rough",
+            "&outline_spans",
+        ]
+        .iter()
+        .map(|name| passes.find(name).unwrap_or_else(|| panic!("{name} is a pass")))
+        .collect();
+
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "the cutout passes must precede the outline passes: {order:?}",
         );
     }
 }

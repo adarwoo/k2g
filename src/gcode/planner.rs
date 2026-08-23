@@ -51,6 +51,17 @@ pub struct DrillTarget {
     /// sweep — the exact order the chain geometry exists to avoid. `None` for a round
     /// hole, which is a run of one.
     pub chain: Option<String>,
+    /// A locating-pin hole: the datum the board is registered against.
+    ///
+    /// Drilled before anything measured from it, which [`plan_drilling`] arranges by
+    /// hoisting this tool's block to the front of the phase and the pin run to the front
+    /// of that block.
+    ///
+    /// Its own field rather than a `chain == Some("pin")` test. The chain id exists to
+    /// keep a run together and nothing else reads meaning into its value; making one
+    /// spelling of it mean "datum" would let a rename in the caller silently reorder the
+    /// program, with no compiler or test able to notice.
+    pub is_pin: bool,
 }
 
 /// Plans the drill phase: one tool block per tool, small→large, TSP-ordered within.
@@ -72,6 +83,7 @@ pub fn plan_drilling(
         z_bottom: Length,
         source: String,
         chain: Option<String>,
+        is_pin: bool,
     }
     let mut by_tool: BTreeMap<String, (Length, Vec<Placed>)> = BTreeMap::new();
     for target in targets {
@@ -84,18 +96,26 @@ pub fn plan_drilling(
             z_bottom: target.z_bottom,
             source: target.source.clone(),
             chain: target.chain.clone(),
+            is_pin: target.is_pin,
         });
     }
 
-    // Order the tool blocks small→large diameter, then by tool id for a total,
-    // deterministic order (op-planner §4.4).
+    // Order the tool blocks: **the pins' drill first**, then small→large diameter, then by
+    // tool id for a total, deterministic order (op-planner §4.4).
+    //
+    // The locating pins are the datum the board is registered against, so they are made
+    // before anything measured from them. Hoisting the *block* rather than giving the pins
+    // one of their own is what keeps a drill that also makes board holes from being loaded
+    // twice — which is the whole return on grouping by tool in the first place.
     let mut ordered: Vec<(String, Length, Vec<Placed>)> = by_tool
         .into_iter()
         .map(|(tool_id, (diameter, placed))| (tool_id, diameter, placed))
         .collect();
     ordered.sort_by(|a, b| {
-        micron(a.1)
-            .cmp(&micron(b.1))
+        let pins = |placed: &Vec<Placed>| !placed.iter().any(|p| p.is_pin);
+        pins(&a.2)
+            .cmp(&pins(&b.2))
+            .then_with(|| micron(a.1).cmp(&micron(b.1)))
             .then_with(|| a.0.cmp(&b.0))
     });
 
@@ -105,11 +125,24 @@ pub fn plan_drilling(
             // Order runs, not plunges: a drill chain's internal order is already fixed,
             // so the TSP sees each chain as one node at its first plunge.
             let runs = contiguous_runs(placed.len(), |i| placed[i].chain.as_deref());
-            let heads: Vec<Point> = runs.iter().map(|run| placed[run.start].entry).collect();
-            let run_order = tsp_order(start, &heads);
-            let order: Vec<usize> = run_order
+
+            // The pin runs lead, in the order they were given — they are the datum, and a
+            // tour that shortened travel by drilling a board hole between them would put a
+            // plunge in before the board is registered. Everything else is toured from
+            // where the pins left the spindle, so leading with them costs one rapid rather
+            // than a worse tour.
+            let (pin_runs, rest): (Vec<usize>, Vec<usize>) =
+                (0..runs.len()).partition(|&r| placed[runs[r].start].is_pin);
+            let from = pin_runs
+                .last()
+                .map_or(start, |&r| placed[runs[r].end - 1].entry);
+
+            let heads: Vec<Point> = rest.iter().map(|&r| placed[runs[r].start].entry).collect();
+            let order: Vec<usize> = pin_runs
                 .iter()
-                .flat_map(|&r| runs[r].clone())
+                .copied()
+                .chain(tsp_order(from, &heads).into_iter().map(|i| rest[i]))
+                .flat_map(|r| runs[r].clone())
                 .collect();
 
             let points: Vec<Point> = placed.iter().map(|p| p.entry).collect();
@@ -599,12 +632,23 @@ mod tests {
             diameter: Length::from_mm(dia),
             z_bottom: Length::from_mm(2.4),
             chain: None,
+            is_pin: false,
         }
     }
 
     /// A plunge belonging to a named drill chain.
     fn chained(chain: &str, n: usize, x: f64, y: f64, tool: &str, dia: f64) -> DrillTarget {
         DrillTarget { chain: Some(chain.to_string()), ..target(&format!("{chain}.{n}"), x, y, tool, dia) }
+    }
+
+    /// A locating-pin plunge — the datum, kept in one run and drilled before anything
+    /// measured from it.
+    fn pin(n: usize, x: f64, y: f64, tool: &str, dia: f64) -> DrillTarget {
+        DrillTarget {
+            chain: Some("pin".to_string()),
+            is_pin: true,
+            ..target(&format!("pin.{n}"), x, y, tool, dia)
+        }
     }
 
     #[test]
@@ -621,6 +665,84 @@ mod tests {
         assert_eq!(blocks[1].tool_id, "big");
         assert_eq!(blocks[0].op_count(), 2);
         assert_eq!(blocks[1].op_count(), 1);
+    }
+
+    fn origin() -> Point {
+        Point::new(Length::from_mm(0.0), Length::from_mm(0.0))
+    }
+
+    /// **The locating pins are drilled before anything measured from them.** They are the
+    /// datum: a board hole plunged before the board is registered is a hole in the wrong
+    /// place, however short the tour that produced it.
+    #[test]
+    fn the_pin_drill_leads_the_phase_whatever_its_diameter() {
+        let targets = vec![
+            target("h1", 0.0, 0.0, "fine", 0.6),
+            pin(0, 20.0, 0.0, "pins", 3.2),
+            pin(1, 20.0, 20.0, "pins", 3.2),
+            target("h2", 5.0, 0.0, "fine", 0.6),
+        ];
+        let blocks = plan_drilling(&targets, &placement_identity(), origin(), &BTreeMap::new());
+
+        assert_eq!(blocks[0].tool_id, "pins", "3.2mm leads a 0.6mm despite small-first");
+        assert_eq!(blocks[0].op_count(), 2);
+        assert_eq!(blocks[1].tool_id, "fine");
+    }
+
+    /// **And it leads without being loaded twice.** Where the pin drill also makes board
+    /// holes, giving the pins a block of their own would cost a second load of that
+    /// drill — which is exactly what grouping by tool exists to avoid. So the pins lead
+    /// *inside* their tool's block and the board holes follow in the same load.
+    #[test]
+    fn a_pin_drill_that_also_makes_board_holes_is_loaded_once() {
+        let targets = vec![
+            target("h1", 0.0, 0.0, "shared", 3.2),
+            pin(0, 20.0, 0.0, "shared", 3.2),
+            pin(1, 20.0, 20.0, "shared", 3.2),
+            target("h2", 1.0, 1.0, "shared", 3.2),
+        ];
+        let blocks = plan_drilling(&targets, &placement_identity(), origin(), &BTreeMap::new());
+
+        assert_eq!(blocks.len(), 1, "one load of the drill, not two");
+        let sources: Vec<&str> = blocks[0].ops.iter().map(|op| op.source.as_str()).collect();
+        assert_eq!(
+            &sources[..2],
+            ["pin.0", "pin.1"],
+            "the pins are the first two plunges, got {sources:?}",
+        );
+        assert_eq!(sources.len(), 4);
+    }
+
+    /// The pins stay together and in the order given. A tour free to interleave them would
+    /// drill one pin, wander off to a board hole, and come back — registering the board
+    /// against a datum that is still half made.
+    #[test]
+    fn the_pins_are_drilled_consecutively() {
+        let targets = vec![
+            pin(0, 0.0, 0.0, "shared", 3.2),
+            // Sits between the two pins, so a pure nearest-neighbour tour would take it
+            // second if it were allowed to.
+            target("tempting", 10.0, 0.0, "shared", 3.2),
+            pin(1, 20.0, 0.0, "shared", 3.2),
+        ];
+        let blocks = plan_drilling(&targets, &placement_identity(), origin(), &BTreeMap::new());
+        let sources: Vec<&str> = blocks[0].ops.iter().map(|op| op.source.as_str()).collect();
+
+        assert_eq!(sources, ["pin.0", "pin.1", "tempting"]);
+    }
+
+    /// With no pins on the board nothing about the drill phase moves — same blocks, same
+    /// order, smallest first.
+    #[test]
+    fn a_board_with_no_pins_drills_exactly_as_before() {
+        let targets = vec![
+            target("h1", 0.0, 0.0, "big", 1.0),
+            target("h2", 5.0, 0.0, "small", 0.6),
+        ];
+        let blocks = plan_drilling(&targets, &placement_identity(), origin(), &BTreeMap::new());
+
+        assert_eq!(blocks[0].tool_id, "small");
+        assert_eq!(blocks[1].tool_id, "big");
     }
 
     #[test]
@@ -858,6 +980,54 @@ mod tests {
             "roughing first, and travel-ordered inside each pass",
         );
         assert!(block.travel_mm > 0.0, "travel accumulates across both passes");
+    }
+
+    /// **The shape `machining_plan` builds, with no finishing allowance.**
+    ///
+    /// Cutouts and the outline share a cutter, so they share a block; they are handed over
+    /// as four passes — cutout rough, cutout finish, outline rough, outline finish — and
+    /// with no allowance set the two rough lists are *empty*, which is the common case.
+    ///
+    /// That emptiness is what the old arrangement foundered on. The cutouts used to be
+    /// merged into the outline's own two lists on the argument that riding the roughing
+    /// pass kept them ahead of the perimeter; with no roughing pass to ride, every cutout
+    /// and the whole perimeter went into one travel-ordered pass and a cutout could be cut
+    /// after the board had been released. Here the ordering is carried by the pass list, so
+    /// it holds whether or not an allowance exists.
+    #[test]
+    fn cutouts_are_cut_before_the_outline_with_no_finishing_allowance() {
+        let span = |source: &str, x: f64| OutlineSpan {
+            source: source.to_string(),
+            path: vec![
+                Point::new(Length::from_mm(x), Length::from_mm(0.0)),
+                Point::new(Length::from_mm(x + 1.0), Length::from_mm(0.0)),
+            ],
+        };
+        // The outline sits nearest the origin, so a single travel-ordered pass would cut
+        // it first — the failure this guards against, rather than a coincidence of layout.
+        let outline = vec![span("outer#0.span0", 1.0), span("outer#0.span1", 2.0)];
+        let cutouts = vec![span("cutout#0.span0", 50.0), span("cutout#1.span0", 80.0)];
+
+        let block = plan_outline(
+            &[&[], &cutouts, &[], &outline],
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .expect("there is something to cut");
+
+        let sources: Vec<&str> = block.ops.iter().map(|op| op.source.as_str()).collect();
+        let first_outline = sources.iter().position(|s| s.starts_with("outer")).unwrap();
+        let last_cutout = sources.iter().rposition(|s| s.starts_with("cutout")).unwrap();
+
+        assert!(
+            last_cutout < first_outline,
+            "every cutout must be cut before the perimeter releases the part, got {sources:?}",
+        );
+        assert_eq!(block.op_count(), 4, "and it is still one block, so one tool change");
     }
 
     /// A pass with nothing in it is skipped rather than ending the block — which is what

@@ -630,12 +630,23 @@ impl AppData {
                 .filter_map(Value::as_str)
                 .collect();
 
+            // **The work still to be done, not merely the first thing that is allowed.**
+            //
+            // This used to take the first operation that was repeatable *or* unclaimed,
+            // which made the answer depend on where the repeatable entries sat in
+            // `MACHINING_OPERATIONS` — with engraving at the end it happened to work, and
+            // ordering that list for the operator (engraving first) would have made every
+            // new step an engraving step. A default that changes when a list is reordered
+            // for unrelated reasons is a trap, not a rule.
+            //
+            // So the question is asked directly: what does this face still not have? Only
+            // when everything once-per-face is claimed does a repeatable operation stand in
+            // — a step must carry at least one (`minItems: 1`), and a step the readiness
+            // gate then complains about is better than one the schema rejects.
             let operation = MACHINING_OPERATIONS
                 .iter()
-                .find(|op| !op.once_per_face || !claimed.contains(&op.key))
-                // Unreachable while any operation is repeatable, but a step must carry
-                // at least one (`minItems: 1`), and a step the gate then complains about
-                // is better than one the schema rejects.
+                .find(|op| op.once_per_face && !claimed.contains(&op.key))
+                .or_else(|| MACHINING_OPERATIONS.iter().find(|op| !op.once_per_face))
                 .map_or(MACHINING_OPERATIONS[0].key, |op| op.key);
 
             // The placeholder name, which `step_display_name` reads as "not named yet" and
@@ -2534,23 +2545,66 @@ mod tests {
         assert!(data.add_step(id));
         assert_eq!(operations(&data, 1), vec!["drill_npth".to_string()], "PTH is taken");
         assert!(data.add_step(id));
-        assert_eq!(operations(&data, 2), vec!["route_board".to_string()], "and so is NPTH");
+        assert_eq!(operations(&data, 2), vec!["route_cutouts".to_string()], "and so is NPTH");
         assert!(data.add_step(id));
         assert_eq!(
             operations(&data, 3),
-            vec!["route_cutouts".to_string()],
-            "cutouts are their own once-per-face claim, taken before the repeatable ones"
+            vec!["route_board".to_string()],
+            "the outline is the last once-per-face claim, taken before the repeatable ones"
         );
 
-        // Past the once-per-side operations it settles on the repeatable one rather
+        // Past the once-per-side operations it settles on a repeatable one rather
         // than running out — a step must carry at least one operation.
         assert!(data.add_step(id));
         assert!(data.add_step(id));
-        assert_eq!(operations(&data, 4), vec!["drill_locating_pins".to_string()]);
+        assert_eq!(operations(&data, 4), vec!["engrave_copper".to_string()]);
         assert_eq!(
             operations(&data, 5),
-            vec!["drill_locating_pins".to_string()],
-            "pins are repeatable, so they stay available"
+            vec!["engrave_copper".to_string()],
+            "engraving is repeatable, so it stays available"
+        );
+    }
+
+    /// **A new step never defaults to a repeatable operation while real work is
+    /// unclaimed.**
+    ///
+    /// `MACHINING_OPERATIONS` is ordered for the operator — engraving and locating pins
+    /// come first, because that is the order a board is made in — and both are repeatable.
+    /// The old rule took the first entry that was repeatable *or* unclaimed, so that
+    /// ordering would have made **every** new step an engraving step. The default has to
+    /// come from what the face still lacks, not from where an entry happens to sit.
+    #[test]
+    fn a_new_step_claims_work_rather_than_the_first_repeatable_operation() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        let id = data.create(Profile::Machining).expect("create machining");
+
+        assert!(data.add_step(id));
+        let step = data
+            .get(id)
+            .unwrap()
+            .root
+            .get_pointer("/steps/1/operations")
+            .unwrap()
+            .value
+            .clone();
+        let NodeValue::Array(items) = step else { panic!("operations is a list") };
+        let keys: Vec<String> = items
+            .iter()
+            .filter_map(|item| match &item.value {
+                NodeValue::Str(key) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_ne!(
+            keys,
+            vec!["engrave_copper".to_string()],
+            "the first repeatable entry must not become the default for every new step",
+        );
+        assert!(
+            crate::data::model::operation_once_per_face(&keys[0]),
+            "a new step should claim work the face still needs, got {keys:?}",
         );
     }
 

@@ -31,15 +31,20 @@ $defs:
   # so it lives in `src/data/model/operations.rs`, which mirrors this list and is what
   # both the editor and the readiness gate consult. Keep the two in step — a test
   # asserts they match, in order.
+  # In the order a board is made in, mirroring `MACHINING_OPERATIONS` in
+  # `src/data/model/operations.rs` — which is what the picker shows and what the
+  # planner emits. Engraving first (Z0 is verified against an unmachined
+  # surface), pins before the holes measured from them, holes while the board is
+  # still whole, interior cutouts before the perimeter that releases the part.
   operation_key:
     type: string
     enum:
+      - engrave_copper
+      - drill_locating_pins
       - drill_pth
       - drill_npth
-      - route_board
       - route_cutouts
-      - drill_locating_pins
-      - engrave_copper
+      - route_board
 
   allowance:
     description: >-

@@ -36,19 +36,58 @@ pub struct MachiningOperation {
     pub once_per_face: bool,
 }
 
-/// The operations, in schema order.
+/// The operations, **in the order a board is made in**.
 ///
-/// Ordered by how often a step uses them, not alphabetically or by phase: almost
-/// every job drills PTH, most also drill NPTH, many cut the outline; locating pins and
-/// engraving are the exceptions. The UI shows them in this order and persists the
-/// enabled set in it.
+/// An operator reading this list is reading the sequence: it is the order the picker
+/// shows, the order a step's blocks come out in, and the order the program runs. One
+/// order to learn rather than three to reconcile.
 ///
-/// `drill_locating_pins` is the one repeatable operation today. Pins register the
-/// board against a *fixture*, so a job that moves the board to a second fixture
-/// genuinely drills a second set — the key names the act, not a feature of the board.
-/// Engraving will join it when it lands, for the same reason: several passes at
-/// different depths, or on different regions, are all legitimately engraving.
+/// The sequence is not arbitrary — each position is owed to a physical rule:
+///
+/// 1. **Engraving** while the board is whole, flat and undrilled. Z0 is verified against
+///    an unmachined surface, and every hole made first is a place the surface can lift or
+///    the bit can catch. It is also the one operation whose quality is a depth tolerance.
+/// 2. **Locating pins** before the rest of the drilling: they are the datum the board is
+///    registered against, so they want making before anything measured from them.
+/// 3. **The holes** — PTH then NPTH — while the board is still fully attached. The
+///    reading order is what this list gives; the blocks inside the drill phase stay
+///    grouped by tool, which is what keeps a drill serving both kinds from being loaded
+///    twice. See [`plan_drilling`](crate::gcode::planner::plan_drilling).
+/// 4. **Interior cutouts** before the perimeter. Once the outline is breached — even
+///    tabbed — the part shifts and interior cuts lose accuracy (op-planner §4).
+/// 5. **The outline** last, tabbed, because it is what releases the part.
+///
+/// It used to be ordered by how often a step uses each one, which put engraving last and
+/// the outline third. That order told the reader nothing, and the ordering rules above
+/// were left to be discovered in the planner.
+///
+/// # Nothing may depend on a position here
+///
+/// `engrave_copper`'s old placement at the end was load-bearing: `AppData::add_step` took
+/// the first operation that was repeatable *or* unclaimed, so a repeatable entry any
+/// earlier became the default for every new step. That is fixed at the source — `add_step`
+/// now asks for the first *unclaimed* operation and falls back to a repeatable one — so
+/// this list is free to be ordered for the person reading it. Keep it that way: an entry
+/// added here should be placed where the board is made, and anything that needs a
+/// different order should say so itself.
 pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
+    // Repeatable: passes at different depths, or over different regions, are all
+    // legitimately engraving.
+    MachiningOperation {
+        key: "engrave_copper",
+        label: "Engrave copper isolation",
+        short_label: "Engrave",
+        once_per_face: false,
+    },
+    // Repeatable too. Pins register the board against a *fixture*, so a job that moves the
+    // board to a second fixture genuinely drills a second set — the key names the act, not
+    // a feature of the board.
+    MachiningOperation {
+        key: "drill_locating_pins",
+        label: "Drill locating pins",
+        short_label: "Pins",
+        once_per_face: false,
+    },
     MachiningOperation {
         key: "drill_pth",
         label: "Drill plated holes (PTH)",
@@ -61,12 +100,6 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         short_label: "NPTH",
         once_per_face: true,
     },
-    MachiningOperation {
-        key: "route_board",
-        label: "Cut board outline",
-        short_label: "Outline",
-        once_per_face: true,
-    },
     // Once per face like the boundary: the openings exist once, so two steps both
     // claiming them on one face is a genuine conflict rather than a division of labour.
     MachiningOperation {
@@ -76,22 +109,10 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         once_per_face: true,
     },
     MachiningOperation {
-        key: "drill_locating_pins",
-        label: "Drill locating pins",
-        short_label: "Pins",
-        once_per_face: false,
-    },
-    // Repeatable, as the note above anticipated: passes at different depths, or over
-    // different regions, are all legitimately engraving.
-    //
-    // Last in the list, and that placement is load-bearing. `AppData::add_step` gives a new
-    // step the first operation that is repeatable *or* unclaimed, so a repeatable entry
-    // placed any earlier would become the default for every step past the fourth.
-    MachiningOperation {
-        key: "engrave_copper",
-        label: "Engrave copper isolation",
-        short_label: "Engrave",
-        once_per_face: false,
+        key: "route_board",
+        label: "Cut board outline",
+        short_label: "Outline",
+        once_per_face: true,
     },
 ];
 
@@ -330,9 +351,59 @@ mod tests {
         assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["drill_pth"])), "PTH");
         assert_eq!(step_display_name("", &ops(&["route_board"])), "Outline");
         assert_eq!(
-            step_display_name("   ", &ops(&["drill_locating_pins", "drill_pth", "drill_npth"])),
-            "PTH + NPTH + Pins",
-            "schema order, not the order they were ticked"
+            step_display_name("   ", &ops(&["drill_npth", "drill_pth", "drill_locating_pins"])),
+            "Pins + PTH + NPTH",
+            "the order the board is made in, not the order they were ticked"
+        );
+    }
+
+    /// **The order a board is made in, pinned.**
+    ///
+    /// This list is the picker, the step name and — through the planner — the order the
+    /// program runs. Asserted whole rather than as a set, so an operation added later has
+    /// to be placed deliberately instead of landing wherever the diff was smallest.
+    ///
+    /// Each position is owed to a physical rule, and getting one wrong is not a cosmetic
+    /// fault: engraving after drilling verifies Z0 against a surface that has already been
+    /// machined, and the outline before the cutouts machines interior features on a part
+    /// the perimeter cut has already released.
+    #[test]
+    fn the_operations_read_in_the_order_a_board_is_made_in() {
+        let keys: Vec<&str> = MACHINING_OPERATIONS.iter().map(|op| op.key).collect();
+
+        assert_eq!(
+            keys,
+            [
+                "engrave_copper",       // whole, flat, undrilled — and Z0 is verified here
+                "drill_locating_pins",  // the datum, before anything measured from it
+                "drill_pth",            // holes while the board is still fully attached
+                "drill_npth",
+                "route_cutouts",        // interior before the perimeter (op-planner §4)
+                "route_board",          // last: it is what releases the part
+            ],
+        );
+    }
+
+    /// The two repeatable operations lead the list, which is only safe because nothing
+    /// derives a default from a position here — see `AppData::add_step`, which asks what a
+    /// face still lacks rather than taking the first entry it is allowed to.
+    ///
+    /// Worth its own test because the coupling is invisible from either side: this list
+    /// carries no marker saying a default is drawn from it, and `add_step` names no
+    /// position. The previous arrangement worked only because both repeatable entries
+    /// happened to sit at the end.
+    #[test]
+    fn the_repeatable_operations_may_lead_the_list() {
+        let leading: Vec<&str> = MACHINING_OPERATIONS
+            .iter()
+            .take_while(|op| !op.once_per_face)
+            .map(|op| op.key)
+            .collect();
+
+        assert_eq!(
+            leading,
+            ["engrave_copper", "drill_locating_pins"],
+            "if this changes, check `add_step` still claims work rather than a repeatable",
         );
     }
 
