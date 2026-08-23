@@ -64,6 +64,14 @@ pub struct CopperSnapshot {
     /// Things the operator has to know about before trusting the result — an unfilled
     /// zone, a via with no ring, a pad KiCad would not resolve.
     pub warnings: Vec<String>,
+    /// **This describes less copper than the board has.** Nothing may be machined from it.
+    ///
+    /// A read that KiCad refused returns the same empty list as a layer with nothing on it,
+    /// and the two are completely different facts. Isolating a partial reading produces
+    /// contours that look perfectly reasonable around the copper that was seen, and no
+    /// account at all of the copper that was not — a board whose nets come out joined with
+    /// every diagnostic silent, which is the one outcome this crate is built to prevent.
+    pub partial: bool,
 }
 
 /// KiCad's copper layer ids, `BL_F_Cu` through `BL_B_Cu`.
@@ -144,27 +152,95 @@ fn stroke(points: &[(i64, i64)], width_nm: i64) -> Vec<Polygon> {
         .collect()
 }
 
-/// Collects every piece of copper on `layer_id`.
+/// How long to wait for KiCad to finish re-pouring before giving up on a read.
+///
+/// Generous, because the alternative to waiting is reading the wrong board: a big ground
+/// pour on a slow machine is seconds, and this only runs when something is about to cut
+/// copper. Exceeded, the read is **refused** rather than attempted — see [`wait_until_idle`].
+const REFILL_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often to ask whether the fill has finished.
+const REFILL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Collects every piece of copper on `layer_id`, retrying while KiCad is busy.
 ///
 /// `refill` asks KiCad to re-pour its zones first. That is worth doing before a cut and
-/// worth *not* doing on every refresh: it blocks KiCad, which answers `AS_BUSY` to
-/// everything until the fill completes.
+/// worth *not* doing on every refresh.
+///
+/// # The race this exists to lose safely
+///
+/// `RefillZones` is documented by KiCad as returning immediately and then answering
+/// **`AS_BUSY` to every subsequent request until the fill completes**. Reading straight
+/// after it is therefore a race against a pour, and one that was mostly lost: on a board
+/// with a ground plane, ten reads in a row returned
+///
+/// ```text
+///   1, 0, 1, 0, 0, 119, 0, 0, 119, 0     features (119 is the right answer)
+/// ```
+///
+/// Every one of those wrong answers reached the isolation pass as *fact*, because each
+/// collector turned its refused request into an empty list. Two of them are the dangerous
+/// kind — a **partial** read, from which the pass cuts plausible-looking contours round the
+/// copper it saw and gives no account whatever of the copper it did not.
+///
+/// # Retried on the real signal, not on a proxy
+///
+/// The obvious fix — poll a cheap board-level call until it answers, then read — does not
+/// work: `get_board_enabled_layers` is *not* gated by the busy state, so it reports ready
+/// while `GetItems` is still refusing. Rather than hunt for a call whose gating matches,
+/// this retries the whole read and stops when the read itself comes back clean. That is the
+/// condition actually wanted, and it holds however KiCad's gating is arranged in a future
+/// version.
+///
+/// A snapshot whose [`CopperSnapshot::partial`] flag is set describes less copper than the
+/// board has and must not be machined from. Nothing here returns an empty snapshot to mean
+/// "no copper" without saying which it is.
 pub fn collect_copper(client: &Client, layer_id: i32, refill: bool) -> CopperSnapshot {
-    let mut snap = CopperSnapshot { layer_id, ..Default::default() };
     if !is_copper_layer(layer_id) {
-        snap.warnings.push(format!("Layer {layer_id} is not a copper layer."));
-        return snap;
+        return CopperSnapshot {
+            layer_id,
+            warnings: vec![format!("Layer {layer_id} is not a copper layer.")],
+            partial: true,
+            ..Default::default()
+        };
     }
     if refill {
         // A stale fill is worse than a slow read: it is copper that is no longer there.
         let _ = client.refill_zones(Vec::new());
     }
 
+    let deadline = std::time::Instant::now() + REFILL_WAIT;
+    loop {
+        let snap = collect_once(client, layer_id);
+        if !snap.partial || std::time::Instant::now() >= deadline {
+            return snap;
+        }
+        std::thread::sleep(REFILL_POLL);
+    }
+}
+
+/// One pass over the board's copper. Partial whenever KiCad refused any part of it.
+fn collect_once(client: &Client, layer_id: i32) -> CopperSnapshot {
+    let mut snap = CopperSnapshot { layer_id, ..Default::default() };
     collect_tracks_and_arcs(client, layer_id, &mut snap);
     collect_pads(client, layer_id, &mut snap);
     collect_vias(client, layer_id, &mut snap);
     collect_zones(client, layer_id, &mut snap);
     snap
+}
+
+/// Records that a read failed, so its emptiness is never read as an absence of copper.
+///
+/// The one thing this file must not do is return silence. Every collector below asks KiCad
+/// for a class of item and every one of those requests can fail — most often with `AS_BUSY`
+/// during a pour, but equally if the board is closed mid-read. An unanswered question and
+/// an answer of "none" are the same empty list and completely different facts.
+fn read_failed(snap: &mut CopperSnapshot, what: &str, err: impl std::fmt::Display) {
+    snap.partial = true;
+    snap.warnings.push(format!(
+        "KiCad would not return the {what} on this layer ({err}), so any copper they carry \
+         is missing from this reading of the board."
+    ));
 }
 
 fn layer_matches(id: i32, layer_id: i32) -> bool {
@@ -175,10 +251,11 @@ fn collect_tracks_and_arcs(client: &Client, layer_id: i32, snap: &mut CopperSnap
     const KOT_PCB_TRACE: i32 = 11;
     const KOT_PCB_ARC: i32 = 13;
 
-    for item in client
-        .get_items_by_type_codes(vec![KOT_PCB_TRACE, KOT_PCB_ARC])
-        .unwrap_or_default()
-    {
+    let items = match client.get_items_by_type_codes(vec![KOT_PCB_TRACE, KOT_PCB_ARC]) {
+        Ok(items) => items,
+        Err(err) => return read_failed(snap, "tracks and arcs", err),
+    };
+    for item in items {
         match item {
             PcbItem::Track(track) if layer_matches(track.layer.id, layer_id) => {
                 let (Some(start), Some(end)) = (track.start_nm, track.end_nm) else { continue };
@@ -228,7 +305,11 @@ fn collect_pads(client: &Client, layer_id: i32, snap: &mut CopperSnapshot) {
     // very much cheaper than reimplementing it.
     let mut ids: Vec<String> = Vec::new();
     let mut net_of: std::collections::HashMap<String, String> = Default::default();
-    for item in client.get_items_by_type_codes(vec![KOT_PCB_PAD]).unwrap_or_default() {
+    let pads = match client.get_items_by_type_codes(vec![KOT_PCB_PAD]) {
+        Ok(items) => items,
+        Err(err) => return read_failed(snap, "pads", err),
+    };
+    for item in pads {
         if let PcbItem::Pad(pad) = item {
             let Some(id) = pad.id.clone() else { continue };
             net_of.insert(id.clone(), pad.net.map(|n| n.name).unwrap_or_default());
@@ -276,7 +357,11 @@ fn collect_pads(client: &Client, layer_id: i32, snap: &mut CopperSnapshot) {
 
 fn collect_vias(client: &Client, layer_id: i32, snap: &mut CopperSnapshot) {
     let mut ringless = 0usize;
-    for via in client.get_vias().unwrap_or_default() {
+    let vias = match client.get_vias() {
+        Ok(vias) => vias,
+        Err(err) => return read_failed(snap, "vias", err),
+    };
+    for via in vias {
         let Some(position) = via.position_nm else { continue };
         let Some(stack) = via.pad_stack.as_ref() else { continue };
 
@@ -322,7 +407,11 @@ fn collect_zones(client: &Client, layer_id: i32, snap: &mut CopperSnapshot) {
     const KOT_PCB_ZONE: i32 = 16;
 
     let mut unfilled: Vec<String> = Vec::new();
-    for item in client.get_items_by_type_codes(vec![KOT_PCB_ZONE]).unwrap_or_default() {
+    let zones = match client.get_items_by_type_codes(vec![KOT_PCB_ZONE]) {
+        Ok(items) => items,
+        Err(err) => return read_failed(snap, "zones", err),
+    };
+    for item in zones {
         let PcbItem::Zone(zone) = item else { continue };
         if zone.zone_type != PcbZoneType::Copper {
             continue; // a rule area is not copper, whatever its outline says

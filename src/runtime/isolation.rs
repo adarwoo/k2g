@@ -234,6 +234,18 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
         return Err("cancelled".into());
     }
     let (copper, copper_layer_count) = collect_copper(spec)?;
+    // **A partial reading is not a board.** KiCad answers `AS_BUSY` while it re-pours, and
+    // a read that lands in that window comes back short — sometimes empty, sometimes with a
+    // handful of the board's features. Isolating that produces contours which look
+    // perfectly reasonable around the copper that was seen and account for none of the
+    // copper that was not, so the operator gets a plausible toolpath for a board that is
+    // not theirs. Failed rather than published: the ask repeats, and the next attempt waits
+    // for the pour.
+    if copper.partial {
+        return Err(copper.warnings.first().cloned().unwrap_or_else(|| {
+            "KiCad returned an incomplete reading of this layer's copper.".to_string()
+        }));
+    }
     // Between the two halves is the only place a cancel can land: reading the board is one
     // IPC round trip and isolating is one call, neither of which reports progress.
     if cancel.load(Ordering::SeqCst) {

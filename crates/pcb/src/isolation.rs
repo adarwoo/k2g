@@ -211,6 +211,23 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
         return result;
     }
 
+    // **An incomplete reading is not a board.** `collect_copper` sets this when KiCad
+    // refused any part of the read — most often `AS_BUSY` while it re-pours — and the
+    // resulting snapshot holds some of the copper, or none, with no way to tell which from
+    // the geometry. Isolating it yields contours that look perfectly reasonable around what
+    // was seen and account for nothing that was not, which is a plausible toolpath for a
+    // board that is not the operator's. Refused here as well as at the caller, because this
+    // is the function that turns copper into cuts and it is the last place that can know.
+    if copper.partial {
+        result.warnings.push(
+            "This layer's copper could not be read completely, so no isolation was \
+             attempted. Machining from a partial reading would leave the copper it missed \
+             uncut and unmentioned."
+                .into(),
+        );
+        return result;
+    }
+
     let nets = net_regions(copper);
     if nets.is_empty() {
         result.warnings.push("No copper was found on this layer.".into());
@@ -1183,7 +1200,7 @@ mod tests {
     }
 
     fn snapshot(features: Vec<CopperFeature>) -> CopperSnapshot {
-        CopperSnapshot { layer_id: 3, features, warnings: Vec::new() }
+        CopperSnapshot { layer_id: 3, features, warnings: Vec::new(), partial: false }
     }
 
     fn contours_of<'a>(r: &'a IsolationResult, net: &str) -> Vec<&'a IsolationContour> {
@@ -1511,6 +1528,36 @@ mod tests {
             "{} nets took {elapsed:?}, over the {budget}s ceiling — the collapse has most              likely gone quadratic again",
             cols * rows,
         );
+    }
+
+    /// **A partial reading is never isolated.** The fault that took an afternoon: KiCad
+    /// answers `AS_BUSY` while it re-pours its zones, and a read landing in that window
+    /// came back with some of the board's copper or none of it. Ten reads in a row on a
+    /// board with a ground plane gave 1, 0, 1, 0, 0, 119, 0, 0, 119, 0 features — and the
+    /// wrong ones reached this function as fact.
+    ///
+    /// The dangerous half is not the empty read but the *short* one. Copper that was seen
+    /// gets a perfectly ordinary contour; copper that was not is indistinguishable from
+    /// copper that is not there. Nothing downstream can tell the difference, so it has to
+    /// be refused here.
+    #[test]
+    fn a_partial_reading_of_the_copper_is_refused_rather_than_isolated() {
+        let mut short = snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]);
+        short.partial = true;
+
+        let result = isolate(&short, 254_000, 150_000);
+
+        assert!(result.contours.is_empty(), "a short read must produce no toolpath at all");
+        assert!(
+            result.warnings.iter().any(|w| w.contains("could not be read completely")),
+            "and must say why: {:?}",
+            result.warnings,
+        );
+
+        // The same copper, read whole, is isolated normally — so the refusal is about the
+        // flag and not about the geometry.
+        let whole = snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]);
+        assert!(!isolate(&whole, 254_000, 150_000).contours.is_empty());
     }
 
     /// **An empty result always carries a reason.** Whichever path produced no contours,
