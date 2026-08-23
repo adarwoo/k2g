@@ -106,6 +106,14 @@ pub struct IsolationResult {
     /// exactly how a board once came off the machine with nets joined and every diagnostic
     /// silent.
     pub uncut: Vec<UncutStretch>,
+    /// Contour dropped by [`collapse_covered_cuts`] because another cut already removed
+    /// the same copper, nm.
+    ///
+    /// Reported rather than simply not emitted, for the reason the whole module is built
+    /// around: a channel is cut, or it is accounted for, and there is no third outcome. A
+    /// pass that *deletes* contours has to answer to that rule too — this is the number
+    /// that lets a reader check the collapse took what it claims and no more.
+    pub collapsed_nm: f64,
     pub warnings: Vec<String>,
 }
 
@@ -244,6 +252,12 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
         }
     }
 
+    // After every net has been walked, never during: a contour's final width is only
+    // settled once the ladder has finished with it, and coverage is a question about
+    // widths. Before the warnings below, so `contours` is the surviving set everywhere
+    // downstream.
+    collapse_covered_cuts(&mut result);
+
     // Said whatever `narrowed` says. The two are arrived at differently on purpose — this
     // is what the ladder actually failed to cut, and it is the one that has been machined.
     if !result.uncut.is_empty() {
@@ -275,6 +289,291 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
     }
     result.narrowed.sort_by(|l, r| l.width_nm.cmp(&r.width_nm).then(l.nets.cmp(&r.nets)));
     result
+}
+
+/// Drops contours whose channel another contour already cuts.
+///
+/// # The waste this removes
+///
+/// Every net is isolated on its own, so the channel between two neighbours is cut **once
+/// from each side**. Where the requested width equals the board's clearance — the value an
+/// operator naturally reaches for — both contours land on the gap's centre line and the
+/// machine cuts the same path twice:
+///
+/// ```text
+///   gap 0.150 .. 0.404 mm, width 0.254 mm
+///     net A at x = 0.2770        net B at x = 0.2770      <- identical
+/// ```
+///
+/// On a dense board that is half the engraving time, and half the life of the finest and
+/// most fragile bit in the rack.
+///
+/// # Only strict coverage, and why that line is where it is
+///
+/// A contour is dropped **only** when the copper it would remove is already removed by
+/// cuts that are staying. Two channels that merely *overlap* are both kept: each still
+/// reaches copper the other does not, and dropping either leaves a ribbon standing along
+/// that side. The distinction matters because the two look alike in a picture and are the
+/// difference between a redundant pass and a wrong board.
+///
+/// So the test is on **swept regions**, not on paths. Two cuts of different widths can run
+/// the same line and not cover each other; two cuts on different lines can. Comparing what
+/// each actually removes is the only question worth asking.
+///
+/// # Leftovers that are artefacts rather than copper
+///
+/// Clipper works in integers over curves that are chord approximations, so a genuinely
+/// covered contour leaves hair-thin slivers along its edges rather than nothing at all.
+/// Those are erased by eroding the leftover by [`TANGENCY_SLACK_NM`] — the same tolerance
+/// every other comparison here is drawn with. What survives an erosion is a region with
+/// real width somewhere, which is copper; what does not was never more than rounding.
+///
+/// Deliberately *not* an area fraction. "98% covered" would discard a genuinely uncut 2%
+/// of a long contour, which is exactly the class of silent loss this module exists to
+/// prevent.
+///
+/// # It is a *stretch* that is redundant, not a contour
+///
+/// Two neighbouring tracks are two whole loops, and each loop coincides with the other
+/// only along the edge they face across. Everywhere else it is the only cut there is. So a
+/// pass that could drop nothing smaller than a whole contour would find nothing to drop on
+/// a real board — the reported case included — and the collapse has to cut contours up.
+///
+/// **Which stretch is redundant is decided by geometry, not by a fraction.** The cut at a
+/// point on the path removes a disc of half the width around it. That disc lies inside a
+/// cut already being made exactly when the point lies within `(kept_width - this_width)/2`
+/// of *that* cut's path — which is the identity
+///
+/// ```text
+///     erode(stroke(P, a), b)  ==  stroke(P, a - b)
+/// ```
+///
+/// read right to left. So the redundant part of a path is its intersection with the
+/// neighbouring paths stroked by the width difference, and [`clip_pieces`] splits it there
+/// — the same call the ladder uses to split a contour on copper it may not touch.
+///
+/// Written that way round for two reasons. It is **an order of magnitude cheaper**: the
+/// direct form eroded a union that grew with every contour kept, which on a 1600-net board
+/// cost 15 seconds against the 2 the rest of the pass takes. And it is **stricter**, since
+/// a union can cover ground none of its parts covers alone — so this drops a stretch only
+/// when one single cut subsumes it, never when two jointly happen to. A cut wider than the
+/// candidate is the only kind that can subsume it at all, which is why the ordering below
+/// puts width first.
+///
+/// A loop that loses a stretch comes back as open spans, which is a representation the
+/// planner already handles: it is what the ladder produces whenever a width has to change
+/// along a contour's length.
+///
+/// # Order
+///
+/// **Widest first**, then longest, then the contour's own identity. Width leads because
+/// only a wider cut can subsume a narrower one, so placing the wide ones first is what lets
+/// them absorb anything running inside them. Length and identity break the ties, which
+/// makes the survivors a function of the geometry rather than of the order the nets
+/// happened to be walked in — and keeps the more useful half of a coincident pair whole,
+/// since one continuous loop beats two part-loops for lead-ins and travel.
+fn collapse_covered_cuts(result: &mut IsolationResult) {
+    if result.contours.len() < 2 {
+        return;
+    }
+
+    // Sort keys only, so nothing is cloned per comparison.
+    let mut order: Vec<usize> = (0..result.contours.len()).collect();
+    let length: Vec<f64> = result.contours.iter().map(contour_len_nm).collect();
+    order.sort_by(|&a, &b| {
+        let (left, right) = (&result.contours[a], &result.contours[b]);
+        right
+            .width_nm
+            .cmp(&left.width_nm)
+            .then_with(|| length[b].total_cmp(&length[a]))
+            .then_with(|| left.net.cmp(&right.net))
+            .then(a.cmp(&b))
+    });
+
+    // The paths being kept, bucketed by grid cell so a candidate looks only at what is
+    // actually beside it. Without this the scan is quadratic in the contour count, which on
+    // a dense board is thousands — and the whole point of the identity above is that each
+    // comparison is cheap enough for that to matter.
+    let cell = grid_cell_nm(&result.contours);
+    let mut grid: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+    // (path with its closing edge, its box, the width it cuts)
+    let mut kept: Vec<(Ring, BBox, i64)> = Vec::new();
+    let mut survivors: Vec<Option<Vec<IsolationContour>>> = vec![None; result.contours.len()];
+
+    for index in order {
+        let contour = &result.contours[index];
+        if contour.path.len() < 2 || contour.width_nm <= 0 {
+            continue; // nothing to sweep; leave it exactly as it is
+        }
+        let Some(box_of) = BBox::of(std::slice::from_ref(&contour.path)) else {
+            continue;
+        };
+
+        // Everything already kept whose cell this contour touches, and which is wide
+        // enough to be able to subsume it at all.
+        let mut candidates: Vec<usize> = cells_of(&contour.path, cell)
+            .iter()
+            .filter_map(|key| grid.get(key))
+            .flatten()
+            .copied()
+            .collect();
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        // Grouped by the kept cut's width, so each distinct width is one stroke rather than
+        // one per neighbour. On a real board almost every cut is the full requested width,
+        // which makes this a single call however many neighbours there are.
+        //
+        // The box test comes before the clone: a grid cell is four of the widest cut and
+        // holds contours that never come near each other, and copying a ground pour's
+        // contour to find that out is most of what this pass costs.
+        let mut by_width: BTreeMap<i64, Vec<Ring>> = BTreeMap::new();
+        for candidate in candidates {
+            let (path, other, width) = &kept[candidate];
+            if *width < contour.width_nm {
+                continue; // a narrower cut cannot contain a wider one
+            }
+            // The furthest this candidate can reach past its own line, plus slack.
+            let reach = (*width - contour.width_nm) / 2 + TANGENCY_SLACK_NM as i64 + 1;
+            if !other.expand(reach).overlaps(box_of) {
+                continue;
+            }
+            by_width.entry(*width).or_default().push(path.clone());
+        }
+
+        let mut redundant: Vec<Ring> = Vec::new();
+        for (width, paths) in by_width {
+            // `(kept - this)/2`, plus the usual slack. The slack is load-bearing rather
+            // than cosmetic: in the coincident case the two widths are equal, the stroke
+            // would be by zero, and Clipper returns nothing at all — the reported fault
+            // would survive the pass untouched. It is the same tolerance every other
+            // comparison here is drawn with, so a rim thinner than it was never a real
+            // difference.
+            let reach = (width - contour.width_nm) as f64 / 2.0 + TANGENCY_SLACK_NM;
+            redundant.extend(crate::stitching::stroke_open_paths(&paths, reach));
+        }
+
+        let pieces = match contour.closed {
+            true => vec![Piece::Closed(contour.path.clone())],
+            false => vec![Piece::Open(contour.path.clone())],
+        };
+        let remaining = match redundant.is_empty() {
+            true => pieces,
+            false => clip_pieces(pieces, &redundant, ClipType::Difference),
+        };
+
+        let mut parts: Vec<IsolationContour> = Vec::new();
+        for piece in remaining {
+            let (path, closed) = match piece {
+                Piece::Closed(ring) => (ring, true),
+                Piece::Open(span) => (span, false),
+            };
+            if path.len() < 2 {
+                continue;
+            }
+            parts.push(IsolationContour { path, closed, ..contour.clone() });
+        }
+
+        let survived: f64 = parts.iter().map(contour_len_nm).sum();
+        result.collapsed_nm += (length[index] - survived).max(0.0);
+
+        // Only what is actually being cut joins the grid. Registering the whole contour
+        // would let a stretch this pass has just dropped go on suppressing others.
+        for part in &parts {
+            let closed_path = with_closing_edge(part);
+            let Some(part_box) = BBox::of(std::slice::from_ref(&closed_path)) else {
+                continue;
+            };
+            for key in cells_of(&closed_path, cell) {
+                grid.entry(key).or_default().push(kept.len());
+            }
+            kept.push((closed_path, part_box, part.width_nm));
+        }
+        survivors[index] = Some(parts);
+    }
+
+    result.contours = result
+        .contours
+        .drain(..)
+        .zip(survivors)
+        .flat_map(|(original, parts)| parts.unwrap_or_else(|| vec![original]))
+        .collect();
+}
+
+/// Grid cell for the collapse's spatial index: four of the widest cut on the board.
+///
+/// Wide enough that two contours in non-adjacent cells cannot possibly interact (the
+/// furthest a cut can reach past another is half a width), and small enough that a cell
+/// holds a handful of contours rather than a quarter of the board.
+fn grid_cell_nm(contours: &[IsolationContour]) -> i64 {
+    let widest = contours.iter().map(|c| c.width_nm).max().unwrap_or(0);
+    (widest * 4).max(100_000)
+}
+
+/// Every grid cell a path passes through or near, deduplicated.
+///
+/// Cells of the *vertices*, each grown to its eight neighbours. A long edge between two
+/// distant vertices would skip the cells it crosses, so this is only sound because the
+/// paths here are offset output — chord approximations whose vertices are at most
+/// `OFFSET_ARC_TOLERANCE_NM` apart on curves and, on straights, are the copper's own
+/// corners. The neighbour ring covers the rest with a cell of margin.
+///
+/// Deduplicated **before** the neighbours are added, and through a sorted `Vec` rather than
+/// a set. A contour is hundreds of vertices spanning a handful of cells, so the collapse
+/// spent more time inserting the same key into a `BTreeSet` nine times per vertex than it
+/// did on the geometry it was there to do.
+fn cells_of(path: &[(i64, i64)], cell: i64) -> Vec<(i64, i64)> {
+    let mut cells: Vec<(i64, i64)> = path
+        .iter()
+        .map(|&(x, y)| (x.div_euclid(cell), y.div_euclid(cell)))
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+
+    let mut out = Vec::with_capacity(cells.len() * 9);
+    for (cx, cy) in cells {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                out.push((cx + dx, cy + dy));
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// A contour's path with the closing edge a loop only implies.
+///
+/// `stroke_open_paths` takes paths at face value, so without this the segment from the last
+/// point back to the first is left unswept and every loop keeps a gap in its own channel.
+fn with_closing_edge(contour: &IsolationContour) -> Ring {
+    let mut path = contour.path.clone();
+    if contour.closed && !contour.path.is_empty() {
+        path.push(contour.path[0]);
+    }
+    path
+}
+
+/// The copper a contour removes: its path swept by the width it cuts.
+///
+/// Only the tests need this now — the collapse works on the identity in
+/// [`collapse_covered_cuts`] instead, which never builds a swept region at all.
+#[cfg(test)]
+fn swept_region(contour: &IsolationContour) -> Option<Vec<Ring>> {
+    if contour.path.len() < 2 || contour.width_nm <= 0 {
+        return None;
+    }
+    let swept = crate::stitching::stroke_open_paths(
+        &[with_closing_edge(contour)],
+        contour.width_nm as f64 / 2.0,
+    );
+    (!swept.is_empty()).then_some(swept)
+}
+
+/// How much cut a contour is, nm — the closing edge included when it is a loop.
+fn contour_len_nm(contour: &IsolationContour) -> f64 {
+    polyline_len_nm(&with_closing_edge(contour))
 }
 
 /// The widths to try, widest first, ending at the floor.
@@ -906,6 +1205,297 @@ mod tests {
     /// A column of round pads on one net, like the pad chains on the reported board.
     fn pad_column(cx: i64, radius: i64, pitch: i64, count: i64) -> Vec<Polygon> {
         (0..count).map(|n| disc(cx, n * pitch, radius)).collect()
+    }
+
+    /// Two parallel tracks with a gap of solid copper between them, as the blank arrives.
+    fn two_tracks(gap: i64) -> (CopperSnapshot, i64, i64) {
+        let half_w = 150_000;
+        let track = |cx: i64| Polygon {
+            outline: vec![
+                (cx - half_w, -5_000_000),
+                (cx + half_w, -5_000_000),
+                (cx + half_w, 5_000_000),
+                (cx - half_w, 5_000_000),
+            ],
+            holes: Vec::new(),
+        };
+        let a_right = half_w;
+        let b_left = a_right + gap;
+        (
+            snapshot(vec![
+                feature("A", vec![track(0)]),
+                feature("B", vec![track(b_left + half_w)]),
+            ]),
+            a_right,
+            b_left,
+        )
+    }
+
+    /// Where the cuts cross `y = 0` inside the gap — one entry per pass through the
+    /// channel, which is what an operator is counting when they say "two cuts".
+    fn cuts_across_gap(r: &IsolationResult, from: i64, to: i64) -> Vec<f64> {
+        let mut xs = Vec::new();
+        for contour in &r.contours {
+            let mut path = contour.path.clone();
+            if contour.closed && !contour.path.is_empty() {
+                path.push(contour.path[0]);
+            }
+            for w in path.windows(2) {
+                let ((x1, y1), (x2, y2)) = (w[0], w[1]);
+                if y1 == y2 || (y1 > 0) == (y2 > 0) {
+                    continue;
+                }
+                let t = -(y1 as f64) / ((y2 - y1) as f64);
+                let x = x1 as f64 + t * ((x2 - x1) as f64);
+                if x > from as f64 - 1_000.0 && x < to as f64 + 1_000.0 {
+                    xs.push(x);
+                }
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        xs
+    }
+
+    /// The copper a set of cuts removes: the area of the union of their swept regions.
+    ///
+    /// The one measurement that says whether a collapse was safe. Counting contours says
+    /// how many passes there are; this says what they take off the board, and only the
+    /// second must be preserved.
+    fn copper_removed(contours: &[IsolationContour]) -> i128 {
+        let mut region: Vec<Ring> = Vec::new();
+        for contour in contours {
+            if let Some(swept) = swept_region(contour) {
+                region = union(&region, &swept);
+            }
+        }
+        region.iter().map(|ring| area_nm2(ring)).sum::<i128>().abs()
+    }
+
+    /// A straight cut of `width` from `(x, y0)` to `(x, y1)`.
+    fn cut(net: &str, x: i64, y0: i64, y1: i64, width: i64) -> IsolationContour {
+        IsolationContour {
+            net: net.to_string(),
+            path: vec![(x, y0), (x, y1)],
+            closed: false,
+            width_nm: width,
+        }
+    }
+
+    fn collapsed(contours: Vec<IsolationContour>) -> IsolationResult {
+        let mut result = IsolationResult { contours, ..Default::default() };
+        collapse_covered_cuts(&mut result);
+        result
+    }
+
+    /// **The reported case, at the unit.** Two cuts on the identical line, the same width:
+    /// one of them is doing nothing and goes.
+    #[test]
+    fn a_cut_another_cut_repeats_exactly_is_dropped() {
+        let before = vec![
+            cut("A", 277_000, -5_000_000, 5_000_000, 254_000),
+            cut("B", 277_000, -5_000_000, 5_000_000, 254_000),
+        ];
+        let removed = copper_removed(&before);
+
+        let after = collapsed(before);
+
+        assert_eq!(after.contours.len(), 1, "the identical second pass survived");
+        assert_eq!(
+            copper_removed(&after.contours),
+            removed,
+            "dropping the duplicate changed the copper removed",
+        );
+        assert!(after.collapsed_nm > 0.0, "the drop was not accounted for");
+    }
+
+    /// **Overlap is not coverage.** Two cuts that each reach copper the other does not are
+    /// both kept — dropping either leaves a ribbon of copper standing along that side.
+    ///
+    /// This is the line the collapse must not cross, and it is the ordinary geometry: a bit
+    /// finer than the gap cuts hard against each neighbour's edge and the channels overlap
+    /// in the middle without either containing the other.
+    #[test]
+    fn two_cuts_that_overlap_without_covering_are_both_kept() {
+        let before = vec![
+            cut("A", 236_000, -5_000_000, 5_000_000, 172_000),
+            cut("B", 318_000, -5_000_000, 5_000_000, 172_000),
+        ];
+        let removed = copper_removed(&before);
+
+        let after = collapsed(before);
+
+        assert_eq!(after.contours.len(), 2, "both cuts still do work");
+        assert_eq!(copper_removed(&after.contours), removed);
+        assert_eq!(after.collapsed_nm, 0.0);
+    }
+
+    /// A narrow cut running inside a wider one **is** covered, even though the paths are
+    /// different lines. The test is on what each removes, not on where each runs.
+    #[test]
+    fn a_narrow_cut_inside_a_wider_one_is_dropped() {
+        let before = vec![
+            cut("A", 277_000, -5_000_000, 5_000_000, 254_000),
+            cut("B", 300_000, -4_000_000, 4_000_000, 60_000),
+        ];
+        let removed = copper_removed(&before);
+
+        let after = collapsed(before);
+
+        assert_eq!(after.contours.len(), 1);
+        assert_eq!(after.contours[0].net, "A", "the wider cut is the one that stays");
+        assert_eq!(copper_removed(&after.contours), removed);
+    }
+
+    /// The converse: the same two cuts the other way round. A wide cut is **not** dropped
+    /// because a narrow one runs down it — the wide one still takes copper the narrow one
+    /// leaves, and length order must not be able to talk the pass into losing it.
+    #[test]
+    fn a_wide_cut_is_never_dropped_for_a_narrow_one_along_it() {
+        let before = vec![
+            // Longest first by path length, so the ordering rule sees the narrow one first.
+            cut("B", 300_000, -5_000_000, 5_000_000, 60_000),
+            cut("A", 277_000, -4_000_000, 4_000_000, 254_000),
+        ];
+        let after = collapsed(before);
+
+        assert!(
+            after.contours.iter().any(|c| c.width_nm == 254_000),
+            "the wide cut was dropped for a narrow one running along it",
+        );
+    }
+
+    /// Cuts far enough apart to leave copper between them are both kept, and no attempt is
+    /// made to tidy the leftover away. Dropping one here would widen the track on that
+    /// side by most of a channel.
+    #[test]
+    fn two_cuts_with_copper_between_them_are_both_kept() {
+        let before = vec![
+            cut("A", 200_000, -5_000_000, 5_000_000, 100_000),
+            cut("B", 600_000, -5_000_000, 5_000_000, 100_000),
+        ];
+        let after = collapsed(before);
+
+        assert_eq!(after.contours.len(), 2);
+        assert_eq!(after.collapsed_nm, 0.0);
+    }
+
+    /// **The survivors are a function of the geometry, not of the order the nets arrive
+    /// in.** A `BTreeMap` walk that happened to reverse would otherwise change which pass
+    /// the machine makes.
+    #[test]
+    fn the_collapse_does_not_depend_on_input_order() {
+        let build = || {
+            vec![
+                cut("A", 277_000, -5_000_000, 5_000_000, 254_000),
+                cut("B", 277_000, -5_000_000, 5_000_000, 254_000),
+                cut("C", 900_000, -5_000_000, 5_000_000, 172_000),
+                cut("D", 980_000, -5_000_000, 5_000_000, 172_000),
+            ]
+        };
+        let forward = collapsed(build());
+        let mut reversed_input = build();
+        reversed_input.reverse();
+        let backward = collapsed(reversed_input);
+
+        let names = |r: &IsolationResult| {
+            let mut n: Vec<String> = r.contours.iter().map(|c| c.net.clone()).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&forward), names(&backward));
+        assert_eq!(forward.collapsed_nm, backward.collapsed_nm);
+    }
+
+    /// **End to end, on the reported board.** Two tracks at the board's own clearance,
+    /// engraved at exactly that width: the pass through the gap is made once.
+    #[test]
+    fn the_reported_board_cuts_its_channel_once() {
+        let gap = 254_000;
+        let (board, from, to) = two_tracks(gap);
+        let result = isolate(&board, gap, 229_500);
+
+        let cuts = cuts_across_gap(&result, from, to);
+        assert_eq!(cuts.len(), 1, "expected one pass through the gap, got {cuts:?}");
+
+        // And it is where the coincident pair was — the centre of the gap.
+        let centre = (from + to) as f64 / 2.0;
+        assert!(
+            (cuts[0] - centre).abs() < 2_000.0,
+            "the surviving cut moved: {} vs the centre {centre}",
+            cuts[0],
+        );
+        assert!(result.collapsed_nm > 0.0);
+    }
+
+    /// End to end with a bit finer than the gap: two distinct channels, both kept, because
+    /// each still reaches copper the other does not.
+    #[test]
+    fn a_fine_bit_on_the_reported_board_keeps_both_passes() {
+        let gap = 254_000;
+        let (board, from, to) = two_tracks(gap);
+        let result = isolate(&board, 172_300, 109_600);
+
+        assert_eq!(cuts_across_gap(&result, from, to).len(), 2);
+        assert_eq!(result.collapsed_nm, 0.0);
+    }
+
+    /// Copper with nothing near it keeps every contour: there is no redundancy to find and
+    /// the collapse must not invent any.
+    #[test]
+    fn isolated_copper_keeps_every_contour() {
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, 500_000)]),
+            feature("B", vec![square(10_000_000, 0, 500_000)]),
+        ]);
+        let result = isolate(&board, 254_000, 150_000);
+
+        assert_eq!(result.contours.len(), 2);
+        assert_eq!(result.collapsed_nm, 0.0);
+    }
+
+    /// **The collapse must not cost more than the pass it is part of.**
+    ///
+    /// It has regressed twice, both times by an order of magnitude, and both times the
+    /// symptom was only visible on a board far denser than any other test here builds:
+    /// eroding a union that grew with every contour kept (15 s), then a `BTreeSet` insert
+    /// per vertex per neighbouring cell (5 s). Neither showed up as a failure — only as a
+    /// test run that had got slow, which is the kind of thing that gets lived with.
+    ///
+    /// The bound is deliberately loose. It is not measuring the machine; it is there to
+    /// fail when the pass goes quadratic again, and a limit that tracked the current figure
+    /// closely would fail on a busy CI runner instead.
+    #[test]
+    fn a_dense_board_collapses_in_proportion_to_its_size() {
+        let radius = 300_000i64;
+        let pitch = 900_000i64; // 0.3 mm between neighbours, on every side
+        let (cols, rows) = (25i64, 25i64);
+        let features: Vec<CopperFeature> = (0..cols)
+            .flat_map(|c| {
+                (0..rows).map(move |r| {
+                    (format!("n{c}_{r}"), vec![disc(c * pitch, r * pitch, radius)])
+                })
+            })
+            .map(|(net, polygons)| feature(&net, polygons))
+            .collect();
+        let board = snapshot(features);
+
+        let started = std::time::Instant::now();
+        let result = isolate(&board, 300_000, 150_000);
+        let elapsed = started.elapsed();
+
+        assert!(!result.contours.is_empty(), "the board produced no contours at all");
+        assert!(
+            result.collapsed_nm > 0.0,
+            "a grid of neighbours at the cut width must have redundant channel to drop",
+        );
+        // Debug builds run Clipper an order slower than release, which is where this would
+        // otherwise be a flake rather than a guard.
+        let budget = if cfg!(debug_assertions) { 120 } else { 20 };
+        assert!(
+            elapsed.as_secs() < budget,
+            "{} nets took {elapsed:?}, over the {budget}s ceiling — the collapse has most              likely gone quadratic again",
+            cols * rows,
+        );
     }
 
     /// **The invariant the pass exists to keep**: a channel is either cut, or reported.

@@ -500,6 +500,7 @@ mod tests {
                     })
                     .collect(),
                 uncut: Vec::new(),
+                collapsed_nm: 0.0,
                 warnings: Vec::new(),
             },
             copper_warnings: Vec::new(),
