@@ -5,40 +5,130 @@ use crate::ui::bindings::{StockField, StockForm};
 use units::user_format as unit_format;
 
 use crate::data::model::*;
+use crate::ui::navigation::StockSortColumn;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum StockSortMode {
-    RecentFirst,
-    Type,
-    SizeAscending,
-    SizeDescending,
-    Status,
-    Preference,
-    SourceCatalog,
-}
+/// Orders `tools` — `(index in stock, tool)` — by `column`, reversing for `descending`.
+///
+/// Every comparison ends on the stock index, so the order is a **total function of the
+/// list** rather than of the order it arrived in: ties among a dozen 0.8 mm drills would
+/// otherwise shuffle between renders, which reads as the table twitching.
+///
+/// The index tie-break is the one thing `descending` does not flip. Reversing it too would
+/// mean a column with many ties re-ordered its ties as well, so clicking a header twice
+/// scrambled rows that share a value instead of just turning the groups over.
+fn sort_stock(
+    tools: &mut [(usize, &Tool)],
+    column: StockSortColumn,
+    descending: bool,
+    pinning: &crate::runtime::tooling::RackPinning,
+) {
+    use std::cmp::Ordering;
 
-impl StockSortMode {
-    fn from_value(value: &str) -> Self {
-        match value {
-            "type" => Self::Type,
-            "size_asc" => Self::SizeAscending,
-            "size_desc" => Self::SizeDescending,
-            "status" => Self::Status,
-            "preference" => Self::Preference,
-            "source_catalog" => Self::SourceCatalog,
-            _ => Self::RecentFirst,
-        }
+    // Newest first is what "recent" has always meant here, so it is the *unreversed* sense
+    // of that column and Reset view lands on it.
+    if column == StockSortColumn::Recent {
+        tools.sort_by(|left, right| {
+            let by_age = right.0.cmp(&left.0);
+            if descending { by_age.reverse() } else { by_age }
+        });
+        return;
     }
 
-    fn value(self) -> &'static str {
-        match self {
-            Self::RecentFirst => "recent",
-            Self::Type => "type",
-            Self::SizeAscending => "size_asc",
-            Self::SizeDescending => "size_desc",
-            Self::Status => "status",
-            Self::Preference => "preference",
-            Self::SourceCatalog => "source_catalog",
+    // The first slot a rack pins the tool in, so the ATC column orders by "what is in the
+    // changer" — unpinned tools last, whichever way it is turned, because they are not an
+    // answer to that question at all.
+    let first_slot = |tool: &Tool| {
+        pinning
+            .for_tool(&tool.id)
+            .first()
+            .map(|pinned| pinned.slot)
+            .unwrap_or(u8::MAX)
+    };
+
+    tools.sort_by(|left, right| {
+        let ordering = match column {
+            StockSortColumn::Recent => Ordering::Equal, // handled above
+            StockSortColumn::Type => {
+                stock_tool_type_rank(&left.1.kind).cmp(&stock_tool_type_rank(&right.1.kind))
+            }
+            StockSortColumn::Diameter => left
+                .1
+                .diameter
+                .as_mm()
+                .partial_cmp(&right.1.diameter.as_mm())
+                .unwrap_or(Ordering::Equal),
+            StockSortColumn::Name => left
+                .1
+                .display_name()
+                .to_ascii_lowercase()
+                .cmp(&right.1.display_name().to_ascii_lowercase()),
+            StockSortColumn::Source => left
+                .1
+                .source_catalog
+                .to_ascii_lowercase()
+                .cmp(&right.1.source_catalog.to_ascii_lowercase()),
+            StockSortColumn::Preference => stock_tool_preference_rank(left.1.preference)
+                .cmp(&stock_tool_preference_rank(right.1.preference)),
+            StockSortColumn::Atc => first_slot(left.1).cmp(&first_slot(right.1)),
+            StockSortColumn::Status => {
+                stock_tool_status_rank(left.1.status).cmp(&stock_tool_status_rank(right.1.status))
+            }
+        };
+        let ordering = if descending { ordering.reverse() } else { ordering };
+        ordering.then_with(|| right.0.cmp(&left.0))
+    });
+}
+
+/// One sortable column heading.
+///
+/// Click to sort by it, click again to turn it over — the convention every table an
+/// operator has ever used already follows, which is why the sort left the dropdown it was
+/// in. The arrow marks the active column and its direction, so the state is readable
+/// without clicking anything.
+///
+/// A component rather than a macro or a loop because a header is a `<th>` in a fixed row:
+/// the columns are not a list, they are the table's shape, and one of them is conditional
+/// on the rack existing at all.
+#[component]
+fn SortHeader(
+    state: Signal<crate::runtime::AppCtx>,
+    column: StockSortColumn,
+    active: StockSortColumn,
+    descending: bool,
+    label: String,
+    /// The tooltip, when the column has one to add. Empty for the columns that do not —
+    /// the heading already says what they are.
+    title: String,
+) -> Element {
+    let is_active = column == active;
+    // A fresh column starts ascending; the active one flips. Nothing here returns to
+    // "unsorted": that is Reset view's job, and a third click that silently dropped the
+    // sort would leave the table in an order nobody asked for.
+    let next_descending = is_active && !descending;
+    let arrow = match (is_active, descending) {
+        (true, false) => " ▲",
+        (true, true) => " ▼",
+        (false, _) => "",
+    };
+    let hint = if title.is_empty() {
+        format!("Sort by {label}")
+    } else {
+        format!("{title}\n\nSort by {label}")
+    };
+
+    rsx! {
+        th {
+            class: if is_active { "stock-sort-header is-active" } else { "stock-sort-header" },
+            title: "{hint}",
+            "aria-sort": match (is_active, descending) {
+                (true, false) => "ascending",
+                (true, true) => "descending",
+                (false, _) => "none",
+            },
+            onclick: move |_| {
+                super::mutate_ctx(state, |ctx| ctx.app.set_stock_sort(column, next_descending));
+            },
+            "{label}{arrow}"
         }
     }
 }
@@ -107,12 +197,12 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     // header rather than letting the numbers under it be quietly short.
     let atc_header_title = if pinning.unresolved > 0 {
         format!(
-            "The slot each machine's rack pins this tool to, one entry per rack. \
+            "The slot this job's racks pin this tool to, one entry per rack. \
              {} rack(s) are not shown: a step names a machine or toolset that no longer exists.",
             pinning.unresolved
         )
     } else {
-        "The slot each machine's rack pins this tool to, one entry per rack".to_string()
+        "The slot this job's racks pin this tool to, one entry per rack".to_string()
     };
     let unit_system = snapshot.unit_system;
 
@@ -131,7 +221,11 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let mut stock_feedback = use_signal(String::new);
     let mut stock_filter = use_signal(String::new);
     let mut stock_type_filter = use_signal(|| StockTypeFilter::All);
-    let mut stock_sort_mode = use_signal(|| StockSortMode::RecentFirst);
+    // The sort is **not** a signal: it lives in settings, so the snapshot below is the
+    // current value and a header click writes through `mutate_ctx` like any other setting.
+    // A local copy would be a second source for the same number.
+    let sort_column = snapshot.stock_sort_column;
+    let sort_descending = snapshot.stock_sort_descending;
 
     // The stock detail panel edits the AppData singleton directly (StockForm /
     // StockField over `/tools/{i}/…`), so it needs only the selected tool's id;
@@ -155,7 +249,6 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let filter_value = stock_filter.read().clone();
     let filter_lower = filter_value.to_ascii_lowercase();
     let type_filter = *stock_type_filter.read();
-    let sort_mode = *stock_sort_mode.read();
 
     let mut filtered_tools: Vec<(usize, &Tool)> = snapshot
         .tools
@@ -177,47 +270,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
         })
         .collect();
 
-    match sort_mode {
-        StockSortMode::RecentFirst => filtered_tools.sort_by(|left, right| right.0.cmp(&left.0)),
-        StockSortMode::Type => filtered_tools.sort_by(|left, right| {
-            stock_tool_type_rank(&left.1.kind)
-                .cmp(&stock_tool_type_rank(&right.1.kind))
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-        StockSortMode::SizeAscending => filtered_tools.sort_by(|left, right| {
-            left.1
-                .diameter
-                .as_mm()
-                .partial_cmp(&right.1.diameter.as_mm())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-        StockSortMode::SizeDescending => filtered_tools.sort_by(|left, right| {
-            right.1
-                .diameter
-                .as_mm()
-                .partial_cmp(&left.1.diameter.as_mm())
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-        StockSortMode::Status => filtered_tools.sort_by(|left, right| {
-            stock_tool_status_rank(left.1.status)
-                .cmp(&stock_tool_status_rank(right.1.status))
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-        StockSortMode::Preference => filtered_tools.sort_by(|left, right| {
-            stock_tool_preference_rank(left.1.preference)
-                .cmp(&stock_tool_preference_rank(right.1.preference))
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-        StockSortMode::SourceCatalog => filtered_tools.sort_by(|left, right| {
-            left.1
-                .source_catalog
-                .to_ascii_lowercase()
-                .cmp(&right.1.source_catalog.to_ascii_lowercase())
-                .then_with(|| right.0.cmp(&left.0))
-        }),
-    }
+    sort_stock(&mut filtered_tools, sort_column, sort_descending, &pinning);
 
     let filtered_tools_is_empty = filtered_tools.is_empty();
     let visible_tool_ids: Vec<String> = filtered_tools.iter().map(|(_, tool)| tool.id.clone()).collect();
@@ -264,17 +317,30 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                             option { value: "vbit", "V-bit" }
                             option { value: "engraving", "Engraving" }
                         }
-                        select {
-                            class: "stock-toolbar-select",
-                            value: sort_mode.value(),
-                            onchange: move |evt| stock_sort_mode.set(StockSortMode::from_value(&evt.value())),
-                            option { value: "recent", "Latest first" }
-                            option { value: "type", "Sort by type" }
-                            option { value: "size_asc", "Size: small to large" }
-                            option { value: "size_desc", "Size: large to small" }
-                            option { value: "status", "Sort by stock status" }
-                            option { value: "preference", "Sort by preference" }
-                            option { value: "source_catalog", "Sort by source catalog" }
+                        // Where the sort dropdown was. Sorting moved to the headers, which
+                        // is where a table is sorted — leaving this spot for the one thing
+                        // the headers cannot do, which is put everything back.
+                        //
+                        // It clears the filter and the search as well as the sort: the
+                        // three together are why the list looks the way it does, and when
+                        // it looks wrong the useful button is the one that undoes all of
+                        // them rather than the one that undoes a third.
+                        button {
+                            class: "btn btn-secondary",
+                            title: "Clear the sort, the type filter and the search",
+                            disabled: sort_column == StockSortColumn::Recent
+                                && !sort_descending
+                                && type_filter == StockTypeFilter::All
+                                && filter_lower.is_empty(),
+                            onclick: move |_| {
+                                stock_type_filter.set(StockTypeFilter::All);
+                                stock_filter.set(String::new());
+                                super::mutate_ctx(
+                                    state,
+                                    |ctx| ctx.app.set_stock_sort(StockSortColumn::Recent, false),
+                                );
+                            },
+                            "Reset view"
                         }
                         if selected_stock_count > 0 {
                             button {
@@ -679,18 +745,43 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                         },
                                     }
                                 }
-                                th { "Type" }
-                                th { "Diameter" }
-                                th { "Name" }
-                                th { "Source catalog" }
-                                th { "Preference" }
+                                SortHeader {
+                                    state, column: StockSortColumn::Type,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Type", title: String::new(),
+                                }
+                                SortHeader {
+                                    state, column: StockSortColumn::Diameter,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Diameter", title: String::new(),
+                                }
+                                SortHeader {
+                                    state, column: StockSortColumn::Name,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Name", title: String::new(),
+                                }
+                                SortHeader {
+                                    state, column: StockSortColumn::Source,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Source catalog", title: String::new(),
+                                }
+                                SortHeader {
+                                    state, column: StockSortColumn::Preference,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Preference", title: String::new(),
+                                }
                                 if has_atc {
-                                    th {
-                                        title: "{atc_header_title}",
-                                        "ATC"
+                                    SortHeader {
+                                        state, column: StockSortColumn::Atc,
+                                        active: sort_column, descending: sort_descending,
+                                        label: "ATC", title: atc_header_title.clone(),
                                     }
                                 }
-                                th { "Status" }
+                                SortHeader {
+                                    state, column: StockSortColumn::Status,
+                                    active: sort_column, descending: sort_descending,
+                                    label: "Status", title: String::new(),
+                                }
                             }
                         }
                         tbody {
@@ -1039,3 +1130,170 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+    use crate::runtime::tooling::RackPinning;
+
+    /// A stock tool. Only the fields the comparators read are meaningful.
+    fn tool(id: &str, kind: &str, diameter_mm: f64, name: &str, source: &str) -> Tool {
+        Tool {
+            id: id.to_string(),
+            composite_name: name.to_string(),
+            name: name.to_string(),
+            kind: kind.to_string(),
+            diameter: units::Length::from_mm(diameter_mm),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(118.0),
+            catalog_point_angle: None,
+            flute_length: None,
+            z_min_depth: None,
+            table_feed: None,
+            catalog_table_feed: None,
+            z_feed: None,
+            catalog_z_feed: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: ToolStatus::InStock,
+            preference: ToolPreference::Neutral,
+            source_catalog: source.to_string(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    /// Insertion order, as the screen holds it.
+    fn shelf() -> Vec<Tool> {
+        vec![
+            tool("a", "Drill bit", 0.8, "Zeta drill", "generic"),
+            tool("b", "Router bit", 2.0, "Alpha router", "vendor"),
+            tool("c", "Drill bit", 0.3, "Mid drill", "generic"),
+        ]
+    }
+
+    /// The ids in the order the sort put them.
+    fn order(tools: &[Tool], column: StockSortColumn, descending: bool) -> Vec<&str> {
+        let mut rows: Vec<(usize, &Tool)> = tools.iter().enumerate().collect();
+        sort_stock(&mut rows, column, descending, &RackPinning::default());
+        rows.iter().map(|(_, tool)| tool.id.as_str()).collect()
+    }
+
+    /// Every column is a sort, not a filter, and lands on one answer both ways round.
+    ///
+    /// Deliberately **not** asserting that reversing gives the list backwards: the
+    /// tie-break does not flip, so a column whose rows all tie — preference, status and ATC
+    /// on this shelf, since nothing there varies — comes back in the same order either way.
+    /// That is the documented behaviour and the reason for it is in `sort_stock`.
+    #[test]
+    fn every_column_keeps_every_row_both_ways() {
+        let shelf = shelf();
+        for column in [
+            StockSortColumn::Recent,
+            StockSortColumn::Type,
+            StockSortColumn::Diameter,
+            StockSortColumn::Name,
+            StockSortColumn::Source,
+            StockSortColumn::Preference,
+            StockSortColumn::Atc,
+            StockSortColumn::Status,
+        ] {
+            for descending in [false, true] {
+                let sorted = order(&shelf, column, descending);
+                assert_eq!(
+                    sorted.len(),
+                    shelf.len(),
+                    "{column:?} descending={descending} dropped a row",
+                );
+                let mut unique = sorted.clone();
+                unique.sort_unstable();
+                unique.dedup();
+                assert_eq!(unique.len(), shelf.len(), "{column:?} duplicated a row");
+                assert_eq!(
+                    sorted,
+                    order(&shelf, column, descending),
+                    "{column:?} is not a function of the list",
+                );
+            }
+        }
+    }
+
+    /// Where the values are all distinct there is nothing to tie, so reversing really is the
+    /// list backwards — which is what clicking a header twice has to feel like.
+    #[test]
+    fn a_column_of_distinct_values_reverses_exactly() {
+        let shelf = shelf();
+        for column in [StockSortColumn::Diameter, StockSortColumn::Name] {
+            let up = order(&shelf, column, false);
+            let mut down = order(&shelf, column, true);
+            down.reverse();
+            assert_eq!(up, down, "{column:?}");
+        }
+    }
+
+    /// The orderings that have a reading worth pinning, rather than only being reversible.
+    #[test]
+    fn the_orderings_read_the_way_the_column_says() {
+        let shelf = shelf();
+
+        assert_eq!(order(&shelf, StockSortColumn::Diameter, false), ["c", "a", "b"], "0.3, 0.8, 2.0");
+        assert_eq!(order(&shelf, StockSortColumn::Diameter, true), ["b", "a", "c"]);
+        assert_eq!(
+            order(&shelf, StockSortColumn::Name, false),
+            ["b", "c", "a"],
+            "Alpha, Mid, Zeta \u{2014} and case-insensitively",
+        );
+        // generic before vendor — and within the two generics the tie-break is newest
+        // first, which is `recent`'s sense and what the old sort modes each ended on.
+        assert_eq!(order(&shelf, StockSortColumn::Source, false), ["c", "a", "b"]);
+        assert_eq!(
+            order(&shelf, StockSortColumn::Type, false),
+            ["c", "a", "b"],
+            "drills before routers, newest drill first",
+        );
+    }
+
+    /// `recent` is newest first, which is the order the table has before anyone sorts it and
+    /// what Reset view returns to. Modelled as a column value rather than an absent one, so
+    /// it has to actually order.
+    #[test]
+    fn recent_is_newest_first() {
+        let shelf = shelf();
+
+        assert_eq!(
+            order(&shelf, StockSortColumn::Recent, false),
+            ["c", "b", "a"],
+            "last added first",
+        );
+        assert_eq!(order(&shelf, StockSortColumn::Recent, true), ["a", "b", "c"]);
+    }
+
+    /// **The order is a function of the list, not of the order it arrived in.**
+    ///
+    /// Every comparison ends on the stock index, so a column full of ties still has one
+    /// answer. Without it, a dozen 0.8 mm drills would sit in whatever order the sort
+    /// happened to leave them and shuffle between renders — which reads as the table
+    /// twitching under the cursor rather than as a sort at all.
+    #[test]
+    fn ties_are_broken_so_the_order_is_stable() {
+        let tied: Vec<Tool> = (0..5)
+            .map(|n| tool(&format!("t{n}"), "Drill bit", 0.8, "same", "generic"))
+            .collect();
+
+        let first = order(&tied, StockSortColumn::Diameter, false);
+        let again = order(&tied, StockSortColumn::Diameter, false);
+        assert_eq!(first, again);
+
+        // And reversing turns the groups over without scrambling within them: the tie-break
+        // is the one comparison `descending` does not flip.
+        assert_eq!(order(&tied, StockSortColumn::Diameter, true), first);
+    }
+
+    /// An empty shelf sorts to nothing rather than panicking, on every column.
+    #[test]
+    fn an_empty_shelf_sorts_to_nothing() {
+        for column in [StockSortColumn::Recent, StockSortColumn::Diameter, StockSortColumn::Atc] {
+            assert!(order(&[], column, false).is_empty());
+        }
+    }
+}

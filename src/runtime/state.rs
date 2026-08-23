@@ -98,6 +98,8 @@ impl AppState {
             job_view_pinned: load_persisted_flag("job_view_pinned", false),
             job_pin_width: load_persisted_job_pin_width(),
             machining_split_height: load_persisted_machining_split(),
+            stock_sort_column: load_persisted_stock_sort_column(),
+            stock_sort_descending: load_persisted_flag("stock_sort_descending", false),
             window_width: load_persisted_window_dimension(
                 "window_width",
                 DEFAULT_WINDOW_WIDTH,
@@ -347,6 +349,8 @@ impl AppState {
             "job_view_pinned": self.job_view_pinned,
             "job_pin_width": self.job_pin_width,
             "machining_split_height": self.machining_split_height,
+            "stock_sort_column": self.stock_sort_column.as_settings_str(),
+            "stock_sort_descending": self.stock_sort_descending,
             "window_width": self.window_width,
             "window_height": self.window_height,
             "window_maximized": self.window_maximized,
@@ -641,6 +645,25 @@ impl AppState {
             return;
         }
         self.job_pin_width = width;
+        self.persist_realms(&[PersistRealm::GlobalSettings]);
+    }
+
+    /// Records how the Stock table is ordered, after a header click or Reset view.
+    ///
+    /// Unlike the drag handles, every call here is a deliberate click rather than one frame
+    /// of a gesture, so there is no batching to do — but the equality guard stays, because
+    /// clicking the header that is already active in the direction it already has should
+    /// not write the settings file.
+    pub fn set_stock_sort(
+        &mut self,
+        column: crate::ui::navigation::StockSortColumn,
+        descending: bool,
+    ) {
+        if self.stock_sort_column == column && self.stock_sort_descending == descending {
+            return;
+        }
+        self.stock_sort_column = column;
+        self.stock_sort_descending = descending;
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
@@ -2665,6 +2688,17 @@ fn load_persisted_machining_split() -> Option<i64> {
         .map(|height| height.max(MIN_MACHINING_SPLIT))
 }
 
+/// How the Stock table was last ordered. An unknown column name reads as the default
+/// rather than refusing the file — see `StockSortColumn::from_settings_str`.
+fn load_persisted_stock_sort_column() -> crate::ui::navigation::StockSortColumn {
+    let stored = persistence_state()
+        .and_then(|state| {
+            state.global_settings.get("stock_sort_column").and_then(|v| v.as_str().map(str::to_string))
+        })
+        .unwrap_or_default();
+    crate::ui::navigation::StockSortColumn::from_settings_str(&stored)
+}
+
 /// A persisted window dimension, clamped so a stale or hand-edited settings file cannot
 /// open a window too small to operate (or absurdly large). `minimum` differs per axis;
 /// the upper rail does not.
@@ -3285,6 +3319,60 @@ mod settings_payload_tests {
             Some(9_000),
             "and an over-large one is the layout's to cap, not ours",
         );
+    }
+
+    /// The Stock sort survives a write, and an unrecognised column opens on the default
+    /// rather than refusing the file.
+    ///
+    /// The token is the contract with `schemas/settings.yaml`, and it is written and read by
+    /// two different functions — so a rename on one side silently loses the operator's sort
+    /// on the next launch, which looks like the setting never having been saved at all.
+    #[test]
+    fn the_stock_sort_round_trips_through_its_token() {
+        use crate::ui::navigation::StockSortColumn as C;
+
+        for column in [C::Recent, C::Type, C::Diameter, C::Name, C::Source, C::Preference, C::Atc, C::Status] {
+            assert_eq!(
+                C::from_settings_str(column.as_settings_str()),
+                column,
+                "{column:?} does not survive its own token",
+            );
+        }
+
+        assert_eq!(C::from_settings_str("size_asc"), C::Recent, "a retired mode name");
+        assert_eq!(C::from_settings_str(""), C::Recent, "an absent value");
+        assert_eq!(C::from_settings_str("nonsense"), C::Recent, "a hand-edited one");
+    }
+
+    /// Every token the schema offers is one the code understands.
+    ///
+    /// Two lists of the same strings, in two files, and nothing but this holding them
+    /// together: a column added to the enum but not to the schema is rejected on load, and
+    /// one added to the schema but not the enum silently reads as `recent`.
+    #[test]
+    fn every_sort_column_the_schema_offers_is_understood() {
+        use crate::ui::navigation::StockSortColumn as C;
+
+        let schema = crate::data::settings_schema_text();
+        let block = schema
+            .split_once("  stock_sort_column:")
+            .expect("the schema declares the sort column")
+            .1;
+        let declared = block
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("enum: ["))
+            .and_then(|line| line.strip_suffix(']'))
+            .expect("it declares an enum of tokens");
+
+        // Round-tripped rather than "does not fall back", because `recent` *is* the
+        // fallback and would fail that test while being perfectly correct.
+        for token in declared.split(',').map(str::trim) {
+            assert_eq!(
+                C::from_settings_str(token).as_settings_str(),
+                token,
+                "the schema offers `{token}` and the code does not read it back as itself",
+            );
+        }
     }
 
     /// **Absent is not zero, and not a default height either.** A divider nobody has

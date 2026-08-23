@@ -101,6 +101,36 @@ properties:
     minimum: 180
     default: null
 
+  # ---------------------------------------------------------------------------
+  # How the Stock table is ordered, as left by clicking its column headers.
+  #
+  # A column and a direction rather than one combined mode, because that is what a
+  # header click produces: the first names the column, the second turns it over.
+  #
+  # `recent` is not a column. It is the order the table has before anyone sorts
+  # it — newest tool first — and it is where `Reset view` puts it back. Modelled
+  # as a value rather than as an absent one so this stays a plain enum with no
+  # null that has to mean something.
+  # ---------------------------------------------------------------------------
+  stock_sort_column:
+    title: Stock table sort column
+    description: >-
+      Which column the Stock table is ordered by. `recent` is the unsorted
+      default — newest first — and is what Reset view returns to. A value naming
+      a column that no longer exists reads as `recent` rather than refusing the
+      file.
+    type: string
+    enum: [recent, type, diameter, name, source, preference, atc, status]
+    default: recent
+
+  stock_sort_descending:
+    title: Stock table sort reversed
+    description: >-
+      Whether that column is ordered downwards. Set by clicking the same header a
+      second time.
+    type: boolean
+    default: false
+
   export_directories:
     description: |
       Where **Export** last wrote, remembered per volume: the machine's disk and each

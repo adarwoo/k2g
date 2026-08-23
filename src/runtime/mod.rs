@@ -196,6 +196,12 @@ pub struct AppState {
     pub job_view_pinned: bool,
     /// Width of the docked Job column in pixels, as left by the split handle.
     pub job_pin_width: i64,
+    /// How the Stock table is ordered, as left by clicking its column headers.
+    ///
+    /// `Recent` is the unsorted default rather than an absent value — see
+    /// [`crate::ui::navigation::StockSortColumn`].
+    pub stock_sort_column: crate::ui::navigation::StockSortColumn,
+    pub stock_sort_descending: bool,
     /// Height of the Machining view's 3D pane in pixels, as left by its divider — and
     /// `None` until it has been. The op list below takes the rest of the column and
     /// scrolls inside it.
@@ -478,6 +484,8 @@ fn default_global_settings() -> Value {
         "job_view_pinned": false,
         "job_pin_width": DEFAULT_JOB_PIN_WIDTH,
         "machining_split_height": Value::Null,
+        "stock_sort_column": "recent",
+        "stock_sort_descending": false,
         "window_width": DEFAULT_WINDOW_WIDTH,
         "window_height": DEFAULT_WINDOW_HEIGHT,
         "window_maximized": false,

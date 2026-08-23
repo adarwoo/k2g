@@ -111,6 +111,59 @@ impl Screen {
     }
 }
 
+/// Which column the stock table is ordered by.
+///
+/// A column and a direction, where there used to be seven fixed modes — `size_asc` and
+/// `size_desc` were one column and a flag written out twice, and there was no way to reverse
+/// any of the others. Splitting them is what lets a header be clicked twice.
+///
+/// [`Self::Recent`] is the odd one and is deliberately in the list: it is not a column but
+/// the order the table has before anyone sorts it, which is where **Reset view** puts it
+/// back. Modelling it as a column value rather than as an absent one keeps the setting a
+/// plain enum, with no null to mean something.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StockSortColumn {
+    Recent,
+    Type,
+    Diameter,
+    Name,
+    Source,
+    Preference,
+    Atc,
+    Status,
+}
+
+impl StockSortColumn {
+    /// The stable token this persists as, matching `schemas/settings.yaml`.
+    pub fn as_settings_str(self) -> &'static str {
+        match self {
+            Self::Recent => "recent",
+            Self::Type => "type",
+            Self::Diameter => "diameter",
+            Self::Name => "name",
+            Self::Source => "source",
+            Self::Preference => "preference",
+            Self::Atc => "atc",
+            Self::Status => "status",
+        }
+    }
+
+    /// Anything unrecognised reads as [`Self::Recent`] — a hand-edited settings file naming
+    /// a column that no longer exists should open on the default order, not refuse to open.
+    pub fn from_settings_str(value: &str) -> Self {
+        match value {
+            "type" => Self::Type,
+            "diameter" => Self::Diameter,
+            "name" => Self::Name,
+            "source" => Self::Source,
+            "preference" => Self::Preference,
+            "atc" => Self::Atc,
+            "status" => Self::Status,
+            _ => Self::Recent,
+        }
+    }
+}
+
 /// Sub-views inside the Job screen.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum JobCenterView {

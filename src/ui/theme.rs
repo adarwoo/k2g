@@ -1842,6 +1842,33 @@ select:disabled {
     width: 6rem;
 }
 
+/* Narrow, and last in the row: the button is an afterthought to reading the rack, not a
+   column of data. Right-aligned so the buttons line up whatever the tool names do. */
+.tooling-edit-col {
+    width: 4.5rem;
+    text-align: right;
+}
+
+/* A heading that sorts. It has to look clickable before it is clicked, which the arrow
+   alone cannot do — the arrow only appears once a column is already active, so the cursor
+   and the hover are what say the other six will do something too.
+
+   `white-space: nowrap` keeps the arrow on the heading's line: without it a two-word
+   heading wraps the moment it gains one, and the row's height jumps as the sort moves. */
+.stock-sort-header {
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.stock-sort-header:hover {
+    color: var(--accent);
+}
+
+.stock-sort-header.is-active {
+    color: var(--accent);
+}
+
 .tooling-slot {
     font-variant-numeric: tabular-nums;
     font-weight: 700;
@@ -4107,6 +4134,24 @@ th {
    used. See `every_dialog_width_rule_is_declared_after_the_wizard_dialog`. */
 .export-dialog {
     width: min(680px, 92vw);
+}
+
+/* The rack's tool editor. Wider than the default wizard because it holds the stock form —
+   a schema-generated field list, not a name and two buttons — and tall enough to need its
+   own scroll before the dialog outgrows a laptop panel.
+
+   After `.wizard-dialog`, like every other dialog that widens it: equal specificity, so
+   source order is the only thing deciding, and declared earlier this would silently render
+   at 520px. `every_dialog_width_rule_is_declared_after_the_wizard_dialog` walks every rule
+   of this shape, so a new dialog put in the wrong place fails the build rather than
+   shipping narrow. */
+.tool-edit-dialog {
+    width: min(640px, 92vw);
+}
+
+.tool-edit-dialog .stock-detail-form {
+    max-height: 60vh;
+    overflow-y: auto;
 }
 
 .export-table {
