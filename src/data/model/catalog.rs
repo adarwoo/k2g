@@ -140,7 +140,9 @@ pub struct CatalogManager {
 impl CatalogManager {
     pub fn new() -> Result<Self, CatalogError> {
         let schema = compile_schema(CATALOG_SCHEMA)?;
-        let validator = SchemaValidator::new(&schema, Path::new("schemas"))
+        // The whole embedded set, because `catalog.yaml` resolves `id.yaml#/$defs/uuid_v7`
+        // and several `units.yaml#/$defs/...` references while it compiles.
+        let validator = SchemaValidator::new(&schema, crate::data::embedded_schemas())
             .map_err(|e| CatalogError::SchemaCompile(e.to_string()))?;
         Ok(Self {
             validator,

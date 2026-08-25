@@ -22,6 +22,10 @@
 /// because these are the shapes `AppData` reads from and writes to the store.
 pub mod model;
 
+/// Writing the bundled schemas out to the user's data directory, so a catalog (or any
+/// other k2g file) can be hand-authored against them.
+pub mod schema_export;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
@@ -52,6 +56,17 @@ const SCHEMAS: &[(&str, &str)] = &[
     ("job.yaml", include_str!("../../schemas/job.yaml")),
     ("catalog.yaml", include_str!("../../schemas/catalog.yaml")),
 ];
+
+/// Every embedded schema as `(file name, YAML text)`.
+///
+/// The reference set a `$ref` between schemas resolves against, and the set published
+/// into the user's `schemas/` folder. Exposed because `catalog.yaml` refers to
+/// `units.yaml` and `id.yaml`, so whatever compiles it needs the others in hand — see
+/// [`crate::catalog_io::SchemaValidator::new`], which used to look for them in a
+/// directory relative to the working directory instead.
+pub(crate) fn embedded_schemas() -> &'static [(&'static str, &'static str)] {
+    SCHEMAS
+}
 
 /// The embedded `settings.yaml` schema text.
 ///
@@ -907,6 +922,11 @@ static APP_DATA: OnceLock<RwLock<AppData>> = OnceLock::new();
 pub fn init_appdata() -> Vec<DataError> {
     match crate::paths::ensure_app_dirs() {
         Ok(dirs) => {
+            // Before the load, not after: the schemas describe the files being read, and
+            // a user who has just been told their catalog is invalid should find the
+            // schema that says so already sitting in the data directory.
+            schema_export::ensure_schema_files(&dirs.schemas);
+
             let (data, errors) = AppData::load(&dirs);
             let _ = APP_DATA.set(RwLock::new(data));
             errors

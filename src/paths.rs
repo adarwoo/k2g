@@ -21,7 +21,10 @@ pub struct AppDirs {
     pub catalogs: PathBuf,
     /// Session state (last-used filenames, recent project settings, etc.).
     pub last_session: PathBuf,
-    /// JSON Schema reference copies — written once, not intended for editing.
+    /// Reference copies of every schema the running build validates against, refreshed
+    /// at each start by [`crate::data::schema_export`]. For reading — when hand-writing
+    /// a catalog, or pointing an editor at one — never for editing: nothing loads them
+    /// back, and a changed copy is overwritten on the next launch.
     pub schemas: PathBuf,
     /// Persisted data files: `global.setting.yaml`, `stock.yaml`, and the profile
     /// subdirectories. Owned by the AppData datastore ([`crate::data`]).
