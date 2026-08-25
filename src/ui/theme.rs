@@ -600,9 +600,15 @@ body {
     gap: 0;
 }
 
-/* The dock is a peer of the screen, so it needs the padding `.screen` would give. */
+/* The dock is a peer of the screen, so it needs the padding `.screen` would give — on the
+ * divider side as much as the other three. The right margin used to be zero, which put the
+ * panel's edge hard against the bar while the screen on the far side kept its own 14px: the
+ * divider read as an edging strip belonging to the Job column rather than as something
+ * standing between two panes. Matching the screen centres the bar in the gutter, and it is
+ * the panel that moves, not the bar — the bar's position is the grid track the operator
+ * drags, and moving that would move what the divider *means*. */
 .job-panel-docked {
-    margin: 14px 0 14px 14px;
+    margin: 14px;
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -622,17 +628,17 @@ body {
 /*
  * Draggable dividers. Two of them — the docked Job column's, which splits left from
  * right, and the Machining view's, which splits the 3D pane from the op list. One rule
- * for both: they are the same affordance, and a hairline that thickened to the accent on
- * one and not the other would read as one of them being dead.
+ * for both: they are the same affordance, and a bar that lit to the accent on one and not
+ * the other would read as one of them being dead.
  */
 .dock-handle,
 .split-handle {
     background: transparent;
     position: relative;
     /* A handle is a control, not text. Chromium anchors a selection wherever the pointer
-     * goes down unless the element under it forbids one, and the hairline sits a few
-     * pixels from the Job view's labels — so without this, taking hold of the divider
-     * starts a selection that the drag then sweeps across the column. */
+     * goes down unless the element under it forbids one, and the bar sits a few pixels
+     * from the Job view's labels — so without this, taking hold of the divider starts a
+     * selection that the drag then sweeps across the column. */
     user-select: none;
 }
 
@@ -647,20 +653,34 @@ body {
     flex: 0 0 auto;
 }
 
-/* The grab target is the full 8px band; the visible rule is a hairline in it. */
+/*
+ * The bar, and the band it sits in. The band is 8px — the grid track for the vertical
+ * divider, the handle's own height for the horizontal one — and the band is what takes the
+ * pointer. The bar is the 5px of it that shows, centred in it, ends inset and corners
+ * rounded so it reads as a grip laid between the two panes rather than a wall built across
+ * them.
+ *
+ * It was a 1px hairline, which asked the operator to aim at something eight times narrower
+ * than the thing that would answer.
+ *
+ * Only the colour transitions. Hover and drag light the bar to the accent rather than
+ * thickening it: there is little room left to thicken into, and the colour was always the
+ * louder half of that signal.
+ */
 .dock-handle::after,
 .split-handle::after {
     content: "";
     position: absolute;
     background: var(--border);
-    transition: background 140ms ease, width 140ms ease, height 140ms ease;
+    border-radius: 4px;
+    transition: background 140ms ease;
 }
 
 .dock-handle::after {
     top: 14px;
     bottom: 14px;
     left: 50%;
-    width: 1px;
+    width: 5px;
     transform: translateX(-50%);
 }
 
@@ -668,14 +688,68 @@ body {
     left: 14px;
     right: 14px;
     top: 50%;
-    height: 1px;
+    height: 5px;
     transform: translateY(-50%);
+}
+
+/*
+ * The grip: three dots down the middle of the bar, the mark a splitter has worn since
+ * desktops had title bars. The bar alone says "there is a boundary here"; the dots are what
+ * says "and you may take hold of it" — the same reason a drawer front gets a handle even
+ * though the whole front pulls.
+ *
+ * Three dots by `box-shadow` rather than a repeating gradient or three elements. A shadow
+ * is a hard-edged copy of the box, so the dots stay round and crisp at any display scale,
+ * where a `radial-gradient` at 3px antialiases into a smudge; and it keeps the whole grip
+ * inside the pseudo-element, so the two handles stay markup-free.
+ *
+ * `z-index` because paint order is tree order and `::before` comes first: without it the
+ * bar, drawn after, covers its own grip.
+ */
+.dock-handle::before,
+.split-handle::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--text-subtle);
+    transform: translate(-50%, -50%);
+    transition: background 140ms ease, box-shadow 140ms ease;
+    z-index: 1;
+}
+
+/* The outer two dots, 6px either side of the middle one — along the bar, whichever way the
+ * bar runs. This is the only part of the two handles that cannot be shared. */
+.dock-handle::before {
+    box-shadow: 0 -6px 0 var(--text-subtle), 0 6px 0 var(--text-subtle);
+}
+
+.split-handle::before {
+    box-shadow: -6px 0 0 var(--text-subtle), 6px 0 0 var(--text-subtle);
 }
 
 .dock-handle:hover::after,
 .dock-handle.is-dragging::after {
     background: var(--accent);
-    width: 2px;
+}
+
+/* Knocked out of the lit bar rather than left grey on it: at rest the dots are the dark
+ * marks on a near-invisible bar, and under the pointer the bar is the mark and the dots are
+ * the holes in it. `--bg` reads against the accent in both themes, which a fixed colour
+ * could not. */
+.dock-handle:hover::before,
+.dock-handle.is-dragging::before {
+    background: var(--bg);
+    box-shadow: 0 -6px 0 var(--bg), 0 6px 0 var(--bg);
+}
+
+.split-handle:hover::before,
+.split-handle.is-dragging::before {
+    background: var(--bg);
+    box-shadow: -6px 0 0 var(--bg), 6px 0 0 var(--bg);
 }
 
 /*
@@ -710,7 +784,6 @@ body {
 .split-handle:hover::after,
 .split-handle.is-dragging::after {
     background: var(--accent);
-    height: 2px;
 }
 
 /*
@@ -3380,7 +3453,22 @@ th {
  */
 .machining-split {
     min-height: 0;
-    /* The divider brings its own; a second gap around it reads as slack in the drag. */
+}
+
+/*
+ * No column gap around the divider. The air either side of the bar is *inside* the panes —
+ * the 3D row's `padding-bottom` and the op list's `padding-top` — and it has to be, because
+ * a flex gap sits outside the row's height and the row's height is the number the drag
+ * writes. Twelve pixels of gap put the bar twelve pixels below the pointer that placed it,
+ * so the divider jumped the moment it was grabbed.
+ *
+ * Doubled onto `.screen.single` rather than left on `.machining-split` alone, and that is
+ * the whole point of this rule existing separately: `.screen.single` sets `gap: 12px` and
+ * out-specifies a single class, so the `gap: 0` that used to live in the block above was
+ * never once applied. It read as settled — comment and all — while the layout did the
+ * opposite. Anything that removes `single` from this view can drop this rule with it.
+ */
+.screen.single.machining-split {
     gap: 0;
 }
 
@@ -3408,7 +3496,19 @@ th {
     flex: 0 0 var(--machining-split, 50%);
     max-height: calc(100% - 148px);
     min-height: 180px;
+    /* The op list below the divider carries 12px of its own; this is the matching 12px
+     * above it, so the bar stands between the two panes instead of sitting on the canvas's
+     * bottom edge. The same centring the docked Job column gets, in the other axis.
+     *
+     * `padding`, and the `margin` it replaces stays at zero — the distinction is load-
+     * bearing. This row's height *is* the divider's value (`flex: 0 0 var(--machining-
+     * split)`), and under `border-box` a padding is inside that height while a margin is
+     * added outside it. A margin would push the handle 12px past the height the drag just
+     * measured, and the bar would trail the pointer by exactly that much for the whole
+     * drag. Padding takes the space out of the canvas instead and leaves the divider where
+     * the pointer put it. */
     margin-bottom: 0;
+    padding-bottom: 12px;
 }
 
 .machining-split .machining-3d,
@@ -6148,6 +6248,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **The Machining column takes no gap around its divider**, and the rule that says so
+    /// must out-specify the one that would.
+    ///
+    /// This is pinned because it already failed silently once. The declaration lived on
+    /// `.machining-split` — one class — against `.screen.single`'s `gap: 12px`, which is
+    /// two: it never applied, and the comment beside it said it did. The cost was not
+    /// cosmetic. A flex gap sits *outside* the 3D row's height, and that height is the
+    /// number the drag writes, so the twelve pixels put the bar twelve pixels below the
+    /// pointer that placed it and the divider jumped the moment it was grabbed. The air
+    /// either side of the bar is padding inside the two panes for exactly that reason.
+    #[test]
+    fn the_machining_column_out_specifies_the_gap_it_must_cancel() {
+        let rules = rules();
+        let gap_rule = |wanted: &str| {
+            rules
+                .iter()
+                .find(|(selector, body)| selector == wanted && body.contains("gap:"))
+                .map(|(selector, body)| (selector.clone(), body.clone()))
+                .unwrap_or_else(|| panic!("the sheet declares a `{wanted}` gap"))
+        };
+
+        let (canceller, body) = gap_rule(".screen.single.machining-split");
+        assert!(
+            body.contains("gap: 0"),
+            "the divider's own column must take no gap: {body}"
+        );
+        assert!(
+            class_count(&canceller) > class_count(".screen.single"),
+            "`{canceller}` must out-specify `.screen.single`, which sets a 12px gap; at or \
+             below it the declaration is dead and the divider drags 12px off the pointer"
+        );
     }
 
     /// **Every palette declares its `color-scheme`, and declares the one it is.**
