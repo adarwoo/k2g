@@ -651,22 +651,25 @@ is redacted, and the program text never goes near the record).
 
 ## 12. Two-sided work
 
-Machining the back face works, and there are three rules k2g enforces because
-breaking any of them scraps the board:
+Machining the back face works, and there are two rules k2g enforces because
+breaking either of them scraps the board:
 
 1. **The locating-pins step comes first.** Pins are drilled into a board still in its
    original setup. Drilled after something else has cut the board, they register it
    against holes made after the fact — which registers nothing.
-2. **Pins are drilled on the front.** Drilling registration from the back means the
-   board was already turned over, before it had anything to be turned over against.
-   The editor hides the face control on a pins step for exactly this reason.
-3. **A face change needs pins before it.** Two steps on opposite faces with no
+2. **A face change needs pins before it.** Two steps on opposite faces with no
    locating-pins step between the start and the change is a board lifted off the
    fixture and put back by eye — and the program that follows is exact to a micron
    and lands wherever you happened to put it.
 
-The editor prevents the first two; the readiness gate catches all three, including in
-a hand-edited or imported profile.
+The readiness gate catches both, including in a hand-edited or imported profile.
+
+**Either face may be first**, pins included. The pins sit on the flip mirror line, so
+they land in the same place on the machine whichever way up the board is loaded — and a
+first step is not turned over from anything, it is simply loaded back-face up. So if the
+back is the hard side, cut it first: a board you scrap then costs one setup instead of
+two. What makes registration work is that the pins are drilled in the *same setup* as the
+first face's cuts, which is rule 1, and that says nothing about which way up it is.
 
 Set the fixture's **board flip axis** to match where your pins physically are: `y`
 for pins on a left-to-right line (turn it like a page), `x` for pins on a near-to-far

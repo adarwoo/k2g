@@ -1310,20 +1310,28 @@ pub(crate) fn missing_bindings(raw: &StepRaw) -> Option<String> {
 /// 1. **Pins come first.** They are drilled into a board that is still in its original
 ///    setup; drilling them after something else has already cut the board means
 ///    registering it against holes made after the fact, which registers nothing.
-/// 2. **Pins are a front-face operation.** Drilling registration from the back means the
-///    board was already turned over — before it had anything to be turned over *against*.
-/// 3. **A face change needs pins.** Two steps on opposite faces with no pins between them
+/// 2. **A face change needs pins.** Two steps on opposite faces with no pins between them
 ///    is a board lifted off the fixture and put back by eye. The program that follows is
 ///    exact to a micron and lands wherever the operator happened to put it.
 ///
-/// The last is the only one the machining editor cannot prevent (it hides the face control
-/// on a pins step and pins the first slot), so the other two are reachable mainly through
-/// a hand-edited or imported profile — which is precisely what a readiness gate is for.
+/// **A pins step may machine either face.** There was a third rule here refusing pins on
+/// the back, on the grounds that "drilling registration from the back means the board was
+/// already turned over — before it had anything to be turned over against". That does not
+/// follow: a *first* step machining the back has not been turned over from anything, it
+/// has been **loaded** back-face up, and there is no prior state for it to have been
+/// flipped from. What makes registration work is that the pins are drilled in the same
+/// setup as the first face's cuts, so the holes record where the board actually was —
+/// which is rule 1, and says nothing about which way up it is.
+///
+/// The geometry is symmetric to match, and was before this rule went: the pins sit *on*
+/// the mirror line, so [`centres`](crate::gcode::pins::centres) returns the same two
+/// machine points either way up (asserted in `gcode::pins`). Machining the harder face
+/// first is a real choice — a scrapped board then costs one setup rather than two.
 ///
 /// Takes the steps rather than a profile id so the decision is separable from reading the
-/// document — and so it can be tested, which the global-store path cannot be. Every step is
-/// checked, not the profile's projected face: that projection carries `steps[0]` only, and
-/// a back-face *second* step is exactly what it would miss.
+/// document — and so it can be tested, which the global-store path cannot be. It reads the
+/// whole list, not the profile's projected face: that projection carries `steps[0]` only,
+/// and a face change is by definition a fact about a *later* step.
 pub(crate) fn locating_pin_faults(steps: &[StepRaw]) -> Vec<String> {
     let mut faults = Vec::new();
 
@@ -1337,13 +1345,6 @@ pub(crate) fn locating_pin_faults(steps: &[StepRaw]) -> Vec<String> {
             faults.push(format!(
                 "{} drills locating pins but is not the first step. Registration has to be \
                  drilled before anything else cuts the board — move it to the top.",
-                crate::data::model::step_reference(index, &step.name),
-            ));
-        }
-        if step.machines_back {
-            faults.push(format!(
-                "{} drills locating pins on the back face. Pins are what lets the board be \
-                 turned over, so they are drilled on the front — set its board face to front.",
                 crate::data::model::step_reference(index, &step.name),
             ));
         }
@@ -3922,17 +3923,26 @@ mod tests {
         );
     }
 
-    /// Pins on the back mean the board was already turned over — before it had anything to
-    /// be turned over against. Only reachable by hand-editing, because the editor hides the
-    /// face control on a pins step.
+    /// **A pins step may machine either face**, and the back-first profile is the point:
+    /// a board with a complex back and a trivial front is worth cutting the risky side
+    /// of first, so a scrap costs one setup instead of two.
+    ///
+    /// This was once refused, on the reasoning that pins on the back meant the board had
+    /// already been turned over before it had anything to be turned over against. A first
+    /// step is not turned over from anything — it is *loaded* back-face up — and the pins
+    /// sit on the mirror line, so they land in the same machine XY either way
+    /// (`gcode::pins::the_pin_centres_do_not_move_when_the_board_turns_over`).
     #[test]
-    fn pins_may_not_be_drilled_from_the_back() {
-        let faults = locating_pin_faults(&[pin_step("Pins", true)]);
+    fn pins_may_be_drilled_from_either_face() {
         assert!(
-            faults
-                .iter()
-                .any(|f| f.contains("back face") && f.contains("set its board face to front")),
-            "{faults:?}"
+            locating_pin_faults(&[pin_step("Pins", true)]).is_empty(),
+            "a lone back-face pins step registers nothing later, and faults nothing"
+        );
+        assert!(
+            locating_pin_faults(&[pin_step("Pins and back", true), step_on("Front", false)])
+                .is_empty(),
+            "the hard side first, then the easy one: pins are drilled in the same setup as \
+             the cuts they register, which is what makes the flip land"
         );
     }
 

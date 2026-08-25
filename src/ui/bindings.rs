@@ -539,16 +539,6 @@ pub fn set_operations(id: Uuid, step: usize, operations: &[String]) {
     bump_render();
 }
 
-/// Sets a step's board face to the front, and re-renders.
-///
-/// The one face a step can be *put* onto rather than asked about: a step that drills
-/// locating pins machines the front by definition, since the pins are what the board is
-/// later turned over against.
-pub fn set_step_face_front(id: Uuid, step: usize) {
-    with_appdata_mut(|data| data.set_str(id, &format!("/steps/{step}/board_face"), "front"));
-    bump_render();
-}
-
 /// The number of steps in machining profile `id` (subscribes to store mutations).
 pub fn use_step_count(id: Uuid) -> usize {
     subscribe();
@@ -868,14 +858,11 @@ fn OperationToggle(
                         .map(|op| op.key.to_string())
                         .collect();
                     set_operations(id, step, &ordered);
-                    // Enabling locating pins settles the step's board face: pins are what
-                    // lets the board be turned over, so they are drilled before it ever is.
-                    // Written rather than merely hidden, because the *document* is what the
-                    // planner and the readiness gate read — a step left saying "back" with
-                    // no control to change it would be unfixable from the editor.
-                    if evt.checked() && op_key == "drill_locating_pins" {
-                        set_step_face_front(id, step);
-                    }
+                    // Ticking locating pins used to force the step's board face to front,
+                    // on the reasoning that pins are drilled before the board is ever
+                    // turned over. It does not follow — see `locating_pin_faults`. The
+                    // face is the operator's either way, and machining the harder side
+                    // first is a reason to want the back.
                 },
             }
             span { "{label}" }

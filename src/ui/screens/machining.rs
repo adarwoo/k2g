@@ -373,7 +373,6 @@ fn StepCard(
     // One component with conditional chrome rather than two: duplicating the field list
     // for the single-step case is how the two would drift apart.
     let multi = step_count > 1;
-    let drills_pins = enabled_ops.iter().any(|op| op == "drill_locating_pins");
 
     // Folding is a statement about a step among steps, like the heading and the reorder
     // controls. A lone step has no collapse control, so it must never render folded —
@@ -492,18 +491,11 @@ fn StepCard(
                 // two — so it belongs with the machine, the fixture and the toolset that
                 // also describe the setup, and ahead of the operations that run within it.
                 //
-                // A locating-pins step has no face to choose. Pins are what *lets* the
-                // board be turned over, so they are drilled before it ever is — on the
-                // front, by definition. The control is absent rather than disabled: a
-                // greyed-out dropdown invites the operator to look for the thing that
-                // would ungrey it, and there is nothing.
-                if drills_pins {
-                    p { class: "field-hint",
-                        "Machines the front face — locating pins are drilled before the board is turned over."
-                    }
-                } else {
-                    BoardFacePicker { id, step: index }
-                }
+                // Offered on every step, a locating-pins one included. That step used to
+                // be forced to the front and have the control hidden; the face is free —
+                // see `locating_pin_faults` for why, and for the one rule that survives
+                // (the pins step comes first).
+                BoardFacePicker { id, step: index }
 
                 OperationsEditor { id, step: index }
 

@@ -1012,20 +1012,35 @@ fn plan_step(
         }
     }
 
-    // The back-face program opens with a "Back face up?" prompt, and that
-    // prompt is the *only* thing standing between a wrongly remounted board and a cut one:
-    // two symmetric pins of one diameter accept the board unflipped or turned 180° just as
-    // readily as the right way up. A controller with no `pause` primitive emits nothing for
-    // it, so the guard silently is not there — which is worth saying out loud, before the
-    // board is in the fixture rather than after.
+    // The back-face program opens with a "Back face up?" prompt, and that prompt is the
+    // *only* thing standing between a wrongly mounted board and a cut one. A controller
+    // with no `pause` primitive emits nothing for it, so the guard silently is not there —
+    // which is worth saying out loud, before the board is in the fixture rather than after.
+    //
+    // Two different risks, because the first step is not registered against anything. On a
+    // later step the board is on the pins, and the danger is that they accept it: two
+    // symmetric holes of one diameter take the board unflipped or turned 180° just as
+    // readily as the right way up. On the first step there are no pins yet — the board is
+    // held however the fixture holds it — so the danger is simply a blank loaded the wrong
+    // way up, with nothing at all to catch it.
     if raw.machines_back && cnc.pause_tpl.trim().is_empty() {
-        notes.push(format!(
-            "'{}' has no pause primitive, so this back-face program cannot ask the \
-             operator to confirm the board was turned over. The locating pins are \
-             symmetric and will accept it either way round — check it by eye before \
-             running.",
-            cnc.name,
-        ));
+        notes.push(if index == 0 {
+            format!(
+                "'{}' has no pause primitive, so this program cannot ask the operator to \
+                 confirm the board is back-face up. It is the first step, so nothing \
+                 registers the board yet — check the blank is the right way up before \
+                 running.",
+                cnc.name,
+            )
+        } else {
+            format!(
+                "'{}' has no pause primitive, so this back-face program cannot ask the \
+                 operator to confirm the board was turned over. The locating pins are \
+                 symmetric and will accept it either way round — check it by eye before \
+                 running.",
+                cnc.name,
+            )
+        });
     }
 
     // Record what this step's plan does not yet cover.

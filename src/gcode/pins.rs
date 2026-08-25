@@ -216,6 +216,85 @@ mod tests {
         }
     }
 
+    /// **A back-face pins step drills the same two holes a front-face one would.**
+    ///
+    /// This is what lets the locating-pins step machine either face
+    /// ([`locating_pin_faults`](crate::runtime::tooling::locating_pin_faults)), so that a
+    /// board with a complex back can be cut risky-side-first. It is a *different* claim
+    /// from the test above: that one says a hole drilled front-up is found again back-up,
+    /// this one says the two setups choose the same hole in the first place.
+    ///
+    /// It reduces to one thing: [`centres`] is a pure function of the **placed board
+    /// rectangle**, so the two steps agree exactly as far as `board_rect_mm` does. Today
+    /// the flip is not even an input to that rectangle — it enters only `xy`/`unplace` —
+    /// and the rectangle is what the mirror is taken about, so a flip that moved it would
+    /// be moving its own axis.
+    ///
+    /// That is why the assertion is on the rectangle and not on a round trip through
+    /// `unplace`/`xy`: those are inverses through the *same* placement, so a test written
+    /// that way is the identity and passes however wrong the pins are. (It was, and it
+    /// did.) What is guarded here is the one realistic regression — a future change that
+    /// makes the placed rectangle depend on which way up the board is, at which point a
+    /// back-first job is misregistered with no symptom anywhere until the second setup is
+    /// already cut.
+    #[test]
+    fn the_pin_centres_do_not_move_when_the_board_turns_over() {
+        let board = pcb::BoardBoundingBox {
+            x: mm(0.0),
+            y: mm(0.0),
+            width: mm(37.0),
+            height: mm(23.0),
+        };
+        let diameter = mm(3.2);
+
+        for (axis, origin) in [
+            (BoardFlip::AboutY, BoardOrigin::default()),
+            (BoardFlip::AboutX, BoardOrigin::default()),
+            // Registered into the far-right corner, where the board runs negative — the
+            // case where a sign error hides.
+            (BoardFlip::AboutY, BoardOrigin { x_at_right: true, y_at_far: true }),
+            // Turned on the bed as well as over, so the rotation and the mirror have to
+            // stay independent of each other.
+            (BoardFlip::AboutX, BoardOrigin::default()),
+        ] {
+            for orientation_deg in [0.0, 90.0] {
+                let base = PlacementSpec {
+                    bounds: Some(&board),
+                    orientation_deg,
+                    origin,
+                    // The job's margin: one frame for every step, by construction.
+                    margin: margin(diameter, axis),
+                    flip: None,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                    z_retract: mm(2.0),
+                    z_safe: mm(5.0),
+                };
+                let front = Placement::new(&base);
+                let back = Placement::new(&PlacementSpec { flip: Some(axis), ..base });
+
+                assert_eq!(
+                    front.board_rect_mm(),
+                    back.board_rect_mm(),
+                    "{axis:?} at {orientation_deg}°: the board sits in the same place \
+                     whichever face is up — the mirror is taken about this very rectangle"
+                );
+
+                // And therefore the holes do. Stated separately because it is the claim
+                // that matters, and `centres` could grow a flip argument.
+                let (front_pins, back_pins) = (
+                    centres(front.board_rect_mm(), axis, diameter),
+                    centres(back.board_rect_mm(), axis, diameter),
+                );
+                assert_eq!(
+                    front_pins, back_pins,
+                    "{axis:?} at {orientation_deg}°: a front-face pins step and a \
+                     back-face one drill different holes"
+                );
+            }
+        }
+    }
+
     /// The margin is what keeps the pins inside the frame; with it applied, neither pin
     /// hole strays outside the envelope the origin anchors.
     #[test]

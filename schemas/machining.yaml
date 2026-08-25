@@ -575,8 +575,11 @@ $defs:
         title: Board face to machine
         description: >-
           Which face of the PCB this step cuts: the front (component side) or
-          the back (solder side). A back-face step machines the board turned
-          over, so it needs locating pins drilled before it.
+          the back (solder side). A back-face step that follows a front-face one
+          machines the board turned over, so it needs locating pins drilled in an
+          earlier step. The first step is free either way — a board can be loaded
+          back-face up to begin with, and machining the harder side first means a
+          scrapped board costs one setup rather than two.
         type: string
         enum: [front, back]
         x-enum-labels: ["Front (component side)", "Back (solder side)"]
