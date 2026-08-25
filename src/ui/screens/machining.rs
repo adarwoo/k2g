@@ -11,7 +11,7 @@ use crate::ui::bindings::{
     add_step, clone_named, create_named, export_yaml, import_yaml, machining_operations, move_step,
     remove_profile_result, remove_step, use_conflicting_operations, use_field,
     use_job_machining_profile, use_operations, use_profiles, use_step_count, BindingPicker,
-    OperationsEditor, SchemaField, SchemaForm,
+    BoardFacePicker, OperationsEditor, SchemaField, SchemaForm,
 };
 
 /// Machining ("process") profile screen, fully backed by the `AppData` datastore.
@@ -477,12 +477,21 @@ fn StepCard(
                     SchemaField { id, ptr: format!("/steps/{index}/name") }
                 }
 
-                BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
-                BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
-                BindingPicker { id, step: index, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
+                // The three bindings on one line. They are one decision — *which physical
+                // setup is this* — asked three ways, and stacking them made the step read
+                // as three unrelated settings that happen to be adjacent. Wraps on a
+                // narrow window rather than squeezing the dropdowns past legibility.
+                div { class: "binding-row",
+                    BindingPicker { id, step: index, field: "cnc".to_string(), kind: Profile::Cnc, label: "CNC profile".to_string() }
+                    BindingPicker { id, step: index, field: "fixture".to_string(), kind: Profile::Fixture, label: "Fixture profile".to_string() }
+                    BindingPicker { id, step: index, field: "toolset".to_string(), kind: Profile::Toolset, label: "Toolset profile".to_string() }
+                }
 
-                OperationsEditor { id, step: index }
-
+                // Which face, before what is done to it. The face decides whether the
+                // board is turned over, which is the difference between one setup and
+                // two — so it belongs with the machine, the fixture and the toolset that
+                // also describe the setup, and ahead of the operations that run within it.
+                //
                 // A locating-pins step has no face to choose. Pins are what *lets* the
                 // board be turned over, so they are drilled before it ever is — on the
                 // front, by definition. The control is absent rather than disabled: a
@@ -493,8 +502,10 @@ fn StepCard(
                         "Machines the front face — locating pins are drilled before the board is turned over."
                     }
                 } else {
-                    SchemaField { id, ptr: format!("/steps/{index}/board_face") }
+                    BoardFacePicker { id, step: index }
                 }
+
+                OperationsEditor { id, step: index }
 
                 // Configuration sections for the currently enabled operations, each one
                 // foldable. A step running three operations is three schema forms deep

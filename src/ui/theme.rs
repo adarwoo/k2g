@@ -44,6 +44,15 @@ pub const APP_STYLE: &str = r#"
        both lose the blue and put the dot a shade away from --warn. */
     --usage-job: #2ca66d;
     --usage-toolset: #2f7ae5;
+    /* KiCad's own copper layer colours — red for the front, blue for the back. Declared
+       once here and *not* overridden by any palette, because they are not a role the
+       theme gets to reinterpret: they are the colours the operator drew the board in, and
+       the whole point of taking them is that the board view, the legend, the 3D scene and
+       the machining step's face picker all say the same thing. A light theme that shifted
+       them would break the one property they are here for. Each user picks its own
+       strength (the views hold copper well below full so the toolpaths win over it). */
+    --copper-front: #c83434;
+    --copper-back: #4d7fc4;
 }
 
 .theme-light {
@@ -2612,10 +2621,117 @@ p {
 }
 
 /*
- * A step binds exactly one CNC / fixture / toolset, so the picker is a plain
- * dropdown. It used to be a checkbox-plus-radio row per profile — tick the allowed
- * set, then pick one — which is why `.binding-row` and `.binding-name` are gone.
+ * A step binds exactly one CNC / fixture / toolset, so each picker is a plain dropdown.
+ * (It used to be a checkbox-plus-radio row per profile — tick the allowed set, then pick
+ * one — which is why the old `.binding-name` is gone.)
+ *
+ * The three sit on one line: they are one decision, *which physical setup is this*, asked
+ * three ways. Equal columns so the row reads as a set rather than as whichever profile
+ * happens to have the longest name. They wrap before they squeeze — a dropdown narrower
+ * than about 11rem shows the head of a profile name and nothing that distinguishes it
+ * from its neighbours, which is worse than a second line.
+ *
+ * The pickers drop their own top margin here; the row carries it once for all three, so
+ * the line sits where a single field would.
  */
+.binding-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 16px;
+    margin-top: 12px;
+}
+
+.binding-row > .binding-picker {
+    flex: 1 1 11rem;
+    min-width: 11rem;
+    margin-top: 0;
+}
+
+/* The dropdown fills its column: the 30% cap that keeps a lone field from spanning a wide
+   pane is the row's job now, and applied per picker it would leave three narrow controls
+   adrift in three wide columns. */
+.binding-row > .binding-picker > select,
+.binding-row > .binding-picker > .field-hint {
+    width: 100%;
+}
+
+/*
+ * Which face the step machines, in the board views' own copper colours — red front, blue
+ * back, from `--copper-front`/`--copper-back`. This is the one setting on the screen with
+ * a counterpart the operator can look at, so it is worth being recognisable rather than
+ * merely readable.
+ *
+ * The unselected button still carries its colour, in the swatch alone: the choice is
+ * between two coloured things, and a grey button would make the operator select one to
+ * find out which it was. Selected fills the tint and takes the border, so which is in
+ * force survives being read at a glance, in greyscale, or by someone who does not
+ * separate the two hues.
+ */
+/* Both classes in the selector, not just the second: `.field-control` caps every control
+   at 30% with a 12rem floor, and one class cannot reliably undo another of equal
+   specificity — whichever the sheet declares last wins, which is a rule that holds until
+   someone moves a block. Two buttons want their own width, so say so at a specificity
+   that cannot lose. */
+.field-control.board-face-control {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+}
+
+.board-face-choice {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elev);
+    color: var(--text-subtle);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.board-face-choice:hover {
+    background: var(--bg-hover);
+}
+
+.board-face-swatch {
+    width: 12px;
+    height: 12px;
+    flex: none;
+    border-radius: 3px;
+    /* Set per face below; neutral for a face the palette has no colour for, which is what
+       a third enum value would land on until someone gives it one. */
+    background: var(--text-subtle);
+}
+
+.board-face-front > .board-face-swatch {
+    background: var(--copper-front);
+}
+
+.board-face-back > .board-face-swatch {
+    background: var(--copper-back);
+}
+
+.board-face-choice.is-selected {
+    color: var(--text);
+    font-weight: 600;
+}
+
+.board-face-front.is-selected {
+    border-color: var(--copper-front);
+    background: color-mix(in srgb, var(--copper-front) 20%, transparent);
+}
+
+.board-face-back.is-selected {
+    border-color: var(--copper-back);
+    background: color-mix(in srgb, var(--copper-back) 20%, transparent);
+}
+
 .field-hint-warn {
     color: var(--warn);
     opacity: 0.9;
@@ -3790,11 +3906,11 @@ th {
 }
 
 .board-copper-front {
-    color: color-mix(in srgb, #c83434 58%, transparent);
+    color: color-mix(in srgb, var(--copper-front) 58%, transparent);
 }
 
 .board-copper-back {
-    color: color-mix(in srgb, #4d7fc4 38%, transparent);
+    color: color-mix(in srgb, var(--copper-back) 38%, transparent);
 }
 
 /*

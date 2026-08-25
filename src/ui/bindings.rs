@@ -726,6 +726,69 @@ pub fn BindingPicker(id: Uuid, step: usize, field: String, kind: crate::data::Pr
     }
 }
 
+/// Which face of the board a step machines, as a pair of buttons in the board views' own
+/// copper colours — red for the front, blue for the back.
+///
+/// A `<select>` would do the job and did, but this is the one setting on the screen the
+/// operator can check against something they can see. The board view, the legend and the
+/// 3D scene all paint the front red and the back blue (KiCad's own layer pair, which is
+/// also what they drew the board in), so saying it the same way here costs a glance
+/// instead of a reading. `--copper-front`/`--copper-back` are the same two tokens those
+/// views paint with, so the two cannot drift apart.
+///
+/// Driven by the schema's own `enum`, not by a hardcoded pair: a face the schema gains
+/// appears here as a neutral button rather than silently going missing. Only the two that
+/// have a colour get one.
+#[component]
+pub fn BoardFacePicker(id: Uuid, step: usize) -> Element {
+    let ptr = format!("/steps/{step}/board_face");
+    let Some(field) = use_field(id, &ptr) else {
+        return rsx! {};
+    };
+    let current = field.display.clone();
+
+    rsx! {
+        div { class: "field",
+            label { "{field.label}" }
+            div { class: "field-control board-face-control",
+                for opt in field.enum_options.clone() {
+                    {
+                        let selected = current == opt.key;
+                        let ptr = ptr.clone();
+                        let key = opt.key.clone();
+                        // Built here rather than as an `if` in the attribute: a branch
+                        // there is a format string per branch, and getting a literal
+                        // `board-face-{opt.key}` into the DOM is a silent miss — the
+                        // button renders, uncoloured, and looks like a CSS problem.
+                        let class = format!(
+                            "board-face-choice board-face-{}{}",
+                            opt.key,
+                            if selected { " is-selected" } else { "" },
+                        );
+                        rsx! {
+                            button {
+                                key: "{opt.key}",
+                                r#type: "button",
+                                class: "{class}",
+                                // The pair is a choice, not two independent toggles, so
+                                // it reads to a screen reader as one: pressed marks which
+                                // of the two is in force.
+                                "aria-pressed": if selected { "true" } else { "false" },
+                                onclick: move |_| addr_set_input(FieldAddr::Doc(id), &ptr, &key),
+                                span { class: "board-face-swatch" }
+                                "{opt.label}"
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(desc) = field.description.clone() {
+                p { class: "field-hint", "{desc}" }
+            }
+        }
+    }
+}
+
 /// The machining operations toggle set for a step: enables/disables each
 /// operation, keeping the stored `operations` array in schema order.
 #[component]
