@@ -4,6 +4,28 @@ pub const APP_STYLE: &str = r#"
 }
 
 :root {
+    /*
+     * Which way round the browser draws the parts of the UI the sheet cannot reach.
+     *
+     * Scrollbars are the visible one. A scrollbar is painted by the engine, not by CSS:
+     * `background` and `border` do not touch it, and left to itself it is drawn light —
+     * a near-white track with a grey thumb, down the side of a pane that is very nearly
+     * black. `color-scheme` is what tells the engine otherwise. The same declaration also
+     * settles the native form controls, the text-selection tint and the caret, each of
+     * which picks its own light or dark rendering from here.
+     *
+     * It has to be repeated on every palette rather than said once here. The property
+     * inherits, and the theme is a *class on `.app-shell`*, not on the document root: a
+     * scrolling pane takes its scheme from the nearest ancestor that declares one, so the
+     * value that reaches it is whichever palette it sits under. This one covers the root
+     * itself, whose default palette is the dark one.
+     *
+     * The light palettes declare it too, rather than being left to the initial `normal`.
+     * `normal` follows nothing today, but it is the value that a user-agent honouring the
+     * OS preference would be free to reinterpret, and a light theme drawn with dark
+     * scrollbars is the same bug the other way up.
+     */
+    color-scheme: dark;
     --bg: #111318;
     --bg-subtle: #181b22;
     --bg-elev: #202632;
@@ -25,6 +47,8 @@ pub const APP_STYLE: &str = r#"
 }
 
 .theme-light {
+    /* Drawn light, scrollbars and native widgets included; see `:root`. */
+    color-scheme: light;
     --bg: #f4f7fb;
     --bg-subtle: #ffffff;
     --bg-elev: #ffffff;
@@ -43,6 +67,8 @@ pub const APP_STYLE: &str = r#"
 }
 
 .shell-theme-dark {
+    /* Drawn dark, scrollbars and native widgets included; see `:root`. */
+    color-scheme: dark;
     --bg: #0c0e12;
     --bg-subtle: #0e1016;
     --bg-elev: #10131a;
@@ -60,6 +86,8 @@ pub const APP_STYLE: &str = r#"
 }
 
 .shell-theme-light {
+    /* Drawn light, scrollbars and native widgets included; see `:root`. */
+    color-scheme: light;
     --bg: #f5f7fb;
     --bg-subtle: #ffffff;
     --bg-elev: #ffffff;
@@ -6119,6 +6147,51 @@ mod tests {
                     ),
                 }
             }
+        }
+    }
+
+    /// **Every palette declares its `color-scheme`, and declares the one it is.**
+    ///
+    /// This is the only declaration in the sheet that changes something CSS cannot draw:
+    /// the scrollbars, the native controls, the selection tint. Miss it on a palette and
+    /// the pane keeps its colours while the scrollbar beside it stays the engine's default
+    /// near-white — which is exactly what the dark theme shipped with, because a scrollbar
+    /// is not a box and no amount of `background` reaches it.
+    ///
+    /// Pinned per palette rather than once, because the property **inherits and the theme
+    /// is a class on `.app-shell`, not on the document root**: a scrolling pane reads the
+    /// nearest ancestor that declares one. A new palette that copies the tokens and leaves
+    /// this out inherits `:root`'s `dark` — invisible on a dark theme, and a light theme
+    /// with black scrollbars on a light one.
+    #[test]
+    fn every_palette_declares_the_color_scheme_it_is() {
+        let rules = rules();
+
+        for (palette, expected) in [
+            (":root", "dark"),
+            (".theme-light", "light"),
+            (".shell-theme-dark", "dark"),
+            (".shell-theme-light", "light"),
+        ] {
+            let body = rules
+                .iter()
+                .find(|(selector, body)| selector == palette && body.contains("--bg:"))
+                .map(|(_, body)| body.clone())
+                .unwrap_or_else(|| panic!("`{palette}` is a palette and defines `--bg`"));
+
+            let declared = body
+                .split(';')
+                .find_map(|decl| decl.split_once(':').filter(|(k, _)| k.trim() == "color-scheme"))
+                .map(|(_, value)| value.trim().to_string())
+                .unwrap_or_else(|| {
+                    panic!("`{palette}` must declare a `color-scheme`, or its scrollbars are \
+                            drawn by whatever palette happens to be above it")
+                });
+
+            assert_eq!(
+                declared, expected,
+                "`{palette}` is a {expected} palette and must say so"
+            );
         }
     }
 }
