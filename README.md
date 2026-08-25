@@ -4,8 +4,7 @@
 K2G reads the board open in KiCad and writes the
 GCode that drills and cuts it out: holes, oblong slots, board outline with breakaway
 tabs.
-
-<img width="1887" height="1176" alt="image" src="https://github.com/user-attachments/assets/9390f33c-4419-41e0-822c-5f4310a6f827" />
+<img width="2782" height="1588" alt="image" src="https://github.com/user-attachments/assets/979820d6-90e4-4c69-a53d-b3b2a9cabea6" />
 
 It is not a generic CAM package. It knows what a PCB is — plated and non-plated holes,
 pad stacks, board outline, cutouts — and what your machine is, so the questions it asks
