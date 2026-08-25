@@ -601,6 +601,11 @@ body {
 .split-handle {
     background: transparent;
     position: relative;
+    /* A handle is a control, not text. Chromium anchors a selection wherever the pointer
+     * goes down unless the element under it forbids one, and the hairline sits a few
+     * pixels from the Job view's labels — so without this, taking hold of the divider
+     * starts a selection that the drag then sweeps across the column. */
+    user-select: none;
 }
 
 .dock-handle {
@@ -643,6 +648,35 @@ body {
 .dock-handle.is-dragging::after {
     background: var(--accent);
     width: 2px;
+}
+
+/*
+ * While the vertical divider is moving, the two columns stand still and stay quiet — the
+ * same guard the Machining divider carries below, and for the same three reasons.
+ *
+ * `user-select` is the one that shows: a divider is dragged *through* the text either side
+ * of it, and a browser reads that as a sweep selection. The handle's own `user-select`
+ * stops the anchor being set on it, but the pointer spends the drag off the handle, and
+ * one stray anchor — a press that landed a pixel wide, a selection already in the column —
+ * is enough for the sweep to take. Both are needed; neither alone is.
+ *
+ * `pointer-events` keeps the panes from taking the move events out of the layout's hands.
+ * The screen beside the dock can be the Machining view, whose 3D canvas listens for drags
+ * of its own: without this, a divider dragged across it spins the model and stops feeding
+ * the divider in the same movement.
+ *
+ * The cursor is repeated here because the pointer is off the 8px handle for all but the
+ * first frame of the drag — left to the elements it passes over, it would flicker to a
+ * text bar over the very text this rule has just made unselectable.
+ */
+.dock-layout.is-dragging {
+    user-select: none;
+    cursor: col-resize;
+}
+
+.dock-layout.is-dragging > .job-panel-docked,
+.dock-layout.is-dragging > .screen-host {
+    pointer-events: none;
 }
 
 .split-handle:hover::after,
@@ -5879,6 +5913,44 @@ mod tests {
             !body.contains("var(--machining-split)"),
             "and it must carry that fallback, or an untouched job gets no basis at all: {body}"
         );
+    }
+
+    /// **Neither divider may select text while it is being dragged**, and it takes two
+    /// rules apiece to promise that — which is why they are pinned rather than trusted to
+    /// read as deliberate.
+    ///
+    /// A divider is dragged *through* the text on either side of it, and that is precisely
+    /// the gesture a browser reads as a sweep selection: the Job column's labels came up
+    /// highlighted every time the pinned view was resized. The handle's own `user-select`
+    /// stops the press from anchoring a selection; the layout's stops any anchor that got
+    /// in anyway — an earlier click in the column, a press that landed a pixel wide — from
+    /// sweeping once the pointer is off the handle, which it is for all but the first frame.
+    /// Either rule alone leaves a way for the highlight back, and neither looks incomplete
+    /// on its own, so removing one would look like tidying a duplicate.
+    #[test]
+    fn a_divider_being_dragged_cannot_select_the_text_it_is_dragged_through() {
+        let rules = rules();
+        let declares = |wanted: &str| {
+            rules
+                .iter()
+                .filter(|(selector, _)| selector.split(',').any(|part| part.trim() == wanted))
+                .any(|(_, body)| body.contains("user-select: none"))
+        };
+
+        for handle in [".dock-handle", ".split-handle"] {
+            assert!(
+                declares(handle),
+                "{handle} must refuse selection itself, or taking hold of it anchors one"
+            );
+        }
+
+        for layout in [".dock-layout.is-dragging", ".machining-split.is-dragging"] {
+            assert!(
+                declares(layout),
+                "{layout} must refuse selection for the length of the drag, or the sweep \
+                 takes once the pointer leaves the handle"
+            );
+        }
     }
 
     /// The selected op row must stay visible under the cursor, for the reason the catalogue

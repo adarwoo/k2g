@@ -168,6 +168,10 @@ windows-sys = { version = "0.61", features = [
     # `runtime::kicad_integration` to refuse editing kicad_common.json while KiCad
     # is running, since KiCad rewrites that file wholesale when it exits.
     "Win32_System_Diagnostics_ToolHelp",
+    # AttachConsole / GetStdHandle / SetStdHandle and ATTACH_PARENT_PROCESS — how
+    # `--version` and `--help` still reach the terminal in a release build, which is linked
+    # as a GUI application and so starts with no console. See `attach_parent_console`.
+    "Win32_System_Console",
     # FindWindowW / IsIconic / ShowWindow / SetForegroundWindow — how a second launch
     # brings the running k2g's window forward instead of starting a second copy
     # (`runtime::single_instance`). There is no portable equivalent, which is why that

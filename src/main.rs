@@ -1,3 +1,25 @@
+//! k2g's entry point.
+//!
+//! # No console window in a shipped build
+//!
+//! Windows decides whether a process gets a console from the subsystem recorded in the
+//! executable header, at link time — there is no run-time way to refuse one, and nothing
+//! the application does after `main` starts can close a window that was opened before it.
+//! The attribute below is therefore the only place this can be said, and a console-
+//! subsystem GUI application says it by leaving a black window sitting behind its own for
+//! the whole session.
+//!
+//! `not(debug_assertions)` rather than unconditional: a development run is driven *from* a
+//! terminal, and the log on stdout is most of what a developer has to go on — Windows
+//! attaches a console-subsystem process to the shell's existing console, so debug builds
+//! keep printing into the terminal they were started from and open no window of their own.
+//! A shipped build is started from a shortcut, the Start menu, or KiCad's toolbar, where
+//! there is no console to inherit and Windows makes one.
+//!
+//! The cost is that the two command-line flags lose their default output channel, which
+//! [`attach_parent_console`] hands back. The attribute is inert on Linux and macOS.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod build_info;
 mod catalog_io;
 mod runtime;
@@ -6,6 +28,8 @@ mod gcode;
 mod ui;
 mod paths;
 mod version;
+
+use std::io::Write;
 
 use ui::UiLaunchData;
 use tracing_subscriber::prelude::*;
@@ -18,7 +42,14 @@ fn main() {
     // the process — so a `--version` placed after it would print nothing while a k2g
     // window is open, which is precisely when the question gets asked.
     if let Some(text) = respond_to_arguments(std::env::args().skip(1)) {
-        println!("{text}");
+        // Borrow the launching shell's console first: a shipped Windows build has none of
+        // its own, and an answer nobody can read is not an answer. No-op everywhere else.
+        attach_parent_console();
+        // Not `println!`, which panics if the write fails. There may genuinely be no
+        // console to write to — a shortcut carrying `--version`, a launch from Explorer —
+        // and the right answer to "nobody is listening" is silence, not a crash with no
+        // window to report it in.
+        let _ = writeln!(std::io::stdout(), "{text}");
         return;
     }
 
@@ -161,6 +192,105 @@ fn respond_to_arguments(args: impl Iterator<Item = String>) -> Option<String> {
     }
     None
 }
+
+/// Borrows the launching shell's console, so `--version` and `--help` have somewhere to
+/// print in a build that has no console of its own.
+///
+/// # Why this is needed
+///
+/// A shipped Windows build is linked as a GUI application (see the crate attribute), and a
+/// GUI application starts with no console at all: `println!` writes to a handle that is not
+/// there, silently, and the two flags whose whole purpose is to be asked from a shell
+/// answer nothing. `AttachConsole(ATTACH_PARENT_PROCESS)` joins the console the shell
+/// already owns. It never makes one — that is `AllocConsole`, and calling it here would put
+/// back precisely the window the subsystem attribute exists to remove — so a launch from a
+/// shortcut, the Start menu or KiCad's toolbar stays windowless and silent.
+///
+/// # Why attaching alone is not enough
+///
+/// Attaching gives the process a console but leaves its standard handles as they were, and
+/// for a GUI process those are usually null. Opening `CONOUT$` — the active screen buffer
+/// of whichever console was just joined — and installing it as stdout is what makes the
+/// write land somewhere a person can read.
+///
+/// Handles the shell *did* pass are left alone. `k2g --version > build.txt` and
+/// `k2g --version | findstr commit` both arrive with a real stdout already inherited, and
+/// overwriting it would put the output on the terminal the user had explicitly redirected
+/// it away from.
+///
+/// # What it cannot fix
+///
+/// A GUI application does not hold the shell's prompt, so an interactive `k2g --version`
+/// prints after the next prompt has been drawn. Redirecting or piping — how a script would
+/// read it — makes both `cmd` and PowerShell wait, so the scripted case stays exact and
+/// only the interactive one looks untidy. Buying that back means shipping a second,
+/// console-subsystem executable whose only job is to print two strings.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_parent_console() {
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
+    };
+
+    // SAFETY: a documented constant is the only argument, and there is nothing to keep
+    // alive across the call. Failure is the ordinary case rather than an error: a launch
+    // from Explorer has no parent console to join, and the flags then print into the void
+    // a GUI launch asked for.
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+        return;
+    }
+
+    // `CONOUT$` names the attached console's screen buffer whatever stdout is pointing at,
+    // which is the point: it cannot be redirected out from under us. NUL-terminated UTF-16,
+    // as `CreateFileW` requires.
+    let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
+
+    for id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: `id` is one of the documented standard-handle identifiers.
+        let existing = unsafe { GetStdHandle(id) };
+        if !existing.is_null() && existing != INVALID_HANDLE_VALUE {
+            continue; // the shell passed a real pipe or file; that is the user's choice
+        }
+
+        // SAFETY: `name` is a live NUL-terminated wide string that outlives the call. Both
+        // share modes are required — the console is already open in the shell we joined —
+        // and the security-attributes and template arguments are null, which the API
+        // documents as "defaults" and "no template".
+        let console = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING, // a console buffer is never created
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if console == INVALID_HANDLE_VALUE {
+            continue;
+        }
+
+        // Deliberately never closed: it has to outlive every write, and the only caller
+        // returns straight into a process exit that closes it anyway.
+        //
+        // SAFETY: installing a handle this call has just opened, against the identifier it
+        // was opened for.
+        unsafe { SetStdHandle(id, console) };
+    }
+}
+
+/// Nothing to attach to, or nothing that needs attaching.
+///
+/// A debug build is a console-subsystem binary already writing into the terminal that
+/// started it, and Linux and macOS never tie stdout to a window in the first place.
+#[cfg(not(all(windows, not(debug_assertions))))]
+fn attach_parent_console() {}
 
 /// `--help` output. Short on purpose: k2g is a desktop application with no command-line
 /// interface to document, and these two flags are the whole of it.

@@ -35,6 +35,30 @@ use shell::{
 use stock::StockScreen;
 use toolset::ToolsetProfilesScreen;
 
+/// Ends a drag of the docked Job view's divider and stores the width it landed on.
+///
+/// Shared by the two ways a drag can finish — the button coming up, and the pointer leaving
+/// the layout — because they have to agree. Only the release used to store, so a drag that
+/// ran out of the window was silently discarded: the column stayed where the pointer left
+/// it until the next render, then snapped back to the persisted width with nothing touched.
+/// Ending is ending; where the divider stopped is where the operator put it.
+///
+/// One settings write per drag, on the end of it: the live width is what the layout reads
+/// while the pointer is down, so persisting each frame would buy nothing and cost a store
+/// write per pixel.
+fn end_dock_drag(
+    state: Signal<crate::runtime::AppCtx>,
+    mut dragging: Signal<bool>,
+    live_width: Signal<f64>,
+) {
+    if !*dragging.read() {
+        return;
+    }
+    dragging.set(false);
+    let width = *live_width.read() as i64;
+    mutate_ctx(state, |ctx| ctx.app.set_job_pin_width(width));
+}
+
 pub fn mutate_ctx<R>(mut state: Signal<crate::runtime::AppCtx>, f: impl FnOnce(&mut crate::runtime::AppCtx) -> R) -> R {
     let result = with_ctx_mut(f);
     state.set(ctx_snapshot());
@@ -93,10 +117,24 @@ pub fn AppRoot() -> Element {
     let snapshot = state.read().clone();
 
     // Split-handle state. The live width is local to the drag so the pointer stays
-    // glued to the divider; it is written back to settings once, on release.
+    // glued to the divider; it is written back to settings once, when the drag ends.
     let mut dock_dragging = use_signal(|| false);
-    let mut dock_drag_last = use_signal(|| 0.0_f64);
     let mut dock_live_width = use_signal(|| snapshot.job_pin_width as f64);
+    // The layout's left edge in client space, measured once when a drag starts, because
+    // the divider tracks the pointer **absolutely** — the column is however far the
+    // pointer is to the right of this — rather than accumulating deltas.
+    //
+    // Accumulating drifts, and it drifts exactly where a splitter is judged: both ends of
+    // the travel are clamped (the minimum here, the screen's 480px reserve in the sheet),
+    // so a drag pushed past either one went on adding to a width nothing could show. The
+    // divider then sat still while the pointer walked away from it, and had to be walked
+    // all the way back before it moved again. Absolute cannot drift: nothing accumulates.
+    let mut dock_left = use_signal(|| 0.0_f64);
+    // The layout element, kept so a drag can ask it where it is. Measured per drag rather
+    // than once at mount: the banners above the shell body come and go, and while none of
+    // them moves a left edge today, a measurement taken at the moment it is used cannot be
+    // wrong about one that does.
+    let mut dock_layout = use_signal(|| None::<Event<MountedData>>);
     // Adopt the persisted width whenever it changes underneath us (launch, or a
     // settings write from elsewhere) — but never mid-drag, which would fight the
     // pointer.
@@ -133,32 +171,35 @@ pub fn AppRoot() -> Element {
                     // `grid-template-columns` would outrank the media query that
                     // collapses the dock on a narrow window.
                     div {
-                        class: if show_dock { "dock-layout is-docked" } else { "dock-layout" },
+                        // `is-dragging` rides on the layout, not only on the handle: for
+                        // the length of a drag the sheet has to speak for both columns at
+                        // once — no selection, no pointer, one cursor — and none of that is
+                        // the handle's to give.
+                        class: match (show_dock, *dock_dragging.read()) {
+                            (true, true) => "dock-layout is-docked is-dragging",
+                            (true, false) => "dock-layout is-docked",
+                            _ => "dock-layout",
+                        },
                         style: "--job-dock-width: {dock_width}px;",
+                        onmounted: move |evt| dock_layout.set(Some(evt)),
                         onmousemove: move |evt| {
                             if !*dock_dragging.read() {
                                 return;
                             }
-                            // Track the delta in client space: the pointer leaves the
-                            // thin handle almost immediately, and element-relative
-                            // coordinates would jump as the target changes under it.
-                            let x = evt.client_coordinates().x;
-                            let last = *dock_drag_last.read();
-                            dock_drag_last.set(x);
-                            let next = (*dock_live_width.read() + (x - last)) as i64;
-                            dock_live_width
-                                .set(next.max(MIN_JOB_PIN_WIDTH) as f64);
+                            // Client space, because that is the frame the measured edge is
+                            // in. The pointer leaves the thin handle almost at once, so
+                            // element-relative coordinates would jump as the target under
+                            // it changed. Half the handle, so the divider sits centred
+                            // under the pointer rather than trailing to its right.
+                            let width = evt.client_coordinates().x - *dock_left.read() - 4.0;
+                            dock_live_width.set(width.max(MIN_JOB_PIN_WIDTH as f64));
                         },
-                        onmouseup: move |_| {
-                            if !*dock_dragging.read() {
-                                return;
-                            }
-                            dock_dragging.set(false);
-                            // One settings write per drag, on release.
-                            let width = *dock_live_width.read() as i64;
-                            mutate_ctx(state, |ctx| ctx.app.set_job_pin_width(width));
-                        },
-                        onmouseleave: move |_| dock_dragging.set(false),
+                        onmouseup: move |_| end_dock_drag(state, dock_dragging, dock_live_width),
+                        // A drag that left the layout is a drag that has ended: without
+                        // this the divider follows the pointer back in as though the button
+                        // were still down. It *ends*, though, rather than being dropped —
+                        // see `end_dock_drag`.
+                        onmouseleave: move |_| end_dock_drag(state, dock_dragging, dock_live_width),
 
                         if show_dock {
                             JobViewPanel { state, docked: true }
@@ -166,8 +207,25 @@ pub fn AppRoot() -> Element {
                                 class: if *dock_dragging.read() { "dock-handle is-dragging" } else { "dock-handle" },
                                 title: "Drag to resize the pinned Job view",
                                 onmousedown: move |evt| {
-                                    dock_drag_last.set(evt.client_coordinates().x);
-                                    dock_dragging.set(true);
+                                    // Ours, and nothing else's: a press here starts a drag,
+                                    // and must not also anchor a text selection in the Job
+                                    // column a few pixels to its left. The sheet's
+                                    // `user-select` stops the sweep that follows; this
+                                    // stops the press from setting an anchor for it.
+                                    evt.prevent_default();
+                                    // Measured here and not at mount, and awaited before
+                                    // the drag opens: until the edge is known every pointer
+                                    // position would be read against zero, which on the
+                                    // first frame throws the column across the window.
+                                    let layout = dock_layout.read().clone();
+                                    spawn(async move {
+                                        if let Some(layout) = layout {
+                                            if let Ok(rect) = layout.get_client_rect().await {
+                                                dock_left.set(rect.origin.x);
+                                            }
+                                        }
+                                        dock_dragging.set(true);
+                                    });
                                 },
                             }
                         }
