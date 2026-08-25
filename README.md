@@ -1,6 +1,6 @@
 # K2G — KiCad to GCode
 
-**You design in KiCad, you have a CNC, you're 3 clicks away from making the board!** 
+**You design in KiCad, you have a CNC, you're 3 clicks away from making the board!**
 K2G reads the board open in KiCad and writes the
 GCode that drills and cuts it out: holes, oblong slots, board outline with breakaway
 tabs.
@@ -22,12 +22,21 @@ the board, hit refresh, get a new program.
 the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 
 > [!WARNING]
-> **Pre-release.** k2g generates code that drives a spindle. Read every program before
+> ** k2g generates code that drives a spindle. Read every program before
 > you run it, and air-cut anything new. See [Status](#status) for what is unfinished.
 
 ---
 
 ## What it does
+
+**Copper isolation**
+
+- Isolation routing at the channel width you ask for; the V-bit is chosen to suit and the
+  depth it needs derived from it, so depth is never asked for
+- Where two nets are closer together than that, the pass narrows across just that stretch
+  and names the nets it narrowed — it never widens, and never cuts into a neighbour
+- Contours are worked out on a thread of their own, so the views stay live while a dense
+  board is read
 
 **Drilling**
 
@@ -48,15 +57,6 @@ the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
 - Optional finishing pass
 - Curved edges come out as `G2`/`G3`: the offset runs on a polyline, and arcs are fitted
   back to it within the profile's curve tolerance
-
-**Copper isolation**
-
-- Isolation routing at the channel width you ask for; the V-bit is chosen to suit and the
-  depth it needs derived from it, so depth is never asked for
-- Where two nets are closer together than that, the pass narrows across just that stretch
-  and names the nets it narrowed — it never widens, and never cuts into a neighbour
-- Contours are worked out on a thread of their own, so the views stay live while a dense
-  board is read
 
 **Two-sided work**
 
@@ -113,14 +113,6 @@ face — and is being tested on real hardware. What is **not** done:
 
 - **Rust** (stable) to build from source, which is the route on an older distribution
   or an architecture no release covers.
-
-Two features vary by platform, and both degrade rather than break. Exporting straight to
-a removable medium and ejecting it needs the Win32 volume API, so on Linux and macOS
-the Export button behaves as though nothing is plugged in. And k2g can tell whether
-KiCad is running on Windows and Linux but not on macOS — no `/proc` there, and
-shelling out to `ps` to answer a question you can answer by looking at your dock is a
-poor trade — so on a Mac the KiCad integration card warns before editing KiCad's
-settings rather than refusing.
 
 ## Install
 
