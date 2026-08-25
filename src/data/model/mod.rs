@@ -17,8 +17,8 @@ pub use units::UserUnitSystem;
 pub use catalog::{CatalogStockCatalog, CatalogStockSection, CatalogStockTool};
 pub use job::{BoardFace, EdgeTab, JobConfig, ProductionOperation, TabContour};
 pub use operations::{
-    conflicting_operations, operation_once_per_face, step_display_name, step_reference,
-    MachiningOperation, OperationConflict, MACHINING_OPERATIONS, UNNAMED_STEP,
+    blocking_step, conflicting_operations, operation_scope, step_display_name, step_reference,
+    MachiningOperation, OperationConflict, OperationScope, MACHINING_OPERATIONS, UNNAMED_STEP,
 };
 pub use profiles::{
     CascadeDeleteImpact, FixtureProfile, JobProfile, MachineProfile, ToolsetGenerationPolicy,

@@ -1,5 +1,5 @@
-//! The machining operations a step can run, and which of them a board face may
-//! receive only once.
+//! The machining operations a step can run, and how many steps may run each: any number,
+//! one per board face, or one for the whole job ([`OperationScope`]).
 //!
 //! This mirrors the `operation_key` enum in `schemas/machining.yaml` and is the one
 //! place that knows what each key *means* to the operator. It lives below the UI
@@ -7,8 +7,44 @@
 //! which greys out an operation another step has claimed, and the readiness gate,
 //! which refuses a hand-edited profile that claims one twice.
 
-/// One machining operation: its schema key, the operator-facing label, and whether a
-/// board face may receive it more than once.
+/// How many steps of one profile may run an operation.
+///
+/// Three answers, because there are three: some operations are a division of labour, some
+/// describe a feature of one face, and one describes the job's own registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationScope {
+    /// Any number of steps. Passes at different depths, or over different regions, are
+    /// all legitimately the same operation.
+    Repeatable,
+    /// At most one step per board face.
+    ///
+    /// Everything that removes the board's own defining material: those features exist
+    /// once, so cutting them in two steps means cutting them twice — the second pass runs
+    /// a tool through air it has already cleared, or worse, re-drills a hole that has
+    /// moved with the fixture.
+    ///
+    /// *Per face*, not per profile, because a face is a separate setup with its own
+    /// geometry: milling the front and then the back is two distinct jobs that happen to
+    /// share a key.
+    OncePerFace,
+    /// At most one step in the whole profile, whichever face it is on.
+    ///
+    /// The locating pins and only the locating pins. They are not a feature of a face —
+    /// they are the datum the *job* is registered against, and
+    /// [`locating_pin_faults`](crate::runtime::tooling::locating_pin_faults) refuses any
+    /// pins step that is not the first one, on either face.
+    ///
+    /// This entry used to be [`Self::Repeatable`], reasoning that a job which moves the
+    /// board to a second fixture genuinely drills a second set. The readiness gate has
+    /// never agreed: it refuses a pins step anywhere but the top. So the operator could
+    /// tick the box in step 2 and only find out at the Job screen, with a no-go and no
+    /// hint that the tick was what caused it. If re-fixturing mid-job is ever wanted, it
+    /// is that rule that has to change first, and this follows it.
+    OncePerJob,
+}
+
+/// One machining operation: its schema key, the operator-facing label, and how many steps
+/// may run it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MachiningOperation {
     /// The `operation_key` value persisted in the profile.
@@ -23,17 +59,8 @@ pub struct MachiningOperation {
     /// automatic shortening makes exactly the two operations an operator most needs to
     /// tell apart indistinguishable.
     pub short_label: &'static str,
-    /// Whether at most one step per board face may run it.
-    ///
-    /// True for everything that removes the board's own defining material: those
-    /// features exist once, so cutting them in two steps means cutting them twice —
-    /// the second pass runs a tool through air it has already cleared, or worse,
-    /// re-drills a hole that has moved with the fixture.
-    ///
-    /// *Per face*, not per profile, because a face is a separate setup with its own
-    /// geometry: milling the front and then the back is two distinct jobs that happen
-    /// to share a key.
-    pub once_per_face: bool,
+    /// How many steps of one profile may run it. See [`OperationScope`].
+    pub scope: OperationScope,
 }
 
 /// The operations, **in the order a board is made in**.
@@ -77,28 +104,27 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         key: "engrave_copper",
         label: "Engrave copper isolation",
         short_label: "Engrave",
-        once_per_face: false,
+        scope: OperationScope::Repeatable,
     },
-    // Repeatable too. Pins register the board against a *fixture*, so a job that moves the
-    // board to a second fixture genuinely drills a second set — the key names the act, not
-    // a feature of the board.
+    // Once for the whole profile, on either face. Not a feature of a board face — the
+    // datum the job is registered against. See `OperationScope::OncePerJob`.
     MachiningOperation {
         key: "drill_locating_pins",
         label: "Drill locating pins",
         short_label: "Pins",
-        once_per_face: false,
+        scope: OperationScope::OncePerJob,
     },
     MachiningOperation {
         key: "drill_pth",
         label: "Drill plated holes (PTH)",
         short_label: "PTH",
-        once_per_face: true,
+        scope: OperationScope::OncePerFace,
     },
     MachiningOperation {
         key: "drill_npth",
         label: "Drill non-plated holes (NPTH)",
         short_label: "NPTH",
-        once_per_face: true,
+        scope: OperationScope::OncePerFace,
     },
     // Once per face like the boundary: the openings exist once, so two steps both
     // claiming them on one face is a genuine conflict rather than a division of labour.
@@ -106,13 +132,13 @@ pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
         key: "route_cutouts",
         label: "Route interior cutouts",
         short_label: "Cutouts",
-        once_per_face: true,
+        scope: OperationScope::OncePerFace,
     },
     MachiningOperation {
         key: "route_board",
         label: "Cut board outline",
         short_label: "Outline",
-        once_per_face: true,
+        scope: OperationScope::OncePerFace,
     },
 ];
 
@@ -131,9 +157,13 @@ pub fn operation_label(key: &str) -> &str {
     machining_operation(key).map(|op| op.label).unwrap_or(key)
 }
 
-/// Whether `key` may appear in only one step per board face.
-pub fn operation_once_per_face(key: &str) -> bool {
-    machining_operation(key).is_some_and(|op| op.once_per_face)
+/// How many steps may run `key`.
+///
+/// An unknown key — a profile from a later build, or hand-edited — is
+/// [`OperationScope::Repeatable`], i.e. unconstrained. An old k2g must still open a newer
+/// file, and refusing an operation it cannot reason about would be inventing a rule.
+pub fn operation_scope(key: &str) -> OperationScope {
+    machining_operation(key).map_or(OperationScope::Repeatable, |op| op.scope)
 }
 
 /// The name a freshly added step carries until the operator gives it one of their own.
@@ -225,6 +255,46 @@ impl OperationConflict {
     }
 }
 
+/// The step whose claim on `key` stops step `step` claiming it too, as `(index, name)`.
+///
+/// Drives the editor's greyed-out checkbox. `None` when the box is free: a repeatable
+/// operation, an unknown key, `step` itself, or — for a face-scoped operation — a claim
+/// on the other face.
+///
+/// How far it looks is the [`OperationScope`]:
+///
+/// - [`Repeatable`](OperationScope::Repeatable) — never blocked.
+/// - [`OncePerFace`](OperationScope::OncePerFace) — blocked by a step on the *same* face.
+///   The front's outline says nothing about the back's; they are separate setups.
+/// - [`OncePerJob`](OperationScope::OncePerJob) — blocked by any step at all. The
+///   locating pins register the whole job, and the readiness gate refuses a second pins
+///   step outright, so leaving the box tickable only moves the discovery to the Job
+///   screen — where a no-go appears with nothing connecting it back to the tick.
+///
+/// Takes `(step name, machines the back, operations)` like [`conflicting_operations`], so
+/// it stays a pure function over the three facts it needs and is testable without a store.
+pub fn blocking_step<'a>(
+    steps: impl IntoIterator<Item = (&'a str, bool, &'a [String])>,
+    step: usize,
+    key: &str,
+) -> Option<(usize, String)> {
+    let scope = operation_scope(key);
+    if scope == OperationScope::Repeatable {
+        return None;
+    }
+    let claims: Vec<(&str, bool, &[String])> = steps.into_iter().collect();
+    let side = claims.get(step)?.1;
+    claims
+        .iter()
+        .enumerate()
+        .find(|(index, (_, back, operations))| {
+            *index != step
+                && (scope == OperationScope::OncePerJob || *back == side)
+                && operations.iter().any(|op| op == key)
+        })
+        .map(|(index, (name, _, _))| (index, (*name).to_string()))
+}
+
 /// Every once-per-face operation claimed by two or more of `steps` on the same face.
 ///
 /// Takes `(step name, machines the back, operations)` rather than any richer step type so
@@ -242,7 +312,12 @@ pub fn conflicting_operations<'a>(
     // editor shows — no index needs threading in from the caller.
     for (index, (name, back, operations)) in steps.into_iter().enumerate() {
         for key in operations {
-            if !operation_once_per_face(key) {
+            // Face-scoped operations only. A job-scoped one (the locating pins) is not a
+            // face question at all — two pins steps on *opposite* faces is exactly as
+            // wrong as two on the same one, and this tally, keyed by face, would miss it.
+            // `locating_pin_faults` owns that rule and says the useful thing about it
+            // ("move it to the top"), so adding a second message here would be noise.
+            if operation_scope(key) != OperationScope::OncePerFace {
                 continue;
             }
             match claims
@@ -384,19 +459,19 @@ mod tests {
         );
     }
 
-    /// The two repeatable operations lead the list, which is only safe because nothing
-    /// derives a default from a position here — see `AppData::add_step`, which asks what a
-    /// face still lacks rather than taking the first entry it is allowed to.
+    /// The two operations no *face* claims lead the list, which is only safe because
+    /// nothing derives a default from a position here — see `AppData::add_step`, which
+    /// asks what a face still lacks rather than taking the first entry it is allowed to.
     ///
     /// Worth its own test because the coupling is invisible from either side: this list
     /// carries no marker saying a default is drawn from it, and `add_step` names no
-    /// position. The previous arrangement worked only because both repeatable entries
-    /// happened to sit at the end.
+    /// position. The previous arrangement worked only because both entries happened to
+    /// sit at the end.
     #[test]
-    fn the_repeatable_operations_may_lead_the_list() {
+    fn the_operations_no_face_claims_may_lead_the_list() {
         let leading: Vec<&str> = MACHINING_OPERATIONS
             .iter()
-            .take_while(|op| !op.once_per_face)
+            .take_while(|op| op.scope != OperationScope::OncePerFace)
             .map(|op| op.key)
             .collect();
 
@@ -405,6 +480,9 @@ mod tests {
             ["engrave_copper", "drill_locating_pins"],
             "if this changes, check `add_step` still claims work rather than a repeatable",
         );
+        // And `add_step`'s fallback names `Repeatable`, so the pins sitting second here
+        // cannot become the default for a new step however the list is reordered.
+        assert_eq!(operation_scope("drill_locating_pins"), OperationScope::OncePerJob);
     }
 
     /// The operator's own name always wins, and is never overwritten by the derivation —
@@ -460,10 +538,90 @@ mod tests {
         );
     }
 
-    /// Locating pins register the board against a fixture, so a job that re-fixtures
-    /// legitimately drills them again.
+    /// **Pins ticked in step 1 grey the box in step 2 — on either face.**
+    ///
+    /// The readiness gate has always refused a second pins step ("move it to the top"),
+    /// but the editor let it be ticked, so the operator met the rule as a no-go on the Job
+    /// screen with nothing pointing back at the tick that caused it. The box says it now.
+    ///
+    /// The back-face case is the one a face-scoped rule would miss, and it is the case
+    /// this got wrong: the pins register the *job*, so a second set on the other side is
+    /// exactly as refused as a second set on the same one.
     #[test]
-    fn locating_pins_may_be_drilled_in_more_than_one_step() {
+    fn pins_claimed_by_one_step_are_blocked_in_every_other() {
+        let first = ops(&["drill_locating_pins", "drill_pth"]);
+        let second = ops(&["drill_pth"]);
+        let profile = |back_of_second: bool| {
+            [
+                ("Pins and front", false, first.as_slice()),
+                ("Second", back_of_second, second.as_slice()),
+            ]
+        };
+
+        for back in [false, true] {
+            let blocked = blocking_step(profile(back), 1, "drill_locating_pins");
+            assert_eq!(
+                blocked,
+                Some((0, "Pins and front".to_string())),
+                "step 2 (back: {back}) must name step 1 as the owner"
+            );
+        }
+
+        // Step 1 is not blocked by its own claim, or nothing could ever be unticked.
+        assert_eq!(blocking_step(profile(false), 0, "drill_locating_pins"), None);
+        // And a step that is the only one claiming them is free.
+        assert_eq!(
+            blocking_step([("Only", false, second.as_slice())], 0, "drill_locating_pins"),
+            None
+        );
+    }
+
+    /// A face-scoped operation stays a *face* question: the front's outline does not
+    /// block the back's, because they are separate setups cutting separate geometry.
+    #[test]
+    fn a_face_scoped_operation_blocks_only_its_own_face() {
+        let front = ops(&["route_board"]);
+        let steps = [
+            ("Front outline", false, front.as_slice()),
+            ("Back outline", true, front.as_slice()),
+            ("More front", false, front.as_slice()),
+        ];
+        assert_eq!(
+            blocking_step(steps, 1, "route_board"),
+            None,
+            "the back's outline is its own"
+        );
+        assert_eq!(
+            blocking_step(steps, 2, "route_board"),
+            Some((0, "Front outline".to_string())),
+            "but a second front outline is the first one cut twice"
+        );
+    }
+
+    /// Repeatable operations are never blocked, and an unknown key — from a newer build —
+    /// is left alone rather than constrained by a rule this build invented.
+    #[test]
+    fn repeatable_and_unknown_operations_are_never_blocked() {
+        let both = ops(&["engrave_copper", "some_future_operation"]);
+        let steps = [("A", false, both.as_slice()), ("B", false, both.as_slice())];
+        assert_eq!(blocking_step(steps, 1, "engrave_copper"), None);
+        assert_eq!(blocking_step(steps, 1, "some_future_operation"), None);
+    }
+
+    /// **A second locating-pins step is refused, but not by this function.**
+    ///
+    /// The pins are [`OperationScope::OncePerJob`], and this tally is keyed by face — so
+    /// it would miss the case that matters most, two pins steps on *opposite* faces, and
+    /// would phrase the one it caught as "on the front face", which is not the reason.
+    /// `locating_pin_faults` owns the rule and gives the useful remedy ("move it to the
+    /// top"); a second message here would only bury it.
+    ///
+    /// So the emptiness below is deliberate, and the scope assertion is what stops it
+    /// reading as "pins may be drilled twice" — which is what this test used to claim.
+    #[test]
+    fn a_second_pins_step_is_not_this_functions_business() {
+        assert_eq!(operation_scope("drill_locating_pins"), OperationScope::OncePerJob);
+
         let conflicts = conflicting_operations([
             (
                 "First setup",
@@ -478,7 +636,7 @@ mod tests {
         ]);
         assert!(
             conflicts.is_empty(),
-            "pins are the one repeatable operation today"
+            "a face tally has nothing to say about a job-scoped operation: {conflicts:?}"
         );
     }
 

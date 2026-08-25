@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
 use crate::data::model::{
-    conflicting_operations, operation_once_per_face, step_reference, MachiningOperation,
-    OperationConflict, UserUnitSystem, MACHINING_OPERATIONS,
+    blocking_step, conflicting_operations, operation_scope, step_reference, MachiningOperation,
+    OperationConflict, OperationScope, UserUnitSystem, MACHINING_OPERATIONS,
 };
 use units::user_format as unit_format;
 use datastore::{FieldKind, Node, NodeValue, RemoveError, UnitValue};
@@ -645,24 +645,22 @@ pub fn use_conflicting_operations(id: Uuid) -> Vec<OperationConflict> {
     )
 }
 
-/// The step already running `key` on the same side as `step`, as `(index, name)`.
+/// The step already running `key` that stops `step` running it too, as `(index, name)`.
 ///
 /// Drives the disabled checkbox: the editor names the owner rather than merely refusing,
 /// because "you cannot tick this" without saying why is indistinguishable from a bug.
-/// `None` for a repeatable operation, for `step` itself, and for the other side.
+///
+/// Reads the store and hands the decision to [`blocking_step`], which is where the rule
+/// lives and where it is tested — the same split [`use_conflicting_operations`] uses.
 fn operation_owner(id: Uuid, step: usize, key: &str) -> Option<(usize, String)> {
-    if !operation_once_per_face(key) {
-        return None;
-    }
     let claims = step_operation_claims(id);
-    let side = claims.get(step)?.1;
-    claims
-        .iter()
-        .enumerate()
-        .find(|(index, (_, bottom, ops))| {
-            *index != step && *bottom == side && ops.iter().any(|op| op == key)
-        })
-        .map(|(index, (name, _, _))| (index, name.clone()))
+    blocking_step(
+        claims
+            .iter()
+            .map(|(name, back, ops)| (name.as_str(), *back, ops.as_slice())),
+        step,
+        key,
+    )
 }
 
 /// The `<option>` value standing for "no profile chosen".
@@ -827,11 +825,22 @@ fn OperationToggle(
     checked: bool,
     blocked_by: Option<(usize, String)>,
 ) -> Element {
+    // Why the box is unavailable, in the terms that particular operation is limited by.
+    // "which machines the same side" is the reason a second outline is refused and is
+    // simply untrue of the pins, which are refused on either side — an explanation that
+    // does not match what the operator sees is worse than none, because it sends them to
+    // change the face.
     let title = match blocked_by.as_ref() {
-        Some((index, name)) => format!(
-            "Already run by {}, which machines the same side",
-            step_reference(*index, name)
-        ),
+        Some((index, name)) => {
+            let owner = step_reference(*index, name);
+            match operation_scope(&op_key) {
+                OperationScope::OncePerJob => format!(
+                    "Already drilled in {owner}. The pins register the whole job, so one \
+                     step drills them — and it has to be the first."
+                ),
+                _ => format!("Already run by {owner}, which machines the same side"),
+            }
+        }
         None => String::new(),
     };
     rsx! {

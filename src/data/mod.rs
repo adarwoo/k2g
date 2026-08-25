@@ -34,7 +34,7 @@ use log::warn;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::data::model::{EdgeTab, MACHINING_OPERATIONS};
+use crate::data::model::{EdgeTab, OperationScope, MACHINING_OPERATIONS};
 use crate::paths::AppDirs;
 
 /// Every schema the application persists, embedded at build time. The order is
@@ -645,8 +645,17 @@ impl AppData {
             // gate then complains about is better than one the schema rejects.
             let operation = MACHINING_OPERATIONS
                 .iter()
-                .find(|op| op.once_per_face && !claimed.contains(&op.key))
-                .or_else(|| MACHINING_OPERATIONS.iter().find(|op| !op.once_per_face))
+                .find(|op| op.scope == OperationScope::OncePerFace && !claimed.contains(&op.key))
+                // Only a *repeatable* one stands in — never the job-scoped locating pins,
+                // which belong to the first step and would be refused here both by the
+                // readiness gate and by the editor's own greyed-out box. Spelled out
+                // rather than left as "not once-per-face", which caught the pins too and
+                // stayed correct only because engraving happens to come first in the list.
+                .or_else(|| {
+                    MACHINING_OPERATIONS
+                        .iter()
+                        .find(|op| op.scope == OperationScope::Repeatable)
+                })
                 .map_or(MACHINING_OPERATIONS[0].key, |op| op.key);
 
             // The placeholder name, which `step_display_name` reads as "not named yet" and
@@ -2602,8 +2611,9 @@ mod tests {
             vec!["engrave_copper".to_string()],
             "the first repeatable entry must not become the default for every new step",
         );
-        assert!(
-            crate::data::model::operation_once_per_face(&keys[0]),
+        assert_eq!(
+            crate::data::model::operation_scope(&keys[0]),
+            crate::data::model::OperationScope::OncePerFace,
             "a new step should claim work the face still needs, got {keys:?}",
         );
     }
