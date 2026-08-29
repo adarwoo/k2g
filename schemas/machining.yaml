@@ -486,6 +486,7 @@ $defs:
     type: object
     default:
       width: 0.15mm
+      test_cut: false
     properties:
       width:
         title: Minimum isolation width
@@ -502,6 +503,99 @@ $defs:
           can make and the step says so.
         $ref: "units.yaml#/$defs/size"
         default: 0.15mm
+
+      # -----------------------------------------------------------------------
+      # test_cut — a throwaway L, cut in the waste before the copper is touched,
+      # purely so the operator can look at it.
+      #
+      # Nothing else in the program verifies that Z0 is where the controller
+      # believes it is, and this is the one operation where being 50um out is the
+      # difference between nets that separate and a board that is ploughed. The
+      # pass runs at one fixed Z for its whole length — there is no probing and no
+      # height map — so the only check available is a cut that can be inspected
+      # before the real one starts.
+      #
+      # An L, not a scratch: its legs are the board's own width and height, so it
+      # shows depth drift across the travel as well as depth at a point. Work that
+      # is not held flat fails an isolation pass exactly as reliably as a mis-set
+      # tool does, and a short scratch cannot tell the two apart.
+      #
+      # What the operator reads is the channel's WIDTH, not its depth: a groove
+      # 50um deep has no depth anyone can get a gauge into, while its width sits
+      # under a loupe next to a scale. But width is not what they adjust — they
+      # adjust Z. So the stop prints both the width the channel should be AND the
+      # conversion for the bit that was chosen, because a V-bit's channel widens
+      # in exact proportion to how far it is sunk. Too narrow means too shallow,
+      # too wide means too deep, and the multiplier says by how much. A flat tip
+      # cuts one width at any depth, so there is no conversion and the stop says
+      # to judge the cut itself instead.
+      #
+      # There is nothing to configure but whether to make it. Where it goes, how
+      # long it is and how deep it cuts all follow from the board and the chosen
+      # bit — a test cut with knobs on is one that can be set somewhere it tests
+      # nothing.
+      #
+      # USUALLY IT COSTS NOTHING. A job that routes its own outline already removes
+      # a band of material round the board — `kerf + finishing` wide, waste by
+      # construction — and the L is cut down the middle of it. A 2 mm cutter leaves
+      # 2.1 mm and a 0.25 mm trough needs 0.75 mm, so the frame does not grow by a
+      # micron and the witness is cut in swarf.
+      #
+      # Only a board that is engraved but never cut out has no such band. Then one
+      # is opened, three trough widths wide — a trough of material between the L
+      # and the board, and another between the L and the work clearance — and the
+      # board moves out by that much, so the work origin moves with it and the job
+      # has to be re-zeroed. The step's notes say which of the two happened.
+      #
+      # Where the band sits in the frame is `work_clearance` on the fixture: the
+      # band is one of the EXTENTS the job's cuts reach outside the board, and the
+      # widest extent ends up with its cutting edge exactly on the clearance line.
+      # Nothing is ever cut nearer the zero than that.
+      #
+      # Two earlier placements are worth recording because both look right. A fixed
+      # offset PAST the zero puts the cut at negative X and Y on an ordinary
+      # near-left fixture — the far side of the corner the board is registered
+      # into, which is where the fixture's stop is (see `dir_x`/`dir_y` on the 3D
+      # fixture mark, "away from the stop"), and possibly outside the controller's
+      # travel; k2g models neither. And the corner ON the zero forgets that a
+      # cutter has width: a 0.2 mm channel centred there puts half of itself at
+      # −0.1 mm.
+      #
+      # What is still not knowable here is the blank: there is no stock, bed or
+      # keep-out geometry anywhere in the product, so the operator confirms there
+      # is material where the band falls.
+      #
+      # It needs the CNC's `pause` primitive, and needs it to be a real stop. A
+      # step whose machine has no pause word does not get the test cut at all and
+      # says so: a witness groove the program runs straight past is not a test.
+      # Watch out for `M01` — the schema's own default `pause` emits one, and that
+      # is an OPTIONAL stop, which a controller with optional-stop switched off
+      # runs past. Every bundled profile uses `M0`/`M00` instead. A hand-written
+      # profile should too, or this option quietly does nothing.
+      #
+      # Off by default: it costs a stop in the middle of every engraving program,
+      # and a program that stops unasked on a machine nobody is standing at is
+      # worse than one that does not check.
+      # -----------------------------------------------------------------------
+      test_cut:
+        title: Cut a depth test first
+        description: >-
+          Engrave an L in the waste outside the work origin, at the depth the
+          isolation pass will use, then stop so it can be checked before the copper
+          is cut. Its legs are as long as the board is wide and high, so it shows
+          depth drift across the travel as well as depth at a point. At the stop the
+          machine retracts and the spindle stops, and the prompt states the width the
+          channel should measure and what a width error is worth in Z on the bit it
+          chose — you measure a width but you adjust Z, and the two differ by a factor
+          that depends on the cone. Too narrow means too shallow: lower Z by that much
+          and run again. Too wide means too deep: raise Z, shift the work offset in X
+          and Y so the retry lands on fresh material, and run again. If this job
+          routes its own outline the L is cut down the middle of the band that
+          routing removes anyway, and costs nothing; if it does not, a narrow band
+          is opened just outside the board and the work origin moves out by it, so
+          re-zero after changing it. Needs a CNC profile whose pause really stops.
+        type: boolean
+        default: false
     required: [width]
     additionalProperties: false
 
@@ -676,6 +770,7 @@ $defs:
         $ref: "#/$defs/engrave_copper"
         default:
           width: 0.25mm
+          test_cut: false
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it

@@ -206,11 +206,18 @@ Actual GCode generation execution is deferred to a subsequent phase.
 
 ### Program algorithm structure
 
-Generation produces output per project type in this order:
+Generation produces output in this order, which is the order rigidity is lost in — the
+copper is cut while the board is whole and flat, the holes while it is still attached, and
+the perimeter last because it releases the part:
 
-1. Drilling projects — all hole operations (PTH, NPTH, locating, pilot)
-2. Contouring projects — routing, scoring, tabs, V-groove
-3. Engraving — planned, not yet implemented
+1. Engraving — copper isolation, optionally preceded by a depth test cut and an operator
+   stop (see operation-planner.md §5.4–§5.5)
+2. Drilling — all hole operations (PTH, NPTH, locating, pilot)
+3. Contouring — interior cutouts, then the board outline with its tabs
+
+Block order is **push order** in `runtime::machining_plan::plan_step`, not a sort on
+`gcode::plan::Phase`; `block_order_tests` guards it at the source, because nothing would
+fail to compile if two pushes were swapped.
 
 Within each project type, operation ordering uses a Travelling Salesman Problem (TSP) sort to minimise tool travel distance. An existing Rust TSP library is used.
 

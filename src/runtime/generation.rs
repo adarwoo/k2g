@@ -538,6 +538,7 @@ mod tests {
                     diameter: units::Length::from_mm(1.0),
                     ops: vec![op],
                     travel_mm: 0.0,
+                    verify_stop: None,
                 }],
                 notes: vec![],
             }],
@@ -897,6 +898,7 @@ mod tests {
                 source: "h".to_string(),
             }],
             travel_mm: 0.0,
+            verify_stop: None,
         };
         let mut broken = empty_step(0);
         broken.blocks = vec![block];

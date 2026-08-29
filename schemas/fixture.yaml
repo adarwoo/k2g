@@ -179,10 +179,17 @@ properties:
   # ---------------------------------------------------------------------------
   # origin
   # ---------------------------------------------------------------------------
-  # The board's work origin in XY: which corner is X0/Y0. The board is registered
-  # to this corner in the fixture (e.g. pushed into a right-angle corner stop), and
-  # the emitted G-code is written relative to it. Z0 is always the board top (see
-  # the "Z model" section), so there is deliberately no Z entry here.
+  # The board's work origin in XY: which corner is X0/Y0 — that is, which way the
+  # zero lies from the work. HOW FAR it lies is `work_clearance`, below. Z0 is
+  # always the board top (see the "Z model" section), so there is deliberately no Z
+  # entry here.
+  #
+  # This block used to say the board was "registered to this corner in the fixture
+  # (e.g. pushed into a right-angle corner stop)". That was written before the
+  # origin had to make room for anything, and it has been false ever since: the zero
+  # sits `work_clearance` plus the reach of whatever the job cuts outside the board
+  # away from the bounding box, and the board touches nothing there. It named a
+  # corner stop the board is not against, which is worse than saying nothing.
   #
   # The axes keep the machine's own directions — X grows to the right, Y away from
   # the operator — so this moves the *zero*, it does not mirror anything. With
@@ -241,6 +248,75 @@ properties:
         default: near
 
     required: [x0, y0]
+    additionalProperties: false
+
+  # ---------------------------------------------------------------------------
+  # work_clearance
+  # ---------------------------------------------------------------------------
+  # HOW FAR the work origin stands off the work, in X and Y. `origin` above says
+  # which way; this says how far. The pair is the whole answer to "where do I put my
+  # zero", which until now had no answer at all.
+  #
+  # IT IS A TOOL-EDGE DISTANCE, NOT A TOOL-CENTRE ONE. Nothing this program cuts —
+  # no channel, no hole, no routed slot — has any part of itself closer to the zero
+  # than this. That is what makes it a guarantee the operator can set up against
+  # rather than a hint.
+  #
+  # Why it is not zero. A zero *on* the work is a zero the first cut straddles: a
+  # 0.2 mm isolation channel centred on it puts half of itself at negative
+  # coordinates, and a controller whose work offset sits near the corner of its
+  # envelope may simply refuse to travel there. The default is small but deliberate.
+  #
+  # HOW THE JOB IS PACKED AGAINST IT. Everything the job cuts outside the board
+  # declares how far out it reaches, measured from the board's bounding box:
+  #
+  #   - the routed outline leaves a band of `kerf + finishing` — the material it
+  #     actually removes, which is waste by construction;
+  #   - the locating pins reach 1.5 x their diameter;
+  #   - an engraving depth test cut reuses the routed band when there is one wide
+  #     enough, and otherwise opens one of its own.
+  #
+  # The board is then placed at `work_clearance + the WIDEST of those`, not their
+  # sum: they are all measured from the same edge and overlap, so the widest is what
+  # has to clear. Whichever one it is ends up with its cutting edge exactly on this
+  # line, and everything else is further out. That is what keeps the frame as tight
+  # as the rules allow instead of accumulating every claim.
+  #
+  # WHAT IT REPLACED. k2g used to derive the origin: board bounding box minus
+  # whatever the locating pins happened to need. So the point the operator had to
+  # zero on was a spot in bare blank with no stop, no pin and no witness mark at it;
+  # it was flush with the board on one axis and 4.8 mm out on the other; it moved
+  # whenever the pin diameter changed; and its value was shown nowhere. Changing
+  # this field moves the origin too, but at least it is the operator who moves it.
+  #
+  # Valid examples:
+  #   work_clearance: { x: "2 mm", y: "2 mm" }
+  #   work_clearance: { x: "0.25 in", y: "0.5 in" }
+  #
+  work_clearance:
+    title: Work clearance
+    description: >-
+      How close a cutting tool's edge may come to the work origin, in X and Y.
+      The job is packed against it: whatever this program cuts furthest outside the
+      board — the routed waste, the locating pins — ends up with its edge on this
+      line, and everything else is beyond it. Nothing at all is cut inside it, so
+      this is the gap you can measure to when setting your zero.
+    type: object
+    default:
+      x: 2mm
+      y: 2mm
+    properties:
+      x:
+        title: X work clearance
+        description: How far the work origin stands off the work along X.
+        $ref: "units.yaml#/$defs/size"
+        default: 2mm
+      y:
+        title: Y work clearance
+        description: How far the work origin stands off the work along Y.
+        $ref: "units.yaml#/$defs/size"
+        default: 2mm
+    required: [x, y]
     additionalProperties: false
 
   # ---------------------------------------------------------------------------

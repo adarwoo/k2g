@@ -5,6 +5,13 @@ struct RuntimeIssueDraft {
     details: Option<String>,
 }
 
+/// The diagnostics domain every broken-reference issue is filed under.
+///
+/// One constant rather than a literal at each site: the domain is what
+/// `clear_runtime_errors` matches on, so a typo in one of them would leave that issue
+/// standing on screen after the operator had fixed it.
+const CURRENT_JOB_REF_DOMAIN: &str = "current-job-ref";
+
 /// The diagnostics domain generation failures live in.
 ///
 /// One domain for the whole run, so each publish replaces the previous run's entries
@@ -955,7 +962,7 @@ impl AppState {
 
     pub fn select_process_profile_by_id(&mut self, id: Option<String>) {
         self.clear_runtime_errors("process-profile");
-        self.clear_runtime_errors("current-job-ref");
+        self.clear_runtime_errors(CURRENT_JOB_REF_DOMAIN);
 
         let resolved_id = id
             .filter(|selected_id| {
@@ -1030,10 +1037,48 @@ impl AppState {
         crate::data::with_appdata_mut(|data| data.set_job_board_orientation(angle));
     }
 
+    /// Re-derives the broken-reference diagnostics from the **current** state.
+    ///
+    /// Called on every store write (through the root's projection bridge), because a broken
+    /// reference is a standing condition and almost anything can end it: putting a different
+    /// tool in the rack slot, re-adding the tool to stock, pointing the step at another
+    /// toolset. It used to run on only two events — selecting a machining profile, and
+    /// deleting a stock tool — so the *one* thing that could raise it was wired up and none of
+    /// the things that fix it were. An operator who replaced the tool in the offending slot
+    /// watched the error sit there, correctly describing a state that no longer existed, with
+    /// generation blocked behind it.
+    ///
+    /// De-duplicated against what is already posted, the way [`Self::validate_tooling`] is:
+    /// running on every mutation means re-posting an unchanged fault dozens of times, and
+    /// `push_runtime_error_owned` toasts.
     pub fn validate_current_job_references(&mut self) {
-        self.clear_runtime_errors("current-job-ref");
+        let next = self.current_job_reference_errors();
+        let posted: Vec<(&str, Option<String>, String, Option<String>)> = self
+            .errors
+            .iter()
+            .filter(|error| error.domain == CURRENT_JOB_REF_DOMAIN)
+            .map(|error| {
+                (
+                    error.domain.as_str(),
+                    error.owner_tag.clone(),
+                    error.message.clone(),
+                    error.details.clone(),
+                )
+            })
+            .collect();
+        let unchanged = next.len() == posted.len()
+            && next.iter().zip(&posted).all(|(issue, (domain, owner, message, details))| {
+                issue.domain == *domain
+                    && issue.owner_tag == *owner
+                    && issue.message == *message
+                    && issue.details == *details
+            });
+        if unchanged {
+            return; // do not re-post, and do not re-toast
+        }
 
-        for issue in self.current_job_reference_errors() {
+        self.clear_runtime_errors(CURRENT_JOB_REF_DOMAIN);
+        for issue in next {
             self.push_runtime_error_owned(
                 &issue.domain,
                 issue.owner_tag,
@@ -1094,7 +1139,7 @@ impl AppState {
 
         if !self.machines.iter().any(|machine| machine.id == profile.cnc_profile_id) {
             issues.push(RuntimeIssueDraft {
-                domain: "current-job-ref".to_string(),
+                domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                 owner_tag: process_owner.clone(),
                 message: format!(
                     "Current job cannot execute: broken CNC reference in machining profile '{}'.",
@@ -1113,7 +1158,7 @@ impl AppState {
             .any(|fixture| fixture.id == profile.fixture_profile_id)
         {
             issues.push(RuntimeIssueDraft {
-                domain: "current-job-ref".to_string(),
+                domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                 owner_tag: process_owner.clone(),
                 message: format!(
                     "Current job cannot execute: broken fixture reference in machining profile '{}'.",
@@ -1132,7 +1177,7 @@ impl AppState {
             .any(|toolset| toolset.id == profile.toolset_profile_id)
         {
             issues.push(RuntimeIssueDraft {
-                domain: "current-job-ref".to_string(),
+                domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                 owner_tag: process_owner.clone(),
                 message: format!(
                     "Current job cannot execute: broken toolset reference in machining profile '{}'.",
@@ -1148,7 +1193,7 @@ impl AppState {
         if let Some(router_id) = self.project_config.outline_router_tool_id.clone() {
             if !self.tools.iter().any(|tool| tool.id == router_id) {
                 issues.push(RuntimeIssueDraft {
-                    domain: "current-job-ref".to_string(),
+                    domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                     owner_tag: Some("project:current".to_string()),
                     message: "Current job cannot execute: broken router tool reference.".to_string(),
                     details: Some(format!(
@@ -1162,7 +1207,7 @@ impl AppState {
         if let Some(drill_id) = self.project_config.mouse_bite_drill_tool_id.clone() {
             if !self.tools.iter().any(|tool| tool.id == drill_id) {
                 issues.push(RuntimeIssueDraft {
-                    domain: "current-job-ref".to_string(),
+                    domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                     owner_tag: Some("project:current".to_string()),
                     message: "Current job cannot execute: broken mouse-bite drill tool reference."
                         .to_string(),
@@ -1199,7 +1244,7 @@ impl AppState {
 
             for (slot_index, tool_id) in missing_slots {
                 issues.push(RuntimeIssueDraft {
-                    domain: "current-job-ref".to_string(),
+                    domain: CURRENT_JOB_REF_DOMAIN.to_string(),
                     owner_tag: toolset_owner.clone(),
                     message: format!(
                         "Current job cannot execute: broken toolset slot reference in '{}'.",
@@ -2074,6 +2119,14 @@ fn fixture_profile_to_value(fixture: &FixtureProfile) -> Value {
             "x0": fixture.origin_x0,
             "y0": fixture.origin_y0,
         },
+        // In the fingerprint for the same reason `board_flip_axis` is: generation depends on
+        // it. It sets how far the zero stands off the work, so changing it moves every
+        // coordinate in every program of the job. Absent from here, the operator would widen
+        // their clearance and watch nothing regenerate.
+        "work_clearance": {
+            "x": fixture.work_clearance_x.to_string(),
+            "y": fixture.work_clearance_y.to_string(),
+        },
         "backboard_thickness": fixture.backboard_thickness.to_string(),
         "bed_clearance": fixture.bed_clearance.to_string(),
         "breakthrough": fixture.breakthrough.to_string(),
@@ -2138,6 +2191,10 @@ fn fixture_profile_from_value(value: &Value) -> Option<FixtureProfile> {
             .and_then(Value::as_str)
             .unwrap_or("front")
             .to_string(),
+        // How far the zero stands off the work. Schema-defaulted like the Z model above, so
+        // the 2 mm fallbacks here only guard a hand-edited file.
+        work_clearance_x: size_at(value, "/work_clearance/x", 2.0),
+        work_clearance_y: size_at(value, "/work_clearance/y", 2.0),
         // `y` — the page turn — is what the schema assumes for a profile written before
         // this field existed, so it is also the fallback here.
         board_flip_axis: value
@@ -3494,6 +3551,126 @@ mod readiness_gate_tests {
         // The gate opening must take the banner with it, with nothing to dismiss.
         app.set_readiness_errors(&[]);
         assert!(app.errors.iter().all(|e| e.domain != READINESS_ERROR_DOMAIN));
+    }
+
+    /// A stock tool that exists. Only its id is read by the reference check.
+    fn stock_tool(id: &str) -> crate::data::model::Tool {
+        crate::data::model::Tool {
+            id: id.to_string(),
+            composite_name: "1.0mm drill".to_string(),
+            name: "1.0mm drill".to_string(),
+            kind: "Drill".to_string(),
+            diameter: units::Length::from_mm(1.0),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(118.0),
+            catalog_point_angle: None,
+            flute_length: None,
+            z_min_depth: None,
+            table_feed: None,
+            catalog_table_feed: None,
+            z_feed: None,
+            catalog_z_feed: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: crate::data::model::ToolStatus::InStock,
+            preference: crate::data::model::ToolPreference::Neutral,
+            source_catalog: String::new(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    /// A job whose rack slot points at a tool that is gone, so the broken-reference
+    /// diagnostic has something to report.
+    fn app_with_a_broken_rack_slot() -> AppState {
+        use crate::data::model::profiles::{JobProfile, ToolsetGenerationPolicy, ToolsetProfile};
+        use crate::data::model::state::RackSlot;
+        use crate::data::model::BoardFace;
+
+        let mut app = bare_app();
+        app.toolsets = vec![ToolsetProfile {
+            id: "toolset".into(),
+            name: "My toolset".into(),
+            description: String::new(),
+            generation_policy: ToolsetGenerationPolicy::FixedToolset,
+            slots: [(1u8, RackSlot { tool_id: Some("gone".into()), locked: true, disabled: false })]
+                .into_iter()
+                .collect(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }];
+        app.process_profiles = vec![JobProfile {
+            id: "profile".into(),
+            name: "My machining".into(),
+            cnc_profile_id: String::new(),
+            fixture_profile_id: String::new(),
+            toolset_profile_id: "toolset".into(),
+            board_face: BoardFace::Front,
+            default_operations: Vec::new(),
+            operation_setups: Default::default(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }];
+        app.selected_process_profile_id = Some("profile".into());
+        app
+    }
+
+    /// Just the rack-slot faults — the stub profile above binds no CNC or fixture, which
+    /// legitimately reports two more, and those are not what this is about.
+    fn broken_slot_messages(app: &AppState) -> Vec<&str> {
+        app.errors
+            .iter()
+            .filter(|e| e.domain == CURRENT_JOB_REF_DOMAIN && e.message.contains("toolset slot"))
+            .map(|e| e.message.as_str())
+            .collect()
+    }
+
+    /// **A broken reference has to stop being reported when it is repaired.**
+    ///
+    /// It is a standing condition, not an event, and almost anything can end it — putting a
+    /// different tool in the slot, re-adding the tool to stock, pointing the step at another
+    /// toolset. This used to be re-derived on only two occasions: selecting a machining
+    /// profile, and deleting a stock tool. Deleting a tool is the one thing that *raises* it;
+    /// none of the things that fix it were wired up. So an operator who replaced the tool in
+    /// the offending slot watched the error sit there describing a state that no longer
+    /// existed, with generation blocked behind it and nothing on screen to clear it.
+    #[test]
+    fn a_repaired_rack_slot_withdraws_its_broken_reference() {
+        let mut app = app_with_a_broken_rack_slot();
+        app.validate_current_job_references();
+        assert_eq!(
+            broken_slot_messages(&app),
+            ["Current job cannot execute: broken toolset slot reference in 'My toolset'."],
+            "the fault is reported while it is real",
+        );
+
+        // The operator puts a tool that exists into T1. Nothing else changes — in particular,
+        // the machining profile is not re-selected and no stock tool is deleted, which were
+        // the only two things that used to re-derive this.
+        app.tools = vec![stock_tool("present")];
+        app.toolsets[0].slots.get_mut(&1).unwrap().tool_id = Some("present".into());
+        app.validate_current_job_references();
+        assert!(
+            broken_slot_messages(&app).is_empty(),
+            "the fault must go when the slot is repaired: {:?}",
+            broken_slot_messages(&app),
+        );
+    }
+
+    /// Re-deriving on every store write must not re-post an unchanged fault.
+    ///
+    /// The entries' ids key the banner's detail list and posting one raises a toast, so a
+    /// clear-and-repush on every keystroke elsewhere would strobe the banner and bury the
+    /// screen in toasts for a fault the operator is already looking at.
+    #[test]
+    fn an_unchanged_broken_reference_is_not_reposted() {
+        let mut app = app_with_a_broken_rack_slot();
+        app.validate_current_job_references();
+        let first: Vec<String> = app.errors.iter().map(|e| e.id.clone()).collect();
+
+        app.validate_current_job_references();
+        let second: Vec<String> = app.errors.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(first, second, "the same fault must keep its entry");
     }
 
     /// Republishing an unchanged set must not disturb what is on screen.

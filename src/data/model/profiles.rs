@@ -143,6 +143,15 @@ pub struct FixtureProfile {
     /// `BoardOrigin::from_edges` interprets them.
     pub origin_x0: String,
     pub origin_y0: String,
+    /// How far the work origin stands off the work, per axis (`work_clearance`).
+    ///
+    /// `origin_x0`/`origin_y0` say which way the zero lies from the work; these say how far.
+    /// A **tool-edge** distance: nothing the program cuts comes closer to the zero than this,
+    /// which is what lets the operator measure to it. The job is packed against it — see
+    /// `job_frame` in `crate::runtime::machining_plan` for how the claims outside the board
+    /// resolve into one offset.
+    pub work_clearance_x: Length,
+    pub work_clearance_y: Length,
     /// Which axis the board is turned about for a back-face step (`x`/`y`), in the
     /// schema's own words — `BoardFlip::from_axis` interprets them.
     ///

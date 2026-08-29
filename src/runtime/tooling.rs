@@ -408,23 +408,30 @@ fn read_cutout_config(root: &Node, base: &str) -> CutoutConfigRaw {
 
 /// The step's `engrave_copper` config, defaulted when absent.
 ///
-/// One setting, and depth is deliberately not among them: a V-bit cuts as wide as it is
-/// deep, so depth follows from this width and whichever bit the rack can offer.
+/// Depth is deliberately not among these: a V-bit cuts as wide as it is deep, so depth follows
+/// from the width and whichever bit the rack can offer.
 pub(crate) struct EngraveConfigRaw {
     pub(crate) width: Length,
+    /// Cut a throwaway L in the waste and stop, so the operator can verify the depth before the
+    /// copper is touched. Nothing else in the program checks that Z0 is the board surface.
+    pub(crate) test_cut: bool,
 }
 
 impl Default for EngraveConfigRaw {
     fn default() -> Self {
         // The schema's own default for `engrave_copper`.
-        Self { width: Length::from_mm(0.25) }
+        Self { width: Length::from_mm(0.25), test_cut: false }
     }
 }
 
+/// Read unconditionally, unlike the pin diameter above: every step carries a materialised
+/// `engrave_copper` block whether or not it engraves, but nothing here changes the job's frame,
+/// and both fields are only ever consulted inside `raw.engraves_copper()`.
 fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
     let default = EngraveConfigRaw::default();
     EngraveConfigRaw {
         width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
+        test_cut: node_bool(root, &format!("{base}/test_cut")).unwrap_or(default.test_cut),
     }
 }
 
@@ -4695,6 +4702,40 @@ mod cutout_router_tests {
 #[cfg(test)]
 mod engraver_tests {
     use super::*;
+
+    /// **The test cut is off unless it is asked for**, in the Rust fallback and in the schema
+    /// alike.
+    ///
+    /// This fallback is what a profile gets when the key cannot be read at all — a truncated or
+    /// hand-edited file, since the loader materialises the key for everything else. It halts the
+    /// program in the middle of a job, so defaulting it on would stop a machine nobody is
+    /// standing at, on a profile whose author never asked for a stop.
+    ///
+    /// The schema half is not ceremony: `engrave_copper.width` already carries two different
+    /// defaults in one file (`0.15mm` in `$defs`, `0.25mm` at the step), which is exactly how
+    /// this drifts, and the Rust fallback here silently tracks one of them.
+    #[test]
+    fn the_test_cut_is_off_in_the_rust_fallback_and_in_the_schema() {
+        assert!(!EngraveConfigRaw::default().test_cut, "the Rust fallback is off");
+
+        // Line-by-line rather than by substring: the schema is a CRLF file, and an anchor that
+        // spelled its newlines would pass on one checkout and fail on the next.
+        let lines: Vec<&str> = include_str!("../../schemas/machining.yaml").lines().collect();
+        let declared = lines
+            .iter()
+            .position(|l| l.trim() == "test_cut:")
+            .expect("the schema declares the option");
+        let default = lines[declared..]
+            .iter()
+            .take_while(|l| !l.trim().is_empty())
+            .find(|l| l.trim().starts_with("default:"))
+            .expect("and gives it a default");
+        assert_eq!(
+            default.trim(),
+            "default: false",
+            "the schema default must be off too, or a profile gains a stop it never asked for",
+        );
+    }
 
     /// A V-bit: a tip flat of `tip_mm` on a cone of `angle_deg`.
     fn vbit(id: &str, tip_mm: f64, angle_deg: f64) -> Tool {

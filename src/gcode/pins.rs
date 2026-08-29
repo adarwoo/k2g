@@ -50,10 +50,18 @@ use super::plan::Point;
 /// How far a pin centre sits from the board's bounding box, as a multiple of the pin
 /// diameter.
 ///
-/// One diameter: close enough that the pin pair spans little more than the board (a longer
-/// lever arm between the pins would be *better* for angular registration, but it is also
-/// more blank to buy and more overhang to clamp), and far enough that the pin hole never
-/// breaks into the routed channel around the edge.
+/// One diameter: close enough that the pin pair spans little more than the board — a longer
+/// lever arm between the pins would be *better* for angular registration, but it is also more
+/// blank to buy and more overhang to clamp.
+///
+/// **It does not keep the hole out of the routed channel**, which this comment used to claim.
+/// The hole spans `[0.5·D, 1.5·D]` from the board's edge and the outline channel spans
+/// `[0, kerf + finishing]`, so clearing it would need `D ≥ 2·(kerf + finishing)` — 4.2 mm at the
+/// default 2 mm kerf, which no diameter in the schema's enum reaches. The 3.2 mm pin overlaps by
+/// 0.5 mm, and by 1.675 mm with a 1/8" cutter, so the outline pass cuts through part of every
+/// registration hole. That is a real defect and it is deliberately **not** fixed here: moving the
+/// pins outside the channel would relocate them on every routed job already in the field, which
+/// is a change of its own. Recorded so the next person does not read a guarantee that is not one.
 const CLEARANCE_DIAMETERS: f64 = 1.0;
 
 /// How far the envelope grows beyond the board on each pin side: the centre clearance plus

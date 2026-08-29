@@ -486,6 +486,7 @@ mod tests {
             diameter: Length::from_mm(diameter),
             ops,
             travel_mm: 0.0,
+            verify_stop: None,
         }
     }
 
@@ -773,6 +774,7 @@ mod tests {
                 diameter: Length::from_mm(2.0),
                 ops: vec![op(OpKind::Drill, pt(1.0, 1.0), pt(1.0, 1.0))],
                 travel_mm: 0.0,
+                verify_stop: None,
             },
         ]));
         assert_eq!(traces.len(), 2);

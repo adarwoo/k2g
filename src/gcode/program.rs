@@ -255,7 +255,7 @@ pub fn render_step_body(
     if let Some(prompt) = render.opening_prompt.as_deref() {
         let mut scope = Scope::new();
         scope.push("prompt", prompt.to_string());
-        out.push_str(&render_one(coder, "pause", OPENING_PROMPT_TPL, &mut scope)?);
+        out.push_str(&render_one(coder, "pause", PAUSE_TPL, &mut scope)?);
     }
 
     for block in &step.blocks {
@@ -308,7 +308,7 @@ pub fn render_step_body(
 
         // The block's ops: a point drill is one self-positioning cycle; a routed hole
         // expands into a spiral pocket (rapid → plunge → circles).
-        for op in &block.ops {
+        for (op_index, op) in block.ops.iter().enumerate() {
             match op.kind {
                 OpKind::Drill => {
                     let mut scope = Scope::new();
@@ -389,6 +389,53 @@ pub fn render_step_body(
                     );
                     out.push_str(&render_moves(coder, render, moves, op.entry, fs)?);
                 }
+            }
+
+            // The depth-test stop, which follows the block's **first** op because that op is
+            // the test cut — see `ToolBlock::verify_stop`. Everything about the order here is
+            // the operator's safety: lift clear of the work, stop the spindle, and only then
+            // ask them to look, because looking means a hand and a loupe next to a V-bit.
+            //
+            // The lift goes out through `render_moves` like every other motion, so a machine
+            // with no word for one of these moves degrades the same way it does everywhere
+            // else, rather than acquiring a second path this one case forgot about.
+            if let Some(stop) = block.verify_stop.as_ref().filter(|_| op_index == 0) {
+                let lift = vec![RouteMove::Rapid {
+                    x: op.exit.x,
+                    y: op.exit.y,
+                    z: stop.z_clear,
+                }];
+                out.push_str(&render_moves(coder, render, lift, op.exit, fs)?);
+
+                let mut scope = Scope::new();
+                out.push_str(&render_one(
+                    coder,
+                    "stop_spindle",
+                    &render.spindle_stop_tpl,
+                    &mut scope,
+                )?);
+
+                // What to look for, then the line the machine actually stops on.
+                for line in &stop.advice {
+                    let mut scope = Scope::new();
+                    scope.push("text", line.clone());
+                    out.push_str(&render_one(coder, "comment", ADVICE_TPL, &mut scope)?);
+                }
+                let mut scope = Scope::new();
+                scope.push("prompt", stop.prompt.clone());
+                out.push_str(&render_one(coder, "pause", PAUSE_TPL, &mut scope)?);
+
+                // Back up to speed for the rest of the block. The profile's own
+                // `spindle_start` carries whatever spin-up dwell the machine needs, so this is
+                // the same restart the block opened with and not a bare `M03`.
+                let mut scope = Scope::new();
+                scope.push("rpm", fs.rpm);
+                out.push_str(&render_one(
+                    coder,
+                    "spindle_start",
+                    &render.spindle_start_tpl,
+                    &mut scope,
+                )?);
             }
         }
     }
@@ -557,14 +604,20 @@ fn render_route_move(
 }
 
 /// Renders one primitive, tagging any engine error with the primitive name.
-/// The whole template for [`StepRender::opening_prompt`]: one script line calling the
-/// machine's own `pause` primitive with the text.
+/// The whole template for a Rust-driven operator stop — [`StepRender::opening_prompt`] and the
+/// depth-test stop alike: one script line calling the machine's own `pause` primitive with the
+/// text.
 ///
 /// A template rather than a direct call because `pause` is a **GTL callable** — it exists
 /// on the engine, for profiles to invoke, and has no Rust-side entry point. Rendering a
 /// one-line template is how Rust reaches it, and it keeps the prompt subject to whatever
 /// the profile's `pause` actually emits (`M0`, `M00 (msg)`, nothing at all).
-const OPENING_PROMPT_TPL: &str = "pause(prompt)\n";
+const PAUSE_TPL: &str = "pause(prompt)\n";
+
+/// The same trick for `comment`, so a stop can put more in front of the operator than the one
+/// line a controller's message word carries. A machine with no comment primitive emits nothing
+/// for these and still stops, which is the right way round.
+const ADVICE_TPL: &str = "comment(text)\n";
 
 fn render_one(coder: &Coder, name: &str, tpl: &str, scope: &mut Scope) -> Result<String, BodyError> {
     coder
@@ -736,6 +789,7 @@ mod tests {
                 diameter: Length::from_mm(1.0),
                 ops: vec![drill_op(3.0, 4.0), drill_op(10.0, 4.0)],
                 travel_mm: 7.0,
+                verify_stop: None,
             }],
             notes: vec![],
         }
@@ -766,6 +820,7 @@ mod tests {
                     source: "outline".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         }
@@ -796,6 +851,7 @@ mod tests {
                     source: "h1".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         }
@@ -911,6 +967,193 @@ mod tests {
         assert!(prompt < first_change, "asked before anything is loaded:\n{body}");
     }
 
+    /// An isolation block that leads with a depth test cut and stops after it. Two ops, so
+    /// the tests can see that the stop lands between them and not at either end.
+    fn engrave_step_with_test_cut() -> StepPlan {
+        let l: Vec<Point> = [(20.0, 0.0), (0.0, 0.0), (0.0, 10.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let net: Vec<Point> = [(8.0, 8.0), (11.0, 8.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let contour = |path: Vec<Point>, source: &str| AtomicOp {
+            phase: Phase::Engrave,
+            kind: OpKind::RouteContour { path: path.clone() },
+            tool_id: "r1".to_string(),
+            entry: path[0],
+            exit: path[path.len() - 1],
+            z: ZProfile {
+                z_bottom: Length::from_mm(-0.12),
+                z_retract: Length::from_mm(5.0),
+                z_feed: None,
+            },
+            primitive: "route_contour",
+            source: source.to_string(),
+        };
+        StepPlan {
+            index: 0,
+            name: "Engrave".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(1),
+                diameter: Length::from_mm(0.1),
+                ops: vec![contour(l, "Depth test cut"), contour(net, "GND#0")],
+                travel_mm: 0.0,
+                verify_stop: Some(crate::gcode::plan::VerifyStop {
+                    z_clear: Length::from_mm(20.0),
+                    advice: vec!["The channel should measure 0.25 mm across.".to_string()],
+                    prompt: "Measure the test cut".to_string(),
+                }),
+            }],
+            notes: vec![],
+        }
+    }
+
+    /// A coder whose machine has all three operator words, so a test can see what the stop
+    /// actually emits rather than the nothing an absent primitive would.
+    fn operator_coder() -> Coder {
+        Coder::with_program_primitives(&crate::gcode::coder::ProgramPrimitives {
+            set_unit: "",
+            set_origin: "",
+            origin_reference: "",
+            comment: "`({text})",
+            message: "`M117 {text}",
+            pause: "`M00 ({text})",
+        })
+        .expect("primitives compile")
+    }
+
+    /// **The spindle is stopped before the operator is asked to look.** This is the test that
+    /// matters: answering the prompt means putting a hand and a loupe up against the cut, and
+    /// a V-bit still turning at 20,000 rpm is an injury, not an inconvenience. The tool also
+    /// has to be clear of the work — at the fixture's safe height, not the retract plane, which
+    /// is millimetres above the board and full of clamps.
+    ///
+    /// And it all has to happen *after* the test cut and *before* the copper, or the stop is
+    /// asking about a groove that does not exist yet or a board that is already engraved.
+    #[test]
+    fn the_spindle_stops_before_the_operator_is_asked_to_look_at_the_test_cut() {
+        let body = render_step_body(
+            &operator_coder(),
+            &engrave_step_with_test_cut(),
+            &render_ctx(true),
+            &router_feed(),
+        )
+        .expect("body renders");
+
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} is not emitted:\n{body}"))
+        };
+
+        let cut = at("G1 X0 Y0 Z-0.12");
+        let lift = at("G0 X0 Y10 Z20");
+        let stop = at("M05");
+        let advice = at("(The channel should measure 0.25 mm across.)");
+        let prompt = at("M00 (Measure the test cut)");
+        let copper = at("G0 X8 Y8 Z5");
+        // The block opened with an M03 of its own, so the restart is the *next* one.
+        let restart = prompt
+            + lines[prompt..]
+                .iter()
+                .position(|l| l.contains("M03"))
+                .unwrap_or_else(|| panic!("the spindle is never restarted:\n{body}"));
+
+        assert!(cut < lift, "the L is cut before the tool lifts:\n{body}");
+        assert!(lift < stop, "the tool is clear before the spindle stops:\n{body}");
+        assert!(stop < advice && advice < prompt, "told what to look for, then asked:\n{body}");
+        assert!(restart < copper, "the spindle is running again before the copper:\n{body}");
+        assert_eq!(
+            lines[stop..prompt].iter().filter(|l| l.contains("M03")).count(),
+            0,
+            "the spindle must stay stopped from the lift to the prompt:\n{body}",
+        );
+    }
+
+    /// **The stop follows the op the planner led with.** `verify_stop` and the test cut at
+    /// `ops[0]` are two halves of one fact that the type system cannot make agree, so this is
+    /// what holds them together: if the renderer ever stopped after some other op, the operator
+    /// would be asked to measure a groove the machine has not cut.
+    #[test]
+    fn the_stop_follows_the_op_the_planner_led_with() {
+        let body = render_step_body(
+            &operator_coder(),
+            &engrave_step_with_test_cut(),
+            &render_ctx(true),
+            &router_feed(),
+        )
+        .expect("body renders");
+
+        assert_eq!(body.matches("M00 (").count(), 1, "exactly one stop:\n{body}");
+        let prompt = body.find("M00 (").expect("the stop");
+        assert!(
+            prompt < body.find("G0 X8 Y8 Z5").expect("the isolation span"),
+            "the stop is before the second op, not after the block:\n{body}",
+        );
+    }
+
+    /// The test cut is made with the engraver already in the spindle — it is an op of the
+    /// isolation block, not a block of its own, so it costs no extra tool change and cannot be
+    /// cut with whatever happened to be loaded.
+    #[test]
+    fn the_test_cut_is_made_with_the_engraving_tool_already_in_the_spindle() {
+        let body = render_step_body(
+            &operator_coder(),
+            &engrave_step_with_test_cut(),
+            &render_ctx(true),
+            &router_feed(),
+        )
+        .expect("body renders");
+
+        assert_eq!(body.matches("M06").count(), 1, "one tool change for the block:\n{body}");
+        assert!(
+            body.find("M06").unwrap() < body.find("G1 X0 Y0 Z-0.12").unwrap(),
+            "the tool is loaded before the test cut:\n{body}",
+        );
+    }
+
+    /// **A block that asked for no stop emits none.** The regression guard on every engraving
+    /// program written before this existed: the option is off by default, and a program that
+    /// halted unasked on a machine nobody is standing at would be worse than one that never
+    /// checked its depth.
+    #[test]
+    fn a_block_with_no_verify_stop_renders_exactly_as_it_did_before() {
+        let mut step = engrave_step_with_test_cut();
+        step.blocks[0].verify_stop = None;
+        step.blocks[0].ops.remove(0);
+
+        let body =
+            render_step_body(&operator_coder(), &step, &render_ctx(true), &router_feed())
+                .expect("body renders");
+
+        assert!(!body.contains("M00"), "no stop:\n{body}");
+        assert!(!body.contains("Z20"), "and no lift to the safe height:\n{body}");
+        assert_eq!(body.matches("M05").count(), 1, "only the step's closing stop:\n{body}");
+    }
+
+    /// **A machine with no operator words still stops nothing and breaks nothing.** The
+    /// planner refuses to plan a test cut for a machine with no `pause`, so this case should
+    /// not arise — but a plan can outlive an edit to its CNC profile, and the renderer must
+    /// degrade rather than emit a half-formed prompt.
+    #[test]
+    fn a_machine_with_no_operator_words_renders_the_cut_and_no_prompt() {
+        let body = render_step_body(
+            &Coder::new(),
+            &engrave_step_with_test_cut(),
+            &render_ctx(true),
+            &router_feed(),
+        )
+        .expect("body renders");
+
+        assert!(body.contains("G1 X0 Y0 Z-0.12"), "the L is still cut:\n{body}");
+        assert!(!body.contains("Measure the test cut"), "and nothing is said:\n{body}");
+    }
+
     /// **A tool's two rated feeds reach the two kinds of move they belong to.**
     ///
     /// `table_feed` is the lateral cutting rate and `z_feed` the plunge rate; a catalogue
@@ -966,6 +1209,7 @@ mod tests {
                     source: "outer#0.span0".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         };
@@ -1050,6 +1294,7 @@ mod tests {
                     source: "h1".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         };
@@ -1091,6 +1336,7 @@ mod tests {
                     source: "slot1".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         };
@@ -1136,6 +1382,7 @@ mod tests {
                     source: "outer#0.span0".to_string(),
                 }],
                 travel_mm: 0.0,
+                verify_stop: None,
             }],
             notes: vec![],
         };

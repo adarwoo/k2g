@@ -35,6 +35,12 @@ pub fn FixtureProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                 "/board_holding_method",
                 "/origin/x0",
                 "/origin/y0",
+                // The other half of "where is zero": `origin` says which way it lies from
+                // the work, these say how far. A tool-edge distance — nothing the program
+                // cuts comes nearer the zero than this — so it is the gap the operator
+                // actually measures to when setting up.
+                "/work_clearance/x",
+                "/work_clearance/y",
                 // Beside `origin` because both answer "where is zero" — that one for
                 // the board's corner, this one for which of the machine's stored zeros
                 // the fixture sits in.

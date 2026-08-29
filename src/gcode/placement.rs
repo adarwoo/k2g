@@ -86,22 +86,81 @@ impl BoardOrigin {
     }
 }
 
-/// Work outside the board's own bounds that the origin has to clear, per side, in
-/// machine millimetres before scaling.
+/// Room the origin has to make beyond the board's own bounds, per side, in machine
+/// millimetres before scaling.
 ///
-/// Today this is the locating pins and only the locating pins. It is **not** the routed
-/// channel: the cutter centre runs one radius outside the edge, so a routed job has always
-/// cut into negative coordinates, and folding that in here would move every existing
-/// routed program. That is a separate decision from this one.
+/// Two kinds of thing live here and they combine differently, which is why there are two
+/// combinators:
 ///
-/// [`Default`] is all zeros, which reproduces the transform exactly as it was before
-/// margins existed — the property every "a job without pins is unchanged" test rests on.
+/// - **Extents** — how far something the job cuts reaches *from the board's bounding box*:
+///   the routed outline's waste band, the locating pins ([`super::pins::margin`]), the
+///   engraving depth test cut's band ([`super::testcut::band`]). They share a reference and
+///   overlap each other, so they combine with [`Margin::widest`].
+/// - **The fixture's work clearance** — how far the zero stands off the work. It sits outside
+///   every extent by definition, so it combines with [`Margin::stack`].
+///
+/// The whole frame is therefore `extents.widest(…).stack(clearance)`, assembled once per job in
+/// `job_frame` (`crate::runtime::machining_plan`).
+///
+/// Every claimant is made by the same rule: state how much room you need *without needing to
+/// know where the board is*, then read your own geometry back out of the finished placement.
+/// That is what breaks the circularity — the origin has to clear the work, the work is measured
+/// from the placed board, and the placed board depends on the origin. [`super::pins`] documents
+/// the same trick at length.
+///
+/// [`Default`] is all zeros, which reproduces the transform exactly as it was before any of
+/// this existed.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Margin {
     pub x_min: f64,
     pub x_max: f64,
     pub y_min: f64,
     pub y_max: f64,
+}
+
+impl Margin {
+    /// Combines two **extents**, per side: the wider wins.
+    ///
+    /// **Takes the maximum; it does not add.** Two extents are two things measured outward from
+    /// the *same* edge — the board's bounding box — and they overlap in the material: the
+    /// routed waste band and the pin holes occupy the same few millimetres of blank. Summing
+    /// them would charge the frame twice for one piece of material and push the board further
+    /// from the zero than anything needs, which is the opposite of packing the job tightly.
+    ///
+    /// Whichever extent is widest ends up with its cutting edge exactly on the clearance line;
+    /// everything else falls short of it, which is correct.
+    pub fn widest(self, other: Self) -> Self {
+        Self {
+            x_min: self.x_min.max(other.x_min),
+            x_max: self.x_max.max(other.x_max),
+            y_min: self.y_min.max(other.y_min),
+            y_max: self.y_max.max(other.y_max),
+        }
+    }
+
+    /// Stacks a band **outside** this one, per side: the two add.
+    ///
+    /// The counterpart to [`Margin::widest`], and the distinction matters. This is for a band
+    /// that genuinely sits beyond another rather than sharing its reference — today only the
+    /// fixture's work clearance, which is measured from the *zero* and holds everything the job
+    /// cuts at arm's length. Using `widest` there would let a wide extent swallow the clearance
+    /// whole and put a cutting edge on the origin.
+    ///
+    /// Associative and commutative, with [`Margin::default`] as the identity.
+    pub fn stack(self, other: Self) -> Self {
+        Self {
+            x_min: self.x_min + other.x_min,
+            x_max: self.x_max + other.x_max,
+            y_min: self.y_min + other.y_min,
+            y_max: self.y_max + other.y_max,
+        }
+    }
+
+    /// A margin of `value` on every side — for a claim that reaches equally in all directions,
+    /// such as the routed outline's waste band.
+    pub fn uniform(value: f64) -> Self {
+        Self { x_min: value, x_max: value, y_min: value, y_max: value }
+    }
 }
 
 /// Which axis the board is turned about when a step machines the bottom side.
@@ -157,6 +216,21 @@ impl Rect {
 
     pub fn centre_y(&self) -> f64 {
         (self.min_y + self.max_y) / 2.0
+    }
+
+    /// Extent along X.
+    ///
+    /// **Can be negative.** A rect is normalised only by [`Placement::new`], which flips one
+    /// built from a `right`/`far` origin the right way round; a rect built by hand — as the
+    /// pin and test-cut tests do — is whatever its caller wrote. A consumer that needs a real
+    /// rectangle checks the sign rather than trusting it.
+    pub fn width(&self) -> f64 {
+        self.max_x - self.min_x
+    }
+
+    /// Extent along Y. Can be negative, for the reason [`Self::width`] gives.
+    pub fn height(&self) -> f64 {
+        self.max_y - self.min_y
     }
 }
 

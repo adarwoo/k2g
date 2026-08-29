@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use units::Length;
 
 use super::placement::Placement;
-use super::plan::{AtomicOp, OpKind, Phase, Point, ToolBlock, ZProfile};
+use super::plan::{AtomicOp, OpKind, Phase, Point, ToolBlock, VerifyStop, ZProfile};
 
 /// Ordering tolerance: a 2-opt swap is accepted only if it shortens the route by
 /// more than this (millimetres), so floating-point noise never flips a decision.
@@ -177,6 +177,7 @@ pub fn plan_drilling(
                 diameter,
                 ops,
                 travel_mm,
+                verify_stop: None,
             }
         })
         .collect()
@@ -301,6 +302,7 @@ pub fn plan_routing(
                 diameter,
                 ops,
                 travel_mm,
+                verify_stop: None,
             }
         })
         .collect()
@@ -390,6 +392,7 @@ pub fn plan_outline(
         diameter: tool_diameter,
         ops,
         travel_mm,
+        verify_stop: None,
     })
 }
 
@@ -413,6 +416,23 @@ pub struct EngraveSpan {
     pub z_bottom: Length,
 }
 
+/// A depth test cut to make **before** the isolation pass: the L, how deep it goes, and what
+/// to say at the stop that follows it.
+///
+/// The geometry comes from [`super::testcut::l_path`] already in machine coordinates, so this
+/// carries it rather than deriving it — the same arrangement [`EngraveSpan`] has, and for the
+/// same reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TestCut {
+    /// The L, as X-leg end → corner → Y-leg end.
+    pub path: [Point; 3],
+    /// How deep it cuts, as a negative machine Z. The **nominal** isolation depth — the one
+    /// the pass was designed around, not a narrowed span's.
+    pub z_bottom: Length,
+    /// The stop that follows the cut.
+    pub stop: VerifyStop,
+}
+
 /// Plans the isolation pass: one block for the engraver, its spans ordered by travel.
 ///
 /// One block, because one bit cuts all of it and the step should pay a single tool change
@@ -431,8 +451,22 @@ pub struct EngraveSpan {
 ///
 /// Entry stays at `path[0]`. A closed loop could be entered anywhere, and choosing where
 /// is a real travel saving — and a separate piece of work from getting the cut right.
+///
+/// ## The test cut
+///
+/// `test_cut` leads the block, at `ops[0]`, **outside the tour** — the tour then runs from
+/// where the L left the tool, so the nearest span is picked up first. It is not toured with
+/// the spans because a depth test that happens second has already been cut at a depth nobody
+/// looked at, and it is not a fourth [`EngraveSpan`] because the loop-closing branch below
+/// would turn an L into a triangle: a plausible-looking picture and a witness that says
+/// nothing.
+///
+/// A test cut with **no spans** still yields `None`. A program that stops for a depth check
+/// and then engraves nothing is worse than one that never stopped: the operator has answered a
+/// question about a board that is not going to be cut.
 pub fn plan_engrave(
     spans: &[EngraveSpan],
+    test_cut: Option<TestCut>,
     tool_id: &str,
     tool_diameter: Length,
     z_retract: Length,
@@ -444,11 +478,32 @@ pub fn plan_engrave(
         return None;
     }
 
-    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
-    let order = tsp_order(start, &entries);
-    let travel_mm = route_length(start, &entries, &order);
+    // The spans are toured from wherever the test cut left the tool, so the L costs one lead-in
+    // hop and no detour. `travel_mm` gains that hop and nothing else: `route_length` tours
+    // *entries*, so it already leaves out every contour's own perimeter, and counting the L's
+    // legs would make it the one op whose cutting distance was included.
+    let from = test_cut.as_ref().map_or(start, |t| t.path[2]);
+    let lead_mm = test_cut.as_ref().map_or(0.0, |t| start.distance_mm(&t.path[0]));
 
-    let ops: Vec<AtomicOp> = order
+    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
+    let order = tsp_order(from, &entries);
+    let travel_mm = lead_mm + route_length(from, &entries, &order);
+
+    let mut ops: Vec<AtomicOp> = Vec::with_capacity(usable.len() + 1);
+    if let Some(test) = test_cut.as_ref() {
+        ops.push(AtomicOp {
+            phase: Phase::Engrave,
+            kind: OpKind::RouteContour { path: test.path.to_vec() },
+            tool_id: tool_id.to_string(),
+            entry: test.path[0],
+            exit: test.path[2],
+            z: ZProfile { z_bottom: test.z_bottom, z_retract, z_feed: None },
+            primitive: "route_contour",
+            source: "Depth test cut".to_string(),
+        });
+    }
+
+    ops.extend(order
         .iter()
         .map(|&i| {
             let span = usable[i];
@@ -470,8 +525,7 @@ pub fn plan_engrave(
                 primitive: "route_contour",
                 source: span.source.clone(),
             }
-        })
-        .collect();
+        }));
 
     Some(ToolBlock {
         slot: slots.get(tool_id).copied(),
@@ -479,6 +533,7 @@ pub fn plan_engrave(
         diameter: tool_diameter,
         ops,
         travel_mm,
+        verify_stop: test_cut.map(|t| t.stop),
     })
 }
 
@@ -1130,14 +1185,33 @@ mod engrave_tests {
     }
 
     fn block(spans: &[EngraveSpan]) -> Option<ToolBlock> {
+        block_with(spans, None)
+    }
+
+    fn block_with(spans: &[EngraveSpan], test_cut: Option<TestCut>) -> Option<ToolBlock> {
         plan_engrave(
             spans,
+            test_cut,
             "v1",
             Length::from_mm(3.175),
             Length::from_mm(2.0),
             pt(0.0, 0.0),
             &BTreeMap::new(),
         )
+    }
+
+    /// An L with its corner on the work origin and its legs running towards the board, the
+    /// shape `testcut::l_path` produces once the frame has made room for it.
+    fn test_cut() -> TestCut {
+        TestCut {
+            path: [pt(20.0, 0.0), pt(0.0, 0.0), pt(0.0, 10.0)],
+            z_bottom: Length::from_mm(-0.12),
+            stop: VerifyStop {
+                z_clear: Length::from_mm(20.0),
+                advice: vec!["The channel should measure 0.25 mm across.".to_string()],
+                prompt: "Measure the test cut".to_string(),
+            },
+        }
     }
 
     /// The geometry stores a ring as its distinct vertices, so the segment from the last
@@ -1200,6 +1274,89 @@ mod engrave_tests {
     fn engraving_is_its_own_phase() {
         let block = block(&[span("GND", square(), true, -0.1)]).expect("one span");
         assert_eq!(block.ops[0].phase, Phase::Engrave);
+    }
+
+    /// **A depth test that happens second has already been cut at a depth nobody looked at.**
+    /// The whole point of the L is that the operator sees it before any copper is touched, so
+    /// it leads the block and the tour is not allowed anywhere near it — a TSP that shortened
+    /// travel by engraving the nearest net first would leave the test cut verifying a board
+    /// that is already made.
+    #[test]
+    fn a_test_cut_leads_the_block_and_the_tour_starts_where_it_ends() {
+        // A span whose entry is close to the origin and far from the L's exit: if the test cut
+        // were toured with the spans, or the tour still started from the origin, this ordering
+        // would come out differently.
+        let near_origin = vec![pt(30.0, 0.2), pt(31.0, 0.2)];
+        let near_l_exit = vec![pt(0.2, 11.0), pt(0.2, 12.0)];
+        let block = block_with(
+            &[span("near.origin", near_origin, false, -0.1), span("near.l", near_l_exit, false, -0.1)],
+            Some(test_cut()),
+        )
+        .expect("a test cut and two spans");
+
+        assert_eq!(block.ops.len(), 3, "the test cut is an op like any other");
+        assert_eq!(block.ops[0].source, "Depth test cut", "and it is the first of them");
+        assert_eq!(
+            block.ops[1].source, "near.l",
+            "the tour starts where the test cut left the tool, not at the origin",
+        );
+    }
+
+    /// **A closed L is a triangle.** `plan_engrave` closes any span flagged `closed`, which is
+    /// right for an isolation ring and catastrophic for a test cut: the diagonal from the Y-leg
+    /// end back to the X-leg end would be cut across whatever is there, and the picture would
+    /// look entirely plausible. The test cut is a distinct type precisely so it cannot take
+    /// that branch — this is what says so.
+    #[test]
+    fn the_test_cut_is_never_closed_into_a_loop() {
+        let block = block_with(&[span("GND", square(), true, -0.1)], Some(test_cut()))
+            .expect("a test cut and a span");
+        let OpKind::RouteContour { ref path } = block.ops[0].kind else {
+            panic!("the test cut is a contour");
+        };
+        assert_eq!(path.len(), 3, "three points, not four: {path:?}");
+        assert_ne!(path[0], path[path.len() - 1], "an L must not come back to its start");
+    }
+
+    /// The stop travels with the block, because the renderer has to know to make one — and it
+    /// is the *engraving* block that carries it, so the operator is asked with the V-bit
+    /// already in the spindle and the board untouched.
+    #[test]
+    fn a_test_cut_carries_the_blocks_verify_stop() {
+        let stopping = block_with(&[span("GND", square(), true, -0.1)], Some(test_cut()))
+            .expect("a test cut and a span");
+        let stop = stopping.verify_stop.expect("the block stops for the operator");
+        assert_eq!(stop.prompt, "Measure the test cut");
+        assert!(!stop.advice.is_empty(), "and says what to look for");
+
+        let plain = block(&[span("GND", square(), true, -0.1)]).expect("one span");
+        assert!(plain.verify_stop.is_none(), "a step that asked for no test cut does not stop");
+    }
+
+    /// **A stop for a board that is not going to be cut.** A test cut with no isolation spans
+    /// would halt the program, ask the operator to measure a groove, and then engrave nothing —
+    /// worse than never having stopped, because they have now answered a question that had no
+    /// consequence. The empty-block rule holds regardless of the test cut.
+    #[test]
+    fn a_test_cut_alone_does_not_make_an_engrave_block() {
+        assert!(block_with(&[], Some(test_cut())).is_none());
+    }
+
+    /// Travel counts the hop out to the test cut — `ToolBlock::travel_mm` claims to run "from
+    /// the block's start point through every op in order", and leaving out the one op that is
+    /// deliberately not toured would make that false.
+    #[test]
+    fn travel_counts_the_lead_out_to_the_test_cut() {
+        let far = vec![pt(10.0, 10.0), pt(11.0, 10.0)];
+        let plain = block(&[span("GND", far.clone(), false, -0.1)]).expect("one span");
+        let tested =
+            block_with(&[span("GND", far, false, -0.1)], Some(test_cut())).expect("one span");
+        assert!(
+            tested.travel_mm > plain.travel_mm,
+            "{} is not more than {}",
+            tested.travel_mm,
+            plain.travel_mm,
+        );
     }
 }
 

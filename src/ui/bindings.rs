@@ -328,6 +328,14 @@ pub fn refresh_legacy_projections() {
             ctx.refresh_tools(stock);
         }
         ctx.refresh_process_profiles(&machining);
+        // Re-derive the broken-reference diagnostics against what was just projected. They
+        // are a standing condition, not an event: a rack slot pointing at a deleted tool
+        // stops being wrong the moment a different tool is put in that slot, and that edit
+        // arrives here like any other store write. Raised on only two events before this,
+        // neither of which was a fix, so a repaired job stayed blocked behind an error
+        // describing a state that no longer existed. Self-de-duplicating, so an unchanged
+        // fault is not re-posted or re-toasted on every keystroke elsewhere.
+        ctx.validate_current_job_references();
     });
 }
 

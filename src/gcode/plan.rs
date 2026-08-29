@@ -37,14 +37,14 @@ impl Point {
 }
 
 /// The machining phase an op belongs to. Phases run in this fixed,
-/// rigidity-decreasing order (op-planner §4): all drilling completes while the board
-/// is fully attached and flat, before any routing releases it. `Engrave` is reserved
-/// for the future copper phase (op-planner §9.5); ordering is by `derive(Ord)`, so
-/// the variant order *is* the phase order.
+/// rigidity-decreasing order (op-planner §4): the copper is engraved while the board is whole,
+/// flat and undrilled, then all drilling completes while it is still fully attached, before any
+/// routing releases it. Ordering is by `derive(Ord)`, so the variant order *is* the phase order.
 ///
-/// `Engrave` and `Route` are not emitted by the drill phase yet, but their ordinal
-/// positions define the precedence (`derive(Ord)`) the planner is built around, so
-/// they are declared now (op-planner §4, §9.5).
+/// All three are emitted. Note that the ordering is not *enforced* through this type: the
+/// planner pushes blocks in the right sequence and `block_order_tests` in
+/// `crate::runtime::machining_plan` guards that at the source, because nothing here would fail
+/// to compile if two pushes were swapped.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase {
@@ -122,6 +122,33 @@ pub struct AtomicOp {
     pub source: String,
 }
 
+/// An operator stop, and everything the program needs to make one.
+///
+/// Emitted **after the block's first op**, so it is the depth test cut the operator is being
+/// asked to look at — see [`ToolBlock::verify_stop`].
+///
+/// The text is split in two because a controller's message word carries one line: `advice` goes
+/// out as comments, which a machine with no comment word simply drops, and `prompt` is the one
+/// line that appears at the stop itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifyStop {
+    /// Where the tool lifts to before the spindle stops — the fixture's safe height, clear of
+    /// clamps and fixture hardware. The operator is about to put their hands and a loupe next to
+    /// the cut, so this is not the retract plane.
+    pub z_clear: Length,
+    /// Lines shown before the stop, through the machine's own `comment` primitive. What the
+    /// channel should measure, and what to do in each direction.
+    ///
+    /// **Plain ASCII, and no parentheses:** every bundled profile renders a comment as
+    /// `( {text} )`, so a bracket inside the text closes the comment early and feeds the rest of
+    /// the sentence to the parser. Formatted in millimetres and never through the operator's
+    /// display-unit preference — the emitted program is a machine fact and must not change
+    /// because someone switched the UI to inches.
+    pub advice: Vec<String>,
+    /// The one line shown at the stop itself.
+    pub prompt: String,
+}
+
 /// A contiguous run of ops sharing one tool (op-planner §4.2) — the unit that costs
 /// exactly one tool change. Ordered within by the planner's TSP.
 #[derive(Clone, Debug, PartialEq)]
@@ -134,6 +161,21 @@ pub struct ToolBlock {
     /// Total straight-line XY travel across the block, from the block's start point
     /// through every op in order (millimetres) — the quantity the TSP minimises.
     pub travel_mm: f64,
+    /// An operator stop after this block's **first** op, and what to say at it.
+    ///
+    /// Set only on an isolation block whose step asked for a depth test cut, in which case
+    /// `ops[0]` **is** that cut — put there by [`plan_engrave`](super::planner::plan_engrave)
+    /// ahead of the TSP rather than ordered by it, because a test cut that happens second has
+    /// already been cut at a depth nobody looked at.
+    ///
+    /// The two halves have to agree and the type cannot say so, which is the price of keeping
+    /// the cut in `ops` where the 3D view, the op table and the op count all find it for free.
+    /// There is one construction site and one consumption site, and a test pins the pairing.
+    ///
+    /// Note that the test cut is counted by [`Self::op_count`] like any other op, even though it
+    /// machines nothing of the board. That is deliberate: it is real motion at real depth, and a
+    /// count that hid it would disagree with the program.
+    pub verify_stop: Option<VerifyStop>,
 }
 
 impl ToolBlock {

@@ -39,14 +39,16 @@ use units::{Length, UserUnitDisplay};
 use crate::data::model::tool_core::ToolKind;
 use crate::data::model::{FixtureProfile, TabContour, Tool};
 use crate::data::{appdata_ready, with_appdata};
-use crate::gcode::assigner::{self, AssignConfig, AssignError, Strategy, Weights};
+use crate::gcode::assigner::{
+    self, engrave_depth_per_width, AssignConfig, AssignError, Strategy, Weights,
+};
 use crate::gcode::placement::{BoardFlip, BoardOrigin, Margin, Placement, PlacementSpec};
-use crate::gcode::plan::{MachiningPlan, Point, StepPlan};
+use crate::gcode::plan::{MachiningPlan, Point, StepPlan, VerifyStop};
 use crate::gcode::planner::{
     plan_drilling, plan_engrave, plan_outline, plan_routing, DrillTarget, EngraveSpan, OutlineSpan,
-    RouteShape, RouteTarget,
+    RouteShape, RouteTarget, TestCut,
 };
-use crate::gcode::{oblong, outline, pins, scene};
+use crate::gcode::{oblong, outline, pins, scene, testcut};
 use crate::runtime::isolation::IsolationSpec;
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_engraver,
@@ -58,18 +60,42 @@ use crate::runtime::AppCtx;
 /// The coordinate frame every program of one job is written in.
 ///
 /// Derived once per job (see the module note) so the steps cannot disagree about where the
-/// zero is. Without locating pins it is entirely inert — a default [`Margin`] and no pin
-/// diameter — and the transform is bit-for-bit the one k2g produced before any of this
-/// existed.
+/// zero is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct JobFrame {
-    /// Room the origin makes for the pins. Zero when the job has none.
+    /// The finished offset from the board's bounding box to the work origin: the widest thing
+    /// the job cuts outside the board, plus the fixture's work clearance. See [`job_frame`].
     pub margin: Margin,
+    /// The fixture's declared work clearance, kept apart from [`Self::margin`] because it is the
+    /// operator's own number and the notes quote it back to them.
+    pub clearance: Margin,
     /// The pin diameter, when the job drills pins at all.
     pub pin_diameter: Option<Length>,
     /// Which axis the board turns about, from the fixture. Meaningful for the pins even on
     /// an all-front job, because it decides which pair of sides they sit on.
     pub flip_axis: BoardFlip,
+    /// Which corner of the bed the zero sits on, from the fixture.
+    ///
+    /// Here rather than read per step because the *margin* depends on it — the test cut's band
+    /// and the clearance are claimed on the origin's two sides — and a margin computed against
+    /// one corner while the geometry is placed against another would open the band on the wrong
+    /// edges. Like [`Self::flip_axis`], it is a fact about where the registration is.
+    pub origin: BoardOrigin,
+    /// How wide a band the engraving depth test cut is cut in, when any step asks for one.
+    ///
+    /// Resolved here, not in the step, because it is one of the extents the frame is built from
+    /// — and because a test cut in step 1 moves the **one** zero step 3's drilling is written
+    /// against too. That is not a leak; it is what one frame means.
+    pub test_band: Option<Length>,
+    /// The material the outline routing removes outside the board (`kerf + finishing`), zero
+    /// when no step cuts the board out.
+    ///
+    /// Kept so the notes can say whether the test cut reused this band or had one opened for
+    /// it — the difference between costing nothing and moving every coordinate in the job.
+    ///
+    /// `Option` only because [`Length`] has no `Default` and this type derives one; `None` and
+    /// zero mean the same thing — no step cuts the board out.
+    pub waste: Option<Length>,
 }
 
 /// The job's shared frame, from the profile's steps and the fixture holding the board.
@@ -80,23 +106,93 @@ pub struct JobFrame {
 /// first rather than, say, the largest is the honest reading of "the pins this job is
 /// registered by": a second pin step re-fixtures against the same holes.
 ///
-/// The flip axis comes from the fixture rather than from the step because it is a fact
-/// about where the registration *is*, which the fixture owns.
+/// The flip axis, the origin corner and the work clearance come from the fixture rather than
+/// from a step because they are facts about where the registration *is*, which the fixture owns.
+///
+/// # Extents, then the clearance
+///
+/// The fixture declares `work_clearance` — how close a cutting tool's **edge** may come to the
+/// zero. Everything the job cuts outside the board declares an **extent**: how far it reaches
+/// from the board's bounding box, stated without needing to know where the board is, which is
+/// what breaks the circularity (the origin clears the work, the work is measured from the placed
+/// board, the placed board depends on the origin). Three claim extents today:
+///
+/// | claimant | extent from the bbox | sides | read back out by |
+/// |---|---|---|---|
+/// | routed outline | `kerf + finishing` — the material it removes | all four | — (it is waste) |
+/// | locating pins | `1.5 × diameter` | the flip axis' two | [`pins::centres`] |
+/// | depth test cut | [`testcut::band`] | the origin's two | [`testcut::l_path`] |
+///
+/// The extents combine with [`Margin::widest`] and **not** [`Margin::stack`]: they are all
+/// measured from the same edge and overlap in the material, so summing them would charge the
+/// frame twice for one piece of blank and push the board further out than anything needs.
+/// Whichever is widest ends up with its cutting edge exactly on the clearance line.
+///
+/// The clearance is then stacked *outside* the widest of them, because it is measured from the
+/// zero rather than from the board. `widest` there would let a wide extent swallow it whole and
+/// put a cutting edge on the origin.
+///
+/// A fourth claimant adds one line to the array and needs nothing else.
 fn job_frame(steps: &[StepRaw], fixture: Option<&FixtureProfile>) -> JobFrame {
     let flip_axis = fixture
         .map(|f| BoardFlip::from_axis(&f.board_flip_axis))
         .unwrap_or(BoardFlip::AboutY);
+    let origin = fixture
+        .map(|f| BoardOrigin::from_edges(&f.origin_x0, &f.origin_y0))
+        .unwrap_or_default();
+    let clearance = fixture
+        .map(|f| Margin {
+            x_min: if origin.x_at_right { 0.0 } else { f.work_clearance_x.as_mm() },
+            x_max: if origin.x_at_right { f.work_clearance_x.as_mm() } else { 0.0 },
+            y_min: if origin.y_at_far { 0.0 } else { f.work_clearance_y.as_mm() },
+            y_max: if origin.y_at_far { f.work_clearance_y.as_mm() } else { 0.0 },
+        })
+        .unwrap_or_default();
+
     let pin_diameter = steps
         .iter()
         .find(|step| step.drills_locating_pins())
         .and_then(|step| step.pin_diameter);
 
+    // The material the outline router removes, from whichever step routes it. Nominal — the
+    // finishing allowance `finishing_allowance` may zero out per step is still counted here,
+    // because a frame that is a tenth of a millimetre generous costs nothing and a frame that is
+    // a tenth short puts a cutting edge inside the clearance.
+    let waste = steps
+        .iter()
+        .filter(|step| step.routes_outline() && step.route_board.cuts_through())
+        .map(|step| step.route_board.kerf.as_mm() + step.route_board.finishing.as_mm())
+        .fold(0.0f64, f64::max);
+
+    // The band the test cut is made in — the routed waste when it is wide enough, otherwise one
+    // opened for it. The trough is the width the operator *asked for*: this has to be answerable
+    // before a V-bit is picked, for the same reason the pin margin has to be answerable before
+    // the board is placed.
+    let test_band = steps
+        .iter()
+        .filter(|step| step.engraves_copper() && step.engrave_copper.test_cut)
+        .map(|step| testcut::band(Length::from_mm(waste), step.engrave_copper.width))
+        .fold(None::<Length>, |acc, b| {
+            Some(acc.map_or(b, |a| if a.as_mm() >= b.as_mm() { a } else { b }))
+        });
+
+    let extents = [
+        pin_diameter.map(|d| pins::margin(d, flip_axis)),
+        (waste > 0.0).then(|| Margin::uniform(waste)),
+        test_band.map(|b| testcut::margin(b, origin)),
+    ]
+    .into_iter()
+    .flatten()
+    .fold(Margin::default(), Margin::widest);
+
     JobFrame {
-        margin: pin_diameter
-            .map(|d| pins::margin(d, flip_axis))
-            .unwrap_or_default(),
+        margin: extents.stack(clearance),
+        clearance,
         pin_diameter,
         flip_axis,
+        origin,
+        test_band,
+        waste: (waste > 0.0).then(|| Length::from_mm(waste)),
     }
 }
 
@@ -753,10 +849,20 @@ fn plan_step(
 
     // Place ops in machine space and order each phase: drilling first (board rigid),
     // then the route-hole phase (op-planner §4).
+    // This step's own fixture, not the frame's: which *corner* the zero sits on is a fact about
+    // the fixture this step is actually set up in, and a step is a whole physical setup, so a
+    // second one on a different fixture legitimately zeroes elsewhere.
+    //
+    // Note this is the one thing the frame's margin depends on that is read per step
+    // (`frame.origin` is the *first* step's). They agree in every single-fixture profile, which
+    // is all of them that engrave. Where they do not, the depth test cut's band is opened on
+    // the wrong two edges and `testcut::l_path` refuses rather than misplacing the cut — see
+    // `plan_test_cut`, which says so instead of going quiet.
+    let board_origin = BoardOrigin::from_edges(&fixture.origin_x0, &fixture.origin_y0);
     let placement = Placement::new(&PlacementSpec {
         bounds: ctx.board.as_ref().and_then(|b| b.bounding_box.as_ref()),
         orientation_deg: orientation,
-        origin: BoardOrigin::from_edges(&fixture.origin_x0, &fixture.origin_y0),
+        origin: board_origin,
         // The job's margin, not this step's: every program is written against the one zero
         // the operator set up against.
         margin: frame.margin,
@@ -770,6 +876,30 @@ fn plan_step(
         z_safe: fixture.z_safe,
     });
     let start = Point::new(Length::from_mm(0.0), Length::from_mm(0.0));
+
+    // **Where the operator's zero actually goes.** Said every time, because until now it was
+    // said nowhere at all: the origin is a computed point out in bare blank with no stop, no pin
+    // and no witness mark at it, and it moves whenever anything the job cuts outside the board
+    // changes. An operator who could not find it had nothing to go on — the schema told them it
+    // was the corner the board is registered into, which it has not been since the origin
+    // started making room for things.
+    //
+    // Two numbers, and they are different on the two axes whenever the pins or the routing
+    // reach further on one than the other. The clearance is quoted separately because it is the
+    // operator's own figure and the rest is what the job added to it.
+    if ctx.board.is_some() {
+        let rect = placement.board_rect_mm();
+        let (dx, dy) = (rect.min_x.abs().min(rect.max_x.abs()), rect.min_y.abs().min(rect.max_y.abs()));
+        notes.push(format!(
+            "Set the work origin {} from the board in X and {} in Y — your {} / {} work \
+             clearance plus the room this job's cuts outside the board need. Nothing is \
+             machined nearer the zero than the clearance.",
+            fmt_len(ctx, Length::from_mm(dx)),
+            fmt_len(ctx, Length::from_mm(dy)),
+            fmt_len(ctx, Length::from_mm(frame.clearance.x_min.max(frame.clearance.x_max))),
+            fmt_len(ctx, Length::from_mm(frame.clearance.y_min.max(frame.clearance.y_max))),
+        ));
+    }
 
     // The locating pins. Measured from the *placed* board and then unplaced, the way the
     // outline's mouse-bite centres are, because they are fixture geometry rather than
@@ -889,8 +1019,12 @@ fn plan_step(
             }
             let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, choice, &placement);
             notes.extend(warnings);
+            let (test_cut, test_notes) =
+                plan_test_cut(ctx, raw, cnc, bit, choice, &placement, frame);
+            notes.extend(test_notes);
             let engraved = plan_engrave(
                 &spans,
+                test_cut,
                 &choice.tool_id,
                 bit.diameter,
                 placement.z_retract(),
@@ -1165,6 +1299,201 @@ fn log_isolation_miss(held: &crate::runtime::isolation::IsolationState, wanted: 
             );
         }
     }
+}
+
+/// What is said to the operator at the depth-test stop.
+///
+/// **The measurement and the correction are in different quantities**, and this is what
+/// bridges them. They read a *width* off the groove — a channel 50 µm deep has no depth anyone
+/// can get a gauge into, while its width sits under a loupe next to a scale — but the dial they
+/// turn is *Z*. Without the conversion, "0.05 mm too wide" is a fault with no remedy and the
+/// whole exercise ends in a guess at the one number it existed to produce.
+///
+/// [`engrave_depth_per_width`] is exact rather than a local slope, and depends only on the cone,
+/// so it can be stated once and scaled to whatever error is found. It is given both ways — the
+/// multiplier, and what 0.10 mm of width is worth — because one of the two is always the easier
+/// arithmetic to do standing at a machine.
+///
+/// Pure, and split out from [`plan_test_cut`] so it can be tested without a context: these
+/// sentences are the interface to a hand on a Z dial, and their arithmetic is worth pinning.
+///
+/// **Millimetres, always, and never through `fmt_len`.** That follows the operator's *display*
+/// preference, and a program whose text changed because someone switched the UI to inches would
+/// not be the deterministic output the planner promises. Three decimals, not two: the whole
+/// subject is tens of microns, and a channel quoted as "0.16 mm" cannot be measured against.
+///
+/// No parentheses anywhere — these go out through the machine's `comment` primitive, which every
+/// bundled profile renders as `( {text} )`.
+fn test_cut_advice(width: Length, depth: Length, point_angle_deg: f64) -> Vec<String> {
+    let mut advice = vec![
+        "Depth test cut - an L in the waste, cut at the isolation depth.".to_string(),
+        format!(
+            "The channel should measure {:.3} mm across, {:.3} mm deep.",
+            width.as_mm(),
+            depth.as_mm(),
+        ),
+    ];
+
+    match engrave_depth_per_width(point_angle_deg) {
+        Some(ratio) => {
+            advice.push(format!(
+                "Width error x {ratio:.2} = the Z correction: 0.10 mm out is {:.3} mm of Z.",
+                0.1 * ratio,
+            ));
+            advice.push(
+                "Too narrow means too shallow - lower Z by that, reset and run again."
+                    .to_string(),
+            );
+            advice.push(
+                "Too wide means too deep - raise Z by that, shift the work offset in X and Y \
+                 onto fresh material, reset and run again."
+                    .to_string(),
+            );
+        }
+        // A flat-tipped tool cuts one width however deep it goes, so the groove's width says
+        // nothing at all about Z. Offering a conversion here would be inventing one; say what
+        // there is to go on instead.
+        None => {
+            advice.push(
+                "This tool cuts one width at any depth, so judge the cut itself. Too faint \
+                 means too shallow - lower Z, reset and run again."
+                    .to_string(),
+            );
+            advice.push(
+                "Through to the substrate means too deep - raise Z, shift the work offset in \
+                 X and Y onto fresh material, reset and run again."
+                    .to_string(),
+            );
+        }
+    }
+
+    advice
+}
+
+/// The **depth test cut** for this step, when it asked for one, and what to say about it.
+///
+/// Engraving is the one operation whose quality is a depth tolerance, cut at one fixed Z with
+/// no probing anywhere in the product to check that Z0 is the board surface. This is the manual
+/// equivalent: an L in the waste at exactly the depth the pass will use, and a stop so it can
+/// be looked at before the copper is touched. See [`crate::gcode::testcut`] for the geometry.
+///
+/// Returns `None` in three cases, two of which say why:
+///
+/// - the step did not ask for one — silent, there is nothing to report;
+/// - **the machine has no `pause` word.** The L's only output is a decision made at the stop, so
+///   without the stop it is a groove cut in a corner nothing has checked, followed by the copper
+///   being engraved at the very depth that was not verified. Every branch is worse than not
+///   cutting, so the cut is dropped rather than degraded — the same call `pick_engraver` makes
+///   when there is no degraded output worth having;
+/// - the placement made no room for it, which is [`testcut::l_path`]'s own guard and can only
+///   mean the frame and this step disagree about whether there is a test cut.
+///
+/// The L runs down the middle of [`JobFrame::test_band`] — the routed outline's own waste band
+/// where the job has one, so on an ordinary routed job the frame does not grow by a micron and
+/// the cut is made in material that was going to be swarf. What is still not knowable here is
+/// the blank itself: k2g models no stock or bed geometry, so the note names the size every time.
+fn plan_test_cut(
+    ctx: &AppCtx,
+    raw: &StepRaw,
+    cnc: &crate::data::model::profiles::MachineProfile,
+    bit: &Tool,
+    choice: &EngraveChoice,
+    placement: &Placement,
+    frame: &JobFrame,
+) -> (Option<TestCut>, Vec<String>) {
+    if !raw.engrave_copper.test_cut {
+        return (None, Vec::new());
+    }
+    // The frame resolved the band; a step that asks for a test cut always has one, so `None`
+    // here means the frame and this step disagree about the profile they read.
+    let Some(band) = frame.test_band else {
+        return (None, Vec::new());
+    };
+    if cnc.pause_tpl.trim().is_empty() {
+        return (
+            None,
+            vec![format!(
+                "'{}' has no pause primitive, so this program cannot stop for you to check an \
+                 engraving test cut. None is planned: a witness groove the program runs \
+                 straight past is not a test, and it would be cut in a corner nothing here \
+                 knows is clear. Set the depth on a scrap board, or give the CNC profile a \
+                 pause that really stops.",
+                cnc.name,
+            )],
+        );
+    }
+    let rect = placement.board_rect_mm();
+    let Some(path) = testcut::l_path(rect, band) else {
+        // The band was reserved against the **job's** frame fixture and this step is placed
+        // against its own, so a step engraving on a second fixture that zeroes on a different
+        // corner finds the room on the wrong two edges. Reported rather than dropped in
+        // silence: the operator ticked a box, and a program that quietly does not stop is the
+        // failure this whole option exists to prevent.
+        //
+        // Also reaches here with no board at all, which is already reported elsewhere — hence
+        // the guard, so a boardless job does not gain a second complaint about it.
+        if ctx.board.is_none() {
+            return (None, Vec::new());
+        }
+        return (
+            None,
+            vec![
+                "No depth test cut is planned: the placement left no room for one. The job \
+                 reserves that room against the fixture of its first step, so an engraving \
+                 step set up on a fixture that zeroes on a different corner cannot have it — \
+                 engrave in a step on the job's own fixture, or turn the test cut off."
+                    .to_string(),
+            ],
+        );
+    };
+
+    let stop = VerifyStop {
+        // Not the retract plane. The operator is about to put a hand and a loupe next to the
+        // cut, so the tool goes to the height that clears the clamps and the fixture.
+        z_clear: placement.z_safe(),
+        advice: test_cut_advice(choice.width, choice.depth, bit.point_angle.as_degrees()),
+        prompt: "Measure the test cut before the copper is engraved".to_string(),
+    };
+
+    // In the operator's own unit — this is a number they measure to, so a millimetre figure on
+    // an imperial machine would be the one thing here they cannot act on. (The *emitted* text
+    // above is the opposite case, and stays in mm for the reason given there.)
+    //
+    // Which band it landed in is the thing worth saying, because the two cases differ in what
+    // they cost. Reusing the routed waste is free and the cut is in material the job removes
+    // anyway; opening a band moves the board out, and therefore every coordinate in every
+    // program of the job.
+    let reuses_waste = frame.waste.is_some_and(|w| band.as_mm() <= w.as_mm() + 1e-9);
+    let note = if reuses_waste {
+        format!(
+            "A depth test L, {} x {}, is cut down the middle of the band the outline routing \
+             removes anyway — so it costs no extra blank and moves nothing.",
+            fmt_len(ctx, Length::from_mm(rect.width())),
+            fmt_len(ctx, Length::from_mm(rect.height())),
+        )
+    } else {
+        format!(
+            "A depth test L, {} x {}, is cut in a {} band just outside the board. This job does \
+             not route its own outline, so that band is opened for the test cut and the work \
+             origin moves out by it — re-zero before running, and check the blank reaches that \
+             far.",
+            fmt_len(ctx, Length::from_mm(rect.width())),
+            fmt_len(ctx, Length::from_mm(rect.height())),
+            fmt_len(ctx, band),
+        )
+    };
+
+    (
+        Some(TestCut {
+            path,
+            // Board top is Z0, so a depth is a negative machine Z. The *nominal* depth, not a
+            // narrowed span's: what is being verified is the depth the pass was designed
+            // around, and `choice.width` above is the width that depth produces.
+            z_bottom: Length::from_mm(-choice.depth.as_mm()),
+            stop,
+        }),
+        vec![note],
+    )
 }
 
 /// The isolation cuts for this step's copper face, and what the operator should know.
@@ -2554,7 +2883,311 @@ mod engrave_diagnostic_tests {
             "checked before it is folded into the plan, while it can still be told apart",
         );
     }
+
+    /// **The operator measures a width and turns a Z dial, so the stop has to convert.**
+    ///
+    /// This is the one piece of arithmetic in the feature that a person acts on directly, with
+    /// the manual shut and the spindle stopped. Getting it inverted, or quoting it to a
+    /// precision coarser than the thing being measured, sends them the wrong way by a
+    /// believable-looking amount.
+    #[test]
+    fn the_stop_converts_the_width_the_operator_measures_into_the_z_they_adjust() {
+        // A 0.1 mm tip 60-degree V-bit at one ounce of copper plus minimum penetration.
+        let advice = super::test_cut_advice(
+            Length::from_mm(0.1635),
+            Length::from_mm(0.055),
+            60.0,
+        );
+        let text = advice.join("\n");
+
+        assert!(
+            text.contains("0.164 mm across, 0.055 mm deep"),
+            "the figures must resolve tens of microns, not hundredths:\n{text}",
+        );
+        // 1 / (2*tan(30)) = 0.8660.
+        assert!(
+            text.contains("Width error x 0.87 = the Z correction: 0.10 mm out is 0.087 mm of Z"),
+            "the width-to-Z conversion is the number they act on:\n{text}",
+        );
+        assert!(text.contains("Too narrow"), "and both directions are named:\n{text}");
+        assert!(text.contains("Too wide"), "and both directions are named:\n{text}");
+        assert!(
+            text.contains("shift the work offset in X and Y"),
+            "going shallower needs fresh material, which is the half that is easy to omit:\n{text}",
+        );
+
+        // A finer cone turns the same width error into much more Z — the case where a wrong
+        // conversion, or none, costs a board.
+        let fine = super::test_cut_advice(Length::from_mm(0.2), Length::from_mm(0.05), 30.0)
+            .join("\n");
+        assert!(fine.contains("0.10 mm out is 0.187 mm of Z"), "{fine}");
+    }
+
+    /// **A flat tip gets no conversion, because there is not one.** Its width does not move
+    /// with depth, so a multiplier here would be a number invented to fill the sentence — and
+    /// an operator who trusted it would dial Z from a reading that says nothing about Z.
+    #[test]
+    fn a_tool_whose_width_does_not_follow_its_depth_is_not_given_a_conversion() {
+        let text = super::test_cut_advice(Length::from_mm(0.2), Length::from_mm(0.05), 180.0)
+            .join("\n");
+        assert!(!text.contains("Z correction"), "no conversion is offered:\n{text}");
+        assert!(text.contains("one width at any depth"), "and it says why:\n{text}");
+    }
+
+    /// **Nothing said at the stop may close a G-code comment.** The advice goes out through the
+    /// machine's `comment` primitive, which every bundled profile renders as `( {text} )`; a
+    /// bracket inside the text ends the comment early and feeds the rest of the sentence to the
+    /// parser as motion.
+    #[test]
+    fn the_operator_text_carries_nothing_that_would_close_a_gcode_comment() {
+        for angle in [30.0, 60.0, 90.0, 180.0] {
+            for line in super::test_cut_advice(Length::from_mm(0.2), Length::from_mm(0.05), angle)
+            {
+                assert!(
+                    !line.contains(['(', ')', '%', ';', '\n']),
+                    "unsafe for a comment line: {line:?}",
+                );
+                assert!(line.is_ascii(), "and must be plain ASCII: {line:?}");
+            }
+        }
+    }
+
+    /// **The depth test cut is decided before the block that carries it is built**, and from
+    /// the nominal depth rather than a span's.
+    ///
+    /// Both halves are one-line mistakes with no symptom. Built after the call, the test cut
+    /// silently never reaches the program. Taken from `span_depth_mm` instead of
+    /// `choice.depth`, the operator measures a channel narrowed for one tight stretch of the
+    /// board and then sets the machine's Z from it — which is the wrong depth for the whole
+    /// rest of the pass.
+    #[test]
+    fn the_test_cut_is_decided_before_the_block_and_from_the_nominal_depth() {
+        let source = include_str!("machining_plan.rs");
+        let built = source
+            .find("let (test_cut, test_notes) =")
+            .expect("the test cut is built in plan_step");
+        let used = source
+            .find("let engraved = plan_engrave(")
+            .expect("the engrave block is built here");
+        assert!(built < used, "the test cut has to exist before the block that carries it");
+
+        let body = &source[source
+            .find("fn plan_test_cut(")
+            .expect("the test cut has its own function")..];
+        assert!(
+            body.find("choice.depth").expect("a depth is taken")
+                < body.find("fn plan_engrave_spans").unwrap_or(body.len()),
+            "the test cut must take the nominal engrave depth, not a narrowed span's",
+        );
+    }
 }
+
+/// The job's coordinate frame: what claims room outside the board, and how the claims combine.
+#[cfg(test)]
+mod job_frame_tests {
+    use super::*;
+    use crate::runtime::tooling::StepRaw;
+
+    fn step(ops: &[&str]) -> StepRaw {
+        StepRaw {
+            name: "Step".into(),
+            operations: ops.iter().map(|s| s.to_string()).collect(),
+            cnc_id: None,
+            fixture_id: None,
+            toolset_id: None,
+            drill: Default::default(),
+            route_board: Default::default(),
+            route_cutouts: Default::default(),
+            engrave_copper: Default::default(),
+            machines_back: false,
+            pin_diameter: None,
+        }
+    }
+
+    fn engraving(test_cut: bool) -> StepRaw {
+        let mut s = step(&["engrave_copper"]);
+        s.engrave_copper.test_cut = test_cut;
+        s
+    }
+
+    fn pinning(diameter_mm: f64) -> StepRaw {
+        let mut s = step(&["drill_locating_pins"]);
+        s.pin_diameter = Some(Length::from_mm(diameter_mm));
+        s
+    }
+
+    /// A near-left, page-turn fixture that declares a work clearance. Only the four fields the
+    /// frame reads matter; the Z model is filled with the schema's own defaults so the shape is
+    /// a plausible profile rather than a stub.
+    fn fixture(clearance_mm: f64) -> FixtureProfile {
+        FixtureProfile {
+            id: "fixture".into(),
+            name: "Test fixture".into(),
+            backing_board: "clamps".into(),
+            backboard_thickness: Length::from_mm(2.5),
+            bed_clearance: Length::from_mm(0.5),
+            breakthrough: Length::from_mm(0.5),
+            z_retract: Length::from_mm(5.0),
+            z_safe: Length::from_mm(20.0),
+            origin_x0: "left".into(),
+            origin_y0: "near".into(),
+            work_clearance_x: Length::from_mm(clearance_mm),
+            work_clearance_y: Length::from_mm(clearance_mm),
+            board_flip_axis: "y".into(),
+            origin_reference: "G55".into(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }
+    }
+
+    /// A step that routes the board outline with the given kerf and finishing allowance.
+    fn routing(kerf_mm: f64, finishing_mm: f64) -> StepRaw {
+        let mut s = step(&["route_board"]);
+        s.route_board.cut = "route".into();
+        s.route_board.kerf = Length::from_mm(kerf_mm);
+        s.route_board.finishing = Length::from_mm(finishing_mm);
+        s
+    }
+
+    /// **Example 1 — a board that is only engraved sits at the clearance.** Nothing is cut
+    /// outside it, so there is no extent to clear and the frame is the operator's own number
+    /// and nothing else.
+    #[test]
+    fn a_job_that_only_engraves_puts_the_board_at_the_clearance() {
+        let frame = job_frame(&[engraving(false)], Some(&fixture(5.0)));
+        assert_eq!((frame.margin.x_min, frame.margin.y_min), (5.0, 5.0));
+        assert_eq!((frame.margin.x_max, frame.margin.y_max), (0.0, 0.0));
+        assert!(frame.test_band.is_none());
+        assert!(frame.waste.is_none());
+    }
+
+    /// **Example 2 — an edge cut moves the board out by the material it removes.** The router
+    /// takes `kerf + finishing` off the waste side, and that band has to clear the zero like
+    /// anything else the program cuts.
+    #[test]
+    fn adding_an_edge_cut_moves_the_board_out_by_the_material_it_removes() {
+        let frame = job_frame(&[engraving(false), routing(2.0, 0.1)], Some(&fixture(5.0)));
+        assert!((frame.margin.x_min - 7.1).abs() < 1e-9, "got {}", frame.margin.x_min);
+        assert!((frame.margin.y_min - 7.1).abs() < 1e-9, "got {}", frame.margin.y_min);
+        assert_eq!(frame.waste, Some(Length::from_mm(2.1)));
+    }
+
+    /// **Example 3 — the test cut is free when the edge cut already leaves waste.** The band it
+    /// needs for a 0.25 mm trough is 0.75 mm; the router leaves 2.1 mm of material it is going
+    /// to remove anyway. Growing the frame for it would cost blank, move every coordinate in
+    /// the job, and buy nothing.
+    #[test]
+    fn a_test_cut_costs_nothing_when_the_edge_cut_already_leaves_waste() {
+        let f = fixture(5.0);
+        let without = job_frame(&[engraving(false), routing(2.0, 0.1)], Some(&f));
+        let with = job_frame(&[engraving(true), routing(2.0, 0.1)], Some(&f));
+
+        assert_eq!(with.margin, without.margin, "the frame must not grow");
+        assert_eq!(with.test_band, Some(Length::from_mm(2.1)), "it reuses the routed band");
+    }
+
+    /// With no outline to route there is no waste to borrow, so a band is opened — three trough
+    /// widths, leaving a trough of material either side of the cut — and the board moves out by
+    /// exactly that and no more.
+    #[test]
+    fn a_test_cut_without_edge_routing_opens_its_own_band() {
+        let mut engrave = engraving(true);
+        engrave.engrave_copper.width = Length::from_mm(0.25);
+        let frame = job_frame(&[engrave], Some(&fixture(5.0)));
+
+        assert_eq!(frame.test_band, Some(Length::from_mm(0.75)));
+        assert!((frame.margin.x_min - 5.75).abs() < 1e-9, "got {}", frame.margin.x_min);
+    }
+
+    /// **The extents take the widest claim and do not sum.** They are all measured from the same
+    /// edge and overlap in the material, so a job with pins *and* routing must not pay for both
+    /// — that would charge the frame twice for one piece of blank and push the board further
+    /// from the zero than anything needs.
+    #[test]
+    fn the_extents_take_the_widest_claim_and_do_not_sum() {
+        let f = fixture(2.0);
+        let pins_only = job_frame(&[pinning(3.2)], Some(&f));
+        let route_only = job_frame(&[routing(2.0, 0.1)], Some(&f));
+        let both = job_frame(&[pinning(3.2), routing(2.0, 0.1)], Some(&f));
+
+        // 1.5 x 3.2 = 4.8 on the flip axis; 2.1 of routed waste all round.
+        assert!((pins_only.margin.y_min - (2.0 + 4.8)).abs() < 1e-9);
+        assert!((route_only.margin.y_min - (2.0 + 2.1)).abs() < 1e-9);
+        assert!(
+            (both.margin.y_min - (2.0 + 4.8)).abs() < 1e-9,
+            "the wider claim wins; summing would give {}",
+            2.0 + 4.8 + 2.1,
+        );
+        // And on the axis the pins do not grow, the routing is what has to clear.
+        assert!((both.margin.x_min - (2.0 + 2.1)).abs() < 1e-9, "got {}", both.margin.x_min);
+    }
+
+    /// **The clearance is added outside every extent, never merged with one.** Taking the wider
+    /// of the two there would let a 4.8 mm pin band swallow a 2 mm clearance whole and put a
+    /// drilled hole's edge on the origin — the one thing the clearance exists to stop.
+    #[test]
+    fn the_clearance_is_added_outside_every_extent() {
+        for clearance in [0.0, 2.0, 5.0] {
+            let frame = job_frame(&[pinning(3.2), routing(2.0, 0.1)], Some(&fixture(clearance)));
+            assert!(
+                (frame.margin.y_min - (clearance + 4.8)).abs() < 1e-9,
+                "C={clearance}: got {}",
+                frame.margin.y_min,
+            );
+        }
+    }
+
+    /// **A step with the option set but no engraving claims nothing.** Every step carries a
+    /// materialised `engrave_copper` block whether or not it engraves, so reading the flag
+    /// without checking the operation would open a band for a job that never cuts copper.
+    #[test]
+    fn a_step_that_does_not_engrave_cannot_claim_a_test_cut_band() {
+        let mut drilling = step(&["drill_pth"]);
+        drilling.engrave_copper.test_cut = true;
+        assert!(job_frame(&[drilling], Some(&fixture(2.0))).test_band.is_none());
+    }
+
+    /// **The pins can never fail to fit.** They shift the bounding box rather than competing for
+    /// a fixed allowance, so however large the pin and however small the clearance, the hole
+    /// stays wholly on the work side of the zero. That is the invariant the model was chosen
+    /// for, and nothing else pins it.
+    #[test]
+    fn the_pins_can_never_fail_to_fit_whatever_the_clearance() {
+        for clearance in [0.0, 0.5, 2.0, 10.0] {
+            for diameter in [1.0, 2.0, 3.2, 6.0] {
+                let frame = job_frame(&[pinning(diameter)], Some(&fixture(clearance)));
+                assert!(
+                    (frame.margin.y_min - (clearance + 1.5 * diameter)).abs() < 1e-9,
+                    "C={clearance} D={diameter}: got {}",
+                    frame.margin.y_min,
+                );
+            }
+        }
+    }
+
+    /// **One step's option moves every step's zero.** The frame is job-wide because the zero is:
+    /// a test cut in the engraving step shifts the drilling step's coordinates too, and any
+    /// other answer would have the operator set up against two different origins in one job.
+    #[test]
+    fn a_test_cut_in_one_step_frames_the_whole_job() {
+        let f = fixture(2.0);
+        let with = job_frame(&[engraving(true), step(&["drill_pth"])], Some(&f));
+        let without = job_frame(&[engraving(false), step(&["drill_pth"])], Some(&f));
+        assert_ne!(with.margin, without.margin, "the frame has to notice");
+
+        // And it does not matter which step asks.
+        let later = job_frame(&[step(&["drill_pth"]), engraving(true)], Some(&f));
+        assert_eq!(later.margin, with.margin);
+    }
+
+    /// A fixture that resolves to nothing at all leaves the frame inert, which is what every
+    /// "a job without any of this is unchanged" property rests on.
+    #[test]
+    fn no_fixture_and_no_claims_is_an_inert_frame() {
+        assert_eq!(job_frame(&[step(&["drill_pth"])], None).margin, Margin::default());
+    }
+}
+
 
 /// The order the blocks come out in, guarded at the source.
 ///

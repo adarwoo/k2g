@@ -1497,6 +1497,19 @@ fn normalize_fixture_value(value: &mut Value, path: &Path) {
 
     retire_work_coordinate_system(obj, &file);
 
+    // **Say when the work origin moves.** The loader materialises `work_clearance` onto a fixture
+    // that predates it, which changes where the zero is for every program the fixture is used
+    // by. That is the deliberate cost of making the origin a declared fact rather than a derived
+    // one — but a coordinate frame that shifts on upgrade with nothing said is how a board gets
+    // cut in the wrong place, so it is said here, once, on load.
+    if !obj.contains_key("work_clearance") {
+        warn!(
+            "[{file}] no work clearance set, so the schema default is used: the work origin now \
+             stands clear of the work rather than sitting on it, and has moved outward. Re-zero \
+             before running, or set the clearance to match your setup."
+        );
+    }
+
     let Some(origin) = obj.get_mut("origin").and_then(Value::as_object_mut) else {
         return;
     };
@@ -2751,6 +2764,107 @@ mod tests {
             "the openings belong to route_cutouts now: {keys:?}"
         );
     }
+    /// **A fixture written before the work clearance existed has to gain one on load.**
+    ///
+    /// Every fixture on disk predates it, and the frame reads it unconditionally — a profile
+    /// that loaded without it would place the board hard against the zero, which is the thing
+    /// the field exists to prevent. The fixture screen lists fields by pointer, so the key has
+    /// to be a child of its parent object as well as reachable, exactly as for the machining
+    /// screen.
+    ///
+    /// Note what this does to the operator's setup: their zero moves outward by the default.
+    /// That is the deliberate cost of the change — the point they were zeroing on before was
+    /// derived, moved with the pin diameter, and was written down nowhere.
+    #[test]
+    fn a_fixture_saved_before_the_work_clearance_existed_still_offers_it() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let fixture_dir = data_dir.join("fixture_profiles");
+        fs::create_dir_all(&fixture_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        let saved = format!(
+            "schema_version: 1\n\
+             id: \"{id}\"\n\
+             name: Before the clearance\n\
+             board_holding_method: clamps\n\
+             origin:\n\
+               x0: left\n\
+               y0: near\n"
+        );
+        fs::write(fixture_dir.join(format!("{id}.yaml")), saved).unwrap();
+
+        let (data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        let doc = data.get(id).expect("the fixture loads");
+        for axis in ["x", "y"] {
+            let node = doc
+                .root
+                .get_pointer(&format!("/work_clearance/{axis}"))
+                .unwrap_or_else(|| panic!("/work_clearance/{axis} is materialised on load"));
+            // By magnitude, not by `NodeValue` equality: `2mm` in the schema decodes to an
+            // integer scalar and `Length::from_mm(2.0)` to a float, which are the same length
+            // and different values.
+            let NodeValue::Unit(datastore::UnitValue::Length(length)) = node.value else {
+                panic!("/work_clearance/{axis} should be a length, got {:?}", node.value);
+            };
+            assert_eq!(length.as_mm(), 2.0, "and carries the schema default");
+        }
+
+        let parent = doc.root.get_pointer("/work_clearance").expect("the block");
+        let keys: Vec<&str> = match &parent.value {
+            NodeValue::Object(map) => map.keys().map(String::as_str).collect(),
+            other => panic!("work_clearance should be an object, got {other:?}"),
+        };
+        assert!(keys.contains(&"x") && keys.contains(&"y"), "the form would list: {keys:?}");
+    }
+
+    /// **The depth test cut has to reach the machining screen on a profile that predates it.**
+    ///
+    /// Every engraving profile already on disk was written before this option existed, which
+    /// makes that the case that matters — not the freshly created one. The checkbox is rendered
+    /// by `SchemaForm` walking `object_children`, so a node the loader materialised by pointer
+    /// but did not add to its parent's key set would leave the operator with no way to turn the
+    /// test cut on at all.
+    #[test]
+    fn a_profile_saved_before_the_engraving_test_cut_existed_still_offers_it() {
+        let dir = tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let proc_dir = data_dir.join("processing_profiles");
+        fs::create_dir_all(&proc_dir).unwrap();
+        let id = uuid::Uuid::now_v7();
+        // A profile whose `engrave_copper` has only the width it was written with.
+        let saved = format!(
+            "schema_version: 3\n\
+             id: \"{id}\"\n\
+             name: Before the test cut\n\
+             steps:\n\
+               - name: Isolate\n\
+                 operations: [engrave_copper]\n\
+                 engrave_copper:\n\
+                   width: 0.2mm\n"
+        );
+        fs::write(proc_dir.join(format!("{id}.yaml")), saved).unwrap();
+
+        let (data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
+        let doc = data.get(id).expect("the profile loads");
+        let node = doc
+            .root
+            .get_pointer("/steps/0/engrave_copper/test_cut")
+            .expect("materialised on load, or the machining screen shows no test-cut checkbox");
+        assert_eq!(
+            node.value,
+            NodeValue::Bool(false),
+            "and it is off, so no existing program gains a stop it did not ask for",
+        );
+
+        let parent = doc.root.get_pointer("/steps/0/engrave_copper").expect("the op config");
+        let keys: Vec<&str> = match &parent.value {
+            NodeValue::Object(map) => map.keys().map(String::as_str).collect(),
+            other => panic!("engrave_copper should be an object, got {other:?}"),
+        };
+        assert!(keys.contains(&"test_cut"), "the form would list: {keys:?}");
+        assert!(keys.contains(&"width"), "and the width it was saved with: {keys:?}");
+    }
+
     /// **A milling step configures the same things a routing step does.**
     ///
     /// The one that matters: a real profile on disk that milled its outline opens clean

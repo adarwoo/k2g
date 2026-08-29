@@ -334,6 +334,34 @@ pub fn engrave_depth_mm(tip_diameter_mm: f64, point_angle_deg: f64, width_mm: f6
     Some((width_mm - tip_diameter_mm) / (2.0 * tangent))
 }
 
+/// How much **Z** a millimetre of measured channel width is worth, for a bit of this cone
+/// angle.
+///
+/// The operator can only measure the channel's *width* — a groove a tenth of a millimetre deep
+/// has no depth anyone can get a gauge into, while its width sits under a loupe next to a
+/// scale. But width is not what they adjust; they adjust Z. This is the number that connects
+/// the two, and without it "the channel is 0.05 mm too wide" is a fault with no remedy.
+///
+/// [`engrave_width_mm`] is linear in depth, so the conversion is **exact** rather than a local
+/// approximation:
+///
+/// ```text
+///     Δwidth = 2·tan(angle/2)·Δdepth      →      Δdepth = Δwidth / (2·tan(angle/2))
+/// ```
+///
+/// It depends only on the cone, not on the tip or the depth — which is why it can be stated
+/// once, at the top of the program, and used for any error the operator finds.
+///
+/// `None` for a flat tool, whose width does not move with depth at all: there is no correction,
+/// because there was never a reading.
+pub fn engrave_depth_per_width(point_angle_deg: f64) -> Option<f64> {
+    if point_angle_deg >= 180.0 {
+        return None;
+    }
+    let tangent = (point_angle_deg / 2.0).to_radians().tan();
+    (tangent > 1e-9).then(|| 1.0 / (2.0 * tangent))
+}
+
 /// The plunge a **router** must reach to cut through: `T + m`.
 ///
 /// A router is flat-ended, so unlike a twist drill there is no point length to clear —
@@ -1283,6 +1311,53 @@ mod tests {
         assert!((engrave_width_mm(0.1, 60.0, 0.0) - 0.1).abs() < 1e-9);
         // A flat tool cuts its own width however deep it goes.
         assert!((engrave_width_mm(2.0, 180.0, 5.0) - 2.0).abs() < 1e-9);
+    }
+
+    /// **The correction the operator dials is not the quantity they measured**, and this is
+    /// the conversion between them — so it is the number a mis-set machine gets fixed by.
+    ///
+    /// Getting it inverted is the failure worth guarding: `2·tan(a/2)` instead of its
+    /// reciprocal reads plausibly, is within 15% of right for a 60° bit, and sends a 30° bit's
+    /// operator 3.5× the wrong way — deeper when they meant to go shallower by a hair.
+    #[test]
+    fn a_width_error_converts_to_a_z_correction_and_not_the_other_way_round() {
+        // 60 degrees: 1 mm of Z opens the channel by 2*tan(30) = 1.1547 mm, so a millimetre of
+        // width is 0.866 mm of Z — **less** than the width, for any cone under 90 degrees.
+        let sixty = engrave_depth_per_width(60.0).expect("a cone has a conversion");
+        assert!((sixty - 0.86603).abs() < 1e-5, "got {sixty}");
+        assert!(sixty < 1.0, "a 60 degree cone opens faster than it sinks");
+
+        // A fine cone moves width very little per unit Z, so a small width error is a large
+        // Z error — the case where guessing costs a board.
+        let thirty = engrave_depth_per_width(30.0).expect("a cone has a conversion");
+        assert!((thirty - 1.86603).abs() < 1e-5, "got {thirty}");
+        assert!(thirty > sixty, "the finer the cone, the more Z a width error represents");
+
+        // 90 degrees is the crossover: 2*tan(45) = 2, so half a millimetre of Z per millimetre.
+        assert!((engrave_depth_per_width(90.0).unwrap() - 0.5).abs() < 1e-9);
+
+        // A flat tool's width does not move with depth, so there is no reading to convert.
+        assert!(engrave_depth_per_width(180.0).is_none());
+    }
+
+    /// The conversion has to agree with the model it is derived from, or the operator corrects
+    /// by a number the planner would not have chosen. Exact, not local: the same ratio holds
+    /// however far off the machine is.
+    #[test]
+    fn the_z_correction_inverts_the_width_model_at_any_error() {
+        let ratio = engrave_depth_per_width(60.0).expect("a cone has a conversion");
+        for (depth, error) in [(0.10, 0.01), (0.10, 0.05), (0.25, 0.20)] {
+            let intended = engrave_width_mm(0.1, 60.0, depth);
+            let measured = intended + error;
+            let actual_depth =
+                engrave_depth_mm(0.1, 60.0, measured).expect("a width the bit can cut");
+            assert!(
+                (actual_depth - depth - error * ratio).abs() < 1e-9,
+                "a {error} mm width error at {depth} mm is {} mm of Z, not {}",
+                actual_depth - depth,
+                error * ratio,
+            );
+        }
     }
 
     /// Depth is derived from the width the operator asked for, and refused when no depth

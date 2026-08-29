@@ -337,7 +337,8 @@ How the board is held, and where zero is.
 | Field | Meaning |
 |---|---|
 | **Board holding method** | Free text — vacuum, clamps, tape. Descriptive. |
-| **Bed origin corner** — *X zero edge* (left / right), *Y zero edge* (near / far) | Which corner of the **bed** the board is registered into, and therefore where X0/Y0 lands. These are the bed's own directions as you stand at the machine: `near` is your side. The axes keep their machine directions, so this moves the zero — it does not mirror anything. With `x0: right`, the board sits in negative X, which is exactly right for a right-hand stop. |
+| **Bed origin corner** — *X zero edge* (left / right), *Y zero edge* (near / far) | Which **way** the zero lies from the work. These are the bed's own directions as you stand at the machine: `near` is your side. The axes keep their machine directions, so this moves the zero — it does not mirror anything. With `x0: right`, the board sits in negative X, which is exactly right for a right-hand stop. How **far** the zero lies is the next row. |
+| **Work clearance X / Y** | How close a cutting tool's *edge* may come to the work origin. Nothing this program cuts — no channel, no hole, no routed slot — comes nearer the zero than this, so it is the gap you measure to when setting up. See [Where to set your zero](#where-to-set-your-zero). |
 | **Machine Origin Reference** | Which of the machine's *stored* zeros this fixture is set up in, in the controller's own words: `G54`, `G55`, `G54.1 P7`. Validated by the CNC profile's `set_origin` — a value that machine does not have refuses generation rather than cutting in the wrong place. Only meaningful on a machine that homes repeatably. |
 | **Board flip axis** | Which axis the board turns about for a back-face step. `y` turns it left-to-right like a page (the near edge stays near); `x` tumbles it near-to-far. It follows from where your registration pins physically are. **Getting it wrong mirrors the board.** |
 | **Backboard thickness** | The martyr/exit board under the PCB. Bounds how far the tool may travel past the underside. **Keep this accurate or drilling can reach the bed.** |
@@ -350,6 +351,34 @@ How the board is held, and where zero is.
 k2g; what differs between machines is only how that zero is established, and that is
 the CNC profile's *repeatable home* capability. Board thickness comes from the KiCad
 stackup, not from here.
+
+### Where to set your zero
+
+The **bed origin corner** says which way the zero lies from the work; **work clearance**
+says how far. Together they are the whole answer, and it is a number you can measure to
+rather than one you have to reconstruct.
+
+The rule is: **no cutting tool's edge ever comes closer to the origin than the work
+clearance.** The job is packed against that line. Everything the program cuts outside the
+board declares how far it reaches from the board's bounding box, and the one that reaches
+furthest ends up with its edge exactly on the clearance:
+
+| what | how far it reaches outside the board |
+|---|---|
+| the routed outline | the kerf plus the finishing allowance — the material it removes |
+| the locating pins | 1.5 × the pin diameter |
+| an engraving depth test cut | the routed band when there is one, otherwise 3 × the isolation width |
+
+They are compared, **not added** — they all sit in the same few millimetres of blank, so
+the job pays for the widest of them once. Every step's plan prints the resulting distance
+from the zero to the board in its notes, in your own units, so you never have to work it
+out.
+
+> **This is a change.** k2g used to *derive* the origin, putting it wherever the locating
+> pins happened to need it. That point sat in bare blank with nothing to sight on, moved
+> whenever you changed the pin diameter, and was displayed nowhere. Fixtures saved before
+> the work clearance existed gain the 2 mm default on load and their zero moves outward —
+> **re-zero before running one.** The log says so when it happens.
 
 ---
 
@@ -443,9 +472,10 @@ operation that cuts an interior opening.
 
 ### Drill locating pins
 
-Two holes through the board and on into the backboard, on the fixture's flip line, so
-the board can be turned over and land back in the same place. The only setting is the
-**pin diameter**, from a fixed list of sizes pins are actually sold in: 2, 2.5, 3,
+Two holes on the fixture's flip line, so the board can be turned over and land back in
+the same place. They go **outside the board**, through the surrounding blank and on into
+the backboard — the board itself is not drilled, and the frame keeps the pins after the
+outline releases it. The only setting is the **pin diameter**, from a fixed list of sizes pins are actually sold in: 2, 2.5, 3,
 3.175 (= ⅛″) and 3.2 mm. 3.2 mm is the default — it takes a ⅛″ shank with about 25 µm
 of play.
 
@@ -455,13 +485,71 @@ This step must be first and must be on the front face; see §12.
 
 Isolation routing: cut a channel around every piece of copper so the nets separate.
 
-The only setting is **isolation width** — an electrical decision, not a tooling one.
+The main setting is **isolation width** — an electrical decision, not a tooling one.
 Wider is better isolated and slower to cut. The V-bit is chosen to suit and the depth
 it needs is worked out from it, so depth is deliberately not asked for. Where the
 board is too cramped for the requested width, the pass narrows only across that
 stretch and says which nets it narrowed, in the step's notes; it never widens and
 never cuts into a neighbour. Outer copper only (F.Cu or B.Cu, whichever the step's
 board face names).
+
+#### Cut a depth test first
+
+Engraving is the one operation whose quality is a depth tolerance, and it runs at one
+fixed Z for the whole board — there is no probing and no height map. If the machine's
+Z zero is fifty microns out, nothing finds out until the board is engraved: the nets are
+still joined, or the traces are undercut and the laminate ploughed.
+
+Turn this on and the program cuts a throwaway **L in the waste first**, at exactly the
+depth the isolation pass will use, then stops. Its legs are as long as the board is wide
+and high, so it shows whether the depth is the same across the whole travel as well as
+what it is at one spot — work that is not held flat fails an isolation pass just as
+reliably as a mis-set tool.
+
+At the stop the tool lifts to the fixture's safe height and **the spindle stops**, so it
+is safe to reach in. The program says what the channel should measure.
+
+**You measure a width, but you adjust Z.** Depth is not something you can get a gauge into
+on a groove a tenth of a millimetre deep; the width sits under a loupe next to a scale. A
+V-bit's channel widens in exact proportion to how far it is sunk, so the program also
+prints the conversion for the bit it chose — something like:
+
+```
+(The channel should measure 0.16 mm across, 0.06 mm deep.)
+(Width error x 0.87 = the Z correction: 0.10 mm out is 0.087 mm of Z.)
+```
+
+The multiplier is a property of the cone, so it is the same for any error you find, and it
+is smaller for a blunt bit and larger for a fine one — a 30° bit turns a 0.10 mm width
+error into nearly 0.19 mm of Z, which is why guessing at it costs boards.
+
+| What you measure | What it means | What to do |
+|---|---|---|
+| Too narrow | Cutting too shallow | Lower Z by the width error × the multiplier, reset, run again |
+| Too wide | Cutting too deep | Raise Z by the same amount, **and shift the work offset in X and Y** so the retry lands on fresh material, reset, run again |
+| Right | — | Resume. The isolation pass runs at a depth you have seen work |
+
+(A flat-tipped engraver cuts one width however deep it goes, so there is no conversion to
+print. The program says so and asks you to judge the cut itself.)
+
+**Usually it costs nothing.** If the job routes its own outline, it is already removing a
+band of material round the board — the kerf plus the finishing allowance, waste by
+definition — and the L is cut down the middle of it. A 2 mm cutter leaves 2.1 mm and a
+0.25 mm isolation width needs 0.75 mm, so nothing moves and the witness is cut in swarf.
+
+Only a board that is engraved but never cut out has no such band. Then a narrow one is
+opened just outside the board — three isolation widths, leaving a channel-width of material
+either side of the cut — and the work origin moves out by it. **Re-zero after turning it on
+in that case.** The step's notes say which of the two happened.
+
+k2g still does not know how big your blank is, so it cannot check the band is on material.
+Check there is stock there before you run it.
+
+It needs a CNC profile whose `pause` primitive really stops. A step whose machine has no
+pause word does not get a test cut at all, and says so in its notes: a witness groove the
+program runs straight past is not a test. Watch out for `M01` — that is an *optional*
+stop, and a controller with optional-stop switched off runs past it. All the bundled
+profiles use `M0`/`M00`.
 
 ---
 

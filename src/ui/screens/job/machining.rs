@@ -483,6 +483,7 @@ mod selection_tests {
                     diameter: Length::from_mm(0.8),
                     ops: (0..ops).map(|_| atomic()).collect(),
                     travel_mm: 0.0,
+                    verify_stop: None,
                 })
                 .collect(),
             notes: Vec::new(),
@@ -504,6 +505,7 @@ mod selection_tests {
                     diameter: Length::from_mm(0.8),
                     ops: (0..*count).map(|_| atomic()).collect(),
                     travel_mm: 0.0,
+                    verify_stop: None,
                 })
                 .collect(),
             notes: Vec::new(),

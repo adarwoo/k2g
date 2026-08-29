@@ -361,6 +361,75 @@ and `min_width_nm` is its minimum-penetration width — **not** its tip, which i
 can never produce. That is the floor the narrowing ladder may descend to, and below it the
 pass reports uncut copper (§`pcb::isolate`).
 
+### 5.5 Nothing verifies Z0, so the operator does — the depth test cut
+
+Everything in §5.4 is arithmetic on a number nobody has measured. `depth` is referenced to
+the board surface, the pass cuts at one fixed Z from end to end, and there is no probing
+and no height map anywhere in the product (`validation-plan.md` §L). A Z zero that is
+50 µm out therefore produces a board that is entirely wrong and looks entirely right until
+it is finished — nets still joined, or traces undercut into the laminate.
+
+`engrave_copper.test_cut` is the manual check, generated. One boolean; everything else
+follows:
+
+- **What.** An L, cut in the waste, at `EngraveChoice::depth` — the *nominal* depth, not a
+  narrowed span's, because what is being verified is the depth the pass was designed
+  around. Its legs are the board's own width and height, so it reports depth drift across
+  the travel as well as depth at a point; a board that is not held flat fails an isolation
+  pass exactly as reliably as a mis-set tool, and a short scratch cannot separate the two.
+- **Where — usually free, and got wrong twice first.** A job that routes its own outline
+  already removes a band round the board (`kerf + finishing`, waste by construction). If it
+  has room for the trough with a trough-width of material either side, the L is cut down its
+  middle and **the frame does not grow at all** — a 2 mm cutter leaves 2.1 mm and a 0.25 mm
+  trough needs 0.75 mm. Only a board that is engraved but never cut out has no such band;
+  then `testcut::band` opens one of `3 × trough` and the board moves out by it.
+
+  The band is one of §6.1's **extents**, so it competes with the routed waste and the pins
+  rather than adding to them, and the fixture's `work_clearance` is stacked outside the
+  widest. Nothing is cut nearer the zero than the clearance.
+
+  ```text
+  testcut::band(waste, trough)  →  Margin::widest  →  Placement::new  →  testcut::l_path(rect, band)
+     how much room,                 with the other      the zero moves       the geometry, read
+     knowing no geometry            extents             out to clear them    back out
+  ```
+
+  Two earlier placements, both of which look right:
+
+  - **A fixed offset *past* the zero** — the obvious reading of "outside the work". It puts
+    the cut at negative X and Y on an ordinary near-left fixture: the far side of the corner
+    the board is registered into, which is where the fixture's stop is
+    (`scene::FixtureMark`'s arms are documented as running *away from the stop*), and
+    possibly outside the controller's travel. k2g carries no bed or envelope geometry, so
+    neither could be checked.
+  - **The corner on the zero** — tidy, and wrong because a cutter has width. A 0.2 mm channel
+    centred on the origin puts half of itself at −0.1 mm. The zero is a place to measure
+    from, not a place to cut.
+  block, outside the TSP; the block carries a `VerifyStop` describing the stop that follows
+  it. Keeping it in `ops` is what gives it the 3D view, the op table and the op count for
+  free — and a cut that appeared in the G-code but in no view is the failure mode §9.2's
+  "engraves nothing" guard exists to prevent.
+- **The stop.** Lift to the fixture's `z_safe` (not the retract plane), stop the spindle,
+  say what the channel should measure, `pause`, restart the spindle. The spindle stop is
+  not decoration: answering the prompt means a hand and a loupe against the cut.
+- **They measure a width and adjust a Z, so the program converts between the two.** A groove
+  50 µm deep has no depth anyone can gauge; its width is what a loupe with a scale resolves.
+  But width is not the dial. `assigner::engrave_depth_per_width` is the bridge —
+  `Δdepth = Δwidth / (2·tan(angle/2))`, exact rather than a local slope because §5.4's width
+  model is linear in depth, and a function of the cone alone so it can be stated once and
+  used for whatever error is found. Without it "0.05 mm too wide" is a fault with no remedy.
+  Too narrow → lower Z by that; too wide → raise Z by that, shift the work offset in X and Y
+  onto fresh material. A flat tip has no conversion (its width does not move with depth), and
+  the step says so rather than printing a ratio that does not exist.
+- **No `pause` word, no test cut.** The L's only output is a decision made at the stop, so
+  without a stop it is a groove in an unchecked corner followed by the copper being cut at
+  the very depth that was not verified. The step reports why, the same call `pick_engraver`
+  makes when there is no degraded output worth having.
+- **Known-absent, and said out loud.** k2g models no stock, bed or keep-out geometry, so
+  whether there is material at that corner cannot be checked — the fixture's registration
+  stop is on that side of the zero. The step's notes name the coordinates and the size
+  every time, and the operator confirms them.
+
 ---
 
 ## 6. Coordinate placement
@@ -377,12 +446,12 @@ machining + CNC + board bounds) and is a pure function of them.
   `origin` x0/y0 = Left/Right/Near/Far, in the **bed's** directions — `near` is the
   operator's side. Deliberately not the board's `front`/`back`, which name the PCB's two
   faces.)
-- **pin margin** — extra room the origin makes for work that is not the board. Today only
-  the locating pins (§6.1). Zero for a job without them, which is what keeps such a job's
-  output identical to one generated before margins existed. Deliberately **not** the routed
-  channel: the cutter centre runs one radius outside the edge, so a routed job has always
-  cut into negative coordinates, and folding that in here would move every existing routed
-  program.
+- **work clearance + extents** — how far the origin stands off the board. The fixture
+  *declares* `work_clearance` (X and Y): how close a cutting tool's **edge** may come to the
+  zero. Everything the job cuts outside the board declares an **extent** from the bounding
+  box — the routed outline's `kerf + finishing`, the pins' `1.5 × D`, the depth test cut's
+  band. The extents are compared, not summed; the clearance is added outside the widest.
+  See §6.1.
 - **CNC scaling** — per-axis calibration (`machine.scaling.x/y`).
 - **board flip** — for a step whose `board_face` is `back`, a final mirror about the
   board's own centre line, on the axis the fixture's `board_flip_axis` names (§6.1).
@@ -416,8 +485,10 @@ Because ops are placed in machine space, the §4 TSP minimises **physical** trav
 
 A board machined on both sides has to be lifted out of the fixture, turned over and put
 back **exactly** where it was. Two registration pins are what make that possible: holes
-drilled through the board and on into the backboard while it is still in its original
-setup, so the turned-over board drops back onto the same two points.
+drilled through the blank and on into the backboard while it is still in its original
+setup, so the turned-over board drops back onto the same two points. Note they are
+drilled **outside the board's bounding box**, through the surrounding blank and the
+backboard — not through the board, which never carries them.
 
 **Where they go** is a fixed rule with one setting — the pin diameter. They sit **on the
 fixture's flip mirror line**, centred on the board's bounding box, one pin each side, one
@@ -431,6 +502,42 @@ pure function of the placed board rectangle.
 sides) and the flip axis are derived once, from the profile's locating-pins step, and given
 to every step and to the 3D workpiece. Per step, two programs of one job could be written
 against different zeros — and the operator sets up against one.
+
+**The origin is declared, not derived.** The fixture states `work_clearance` (X and Y):
+*how close a cutting tool's edge may come to the zero*. Everything the job cuts outside the
+board then declares an **extent** — how far it reaches from the board's bounding box —
+stated *without knowing where the board is*, which is what breaks the circularity of "the
+origin clears the work, the work is measured from the placed board, the placed board depends
+on the origin". Three claim extents today:
+
+| claimant | extent from the bbox | sides | read back out by |
+|---|---|---|---|
+| routed outline | `kerf + finishing` — the material it removes | all four | — (it is waste) |
+| locating pins | `1.5 × diameter` | both sides of the flip axis | `pins::centres` |
+| engraving depth test cut (§5.5) | `testcut::band` | the origin's two sides | `testcut::l_path` |
+
+The extents combine with **`Margin::widest`, not `Margin::stack`**. They are all measured
+from the same edge and overlap in the material — the routed channel and the pin holes
+occupy the same few millimetres of blank — so summing them would charge the frame twice for
+one piece of material and push the board further out than anything needs. Whichever is
+widest ends up with its cutting edge exactly on the clearance line, and everything else
+falls short of it.
+
+The clearance is then **stacked outside** the widest of them, because it is measured from
+the zero rather than from the board. `widest` there would let a wide extent swallow it and
+put a cutting edge on the origin, which is the one thing the clearance exists to stop.
+
+So `origin = bbox − (max(extents) + clearance)`, and a fourth claimant adds one line to the
+array in `job_frame`. Because the frame is the job's, a claim made by one step moves the
+zero for all of them — which is the point, and the reason the operator re-zeroes when they
+turn one on.
+
+> **What this replaced.** k2g used to derive the origin from the pin margin alone. The point
+> the operator had to zero on was therefore in bare blank with no stop, no pin and no witness
+> mark at it; it was flush with the board on one axis and `1.5 × D` out on the other; it
+> moved whenever the pin diameter changed; and it was displayed nowhere. `fixture.yaml` even
+> described it as the corner the board is registered into, which it had not been since
+> margins were added. Every step's plan now prints the resulting distance in its notes.
 
 **Depth** is through the board plus the whole usable space below it
 (`backboard_thickness − bed_clearance`). This deliberately bypasses the §2½ Z-feasibility
