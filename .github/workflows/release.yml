@@ -441,7 +441,7 @@ jobs:
 
       # Every platform's artifacts, flattened into one directory. Their names already
       # carry the platform and architecture, so there is nothing to collide.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: k2g-*
