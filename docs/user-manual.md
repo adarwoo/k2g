@@ -124,9 +124,9 @@ the companion documents at the foot of that list open in your browser.
 
 ## 3. Quick start — your first board
 
-A fresh install has the tool catalogs and the bundled CNC templates, and nothing
-else. Building the first job takes about ten minutes; after that, a new board is
-"open it, check the plan, export".
+A fresh install has the tool catalogs and a set of bundled templates. The short way
+is four steps and needs one decision from you; after that, a new board is "open it,
+check the plan, export".
 
 1. **Open the board in KiCad**, with the IPC API enabled. If k2g's top bar says *No
    board loaded*, see [Connecting to KiCad](install-and-security.md#connecting-to-kicad)
@@ -134,26 +134,43 @@ else. Building the first job takes about ten minutes; after that, a new board is
    button to KiCad's toolbar for you.
 2. **Stock → Add tools from catalog.** Pick the drills and routers you actually own.
    Nothing can be planned without tools. (§4)
-3. **CNC → Add CNC.** Start from a bundled template if one matches your machine —
+3. **Job → Create starter profiles.** With no machining profile yet, the Job sidebar
+   asks which machine you have and creates the rest — a fixture, a toolset and a
+   *Drill and cut out* machining profile, bound to each other and selected. The job
+   summary fills in and generation starts by itself.
+4. **Open Fixtures and set the backboard thickness.** The starter fixture ships a
+   deliberately conservative value, not a measurement of your bench. **This is the
+   number that keeps the drill out of your bed** — see §7 before you cut anything.
+
+Then check the plan: *Tooling* — is each hole size getting a sensible tool?
+*Machining* — does the 3D toolpath look like your board? *Board* — are all the
+features there? Read the program on the *Code* tab, **Export…**, and air-cut it.
+
+### The long way
+
+Build each profile yourself when the starter set does not describe your setup — a
+machine with a tool rack, a vacuum table, a job that isolates copper as well as
+drilling. It takes about ten minutes, and it is the same four objects the starter set
+creates, so you can also start from those and edit rather than from nothing.
+
+1. **CNC → Add CNC.** Start from a bundled template if one matches your machine —
    *Genmitsu 3018-Pro*, *Masso G3 (with ATC / manual tool change)*, *Bantam Tools
    Desktop PCB Milling Machine*. Otherwise start from any of them and edit. Check
    the spindle range, the feed ceilings and the ATC slot count. (§6)
-4. **Fixtures → Add Fixture.** Backboard thickness, bed origin corner, machine
+2. **Fixtures → Add Fixture.** Backboard thickness, bed origin corner, machine
    origin reference (`G54`…), safe and retract heights. **Get the backboard
    thickness right — it is what keeps the drill out of your bed.** (§7)
-5. **Toolset → Add Toolset.** Set the slot count to your rack, then pin the tools
+3. **Toolset → Add Toolset.** Set the slot count to your rack, then pin the tools
    that live there permanently and leave the rest *Spare*. On a machine with no ATC,
    a one-slot spare toolset is enough. (§8)
-6. **Machining → Add Machining.** Bind the CNC, fixture and toolset to the step,
+4. **Machining → Add Machining.** Bind the CNC, fixture and toolset to the step,
    tick the operations you want (*Drill plated holes*, *Drill non-plated holes*,
    *Cut board outline* is the usual first set), and set the outline options. (§9)
-7. **Job → sidebar → Machining profile**: select the profile you just made. The job
-   summary fills in and generation starts by itself.
-8. **Check the plan.** *Tooling* — is each hole size getting a sensible tool?
-   *Machining* — does the 3D toolpath look like your board? *Board* — are all the
-   features there?
-9. **Read the program** on the *Code* tab.
-10. **Export…**, then air-cut it.
+   *Isolate, drill and cut out* is bundled too, and needs a V-bit in stock.
+5. **Job → sidebar → Machining profile**: select the profile you just made.
+
+Each **Add** dialog offers the bundled templates for that kind, so "from scratch"
+still starts from a working document rather than an empty one.
 
 ---
 
