@@ -1,0 +1,115 @@
+name: Bug report
+description: Something k2g did that it should not have, or did not do that it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting.
+
+        **If this is a security vulnerability, stop here** and follow
+        [SECURITY.md](https://github.com/adarwoo/k2g/blob/main/SECURITY.md) instead — please
+        report privately rather than as a public issue.
+
+        Nearly every report needs the same handful of facts, and a report without them
+        usually cannot be reproduced. The fields below are what it takes to get from
+        "it didn't work" to a fix.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        I selected the machining profile and pressed Generate. Instead of a program I got
+        "no isolation toolpath" — but the board definitely has copper on the front.
+    validations:
+      required: true
+
+  - type: input
+    id: k2g-version
+    attributes:
+      label: k2g version
+      description: >
+        On the **About** screen, and in the header of every generated program — so if you
+        are attaching a program below, it is already in there.
+      placeholder: "0.14.0"
+    validations:
+      required: true
+
+  - type: input
+    id: kicad-version
+    attributes:
+      label: KiCad version
+      description: KiCad's *Help → About → Copy Version Info*.
+      placeholder: "9.0.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+
+  - type: input
+    id: machine
+    attributes:
+      label: Machine and controller
+      description: >
+        The CNC this program was for, and what runs it. This matters even when the bug
+        looks unrelated to the machine — the CNC profile shapes almost every number k2g
+        emits.
+      placeholder: "Genmitsu 3018-Pro, GRBL 1.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: profiles
+    attributes:
+      label: The profiles involved
+      description: >
+        **This is the field that most often decides whether a bug can be reproduced.**
+        Export and attach them: CNC / Fixture / Toolset from their screens via
+        *Export profile*, and the machining profile via *Export machining profile*.
+        Drag the `.yaml` files into this box.
+      placeholder: Drag the exported .yaml files here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: program
+    attributes:
+      label: The generated program
+      description: >
+        The `.nc` (or equivalent) file, if one was produced. If generation *refused*, paste
+        the message it refused with instead — those messages are deliberate and name the
+        thing that was missing.
+      placeholder: Drag the program here, or paste the refusal message.
+
+  - type: textarea
+    id: security-log
+    attributes:
+      label: Security log (optional)
+      description: >
+        *Logs → Security → Export…*. Useful when the problem involves updates, KiCad
+        registration, export to removable media, or a config file being rejected. It
+        contains no personal data — paths are redacted before they are written.
+      placeholder: Drag the exported .jsonl here.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Before you post
+      options:
+        - label: >
+            I understand that a program which damages a machine or workpiece is a **bug**,
+            not a vulnerability, and that verifying a program against the real fixture,
+            stock and tooling is the operator's job.
+          required: true

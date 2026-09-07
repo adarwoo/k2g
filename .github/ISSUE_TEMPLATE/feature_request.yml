@@ -1,0 +1,48 @@
+name: Feature request
+description: Something k2g should be able to do and cannot
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Already known and on the roadmap** — please add to the existing issue rather than
+        opening a new one, or say so below if your case is different from the general one:
+
+        | | |
+        |---|---|
+        | **Engraving** | Cutting lettering, fiducials or any other mark. Copper *isolation* is done; engraving is not started. |
+        | **Tab nudging** | Tabs land where the distribution algorithm puts them. The planner honours a stored per-tab offset, but nothing in the UI sets one yet. |
+        | **Arc-preserving offsets** | The outline offset is a polygon operation, so it tessellates; arcs are fitted back before emission, exact to the profile's curve tolerance rather than to the original curve. |
+        | **Removable media** | Detection and eject are Windows-only. Plain export works everywhere. |
+
+        Asking for a bundled profile for your machine? Use the **Machine profile request**
+        form instead — it asks for the specific numbers a profile needs.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do
+      description: >
+        The job you are trying to get done, rather than the feature you have in mind for it.
+        The board, the machine, the step that is currently impossible or has to be done by
+        hand outside k2g.
+      placeholder: |
+        I panelise six small boards on one piece of stock and have to cut them apart by
+        hand afterwards, because …
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What do you do about it today
+      description: >
+        Another tool, a hand edit of the program, or simply not doing it. This is genuinely
+        useful — it says how much the gap costs and often shows a smaller change that would
+        close most of it.
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you think k2g should do (optional)
+      description: If you have a specific shape in mind, describe it here.

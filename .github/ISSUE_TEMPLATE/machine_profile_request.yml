@@ -1,0 +1,109 @@
+name: Machine profile request
+description: Ask for a bundled CNC profile for a machine k2g does not ship one for
+labels: ["cnc-profile"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        k2g does not need a bundled profile to drive your machine — a CNC profile is a
+        document you can write yourself, and starting from any bundled one and editing it
+        is a supported path (§6 of the manual, and the
+        [GCode template language reference](https://github.com/adarwoo/k2g/blob/main/docs/design/gcode-template-language.md)).
+
+        This form is for asking that one be **bundled**, so the next person with your
+        machine does not have to write it.
+
+        Fill in what you know. A request with the machine's real limits in it can be turned
+        into a profile; one that just names the machine usually cannot, because the numbers
+        below are exactly what a profile *is*.
+
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      placeholder: "Shapeoko 4 XXL"
+    validations:
+      required: true
+
+  - type: input
+    id: controller
+    attributes:
+      label: Controller and firmware
+      description: What actually interprets the G-code, and which version.
+      placeholder: "GRBL 1.1h / Carbide Motion"
+    validations:
+      required: true
+
+  - type: input
+    id: spindle
+    attributes:
+      label: Spindle range
+      description: >
+        Minimum and maximum. k2g scales feeds down when a tool is rated faster than the
+        spindle can turn, so the ceiling changes every feed in the program — a wrong number
+        here is a broken tool.
+      placeholder: "10000–30000 rpm, or 'fixed 12000 rpm', or 'manual router, not controllable'"
+    validations:
+      required: true
+
+  - type: input
+    id: feeds
+    attributes:
+      label: Maximum feed rates
+      description: XY and Z.
+      placeholder: "XY 5000 mm/min, Z 1000 mm/min"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: atc
+    attributes:
+      label: Tool changing
+      options:
+        - Manual tool change only
+        - Automatic tool changer (ATC)
+        - Manual, but with a tool-length probe
+    validations:
+      required: true
+
+  - type: input
+    id: work-offsets
+    attributes:
+      label: Work offsets available
+      description: >
+        Which of `G54`–`G59` you can use, and any the machine reserves. This is not
+        pedantry — a Bantam reserves `G54`, so it numbers offsets differently from a
+        stock GRBL machine and a profile that assumes otherwise puts the job in the
+        wrong place.
+      placeholder: "G54–G59, all free"
+    validations:
+      required: true
+
+  - type: textarea
+    id: quirks
+    attributes:
+      label: Anything unusual about its dialect
+      description: >
+        Canned cycles it does not support (some controllers have no `G81`), arcs it
+        refuses, a tool-change macro that moves the spindle, an unusual file extension,
+        line numbering requirements, homing behaviour.
+      placeholder: "No canned cycles — G81 is rejected, so drilling has to be explicit moves."
+
+  - type: textarea
+    id: existing-program
+    attributes:
+      label: A known-good program for this machine (optional, but the most useful thing here)
+      description: >
+        Any G-code you already run successfully on it — from another CAM tool, or written
+        by hand. A working program answers most of the questions above at once, and shows
+        the dialect as the machine actually accepts it rather than as the manual describes it.
+      placeholder: Paste or attach a short program that runs correctly on your machine.
+
+  - type: checkboxes
+    id: testing
+    attributes:
+      label: Testing
+      options:
+        - label: >
+            I have this machine and can test a draft profile on it. *(Profiles are not
+            bundled untested — if nobody can run it, it cannot ship.)*

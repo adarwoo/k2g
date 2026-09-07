@@ -346,7 +346,15 @@ mod tests {
         use std::path::{Path, PathBuf};
 
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut pages: Vec<PathBuf> = vec![root.join("README.md")];
+        // Every Markdown file at the root, not just the README: CONTRIBUTING and the
+        // CHANGELOG link into `docs/`, `assets/` and each other, and a root document added
+        // later should be covered without anyone remembering to add it here.
+        let mut pages: Vec<PathBuf> = std::fs::read_dir(&root)
+            .expect("the repository root is readable")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|e| e == "md"))
+            .collect();
         let mut stack = vec![root.join("docs")];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("docs/ is readable").flatten() {
