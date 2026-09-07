@@ -1,0 +1,62 @@
+# cargo-audit configuration — the advisory half of `.github/workflows/audit.yml`.
+#
+# This file exists to keep the *scheduled* run meaningful. `cargo audit` reports
+# informational advisories (unmaintained, unsound, notice) alongside vulnerabilities,
+# and on a schedule `rustsec/audit-check` turns whatever it finds into a GitHub issue.
+# With sixteen standing informational warnings and zero vulnerabilities, that is an
+# issue filed every Monday saying nothing has changed — which is how a weekly security
+# report gets filtered to trash, taking the one that matters with it.
+#
+# So the standing warnings are named here, exactly as they are in `deny.toml`, and for
+# the same reason: an exemption that is listed and justified stays reviewable, while a
+# blanket `informational_warnings = []` would also hide the *next* unmaintained crate,
+# which is the signal actually worth having.
+#
+# This list and `deny.toml`'s are the same set plus two entries — the `unsound`
+# advisories, which cargo-deny only warns on and cargo-audit reports. Both are marked
+# below. Any *other* divergence means one of the two files has gone stale, because they
+# are two tools answering one question about one dependency tree.
+
+[advisories]
+ignore = [
+    # --- The GTK3 stack, on Linux only -------------------------------------------
+    # wry draws the webview with WebKitGTK, which is bound to GTK3, and gtk-rs archived
+    # its GTK3 bindings in favour of gtk4-rs. Nothing k2g does reaches these crates:
+    # they are the toolkit under the window, and they leave when wry moves to GTK4.
+    # Windows (WebView2) and macOS (WKWebView) do not pull them at all.
+    "RUSTSEC-2024-0411",  # gdkwayland-sys — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0412",  # gdk           — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0413",  # atk           — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0414",  # gdkx11-sys    — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0415",  # gtk           — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0416",  # atk-sys       — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0418",  # gdk-sys       — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0419",  # gtk3-macros   — unmaintained GTK3 bindings
+    "RUSTSEC-2024-0420",  # gtk-sys       — unmaintained GTK3 bindings
+
+    # `glib`, same stack and same route in, but filed as *unsound* rather than
+    # unmaintained, which is why `deny.toml` does not list it — cargo-deny warns on
+    # unsound instead of failing. The unsoundness is in `VariantStrIter`'s iterator
+    # impls; k2g never constructs a `glib::Variant`, let alone iterates one.
+    "RUSTSEC-2024-0429",  # glib — unsound VariantStrIter, via wry/WebKitGTK on Linux
+
+    # --- Unmaintained utility crates, all transitive ------------------------------
+    # None is reachable from k2g's own code; each is an implementation detail of a
+    # crate that has not yet replaced it.
+    "RUSTSEC-2025-0057",  # fxhash — a hasher, pulled in transitively; no API of it is ours
+    "RUSTSEC-2024-0436",  # paste — a proc-macro that runs at build time and ships nothing
+    "RUSTSEC-2024-0370",  # proc-macro-error — likewise build-time only
+    "RUSTSEC-2026-0249",  # smartstring — rhai's string type, so it goes when rhai replaces it
+
+    # `rand` 0.7.3, unsound when a custom logger calls `rand::rng()`. It is a
+    # **build-dependency** and nothing else: phf_codegen → selectors → kuchikiki → wry.
+    # It runs during compilation to generate a static map and is not linked into any
+    # binary k2g ships, so there is no logger and no runtime to be unsound in. k2g's own
+    # tree is on rand 0.10.
+    "RUSTSEC-2026-0097",  # rand 0.7.3 — build-time only, via wry's phf codegen
+]
+
+# Left at the default (`["unmaintained", "unsound", "notice"]`) on purpose. Narrowing it
+# would silence whole categories rather than the specific advisories above, and a new
+# unmaintained dependency arriving is precisely what the weekly run is for.
+informational_warnings = ["unmaintained", "unsound", "notice"]

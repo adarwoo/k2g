@@ -35,12 +35,26 @@ jobs:
     # Dependabot's token is read-only whatever this says, so its pull requests still
     # cannot publish the check; the same audit runs on every push to main, which is where
     # the answer actually matters.
+    #
+    # `issues: write` is the same failure a second time, on the path only the schedule
+    # takes. The action reports as a *check run* on push and pull_request, but a scheduled
+    # run has no commit to attach a check to, so it opens an issue instead — and without
+    # this the weekly run died on "Resource not accessible by integration", pointing at
+    # the create-an-issue endpoint, having again found nothing wrong. A schedule that
+    # cannot report is a schedule that is not running: the whole point of the cron is to
+    # catch an advisory filed against a dependency on a week nobody pushed.
     permissions:
       contents: read
       checks: write
+      issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # Still on Node 20, and deliberately left there: it is the one action here with no
+      # Node 24 release to move to. Upstream fixed it on `main` but has cut no tag since
+      # v2.0.0, and pinning a security-audit action to an unreleased commit trades a
+      # deprecation notice for an unreviewed one. The runner already forces it onto Node
+      # 24 — the annotation is advisory, not a failure. Revisit when rustsec tags a v2.1.
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -48,7 +62,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

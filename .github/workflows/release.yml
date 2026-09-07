@@ -51,7 +51,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # `build.rs` compares Cargo.toml's version against the nearest tag; a
           # shallow clone has no tags and the check silently passes.
@@ -149,7 +149,7 @@ jobs:
 
       # Unsigned, and not published from here: signing and publishing are the `publish`
       # job's, behind the one approval gate. See its comment.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-windows
           path: dist/*
@@ -169,7 +169,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # As in the other jobs: `build.rs` compares Cargo.toml's version against the
           # nearest tag, and a shallow clone has no tags to compare against.
@@ -280,7 +280,7 @@ jobs:
           cp "./k2g-${VERSION}-portable-linux-x86_64.tar.gz" dist/
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-linux
           path: dist/*
@@ -304,7 +304,7 @@ jobs:
     name: macos (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # As in the Windows job: `build.rs` compares Cargo.toml's version against the
           # nearest tag, and a shallow clone has no tags to compare against.
@@ -410,7 +410,7 @@ jobs:
           cp "./k2g-${VERSION}-portable-macos-${ARCH}.tar.gz" dist/
           ls -la dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-macos-${{ matrix.arch }}
           path: dist/*
@@ -435,13 +435,19 @@ jobs:
       # For `.github/actions/sign-artifacts` and, more to the point, for
       # `assets/release-signing.pub` — the key each signature is checked against is the
       # one in the tree being released, not one fetched from anywhere.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
       # Every platform's artifacts, flattened into one directory. Their names already
       # carry the platform and architecture, so there is nothing to collide.
-      - uses: actions/download-artifact@v4
+      #
+      # v8 fails the run on a digest mismatch rather than logging a warning, which is
+      # the behaviour this job wants: everything below signs whatever lands in `dist`,
+      # so a corrupted download would otherwise be signed and shipped. `pattern` with
+      # `merge-multiple` is also unaffected by v5's path change, which only moved
+      # single-artifact downloads addressed by id.
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: k2g-*
@@ -460,14 +466,14 @@ jobs:
 
       # The signed set, kept whole for a manual run — which never publishes, so this is
       # the only way to inspect what a release *would* have contained.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: k2g-release-signed
           path: dist/*
 
       - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
