@@ -105,7 +105,13 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                         }
                     }
 
-                    if snapshot.selected_process_profile_id.is_none() {
+                    // Nothing to select from at all. This is a fresh install, and it is the
+                    // point the manual's quick start turns into ten minutes of authoring —
+                    // so the offer to build the set is made here, where the wall is, rather
+                    // than on a screen the newcomer has not thought to open.
+                    if snapshot.process_profiles.is_empty() {
+                        StarterKitOffer { state }
+                    } else if snapshot.selected_process_profile_id.is_none() {
                         p { class: "diag-status",
                             "Select a machining profile to display job attributes."
                         }
@@ -141,5 +147,79 @@ pub fn JobSidebar(state: Signal<AppCtx>) -> Element {
                         }
                     }
                 }
+    }
+}
+
+/// The first-run offer: build a complete, working set of profiles from one choice.
+///
+/// Shown only when there is no machining profile at all, which is a fresh install and
+/// nothing else. The alternative for that user is the manual's quick start — five objects
+/// authored before anything can be generated, of which the machine is the only one they
+/// are equipped to decide. So the machine is the only thing asked for.
+///
+/// Deliberately not a silent "set everything up" button. It says what it is about to
+/// create and what has to be checked afterwards, because one of the values it writes is
+/// the backboard thickness that keeps a drill out of the machine bed — and a starter set
+/// that hides that is worse than the wall it replaces.
+#[component]
+fn StarterKitOffer(state: Signal<AppCtx>) -> Element {
+    let templates = crate::ui::bindings::use_templates(crate::data::Profile::Cnc);
+    let mut chosen = use_signal(|| {
+        templates.first().map(|(key, _)| key.clone()).unwrap_or_default()
+    });
+    let mut message = use_signal(String::new);
+
+    rsx! {
+        div { class: "starter-kit",
+            p { class: "starter-kit-lead",
+                "No machining profile yet. Pick your machine and k2g will create a matching "
+                "fixture, toolset and machining profile, ready to generate."
+            }
+
+            div { class: "field",
+                label { "Machine" }
+                select {
+                    value: "{chosen}",
+                    onchange: move |evt| chosen.set(evt.value()),
+                    for (key , label) in templates.iter() {
+                        option { value: "{key}", "{label}" }
+                    }
+                }
+            }
+
+            button {
+                class: "btn btn-primary",
+                r#type: "button",
+                disabled: chosen.read().is_empty(),
+                onclick: move |_| {
+                    let key = chosen.read().clone();
+                    match crate::ui::bindings::create_starter_kit(&key) {
+                        Some(machining) => {
+                            let id = machining.to_string();
+                            crate::ui::screens::mutate_ctx(
+                                state,
+                                move |s| s.select_process_profile_by_id(Some(id.clone())),
+                            );
+                            message.set(String::new());
+                        }
+                        None => message.set(
+                            "Could not create the starter profiles — see Logs for detail."
+                                .to_string(),
+                        ),
+                    }
+                },
+                "Create starter profiles"
+            }
+
+            p { class: "diag-status starter-kit-check",
+                "Then check the fixture: its backboard thickness is what keeps the drill out "
+                "of your machine bed, and it ships at a conservative value rather than a "
+                "measurement of your bench."
+            }
+
+            if !message.read().is_empty() {
+                p { class: "diag-status", "{message}" }
+            }
+        }
     }
 }

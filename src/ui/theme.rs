@@ -2576,6 +2576,35 @@ p {
     font-weight: 600;
 }
 
+/* The first-run starter-set offer, in the slot the "select a profile" note occupies once
+   there is something to select. Boxed and tinted rather than plain prose: on a fresh
+   install this is the only actionable thing in the panel, and it should read as the way
+   forward rather than as one more explanatory paragraph. */
+.starter-kit {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.starter-kit-lead {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--text);
+}
+
+/* The backboard-thickness warning. `--warn` rather than the muted `.diag-status` grey it
+   would otherwise inherit: it is the one instruction here whose cost of being ignored is
+   a drill in the machine bed, and it must not read as a footnote. */
+.starter-kit-check {
+    margin: 0;
+    color: var(--warn);
+}
+
 /* Job summary: an aligned two-column (label · value) table. Muted uppercase
    labels line up in the first column; values are emphasized in the second. */
 .job-summary {

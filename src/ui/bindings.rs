@@ -268,6 +268,18 @@ pub fn data_revision() -> u64 {
     RENDER_TICK()
 }
 
+/// Creates the complete starter set for `cnc_template` and returns the machining profile's
+/// id, which is the one the Job screen should then run.
+///
+/// The other three are reachable from their own screens under the names their templates
+/// carry; only the machining profile needs to be handed back, because it is the one the
+/// job binds to.
+pub fn create_starter_kit(cnc_template: &str) -> Option<Uuid> {
+    let kit = with_appdata_mut(|data| data.create_starter_kit(cnc_template).ok())?;
+    bump_render();
+    Some(kit.machining)
+}
+
 /// The templates bundled for `kind`, as `(key, label)` pairs for the ProfileManager add
 /// dialog. Empty when the kind has none, which the dialog reads as "no picker".
 /// Subscribes to store mutations for consistency with the other reads.

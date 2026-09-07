@@ -189,6 +189,24 @@ struct ProfileTemplate {
     seed: Value,
 }
 
+/// The templates [`AppData::create_starter_kit`] builds its set from. Named here rather
+/// than passed in: the starter set is one opinionated answer, and offering a choice of
+/// fixture to someone who has not yet made their first board is the wall it exists to
+/// remove. The machine is the only choice, because it is the only one that is theirs.
+const STARTER_FIXTURE_TEMPLATE: &str = "starter_desktop";
+const STARTER_TOOLSET_TEMPLATE: &str = "manual_tool_change";
+const STARTER_MACHINING_TEMPLATE: &str = "drill_and_cut_out";
+
+/// The profiles [`AppData::create_starter_kit`] created, so a caller can select the
+/// machining profile it should now run and point the operator at the fixture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StarterKit {
+    pub cnc: Uuid,
+    pub fixture: Uuid,
+    pub toolset: Uuid,
+    pub machining: Uuid,
+}
+
 /// Lightweight descriptor of a bundled template for the UI picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateInfo {
@@ -605,6 +623,34 @@ impl AppData {
             self.bind_sole_profiles(id, 0);
         }
         Ok(id)
+    }
+
+    /// Creates the four profiles a first job needs, bound to each other, and returns them.
+    ///
+    /// The manual's quick start is ten minutes of authoring before anything can be
+    /// generated — five objects, of which only the machine is a decision a newcomer is
+    /// equipped to make. This collapses it to that one choice: pick the machine, and the
+    /// fixture, toolset and machining profile that go with it arrive already wired
+    /// together. What is left is the one number that must not be guessed, which the
+    /// fixture's own name asks for.
+    ///
+    /// The bindings are set **explicitly** rather than left to [`Self::bind_sole_profiles`].
+    /// That pass binds only where there is exactly one candidate — correct for a lone
+    /// `create`, but it would silently leave the step unbound for anyone reaching for a
+    /// starter set on an install that already has a machine on it, which is precisely when
+    /// a half-built set is most confusing.
+    pub fn create_starter_kit(&mut self, cnc_template: &str) -> Result<StarterKit, FactoryError> {
+        let cnc = self.create_from_template(Profile::Cnc, cnc_template)?;
+        let fixture = self.create_from_template(Profile::Fixture, STARTER_FIXTURE_TEMPLATE)?;
+        let toolset = self.create_from_template(Profile::Toolset, STARTER_TOOLSET_TEMPLATE)?;
+        let machining =
+            self.create_from_template(Profile::Machining, STARTER_MACHINING_TEMPLATE)?;
+
+        for (field, target) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
+            self.set_step_reference(machining, 0, field, Some(target));
+        }
+
+        Ok(StarterKit { cnc, fixture, toolset, machining })
     }
 
     // ---- machining step structural edits ---------------------------------
@@ -3481,6 +3527,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The starter set is complete and wired together: one call, and there is a machining
+    /// profile that can generate.
+    #[test]
+    fn the_starter_kit_arrives_ready_to_generate() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        let kit = data.create_starter_kit("genmitsu_3018").expect("starter kit");
+        data.flush();
+
+        for id in [kit.cnc, kit.fixture, kit.toolset, kit.machining] {
+            let doc = data.get(id).expect("profile present");
+            assert!(doc.status.is_complete(), "{:?}", doc.status);
+        }
+        let doc = data.get(kit.machining).unwrap();
+        for (field, expected) in
+            [("cnc", kit.cnc), ("fixture", kit.fixture), ("toolset", kit.toolset)]
+        {
+            let bound = doc.root.get_pointer(&format!("/steps/0/{field}")).unwrap();
+            assert!(matches!(&bound.value, NodeValue::Ref(r) if r.raw == expected), "{field}");
+        }
+    }
+
+    /// The binding is explicit, not a by-product of there being exactly one candidate.
+    ///
+    /// `bind_sole_profiles` deliberately refuses to choose between two machines. That is
+    /// right for a lone `create`, but it would leave the starter set's own step unbound
+    /// for anyone who already had a profile — the case where a half-built set is most
+    /// confusing. This is the test that fails if the explicit binding is ever removed on
+    /// the grounds that the sole-binding pass "already does it".
+    #[test]
+    fn the_starter_kit_binds_even_when_other_profiles_exist() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        // Pre-existing profiles of every kind, so nothing is "the sole" anything.
+        for kind in Profile::ALL {
+            data.create(kind).expect("pre-existing profile");
+        }
+
+        let kit = data.create_starter_kit("genmitsu_3018").expect("starter kit");
+        let doc = data.get(kit.machining).expect("profile present");
+        for (field, expected) in
+            [("cnc", kit.cnc), ("fixture", kit.fixture), ("toolset", kit.toolset)]
+        {
+            let bound = doc
+                .root
+                .get_pointer(&format!("/steps/0/{field}"))
+                .unwrap_or_else(|| panic!("'{field}' unbound"));
+            assert!(
+                matches!(&bound.value, NodeValue::Ref(r) if r.raw == expected),
+                "'{field}' bound to something other than the profile the kit just made",
+            );
+        }
+        assert!(doc.status.is_complete(), "{:?}", doc.status);
     }
 
     /// A machining profile from a template arrives bound, the same as a blank one does.
