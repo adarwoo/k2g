@@ -90,6 +90,13 @@ pub enum Event {
     FactoryReset,
     /// The user's k2g data directory was deleted.
     DataDeleted,
+    /// This file passed [`MAX_BYTES`] and rolled, discarding the generation before it.
+    ///
+    /// The only event the log writes about itself, and the reason is that rotation is
+    /// the one thing that removes history: without a line saying so, a reader cannot
+    /// tell a complete record from one whose beginning has been dropped. Written as the
+    /// first line of the fresh file, so it sits exactly at the discontinuity.
+    LogRotated,
 }
 
 impl Event {
@@ -112,6 +119,7 @@ impl Event {
             Self::GcodeWritten => "gcode.written",
             Self::FactoryReset => "data.factory_reset",
             Self::DataDeleted => "data.deleted",
+            Self::LogRotated => "log.rotated",
         }
     }
 }
@@ -174,22 +182,53 @@ fn try_record(event: Event, outcome: Outcome, detail: Value) -> std::io::Result<
     let path = dir.join(CURRENT_FILE);
 
     rotate_if_needed(&dir, &path)?;
+    append_line(&path, &line_for(event, outcome, detail))
+}
 
-    let line = serde_json::to_string(&json!({
+/// One record, as the line that goes in the file.
+///
+/// Separated from the writing so [`rotate_if_needed`] can lay down its own marker
+/// without going back through [`record`] — which would re-enter the rotation check it is
+/// in the middle of.
+fn line_for(event: Event, outcome: Outcome, detail: Value) -> String {
+    serde_json::to_string(&json!({
         "time": chrono::Utc::now().to_rfc3339(),
         "kind": event.kind(),
         "outcome": outcome.as_str(),
         "version": env!("CARGO_PKG_VERSION"),
         "detail": detail,
     }))
-    .unwrap_or_else(|_| String::from(r#"{"kind":"log.unserialisable"}"#));
+    .unwrap_or_else(|_| String::from(r#"{"kind":"log.unserialisable"}"#))
+}
 
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
+/// Append one already-formatted line, creating the file if it is not there.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{line}")
 }
 
 /// Roll `security.jsonl` to `security.1.jsonl` once it passes [`MAX_BYTES`],
 /// discarding the generation before that.
+///
+/// # Why the rotation records itself
+///
+/// Discarding the oldest generation is the one action in k2g that destroys part of the
+/// record, and it was the only consequential thing the record did not mention. Every
+/// other destructive operation is an event — [`Event::FactoryReset`],
+/// [`Event::DataDeleted`], [`Event::ConfigRejected`] — so a reader could tell what had
+/// happened. Without this, a reader could not tell a complete history from one whose
+/// first few thousand events had been dropped: nothing distinguishes the two.
+///
+/// So the fresh file opens with an [`Event::LogRotated`] line saying what went. The gap
+/// becomes a *recorded* gap, which is the difference between a bounded log and a quietly
+/// lossy one.
+///
+/// The marker lands where it needs to without being placed there. Each one is written at
+/// the top of the generation it opens, so when the *next* rotation discards everything
+/// older, that marker is left as the first line of the retained record — a reader opening
+/// the log sees it before anything else and knows the history does not start there. The
+/// marker written now says only that a rotation happened; the one written at the *next*
+/// rotation is what carries the size of what this generation eventually loses.
 fn rotate_if_needed(dir: &Path, path: &Path) -> std::io::Result<()> {
     let Ok(meta) = std::fs::metadata(path) else {
         return Ok(()); // not created yet
@@ -198,8 +237,47 @@ fn rotate_if_needed(dir: &Path, path: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     let previous = dir.join(PREVIOUS_FILE);
+
+    // Measured before the removal, because afterwards there is nothing left to ask. This
+    // is the generation that actually leaves — the current file is only moving down one
+    // place and stays readable.
+    let discarded = measure(&previous);
+
     let _ = std::fs::remove_file(&previous);
-    std::fs::rename(path, &previous)
+    std::fs::rename(path, &previous)?;
+    let rolled = measure(&previous);
+
+    append_line(
+        path,
+        &line_for(
+            Event::LogRotated,
+            Outcome::Ok,
+            // Flat scalars rather than two nested objects, because every other event's
+            // detail is flat and the Logs screen renders a detail as `key=value` pairs —
+            // a nested object would arrive there as raw JSON, braces and all. The
+            // `discarded_*` pair is absent rather than zero on the first rotation, which
+            // the screen already drops, so it reads as "nothing was lost" rather than
+            // claiming a measurement of nothing.
+            json!({
+                "rolled_bytes": rolled.map(|(bytes, _)| bytes),
+                "rolled_events": rolled.map(|(_, events)| events),
+                "discarded_bytes": discarded.map(|(bytes, _)| bytes),
+                "discarded_events": discarded.map(|(_, events)| events),
+            }),
+        ),
+    )
+}
+
+/// A generation's size and how many events are in it, or `None` if it is not there —
+/// which on the first rotation is the honest answer and is written as `null`.
+///
+/// Counts the line terminators rather than parsing: a record is written with `writeln!`,
+/// so a complete event is a complete line. A final line truncated by power loss is not
+/// counted, which agrees with [`read_all`] skipping what will not parse.
+fn measure(path: &Path) -> Option<(u64, usize)> {
+    let data = std::fs::read(path).ok()?;
+    let events = data.iter().filter(|byte| **byte == b'\n').count();
+    Some((data.len() as u64, events))
 }
 
 /// Read the record back, newest last, for the Logs screen and for export.
@@ -359,6 +437,7 @@ mod tests {
             Event::GcodeWritten,
             Event::FactoryReset,
             Event::DataDeleted,
+            Event::LogRotated,
         ];
         let mut kinds: Vec<&str> = all.iter().map(|e| e.kind()).collect();
         let count = kinds.len();
@@ -386,8 +465,11 @@ mod tests {
         std::fs::write(&path, vec![b'x'; (MAX_BYTES + 1) as usize]).unwrap();
         rotate_if_needed(dir.path(), &path).unwrap();
 
-        assert!(!path.exists(), "the oversized file was rolled away");
-        assert!(dir.path().join(PREVIOUS_FILE).exists(), "and kept as .1");
+        assert!(dir.path().join(PREVIOUS_FILE).exists(), "the oversized file was kept as .1");
+        // The current file is fresh, and holds the rotation marker and nothing else.
+        let current = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(current.lines().count(), 1, "{current}");
+        assert!(current.contains("log.rotated"), "{current}");
 
         // A second rotation discards the oldest rather than accumulating.
         std::fs::write(&path, vec![b'y'; (MAX_BYTES + 1) as usize]).unwrap();
@@ -396,9 +478,61 @@ mod tests {
         assert_eq!(previous[0], b'y', "the newer generation replaced the older");
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
-            1,
-            "exactly one previous generation is retained"
+            2,
+            "the record stays two files: the current one and one previous generation"
         );
+    }
+
+    /// The rotation says how much it destroyed. A marker that recorded only *that* a gap
+    /// exists, without its size, would be half an answer — the point is that a reader can
+    /// tell how much of the history is missing, not merely that some is.
+    #[test]
+    fn a_rotation_records_what_it_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CURRENT_FILE);
+        // Filled with line terminators so the byte count and the event count are the same
+        // known number, and the marker can be checked against both.
+        let filler = vec![b'\n'; (MAX_BYTES + 1) as usize];
+        let marker = |path: &Path| -> Value {
+            let text = std::fs::read_to_string(path).unwrap();
+            serde_json::from_str(text.lines().next().expect("a marker line")).unwrap()
+        };
+
+        // The first rotation has nothing behind it, so nothing is lost and it says so.
+        std::fs::write(&path, &filler).unwrap();
+        rotate_if_needed(dir.path(), &path).unwrap();
+        let first = marker(&path);
+        assert_eq!(first["kind"], "log.rotated");
+        assert!(first["detail"]["discarded_bytes"].is_null(), "nothing to lose yet: {first}");
+        assert!(first["detail"]["discarded_events"].is_null(), "{first}");
+        assert_eq!(first["detail"]["rolled_events"], MAX_BYTES + 1);
+        assert_eq!(first["detail"]["rolled_bytes"], MAX_BYTES + 1);
+
+        // The second is the one that drops a generation, and quantifies it.
+        std::fs::write(&path, &filler).unwrap();
+        rotate_if_needed(dir.path(), &path).unwrap();
+        let second = marker(&path);
+        assert_eq!(second["detail"]["discarded_bytes"], MAX_BYTES + 1);
+        assert_eq!(second["detail"]["discarded_events"], MAX_BYTES + 1);
+
+        // The detail is flat, so the Logs screen's `key=value` rendering has no nested
+        // object to fall back to printing as JSON.
+        let detail = second["detail"].as_object().expect("an object");
+        assert!(detail.values().all(|value| !value.is_object()), "{second}");
+    }
+
+    /// The marker is written straight to the file rather than through `record`, because
+    /// going back through it would re-enter the rotation check that is running. This is
+    /// the regression test for that: a rotation must terminate, and must leave exactly
+    /// one marker rather than a stack of them.
+    #[test]
+    fn a_rotation_does_not_re_enter_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CURRENT_FILE);
+        std::fs::write(&path, vec![b'z'; (MAX_BYTES + 1) as usize]).unwrap();
+        rotate_if_needed(dir.path(), &path).unwrap();
+        let current = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(current.matches("log.rotated").count(), 1, "{current}");
     }
 
     #[test]

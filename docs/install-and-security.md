@@ -204,6 +204,13 @@ anything else.
 - **Check the security log** if something surprises you: Logs → *Security*. It records
   what k2g changed outside its own directory, and when.
 
+  It is capped rather than kept forever: the record rolls at 2 MB and one previous
+  generation is kept, so it holds roughly the last 4 MB — thousands of events, and small
+  enough to attach to a bug report. When the oldest generation is dropped, that is itself
+  written down as a `log.rotated` entry saying how much went, so a shortened history
+  never looks like a complete one. If you need to keep more than that, export the log
+  (Logs → *Security* → *Export…*) before it rolls.
+
 ## Where your data lives
 
 | Platform | Directory |
