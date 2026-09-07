@@ -1,0 +1,57 @@
+# Starter fixture — a conservative setup for a desktop CNC holding a board on a
+# sacrificial backboard with clamps.
+#
+# The point of this template is that a new user has something to start a job with, not
+# that it describes their bench. Every value here is a *safe* starting point, and two of
+# them must be checked against the real machine before anything is cut.
+#
+# ## backboard_thickness is the one that matters
+#
+# It is the thickness of the sacrificial board under the PCB, and `breakthrough` is bounded
+# by it so the tool never reaches the bed. Declaring it **larger** than reality is what
+# puts a drill into the machine bed; declaring it smaller only risks a hole that does not
+# break through cleanly.
+#
+# So this ships at the schema's own conservative default rather than at a plausible-looking
+# "6 mm MDF". A number that looks measured invites being accepted without measuring, and
+# this is the one field where that trade is not worth making. The profile's name says so
+# too, because the name is what the operator sees in the picker.
+#
+# ## The heights
+#
+# Both are measured from the board top (Z0). `z_safe` is the travel height for rapid moves
+# and has to clear clamps, pins and any fixture hardware — 20 mm is generous for a desktop
+# machine, deliberately, because the cost of it being too low is a rapid through a clamp.
+
+$schema: fixture.yaml
+schema_version: 1
+
+name: "Starter fixture (set your backboard thickness)"
+
+# See the note above: conservative on purpose, and not a measurement of anything.
+backboard_thickness: "2.5mm"
+
+board_holding_method: clamps
+
+# G54 is the offset a stock machine has free. A Bantam reserves it and numbers offsets
+# differently — if that is your machine, start from its own profile instead.
+origin_reference: G54
+
+board_flip_axis: y
+
+# Bottom-left, which is where a desktop machine's origin usually is.
+origin:
+  x0: left
+  y0: near
+
+work_clearance:
+  x: "2mm"
+  y: "2mm"
+
+bed_clearance: "0.5mm"
+
+# Just enough to clear the underside of the board. Bounded by backboard_thickness above.
+breakthrough: "0.5mm"
+
+z_retract: "5mm"
+z_safe: "20mm"

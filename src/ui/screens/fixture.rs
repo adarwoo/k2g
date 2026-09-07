@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use super::profile_manager::{FieldGroup, ProfileManager};
 use super::profiles_common::format_impact_warning;
 use crate::data::Profile;
+use crate::ui::bindings::use_templates;
 
 /// Fixture profile screen — a thin wrapper over the shared [`ProfileManager`].
 /// Supplies the fixture field layout and a transitional delete guard that blocks
@@ -56,7 +57,7 @@ pub fn FixtureProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                 "/z_retract",
                 "/z_safe",
             ]),
-            templates: Vec::new(),
+            templates: use_templates(Profile::Fixture),
             delete_guard: Some(delete_guard),
         }
     }

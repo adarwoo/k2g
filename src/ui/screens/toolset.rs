@@ -7,7 +7,7 @@ use super::profiles_common::{
 };
 use crate::data::Profile;
 use crate::ui::bindings::{
-    clone_named, create_named, export_yaml, import_yaml, remove_profile_result, use_profiles,
+    clone_named, create_named_from_template, export_yaml, import_yaml, remove_profile_result, use_profiles, use_templates,
     RackGrid, SchemaField,
 };
 use crate::data::model::stock::ToolStatus;
@@ -27,6 +27,12 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
     let mut dialog_name = use_signal(|| "My toolset".to_string());
+    // The bundled toolset templates, and which one the add dialog is offering. The
+    // first is pre-selected so the dialog always has an answer; an empty list leaves
+    // this empty, which `create_named_from_template` reads as "from schema defaults".
+    let templates = use_templates(Profile::Toolset);
+    let mut selected_template =
+        use_signal(|| templates.first().map(|(key, _)| key.clone()).unwrap_or_default());
     let mut selected = use_signal(|| None::<Uuid>);
 
     let profiles = use_profiles(Profile::Toolset);
@@ -189,10 +195,10 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                     title: if *dialog_is_clone.read() { "Clone toolset profile".to_string() } else { "Add toolset profile".to_string() },
                     name_label: "Profile name".to_string(),
                     name_value: dialog_name.read().clone(),
-                    template_options: Vec::<(String, String)>::new(),
-                    selected_template: String::new(),
+                    template_options: if *dialog_is_clone.read() { Vec::new() } else { templates.clone() },
+                    selected_template: selected_template.read().clone(),
                     on_name_change: move |value| dialog_name.set(value),
-                    on_template_change: |_| {},
+                    on_template_change: move |value| selected_template.set(value),
                     on_cancel: move |_| show_name_dialog.set(false),
                     on_submit: move |_| {
                         let name = dialog_name.read().trim().to_string();
@@ -204,7 +210,7 @@ pub fn ToolsetProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                         let result = if is_clone {
                             current.and_then(|id| clone_named(id, &name))
                         } else {
-                            create_named(Profile::Toolset, &name)
+                            create_named_from_template(Profile::Toolset, &selected_template.read(), &name)
                         };
                         match result {
                             Some(id) => {

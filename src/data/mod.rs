@@ -84,12 +84,39 @@ pub(crate) fn settings_schema_text() -> &'static str {
 }
 
 /// Bundled CNC templates: `(key, embedded YAML)`. Each is a `cnc.yaml`-shaped
-/// seed with no `id`; see [`AppData::create_cnc_from_template`].
+/// seed with no `id`; see [`AppData::create_from_template`].
 pub(crate) const CNC_TEMPLATES: &[(&str, &str)] = &[
     ("genmitsu_3018", include_str!("../../assets/cnc_templates/genmitsu_3018.yaml")),
     ("masso_g3_with_atc", include_str!("../../assets/cnc_templates/masso_g3_with_atc.yaml")),
     ("masso_g3_no_atc", include_str!("../../assets/cnc_templates/masso_g3_no_atc.yaml")),
     ("batam", include_str!("../../assets/cnc_templates/batam.yaml")),
+];
+
+/// Bundled fixture templates. See [`Profile::bundled_templates`].
+pub(crate) const FIXTURE_TEMPLATES: &[(&str, &str)] = &[(
+    "starter_desktop",
+    include_str!("../../assets/fixture_templates/starter_desktop.yaml"),
+)];
+
+/// Bundled toolset templates. See [`Profile::bundled_templates`].
+pub(crate) const TOOLSET_TEMPLATES: &[(&str, &str)] = &[(
+    "manual_tool_change",
+    include_str!("../../assets/toolset_templates/manual_tool_change.yaml"),
+)];
+
+/// Bundled machining templates. See [`Profile::bundled_templates`].
+///
+/// Neither carries `cnc`/`fixture`/`toolset` on its step: those are bound at creation by
+/// [`AppData::bind_sole_profiles`], to whichever the user has exactly one of.
+pub(crate) const MACHINING_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "drill_and_cut_out",
+        include_str!("../../assets/machining_templates/drill_and_cut_out.yaml"),
+    ),
+    (
+        "isolate_drill_and_cut_out",
+        include_str!("../../assets/machining_templates/isolate_drill_and_cut_out.yaml"),
+    ),
 ];
 
 /// Reserved meta-key stamped at the top of every persisted file (mirrors the
@@ -113,6 +140,20 @@ pub enum Profile {
 
 impl Profile {
     pub const ALL: [Profile; 4] = [Profile::Cnc, Profile::Fixture, Profile::Toolset, Profile::Machining];
+
+    /// The templates bundled for this kind, as `(key, embedded YAML)`.
+    ///
+    /// A kind with an empty list simply has no picker: the add dialog falls back to
+    /// creating from the schema's own defaults, which is what every kind but CNC did
+    /// before there was anything to seed them from.
+    pub(crate) fn bundled_templates(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Profile::Cnc => CNC_TEMPLATES,
+            Profile::Fixture => FIXTURE_TEMPLATES,
+            Profile::Toolset => TOOLSET_TEMPLATES,
+            Profile::Machining => MACHINING_TEMPLATES,
+        }
+    }
 
     /// The schema id backing this collection.
     fn schema_id(self) -> &'static str {
@@ -140,14 +181,15 @@ impl Profile {
     }
 }
 
-/// A bundled CNC template parsed into a reusable seed.
-struct CncTemplate {
+/// A bundled profile template parsed into a reusable seed.
+struct ProfileTemplate {
+    kind: Profile,
     key: &'static str,
     name: String,
     seed: Value,
 }
 
-/// Lightweight descriptor of a CNC template for the UI picker.
+/// Lightweight descriptor of a bundled template for the UI picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplateInfo {
     pub key: String,
@@ -155,10 +197,10 @@ pub struct TemplateInfo {
 }
 
 /// The central data facade. Holds one live, auto-persisting [`ResolvedStore`]
-/// plus the parsed CNC templates.
+/// plus the parsed profile templates.
 pub struct AppData {
     store: ResolvedStore,
-    cnc_templates: Vec<CncTemplate>,
+    templates: Vec<ProfileTemplate>,
     settings_path: PathBuf,
     stock_path: PathBuf,
     job_path: PathBuf,
@@ -249,10 +291,10 @@ impl AppData {
         // resolve against catalog tools on the final pass.
         errors.extend(store.parse_directory("catalog.yaml", catalogs_dir));
 
-        let cnc_templates = load_cnc_templates();
+        let templates = load_templates();
 
         (
-            Self { store, cnc_templates, settings_path, stock_path, job_path },
+            Self { store, templates, settings_path, stock_path, job_path },
             errors,
         )
     }
@@ -528,25 +570,41 @@ impl AppData {
         self.store.remove_document(id)
     }
 
-    // ---- CNC templates ----------------------------------------------------
+    // ---- profile templates ------------------------------------------------
 
-    /// The available CNC templates, as `(key, name)` descriptors.
-    pub fn cnc_templates(&self) -> Vec<TemplateInfo> {
-        self.cnc_templates
+    /// The templates bundled for `kind`, as `(key, name)` descriptors. Empty when the
+    /// kind has none, which the add dialog reads as "no picker".
+    pub fn templates(&self, kind: Profile) -> Vec<TemplateInfo> {
+        self.templates
             .iter()
+            .filter(|t| t.kind == kind)
             .map(|t| TemplateInfo { key: t.key.to_string(), name: t.name.clone() })
             .collect()
     }
 
-    /// Creates a new CNC profile seeded from the template `key`; returns its id.
-    pub fn create_cnc_from_template(&mut self, key: &str) -> Result<Uuid, FactoryError> {
+    /// Creates a new profile of `kind` seeded from the template `key`; returns its id.
+    ///
+    /// Machining templates get the same binding pass a blank machining profile gets —
+    /// their steps deliberately name no CNC, fixture or toolset, so without this a
+    /// profile created from one would arrive unbound and refuse to generate.
+    pub fn create_from_template(
+        &mut self,
+        kind: Profile,
+        key: &str,
+    ) -> Result<Uuid, FactoryError> {
         let seed = self
-            .cnc_templates
+            .templates
             .iter()
-            .find(|t| t.key == key)
+            .find(|t| t.kind == kind && t.key == key)
             .map(|t| t.seed.clone())
-            .ok_or_else(|| FactoryError::UnknownSource(format!("cnc template '{key}'")))?;
-        self.store.create_document_from("cnc.yaml", &seed)
+            .ok_or_else(|| {
+                FactoryError::UnknownSource(format!("{kind:?} template '{key}'"))
+            })?;
+        let id = self.store.create_document_from(kind.schema_id(), &seed)?;
+        if kind == Profile::Machining {
+            self.bind_sole_profiles(id, 0);
+        }
+        Ok(id)
     }
 
     // ---- machining step structural edits ---------------------------------
@@ -1027,21 +1085,23 @@ fn build_datastore() -> DataStore {
     builder.build().expect("embedded schemas must compile")
 }
 
-/// Parses the bundled CNC templates into reusable seeds, taking each display
-/// name from the template's `name` field (falling back to the key).
-fn load_cnc_templates() -> Vec<CncTemplate> {
+/// Parses every bundled template into a reusable seed, taking each display name from the
+/// template's `name` field (falling back to the key).
+fn load_templates() -> Vec<ProfileTemplate> {
     let mut out = Vec::new();
-    for (key, text) in CNC_TEMPLATES {
-        match parse_yaml_value(text) {
-            Some(value) => {
-                let name = value
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or(key)
-                    .to_string();
-                out.push(CncTemplate { key, name, seed: value });
+    for kind in Profile::ALL {
+        for (key, text) in kind.bundled_templates() {
+            match parse_yaml_value(text) {
+                Some(value) => {
+                    let name = value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(key)
+                        .to_string();
+                    out.push(ProfileTemplate { kind, key, name, seed: value });
+                }
+                None => warn!("bundled {kind:?} template '{key}' failed to parse; skipping"),
             }
-            None => warn!("bundled CNC template '{key}' failed to parse; skipping"),
         }
     }
     out
@@ -3366,11 +3426,13 @@ mod tests {
     }
 
     #[test]
-    fn create_cnc_from_template_preserves_the_template_name() {
+    fn create_from_template_preserves_the_template_name() {
         let dir = tempdir().unwrap();
         let (mut data, _) = load_temp(dir.path());
 
-        let id = data.create_cnc_from_template("genmitsu_3018").expect("create from template");
+        let id = data
+            .create_from_template(Profile::Cnc, "genmitsu_3018")
+            .expect("create from template");
         data.flush();
 
         let doc = data.get(id).expect("profile present");
@@ -3383,7 +3445,75 @@ mod tests {
     fn unknown_template_key_is_an_error() {
         let dir = tempdir().unwrap();
         let (mut data, _) = load_temp(dir.path());
-        assert!(data.create_cnc_from_template("does_not_exist").is_err());
+        assert!(data.create_from_template(Profile::Cnc, "does_not_exist").is_err());
+    }
+
+    /// A key is only valid for its own kind. Without the kind in the lookup, a machining
+    /// template key would happily seed a CNC profile from a machining document.
+    #[test]
+    fn a_template_key_does_not_cross_between_kinds() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+        assert!(data.create_from_template(Profile::Cnc, "drill_and_cut_out").is_err());
+        assert!(data.create_from_template(Profile::Machining, "genmitsu_3018").is_err());
+    }
+
+    /// Every bundled template, of every kind, must produce a document the application
+    /// considers complete — otherwise the profile it seeds cannot generate, and the
+    /// starter set is worse than no starter set.
+    #[test]
+    fn every_bundled_template_creates_a_complete_profile() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        // In `Profile::ALL` order, so the machining templates are created last and their
+        // steps bind to the sole CNC, fixture and toolset made just above.
+        for kind in Profile::ALL {
+            for (key, _) in kind.bundled_templates() {
+                let id = data
+                    .create_from_template(kind, key)
+                    .unwrap_or_else(|e| panic!("{kind:?} template '{key}': {e:?}"));
+                let doc = data.get(id).expect("profile present");
+                assert!(
+                    doc.status.is_complete(),
+                    "{kind:?} template '{key}' is incomplete: {:?}",
+                    doc.status
+                );
+            }
+        }
+    }
+
+    /// A machining profile from a template arrives bound, the same as a blank one does.
+    /// The templates name no CNC, fixture or toolset on purpose, so without the binding
+    /// pass in `create_from_template` they would seed a profile that cannot generate.
+    #[test]
+    fn a_machining_template_binds_to_the_sole_profiles() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        let cnc = data.create_from_template(Profile::Cnc, "genmitsu_3018").unwrap();
+        let fixture = data.create_from_template(Profile::Fixture, "starter_desktop").unwrap();
+        let toolset = data
+            .create_from_template(Profile::Toolset, "manual_tool_change")
+            .unwrap();
+
+        let id = data
+            .create_from_template(Profile::Machining, "drill_and_cut_out")
+            .expect("create machining from template");
+
+        let doc = data.get(id).expect("profile present");
+        for (field, expected) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
+            let bound = doc
+                .root
+                .get_pointer(&format!("/steps/0/{field}"))
+                .unwrap_or_else(|| panic!("step has no '{field}' after creation"));
+            assert!(
+                matches!(&bound.value, NodeValue::Ref(r) if r.raw == expected),
+                "'{field}' did not bind to the sole profile: {:?}",
+                bound.value
+            );
+        }
+        assert!(doc.status.is_complete(), "a bound step should generate: {:?}", doc.status);
     }
 
     /// Every unit the `units` crate can *write* must be accepted by the schema that will
@@ -3533,12 +3663,19 @@ mod tests {
     }
 
     #[test]
-    fn cnc_templates_lists_all_bundled_seeds() {
+    fn templates_lists_every_bundled_seed_for_its_own_kind() {
         let dir = tempdir().unwrap();
         let (data, _) = load_temp(dir.path());
-        let templates = data.cnc_templates();
-        assert_eq!(templates.len(), CNC_TEMPLATES.len());
-        assert!(templates.iter().any(|t| t.name == "Masso G3 - With ATC"));
+        for kind in Profile::ALL {
+            assert_eq!(
+                data.templates(kind).len(),
+                kind.bundled_templates().len(),
+                "{kind:?} templates did not all load"
+            );
+        }
+        assert!(data.templates(Profile::Cnc).iter().any(|t| t.name == "Masso G3 - With ATC"));
+        // Each kind's picker offers only its own.
+        assert!(data.templates(Profile::Fixture).iter().all(|t| t.name != "Masso G3 - With ATC"));
     }
 
     #[test]
@@ -4450,3 +4587,4 @@ steps:
         assert!(data.list(Profile::Fixture).is_empty());
     }
 }
+

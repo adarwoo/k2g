@@ -1,0 +1,25 @@
+# Starter toolset — one spare slot, for a machine with no automatic tool changer.
+#
+# This is the manual's own advice for a machine without an ATC (§8): a single spare slot is
+# enough, because every tool goes into the same collet and the program stops to ask for the
+# next one. Pinning tools to fixed slots only earns its keep on a machine that has a rack.
+#
+# `generation_policy: fixed_toolset` means the planner works with the tools this toolset
+# offers rather than assuming anything else is reachable — which for one spare slot means
+# "whatever is in stock, one at a time, with a stop between".
+
+$schema: toolset.yaml
+schema_version: 1
+
+name: "Manual tool change (1 spare slot)"
+description: >
+  For a machine with no automatic tool changer. One spare slot: the program pauses and asks
+  for each tool in turn. Add slots and pin tools to them if your machine has a rack.
+
+generation_policy: fixed_toolset
+
+slots:
+  - index: 1
+    mode: spare
+
+tags: []

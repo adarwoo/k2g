@@ -1,0 +1,35 @@
+# Isolate the copper, drill the holes, then cut the board out — the whole job in one step.
+#
+# The same set as `drill_and_cut_out` with `engrave_copper` added in front. Kept as a
+# separate template rather than as the default because it needs something the drill-and-cut
+# profile does not: **a V-bit in stock**. Without one the planner refuses rather than
+# emitting a program that cannot be cut, which is correct but is a poor first experience —
+# so the simpler profile is the one to succeed at first.
+#
+# ## Why engraving comes first
+#
+# Isolation is the one operation whose quality is a depth tolerance: a V-bit's channel
+# width is a function of how deep it goes, and the pass runs at one fixed Z for its whole
+# length. That only holds if Z0 is the real board surface, so the copper is cut while the
+# surface is still unmachined and the board is still whole — before any hole or cut has
+# given it a reason to move. The planner enforces this order; the list below only says
+# which operations are wanted.
+#
+# `test_cut` is left at the schema default. Turning it on cuts a short L in the waste at
+# the exact depth the pass will use and stops, so the channel width can be measured with a
+# loupe before the copper is touched. On an unfamiliar machine that is the cheapest
+# insurance there is — see `gcode::testcut`.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Isolate, drill and cut out"
+
+steps:
+  - name: "Isolate, drill and cut out"
+    board_face: front
+    operations:
+      - engrave_copper
+      - drill_pth
+      - drill_npth
+      - route_board

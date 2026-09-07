@@ -240,17 +240,21 @@ pub fn remove_profile_result(id: Uuid) -> Result<(), String> {
     })
 }
 
-/// Creates a named profile, seeding from a template when `kind` supports one and
-/// `template_key` is non-empty (currently CNC). Returns the new id.
+/// Creates a named profile, seeding from a template when one was chosen. Returns the new
+/// id.
+///
+/// An empty `template_key` means "from the schema's defaults" — which is what a kind with
+/// no bundled templates always gets, and what the dialog sends when the picker is not
+/// shown.
 pub fn create_named_from_template(
     kind: crate::data::Profile,
     template_key: &str,
     name: &str,
 ) -> Option<Uuid> {
-    let id = if kind == crate::data::Profile::Cnc && !template_key.is_empty() {
-        with_appdata_mut(|data| data.create_cnc_from_template(template_key).ok())?
-    } else {
+    let id = if template_key.is_empty() {
         with_appdata_mut(|data| data.create(kind).ok())?
+    } else {
+        with_appdata_mut(|data| data.create_from_template(kind, template_key).ok())?
     };
     with_appdata_mut(|data| data.set_field(id, "/name", NodeValue::Str(name.to_string())));
     bump_render();
@@ -264,15 +268,16 @@ pub fn data_revision() -> u64 {
     RENDER_TICK()
 }
 
-/// The bundled CNC templates as `(key, label)` pairs for the ProfileManager add
-/// dialog. Subscribes to store mutations for consistency with the other reads.
-pub fn use_cnc_templates() -> Vec<(String, String)> {
+/// The templates bundled for `kind`, as `(key, label)` pairs for the ProfileManager add
+/// dialog. Empty when the kind has none, which the dialog reads as "no picker".
+/// Subscribes to store mutations for consistency with the other reads.
+pub fn use_templates(kind: crate::data::Profile) -> Vec<(String, String)> {
     subscribe();
     if !appdata_ready() {
         return Vec::new();
     }
     with_appdata(|data| {
-        data.cnc_templates()
+        data.templates(kind)
             .into_iter()
             .map(|template| (template.key, template.name))
             .collect()

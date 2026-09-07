@@ -1,0 +1,36 @@
+# Starter machining profile — drill the holes, then cut the board out.
+#
+# The manual's own "usual first set" (§3, step 6): plated holes, non-plated holes, and the
+# outline. It is the smallest profile that produces a board you can hold, which makes it
+# the right thing to succeed at before adding isolation to the mix.
+#
+# ## What is deliberately not here
+#
+# No `cnc`, `fixture` or `toolset` on the step. Those are bound when the profile is
+# created — to the ones the user has exactly one of, and to nothing at all when there is
+# more than one, because with two machines on the bench which one a step runs on is a
+# decision only the operator can make (see `AppData::sole_profile`). A template that
+# hard-coded ids would either be wrong or would not load.
+#
+# Everything the step does not name — the oversize/undersize allowances, the tab
+# arrangement, the kerf — comes from the schema's own defaults, so this file stays about
+# the choice it is making rather than restating the whole document.
+#
+# ## Order
+#
+# The operations are listed in the order the planner runs them, which is fixed and not
+# taken from this list: holes while the board is still whole, and the perimeter that
+# releases the part last.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Drill and cut out"
+
+steps:
+  - name: "Drill and cut out"
+    board_face: front
+    operations:
+      - drill_pth
+      - drill_npth
+      - route_board

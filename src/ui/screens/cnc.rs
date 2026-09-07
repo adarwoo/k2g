@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use super::profile_manager::{FieldGroup, ProfileManager};
 use super::profiles_common::format_impact_warning;
 use crate::data::Profile;
-use crate::ui::bindings::use_cnc_templates;
+use crate::ui::bindings::use_templates;
 
 /// CNC profile screen — a thin wrapper over the shared [`ProfileManager`].
 ///
@@ -16,7 +16,7 @@ use crate::ui::bindings::use_cnc_templates;
 /// profile (machining is not migrated to the datastore yet).
 #[component]
 pub fn CncScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
-    let templates = use_cnc_templates();
+    let templates = use_templates(Profile::Cnc);
 
     let delete_guard = use_callback(move |id: String| {
         let impact = state.read().impact_delete_cnc_profile(&id);
