@@ -5086,6 +5086,70 @@ summary {
     margin-bottom: 6px;
 }
 
+/* The search field, at the top of the rail because it is a way *into* the contents
+   rather than another entry in them. It sits above the list it filters. */
+.manual-search {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-right: 14px;
+}
+
+/* `type="search"` rather than `type="text"`: the engine draws its own clear affordance
+   in the field, which is the discoverable half of the Escape key the screen handles. */
+.manual-search-input {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elev);
+    color: var(--text);
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 12.5px;
+}
+
+.manual-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.manual-search-status {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+}
+
+.manual-search-count {
+    font-size: 11.5px;
+    color: var(--text-subtle);
+    font-variant-numeric: tabular-nums;
+}
+
+.manual-search-steps {
+    display: flex;
+    gap: 2px;
+}
+
+.manual-search-step {
+    appearance: none;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-subtle);
+    font-size: 10px;
+    line-height: 1;
+    padding: 4px 7px;
+    cursor: pointer;
+}
+
+.manual-search-step:hover {
+    background: var(--bg-elev);
+    color: var(--text);
+    border-color: var(--accent);
+}
+
 /* A button rather than an anchor, throughout: see `ui::help` — an href in this window
    navigates the application itself. */
 .manual-toc-link {
@@ -5136,6 +5200,52 @@ summary {
     max-width: 104ch;
     margin-inline: auto;
     padding: 18px 24px 48px;
+}
+
+/* A search result: the section's words, and how many matches are in it. The count is
+   pushed to the end rather than following the title, so a column of them lines up and
+   can be compared at a glance. */
+.manual-toc-link.is-hit {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.manual-toc-link-text {
+    min-width: 0;
+}
+
+.manual-toc-hit-count {
+    flex: none;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-subtle);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-radius: 999px;
+    padding: 1px 6px;
+}
+
+/* The matches themselves.
+   `color: inherit` is not decoration but a correction: a browser draws `mark` as black
+   on yellow, which on the dark palettes is black text on a dark page — the highlight
+   would hide the word it is pointing at. The tint is mixed from `--accent` so it follows
+   whichever of the four palettes is on, amber included.
+
+   The current match is told apart by a ring rather than by a different text colour,
+   because a colour readable on `--accent` in the dark palettes is not readable on it in
+   the light ones. An outline holds up on all four. */
+.help-markdown mark.manual-hit {
+    color: inherit;
+    background: color-mix(in srgb, var(--accent) 28%, transparent);
+    border-radius: 3px;
+    padding: 0 1px;
+}
+
+.help-markdown mark.manual-hit.is-current {
+    background: color-mix(in srgb, var(--accent) 55%, transparent);
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
 }
 
 @media (max-width: 900px) {

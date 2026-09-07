@@ -61,12 +61,40 @@ pub struct Section {
     pub title: String,
 }
 
-/// A rendered page: the HTML to inject, and the sections a contents list can jump to.
+/// One section that a search matched, and how many times it did.
+///
+/// Carries the heading's own `id` so a result is clicked the same way a contents entry
+/// is — by scrolling to the anchor, never by following a link.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionHits {
+    pub id: String,
+    pub title: String,
+    pub hits: usize,
+}
+
+/// A rendered page: the HTML to inject, the sections a contents list can jump to, and —
+/// when the page was rendered for a search — where the matches are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderedDoc {
     pub html: String,
     pub sections: Vec<Section>,
+    /// Sections containing at least one match, in document order. Empty when nothing was
+    /// searched for.
+    pub hits: Vec<SectionHits>,
+    /// Every match in the page, including any above the first level-2 heading — so this
+    /// can exceed the sum over [`hits`](Self::hits), and it is what the match counter and
+    /// the `manual-hit-{n}` ids are numbered against.
+    pub total_hits: usize,
 }
+
+/// How many characters a query needs before it highlights anything.
+///
+/// One is not a useful search of a manual: "e" marks several thousand places, which is
+/// no more informative than not searching and costs a full re-render on the keystroke
+/// that opens every session. Two is the shortest query that says something — and it
+/// keeps `Z`, `G` and the other single letters an operator might try from producing a
+/// page of noise instead of an answer.
+pub const MIN_QUERY: usize = 2;
 
 /// Renders a help page to HTML, with heading anchors and no navigable links.
 ///
@@ -86,6 +114,49 @@ pub struct RenderedDoc {
 /// blockquote carrying `markdown-alert-warning` rather than as a paragraph beginning with
 /// a literal `[!WARNING]`.
 pub fn render_doc(markdown: &str) -> RenderedDoc {
+    render(markdown, "")
+}
+
+/// [`render_doc`], with every occurrence of `query` wrapped in a `<mark>` and counted.
+///
+/// Matching is case-insensitive and by substring, which is what a reader expects of a
+/// find field: typing "feed" finds "Feedrate". A query shorter than [`MIN_QUERY`]
+/// searches for nothing, so the page comes back exactly as [`render_doc`] renders it.
+///
+/// # Why the search runs here and not in the WebView
+///
+/// The obvious implementation is a few lines of JavaScript through `document::eval` that
+/// walk the text nodes and wrap the matches. It is also the one place on this screen
+/// where text typed by the user would be interpolated into a script — the hazard the
+/// module note describes, arrived at from the other direction. Marking the matches while
+/// the page is built keeps the query as *data*: it is compared against text and never
+/// becomes part of a program, and the only thing that reaches `eval` is an integer
+/// counter generated here (see `manual::focus_hit`).
+///
+/// The cost is that a keystroke re-renders the page rather than touching the DOM. The
+/// manual is some forty kilobytes and this sits behind a `use_memo`, so it costs a few
+/// milliseconds when the query changes and nothing at all on any other re-render.
+///
+/// Each mark carries `id="manual-hit-{n}"`, numbered across the whole page in document
+/// order, which is what lets the screen step from one match to the next.
+pub fn render_doc_matching(markdown: &str, query: &str) -> RenderedDoc {
+    render(markdown, query)
+}
+
+/// The renderer both entry points share. An empty `query` — or one shorter than
+/// [`MIN_QUERY`] — highlights nothing, which is the plain-rendering case.
+fn render(markdown: &str, query: &str) -> RenderedDoc {
+    // Held as `char`s rather than a lowercased `String`, because a match has to be sliced
+    // back out of the *original* text to keep its own capitals, and lowercasing is not
+    // length-preserving — offsets found in a lowered copy can land mid-character in the
+    // original.
+    let trimmed = query.trim();
+    let needle: Vec<char> = if trimmed.chars().count() >= MIN_QUERY {
+        trimmed.chars().collect()
+    } else {
+        Vec::new()
+    };
+
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
@@ -116,29 +187,166 @@ pub fn render_doc(markdown: &str) -> RenderedDoc {
             .map(|(_, id)| id.clone())
     };
 
-    let kept = events.into_iter().enumerate().filter_map(|(at, event)| {
+    // Matches per section, parallel to `sections`. `walking` is the section being read
+    // now, and stays `None` until the first level-2 heading: the title and any preamble
+    // above it belong to no section, so a match there counts in the total and is
+    // attributed to nothing — which is why the two figures need not agree.
+    let mut counts = vec![0usize; sections.len()];
+    let mut walking: Option<usize> = None;
+    let mut entered = 0usize;
+    let mut next_hit = 0usize;
+
+    let mut kept: Vec<Event> = Vec::with_capacity(events.len());
+    for (at, event) in events.into_iter().enumerate() {
         if dropped.as_ref().is_some_and(|range| range.contains(&at)) {
-            return None;
+            continue;
         }
         match event {
             Event::Start(Tag::Heading { level, classes, attrs, .. }) => {
-                Some(Event::Start(Tag::Heading {
+                if level == HeadingLevel::H2 {
+                    walking = Some(entered);
+                    entered += 1;
+                }
+                kept.push(Event::Start(Tag::Heading {
                     level,
                     id: anchor_for(at).map(Into::into),
                     classes,
                     attrs,
-                }))
+                }));
             }
             // The link's *text* is the events between these two, and they are kept — so
             // "see [Privacy](../PRIVACY.md)" reads as "see Privacy" and clicks nowhere.
-            Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link) => None,
-            other => Some(other),
+            Event::Start(Tag::Link { .. }) | Event::End(TagEnd::Link) => {}
+
+            // Prose, table cells and the inside of fenced blocks all arrive as `Text`. A
+            // match turns the run into raw HTML, so the escaping this event would have
+            // been given by the renderer has to be done by hand — see `mark_matches`.
+            Event::Text(text) if !needle.is_empty() => {
+                let mut marked = String::new();
+                let found = mark_matches(&text, &needle, &mut next_hit, &mut marked);
+                if found == 0 {
+                    kept.push(Event::Text(text));
+                } else {
+                    if let Some(section) = walking {
+                        counts[section] += found;
+                    }
+                    kept.push(Event::InlineHtml(marked.into()));
+                }
+            }
+
+            // Inline code is its own event, and a manual keeps a lot of its nouns in
+            // backticks — `G01`, `drill`. Leaving it out would have a reader searching in
+            // vain for the very terms the document sets apart. The `<code>` the renderer
+            // would have written is written here instead, because the marks go inside it.
+            Event::Code(text) if !needle.is_empty() => {
+                let mut marked = String::new();
+                let found = mark_matches(&text, &needle, &mut next_hit, &mut marked);
+                if found == 0 {
+                    kept.push(Event::Code(text));
+                } else {
+                    if let Some(section) = walking {
+                        counts[section] += found;
+                    }
+                    kept.push(Event::InlineHtml(format!("<code>{marked}</code>").into()));
+                }
+            }
+
+            other => kept.push(other),
         }
-    });
+    }
+
+    let hits = sections
+        .iter()
+        .zip(&counts)
+        .filter(|(_, &found)| found > 0)
+        .map(|(section, &found)| SectionHits {
+            id: section.id.clone(),
+            title: section.title.clone(),
+            hits: found,
+        })
+        .collect();
 
     let mut out = String::with_capacity(markdown.len() * 2);
-    html::push_html(&mut out, kept);
-    RenderedDoc { html: out, sections }
+    html::push_html(&mut out, kept.into_iter());
+    RenderedDoc { html: out, sections, hits, total_hits: next_hit }
+}
+
+/// Writes `text` into `out` as HTML, wrapping each match of `needle` in a numbered
+/// `<mark>`; returns how many it wrapped.
+///
+/// Everything that is not a match is escaped on the way through, which is not optional:
+/// the result is handed back as raw HTML, so a `<` in the manual's prose that the
+/// renderer would have escaped has to be escaped here or it becomes a tag.
+fn mark_matches(text: &str, needle: &[char], next_hit: &mut usize, out: &mut String) -> usize {
+    let mut found = 0;
+    let mut at = 0;
+    while let Some((start, end)) = find_ignoring_case(text, needle, at) {
+        escape_html(&text[at..start], out);
+        out.push_str("<mark class=\"manual-hit\" id=\"manual-hit-");
+        out.push_str(&next_hit.to_string());
+        out.push_str("\">");
+        // Sliced out of the original rather than echoing the query back, so the page
+        // keeps its own capitals: a search for "gcode" marks the document's "GCode".
+        escape_html(&text[start..end], out);
+        out.push_str("</mark>");
+        *next_hit += 1;
+        found += 1;
+        at = end;
+    }
+    escape_html(&text[at..], out);
+    found
+}
+
+/// The first match of `needle` in `haystack` at or after the byte offset `from`, given
+/// back as byte offsets into `haystack`.
+///
+/// Written out rather than `to_lowercase().find()` because those offsets have to index
+/// the *original* string: lowercasing can change a string's length, so a position found
+/// in a lowered copy may slice the original in the wrong place — at best the wrong
+/// characters, at worst a panic in the middle of one.
+fn find_ignoring_case(haystack: &str, needle: &[char], from: usize) -> Option<(usize, usize)> {
+    if needle.is_empty() || from >= haystack.len() {
+        return None;
+    }
+    'start: for (offset, _) in haystack[from..].char_indices() {
+        let start = from + offset;
+        let mut at = start;
+        for &wanted in needle {
+            // Out of text: no later start can match either, so this is the end of it.
+            let Some(got) = haystack[at..].chars().next() else {
+                return None;
+            };
+            if !eq_ignoring_case(got, wanted) {
+                continue 'start;
+            }
+            at += got.len_utf8();
+        }
+        return Some((start, at));
+    }
+    None
+}
+
+/// Two characters compared without regard to case.
+///
+/// Compares the full lowercase mappings rather than `to_ascii_lowercase`, so an accented
+/// word matches a query typed in either case. A character whose lowering changes its
+/// *length* (`ß` to "ss") will not match, which no page in this application contains.
+fn eq_ignoring_case(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
+}
+
+/// The characters that cannot be written literally into HTML text.
+fn escape_html(text: &str, out: &mut String) {
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
 }
 
 /// One heading found in the event stream: where it starts, what level it is, and the
@@ -388,4 +596,88 @@ mod tests {
         assert_eq!(rendered.sections[0].title, "1. How k2g is put together");
         assert!(rendered.html.contains("markdown-alert-warning"), "the safety warning");
     }
+
+    /// Searching marks what it finds, whatever case either side is written in, and counts
+    /// it against the section it is in.
+    #[test]
+    fn a_search_marks_and_counts_its_matches() {
+        // Neither heading contains the query, so the count is the body's alone — the
+        // heading case has its own test below.
+        let rendered = render_doc_matching(
+            "## Cutting\n\nThe feedrate and the FEED per tooth.\n\n## Speeds\n\nNo match here.\n",
+            "feed",
+        );
+        assert_eq!(rendered.total_hits, 2);
+        assert_eq!(rendered.hits.len(), 1, "only one section matched: {:?}", rendered.hits);
+        assert_eq!(rendered.hits[0].title, "Cutting");
+        assert_eq!(rendered.hits[0].hits, 2);
+        // The page keeps its own capitals; the query does not overwrite them.
+        assert!(rendered.html.contains(">feed</mark>"), "{}", rendered.html);
+        assert!(rendered.html.contains(">FEED</mark>"), "{}", rendered.html);
+    }
+
+    /// The ids run in document order across the whole page, because stepping between
+    /// matches is `manual-hit-{n}` counted up and down.
+    #[test]
+    fn matches_are_numbered_across_the_page() {
+        let rendered = render_doc_matching("## One\n\naa\n\n## Two\n\naa aa\n", "aa");
+        assert_eq!(rendered.total_hits, 3);
+        for n in 0..3 {
+            assert!(
+                rendered.html.contains(&format!("id=\"manual-hit-{n}\"")),
+                "missing hit {n}: {}",
+                rendered.html
+            );
+        }
+    }
+
+    /// A manual keeps its nouns in backticks, so inline code has to be searchable too —
+    /// and the `<code>` element has to survive being rewritten.
+    #[test]
+    fn inline_code_is_searchable() {
+        let rendered = render_doc_matching("## Codes\n\nUse the `drill` primitive.\n", "drill");
+        assert_eq!(rendered.total_hits, 1);
+        assert!(rendered.html.contains("<code><mark"), "{}", rendered.html);
+        assert!(rendered.html.contains("</mark></code>"), "{}", rendered.html);
+    }
+
+    /// Rewriting a run into raw HTML means this module owns the escaping. A page whose
+    /// prose contains a `<` must not have it become a tag because something nearby matched.
+    #[test]
+    fn a_marked_run_still_escapes_its_html() {
+        let rendered = render_doc_matching("## S\n\nfeed rate < 200 and a & b\n", "feed");
+        assert!(rendered.html.contains("&lt; 200"), "{}", rendered.html);
+        assert!(rendered.html.contains("a &amp; b"), "{}", rendered.html);
+    }
+
+    /// Too short to be a search: the page comes back exactly as it renders unsearched, so
+    /// the first keystroke does not mark several thousand places.
+    #[test]
+    fn a_query_below_the_minimum_marks_nothing() {
+        let source = "## Feeds\n\nThe feedrate.\n";
+        for query in ["", " ", "f"] {
+            let rendered = render_doc_matching(source, query);
+            assert_eq!(rendered.total_hits, 0, "query {query:?}");
+            assert_eq!(rendered.html, render_doc(source).html, "query {query:?}");
+        }
+    }
+
+    /// A match in a heading belongs to that heading's own section, not the one before it.
+    #[test]
+    fn a_heading_match_counts_against_its_own_section() {
+        let rendered = render_doc_matching("## Drilling\n\nbody\n\n## Routing\n\nbody\n", "drill");
+        assert_eq!(rendered.hits.len(), 1);
+        assert_eq!(rendered.hits[0].title, "Drilling");
+        assert_eq!(rendered.hits[0].id, "drilling", "clicked by anchor, not by link");
+    }
+
+    /// The rule the module exists to keep, restated for the search: highlighting adds
+    /// `<mark>` and must never add a way out of the application.
+    #[test]
+    fn searching_the_manual_adds_no_navigable_link() {
+        let rendered = render_doc_matching(MANUAL.markdown, "board");
+        assert!(rendered.total_hits > 0, "the manual talks about boards");
+        assert!(!rendered.html.contains("<a "), "an href here replaces the application");
+    }
 }
+

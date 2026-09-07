@@ -8,6 +8,20 @@
 //! The page is laid out as a document with a sticky contents rail: the manual is long
 //! enough that scrolling to a section is the main navigation, and its own Markdown table
 //! of contents is dropped in favour of this one, which stays on screen.
+//!
+//! # Searching
+//!
+//! Sixteen sections is more than a reader wants to scroll when they arrived with a word
+//! in mind, so the rail opens with a search field. Typing marks every occurrence in the
+//! document and narrows the rail to the sections that contain one, each with its count;
+//! Enter walks the matches, shift+Enter walks them back, Escape clears. When nothing
+//! matches, the rail returns to the full contents rather than emptying — a search that
+//! finds nothing should not also take away the way of looking manually.
+//!
+//! The matching itself is [`help::render_doc_matching`]'s, not this module's, and for a
+//! reason worth keeping in view: the query is compared against text while the page is
+//! built, so it never reaches `document::eval`. What this screen sends to the WebView is
+//! only ever an id it generated — a heading slug, or a match number.
 
 use dioxus::prelude::*;
 
@@ -54,33 +68,205 @@ fn scroll_to_section(id: &str) {
     });
 }
 
+/// Brings match number `index` into view and makes it the current one.
+///
+/// The same bargain as [`scroll_to_section`], and safer still: `index` is a `usize` this
+/// module counted, never anything the user typed. The query itself does not appear in the
+/// script at all — the matches were already marked while the page was rendered
+/// ([`help::render_doc_matching`]), so all that is left to do here is point at one.
+///
+/// The current mark is distinguished by a class rather than by re-rendering the document,
+/// which would rebuild forty kilobytes of HTML to recolour one word.
+fn focus_hit(index: usize) {
+    let script = format!(
+        "document.querySelectorAll('.manual-hit.is-current')\
+           .forEach(hit => hit.classList.remove('is-current'));\
+         const hit = document.getElementById('manual-hit-{index}');\
+         if (hit) {{ hit.classList.add('is-current');\
+           hit.scrollIntoView({{ behavior: 'smooth', block: 'center' }}); }}"
+    );
+    spawn(async move {
+        if let Err(err) = document::eval(&script).await {
+            log::debug!("could not scroll to a manual match: {err}");
+        }
+    });
+}
+
+/// A count of matches with its noun agreeing with it — "1 match", "12 matches".
+///
+/// Used by both the counter above the rail and each result's tooltip, so the two cannot
+/// come to disagree about how a number is written.
+fn match_count(n: usize) -> String {
+    if n == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{n} matches")
+    }
+}
+
 #[component]
 pub fn ManualScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
     // Present but unused: the manual is static. Touched so the prop is not flagged, the
     // same way About does it.
     let _ = state;
 
-    // Parsed and rendered once for as long as the screen is mounted. The manual is some
-    // seven hundred lines of Markdown, and the shell re-renders on every context change —
-    // a toast, a generation finishing — none of which changes a word of it.
-    let doc = use_memo(|| help::render_doc(help::MANUAL.markdown));
+    let mut query = use_signal(String::new);
+    // Which match the ◀ ▶ buttons are sitting on. Reset whenever the query changes, since
+    // "match 7 of 12" means nothing once the twelve are a different twelve.
+    let mut at_hit = use_signal(|| 0usize);
+    // Whether the reader has stepped into the matches yet. Typing highlights them all but
+    // singles out none, so until the first step there is no "current" match to be on —
+    // and a counter reading "1 of 103" beside a page with no ring drawn on it would be
+    // describing a state the document is not in.
+    let mut stepped = use_signal(|| false);
+
+    // Re-rendered only when the query changes: `use_memo` tracks the signals read inside
+    // it, and the shell re-renders on every context change — a toast, a generation
+    // finishing — none of which changes a word of the manual. Searching costs a parse of
+    // some seven hundred lines of Markdown, which is a few milliseconds on a keystroke and
+    // buys a search that never puts what the user typed into a script; see
+    // `help::render_doc_matching`.
+    let doc = use_memo(move || help::render_doc_matching(help::MANUAL.markdown, &query.read()));
     let rendered = doc.read();
+
+    let total = rendered.total_hits;
+    // A query too short to search reads as "not searching" rather than "no matches", or
+    // the first keystroke of every search would flash "Nothing found". The threshold is
+    // the renderer's, not a second opinion about it.
+    let searched = query.read().trim().chars().count() >= help::MIN_QUERY;
+
+    // Built here rather than in the markup so the three states are visibly the three
+    // states, and so the singular case reads as English rather than "1 matches".
+    let counter = if total == 0 {
+        "Nothing found".to_string()
+    } else if *stepped.read() {
+        // One-based: `at_hit` counts matches from zero, and a reader counts from one.
+        format!("{} of {total}", *at_hit.read() + 1)
+    } else {
+        match_count(total)
+    };
+
+    // Steps the current match, wrapping at both ends the way a find field does — the last
+    // match is next to the first, and there is no dead end to back out of.
+    let mut step = move |forward: bool| {
+        let total = doc.read().total_hits;
+        if total == 0 {
+            return;
+        }
+        let next = if *stepped.read() {
+            let now = *at_hit.read();
+            if forward {
+                (now + 1) % total
+            } else {
+                (now + total - 1) % total
+            }
+        } else {
+            // The first step moves *into* the matches rather than off an index nothing is
+            // drawn on yet: forwards lands on the first, backwards on the last.
+            stepped.set(true);
+            if forward {
+                0
+            } else {
+                total - 1
+            }
+        };
+        at_hit.set(next);
+        focus_hit(next);
+    };
 
     rsx! {
         div { class: "screen single manual-screen",
             aside { class: "manual-toc",
+                div { class: "manual-search",
+                    input {
+                        class: "manual-search-input",
+                        r#type: "search",
+                        value: "{query}",
+                        placeholder: "Search the manual",
+                        oninput: move |evt| {
+                            query.set(evt.value());
+                            at_hit.set(0);
+                            stepped.set(false);
+                        },
+                        // Enter walks the matches, shift+Enter walks them backwards, and
+                        // Escape clears — the three keys a find field is expected to have.
+                        onkeydown: move |evt| {
+                            match evt.key() {
+                                Key::Enter => {
+                                    evt.prevent_default();
+                                    step(!evt.modifiers().shift());
+                                }
+                                Key::Escape => {
+                                    evt.prevent_default();
+                                    query.set(String::new());
+                                    at_hit.set(0);
+                                    stepped.set(false);
+                                }
+                                _ => {}
+                            }
+                        },
+                    }
+
+                    if searched {
+                        div { class: "manual-search-status",
+                            if total == 0 {
+                                span { class: "manual-search-count is-empty", "{counter}" }
+                            } else {
+                                span { class: "manual-search-count", "{counter}" }
+                                div { class: "manual-search-steps",
+                                    button {
+                                        class: "manual-search-step",
+                                        r#type: "button",
+                                        title: "Previous match (shift+Enter)",
+                                        onclick: move |_| step(false),
+                                        "\u{25c0}"
+                                    }
+                                    button {
+                                        class: "manual-search-step",
+                                        r#type: "button",
+                                        title: "Next match (Enter)",
+                                        onclick: move |_| step(true),
+                                        "\u{25b6}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 nav { class: "manual-toc-nav",
-                    div { class: "manual-toc-title", "Contents" }
-                    for section in rendered.sections.iter() {
-                        button {
-                            key: "{section.id}",
-                            class: "manual-toc-link",
-                            r#type: "button",
-                            onclick: {
-                                let id = section.id.clone();
-                                move |_| scroll_to_section(&id)
-                            },
-                            "{section.title}"
+                    // The rail lists the sections a search matched while one is running,
+                    // and the whole contents when none is: the same list, narrowed. A
+                    // second list would leave the reader deciding which of two to use.
+                    if searched && total > 0 {
+                        div { class: "manual-toc-title", "Matching sections" }
+                        for hit in rendered.hits.iter() {
+                            button {
+                                key: "{hit.id}",
+                                class: "manual-toc-link is-hit",
+                                r#type: "button",
+                                title: "{match_count(hit.hits)} in this section",
+                                onclick: {
+                                    let id = hit.id.clone();
+                                    move |_| scroll_to_section(&id)
+                                },
+                                span { class: "manual-toc-link-text", "{hit.title}" }
+                                span { class: "manual-toc-hit-count", "{hit.hits}" }
+                            }
+                        }
+                    } else {
+                        div { class: "manual-toc-title", "Contents" }
+                        for section in rendered.sections.iter() {
+                            button {
+                                key: "{section.id}",
+                                class: "manual-toc-link",
+                                r#type: "button",
+                                onclick: {
+                                    let id = section.id.clone();
+                                    move |_| scroll_to_section(&id)
+                                },
+                                "{section.title}"
+                            }
                         }
                     }
                 }
@@ -216,6 +402,28 @@ mod tests {
             broken.is_empty(),
             "documentation links point at files that do not exist:\n  {}",
             broken.join("\n  ")
+        );
+    }
+
+    /// The counter reads as a sentence at one match as well as at many. Trivial, and the
+    /// reason it is written down is that "1 matches" is the kind of thing that ships.
+    #[test]
+    fn a_match_count_agrees_with_its_number() {
+        assert_eq!(match_count(0), "0 matches");
+        assert_eq!(match_count(1), "1 match");
+        assert_eq!(match_count(12), "12 matches");
+    }
+
+    /// The manual is worth searching in the first place: enough sections that the rail is
+    /// a scroll, which is what the field is for. Guards the case where the document is
+    /// gutted and the feature quietly becomes furniture.
+    #[test]
+    fn the_manual_is_long_enough_to_need_searching() {
+        let rendered = help::render_doc(help::MANUAL.markdown);
+        assert!(
+            rendered.sections.len() > 10,
+            "found {} sections",
+            rendered.sections.len()
         );
     }
 
