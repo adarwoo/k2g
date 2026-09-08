@@ -10,6 +10,17 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-09-08 — *templates*
+
+A library to start from, instead of whatever had been written first.
+
+- Every **Add** dialog opens on *User defined*; the bundled seeds are listed under it.
+- Seven machining templates and three fixture benches, up from two and one.
+- A machining template may describe more than one setup — a flip, or a trip to the
+  plating bath — and binds on every step rather than only the first.
+- The user manual is searchable from inside the application.
+- The security log records its own rotation, so a truncated history says it is one.
+
 ### Added
 - **Every Add dialog now starts from *User defined*, and the bundled template lists are
   worth reading.** Machining offers seven — the two single-sided profiles, isolation on its
@@ -116,7 +127,8 @@ Job and profile ownership migration, and summary updates.
 
 Processing schema, UI and persistence brought into step.
 
-[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.14.0-first-board...HEAD
+[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...HEAD
+[0.15.0]: https://github.com/adarwoo/k2g/compare/v0.14.0-first-board...v0.15.0-templates
 [0.14.0]: https://github.com/adarwoo/k2g/compare/v0.13.0-retention...v0.14.0-first-board
 [0.13.0]: https://github.com/adarwoo/k2g/compare/v0.12.0-signed...v0.13.0-retention
 [0.12.0]: https://github.com/adarwoo/k2g/compare/v0.11.0-manual...v0.12.0-signed
