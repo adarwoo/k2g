@@ -5,6 +5,12 @@
 # that it describes their bench. Every value here is a *safe* starting point, and two of
 # them must be checked against the real machine before anything is cut.
 #
+# One of three bundled benches. `taped_backboard` is this setup with the clamps taken off
+# — nothing stands proud, so its travel heights come down — and `pinned_double_sided` adds
+# the registration a two-setup job needs. This is the one the starter set creates
+# (`STARTER_FIXTURE_TEMPLATE`), because clamps are what a desktop machine arrives with and
+# a newcomer choosing between three benches is the wall the starter set exists to remove.
+#
 # ## backboard_thickness is the one that matters
 #
 # It is the thickness of the sacrificial board under the PCB, and `breakthrough` is bounded
@@ -26,7 +32,7 @@
 $schema: fixture.yaml
 schema_version: 1
 
-name: "Starter fixture (set your backboard thickness)"
+name: "G54 — clamped on a backboard (set the backboard thickness)"
 
 # See the note above: conservative on purpose, and not a measurement of anything.
 backboard_thickness: "2.5mm"

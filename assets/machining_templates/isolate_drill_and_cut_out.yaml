@@ -23,10 +23,10 @@
 $schema: machining.yaml
 schema_version: 3
 
-name: "Isolate, drill and cut out"
+name: "Single sided — engrave, drill and cut edges"
 
 steps:
-  - name: "Isolate, drill and cut out"
+  - name: "Engrave, drill and cut edges"
     board_face: front
     operations:
       - engrave_copper

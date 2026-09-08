@@ -1,0 +1,55 @@
+# Both faces isolated, then the holes and the outline — a whole double-sided board in two
+# setups.
+#
+# ## The steps are the two sides, and the order is not free
+#
+# 1. **Front**: the locating pins, then the front copper. The pins come first because they
+#    are the datum everything after the flip is measured from — they have to be drilled
+#    before anything else cuts the board, or the second setup has nothing to register
+#    against. The readiness gate enforces exactly this: a pins step anywhere but the top is
+#    refused (`runtime::tooling::locating_pin_faults`).
+# 2. **Back**: the back copper, then the holes, then the outline. The board is turned over
+#    onto the pins and never turned back, so everything left is done from this side.
+#
+# Which way it turns over is the *fixture's* business, not this profile's: two pins on a
+# left-to-right line let the board be turned like a page (`board_flip_axis: y`), pins on a
+# near-to-far line tumble it (`x`). Getting that wrong mirrors the solder side, so the
+# fixture this binds to has to describe the fixture actually on the bed.
+#
+# ## Why the drilling waits for the second setup
+#
+# Isolation is cut at one fixed Z for the length of the pass, so its channel width is a
+# depth tolerance and it wants an unmachined surface on a board that is still whole and
+# flat. Holes drilled first are places the surface can lift and the bit can catch. The
+# outline goes last on either side, because it is what releases the part.
+#
+# Nothing forbids drilling from the front instead — it would be a third step and another
+# flip. Doing it from the back costs no extra setup and puts the drill breakout on the
+# component side, which is the face a burr matters least on.
+#
+# ## What it needs
+#
+# A V-bit for the isolation, a drill matching `drill_locating_pins.pin_diameter` (3.2 mm by
+# default), the drills the board's own holes call for, and an end mill for the outline.
+# Each step is emitted as its own program, so the flip happens between two runs rather than
+# inside one.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Double sided — engrave, drill and cut edges"
+
+steps:
+  - name: "Front — pins and isolation"
+    board_face: front
+    operations:
+      - drill_locating_pins
+      - engrave_copper
+
+  - name: "Back — isolation, holes and edges"
+    board_face: back
+    operations:
+      - engrave_copper
+      - drill_pth
+      - drill_npth
+      - route_board

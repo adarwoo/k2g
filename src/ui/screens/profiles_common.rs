@@ -226,7 +226,23 @@ pub fn ProfileNameDialog(
     on_cancel: EventHandler<()>,
     on_submit: EventHandler<()>,
 ) -> Element {
+    // The picker only appears when there is something to pick *from*: a kind with no
+    // bundled templates gets no select at all, exactly as before.
     let has_templates = !template_options.is_empty();
+
+    // "User defined" is the empty key, which `create_named_from_template` reads as "from
+    // the schema's own defaults" — the same profile the Add button produced before any
+    // template existed. It leads the list, and is what the dialog opens on, because
+    // starting from a bundled profile is a choice the operator makes rather than one made
+    // for them: a template quietly pre-selected is a set of somebody else's numbers
+    // arriving under the name they just typed.
+    let template_options: Vec<(String, String)> = if has_templates {
+        std::iter::once((String::new(), "User defined".to_string()))
+            .chain(template_options)
+            .collect()
+    } else {
+        template_options
+    };
 
     rsx! {
         div { class: "wizard-overlay",

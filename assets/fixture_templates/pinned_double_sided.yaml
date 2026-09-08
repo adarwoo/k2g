@@ -1,0 +1,63 @@
+# Backboard with registration pins, for a job that machines both faces.
+#
+# What separates it from the other desktop fixtures is not how the board is held but that
+# it can be *put back*: the board is drilled onto pins in the first setup, turned over onto
+# the same pins for the second, and so returns to a zero it has not lost. Everything
+# `double_sided_engrave_drill_and_cut` and `plated_through_holes` do rests on this fixture
+# existing, and the pin holes themselves come from the machining profile's
+# `drill_locating_pins` operation — this file only describes the bench they are drilled
+# into.
+#
+# ## board_flip_axis is the field to get right
+#
+# `y` turns the board like a page: the near edge stays near and X is mirrored. That is
+# right for two pins on a **left-to-right** line, which is the usual arrangement. Pins on a
+# near-to-far line tumble the board instead, and that is `x`.
+#
+# There is no safe default here — the value follows from where the pins physically are, and
+# the wrong one mirrors the solder side onto the wrong axis. `y` is set because it matches
+# the common arrangement, not because it is safe to leave unchecked.
+#
+# ## The pins are the tallest thing on the bed
+#
+# A pin stands proud of the board by design — the board has to drop onto it — so `z_safe`
+# has to clear the pin, not the board. 25 mm covers a dowel left long; trim it once the
+# real pins are cut to length, and never below the amount they stick up.
+#
+# ## backboard_thickness is still the dangerous one
+#
+# Conservative default, as in every bundled fixture: `breakthrough` is bounded by it so the
+# tool never reaches the bed, and declaring it larger than reality is what puts a drill into
+# the machine. Measure it — and remember the pin holes go into this board too.
+
+$schema: fixture.yaml
+schema_version: 1
+
+name: "G54 — pinned backboard, double sided"
+
+# See the note above: conservative on purpose, and not a measurement of anything.
+backboard_thickness: "2.5mm"
+
+board_holding_method: "locating pins and tape"
+
+origin_reference: G54
+
+# Page turn: pins on a left-to-right line. See the note above — check it against the pins.
+board_flip_axis: y
+
+origin:
+  x0: left
+  y0: near
+
+work_clearance:
+  x: "2mm"
+  y: "2mm"
+
+bed_clearance: "0.5mm"
+
+breakthrough: "0.5mm"
+
+z_retract: "5mm"
+
+# Clears a locating pin, not just the board. Trim it to the pins you actually fit.
+z_safe: "25mm"

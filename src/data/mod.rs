@@ -93,10 +93,29 @@ pub(crate) const CNC_TEMPLATES: &[(&str, &str)] = &[
 ];
 
 /// Bundled fixture templates. See [`Profile::bundled_templates`].
-pub(crate) const FIXTURE_TEMPLATES: &[(&str, &str)] = &[(
-    "starter_desktop",
-    include_str!("../../assets/fixture_templates/starter_desktop.yaml"),
-)];
+///
+/// Three benches rather than one, because a fixture is not a set of numbers so much as a
+/// set of consequences: what holds the board decides how high the tool has to travel to
+/// clear the bed, and whether the board can be *put back* decides whether a two-setup job
+/// is possible at all. Each entry exists because it answers those differently — clamps
+/// stand proud, tape does not, and pins are what a double-sided or plated job registers
+/// against.
+///
+/// The list is ordered simplest first, which is also the order a bench tends to grow in.
+pub(crate) const FIXTURE_TEMPLATES: &[(&str, &str)] = &[
+    (
+        "starter_desktop",
+        include_str!("../../assets/fixture_templates/starter_desktop.yaml"),
+    ),
+    (
+        "taped_backboard",
+        include_str!("../../assets/fixture_templates/taped_backboard.yaml"),
+    ),
+    (
+        "pinned_double_sided",
+        include_str!("../../assets/fixture_templates/pinned_double_sided.yaml"),
+    ),
+];
 
 /// Bundled toolset templates. See [`Profile::bundled_templates`].
 pub(crate) const TOOLSET_TEMPLATES: &[(&str, &str)] = &[(
@@ -106,8 +125,19 @@ pub(crate) const TOOLSET_TEMPLATES: &[(&str, &str)] = &[(
 
 /// Bundled machining templates. See [`Profile::bundled_templates`].
 ///
-/// Neither carries `cnc`/`fixture`/`toolset` on its step: those are bound at creation by
-/// [`AppData::bind_sole_profiles`], to whichever the user has exactly one of.
+/// None of them carries `cnc`/`fixture`/`toolset` on any step: those are bound at creation
+/// by [`AppData::bind_all_steps`], to whichever the user has exactly one of.
+///
+/// **Ordered by how much of a board they make**, not by how often they are used: the two
+/// single-sided profiles that produce a finished board first, then the isolation-only one,
+/// then the two-setup jobs, then the two partial profiles that finish nothing on their own.
+/// Someone reading the picker top to bottom is reading a scale, which is the only ordering
+/// that says anything — and the first entry is the one to succeed at first.
+///
+/// Every one of these is a minute's work in the step editor, so the templates are not
+/// saving labour. What they are for is the newcomer who does not yet know that isolation
+/// has to precede drilling, that a flip needs pins in the step above it, or that plating
+/// happens between two setups. The list is those rules, already applied.
 pub(crate) const MACHINING_TEMPLATES: &[(&str, &str)] = &[
     (
         "drill_and_cut_out",
@@ -116,6 +146,26 @@ pub(crate) const MACHINING_TEMPLATES: &[(&str, &str)] = &[
     (
         "isolate_drill_and_cut_out",
         include_str!("../../assets/machining_templates/isolate_drill_and_cut_out.yaml"),
+    ),
+    (
+        "engrave_only",
+        include_str!("../../assets/machining_templates/engrave_only.yaml"),
+    ),
+    (
+        "double_sided_engrave_drill_and_cut",
+        include_str!("../../assets/machining_templates/double_sided_engrave_drill_and_cut.yaml"),
+    ),
+    (
+        "plated_through_holes",
+        include_str!("../../assets/machining_templates/plated_through_holes.yaml"),
+    ),
+    (
+        "drill_only",
+        include_str!("../../assets/machining_templates/drill_only.yaml"),
+    ),
+    (
+        "cut_edges_only",
+        include_str!("../../assets/machining_templates/cut_edges_only.yaml"),
     ),
 ];
 
@@ -543,10 +593,31 @@ impl AppData {
             else {
                 return;
             };
-            for (field, target) in &bindings {
-                step_obj
-                    .entry((*field).to_string())
-                    .or_insert_with(|| Value::String(target.to_string()));
+            fill_step_bindings(step_obj, &bindings);
+        });
+    }
+
+    /// The same fill, applied to **every** step of `id`.
+    ///
+    /// What [`Self::bind_sole_profiles`] does for one step, for a profile that arrives
+    /// with several. A bundled template may describe a whole process — a flip, or a trip
+    /// to the plating bath — and binding only its first step would hand the operator a
+    /// profile that is half wired and refuses to generate at the step they cannot see
+    /// without scrolling. Every step of one template runs on the same bench, so if there
+    /// is a sole machine there is nothing to decide about any of them.
+    fn bind_all_steps(&mut self, id: Uuid) {
+        let bindings = self.sole_step_bindings();
+        if bindings.is_empty() {
+            return;
+        }
+        self.edit_document_value(id, |value| {
+            let Some(steps) = value.pointer_mut("/steps").and_then(Value::as_array_mut) else {
+                return;
+            };
+            for step in steps.iter_mut() {
+                if let Some(step_obj) = step.as_object_mut() {
+                    fill_step_bindings(step_obj, &bindings);
+                }
             }
         });
     }
@@ -604,7 +675,8 @@ impl AppData {
     ///
     /// Machining templates get the same binding pass a blank machining profile gets —
     /// their steps deliberately name no CNC, fixture or toolset, so without this a
-    /// profile created from one would arrive unbound and refuse to generate.
+    /// profile created from one would arrive unbound and refuse to generate. Applied to
+    /// every step, not just the first: a template may describe a two-setup process.
     pub fn create_from_template(
         &mut self,
         kind: Profile,
@@ -620,7 +692,7 @@ impl AppData {
             })?;
         let id = self.store.create_document_from(kind.schema_id(), &seed)?;
         if kind == Profile::Machining {
-            self.bind_sole_profiles(id, 0);
+            self.bind_all_steps(id);
         }
         Ok(id)
     }
@@ -646,8 +718,13 @@ impl AppData {
         let machining =
             self.create_from_template(Profile::Machining, STARTER_MACHINING_TEMPLATE)?;
 
-        for (field, target) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
-            self.set_step_reference(machining, 0, field, Some(target));
+        // Every step, not just the first: the starter template is single-step today, but a
+        // set that silently half-binds if that ever changes is the same trap this explicit
+        // pass exists to avoid.
+        for step in 0..self.step_count(machining) {
+            for (field, target) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
+                self.set_step_reference(machining, step, field, Some(target));
+            }
         }
 
         Ok(StarterKit { cnc, fixture, toolset, machining })
@@ -1129,6 +1206,22 @@ fn build_datastore() -> DataStore {
         builder = builder.schema(id, text);
     }
     builder.build().expect("embedded schemas must compile")
+}
+
+/// Writes `bindings` into one step object, **never over a field it already has**.
+///
+/// The shared half of [`AppData::bind_sole_profiles`] and [`AppData::bind_all_steps`]. Only
+/// ever fills, so it cannot overwrite something the operator or a seed value chose — which
+/// is what makes it safe to run over a whole template.
+fn fill_step_bindings(
+    step_obj: &mut serde_json::Map<String, Value>,
+    bindings: &[(&'static str, Uuid)],
+) {
+    for (field, target) in bindings {
+        step_obj
+            .entry((*field).to_string())
+            .or_insert_with(|| Value::String(target.to_string()));
+    }
 }
 
 /// Parses every bundled template into a reusable seed, taking each display name from the
@@ -3524,6 +3617,112 @@ mod tests {
                     doc.status.is_complete(),
                     "{kind:?} template '{key}' is incomplete: {:?}",
                     doc.status
+                );
+            }
+        }
+    }
+
+    /// Every step of a multi-step template binds, not just the first.
+    ///
+    /// `create_from_template` bound step 0 alone for as long as every bundled template was
+    /// one step. The two-setup templates — the flip, the trip to the plating bath — would
+    /// then arrive with their second step unbound, and the profile would refuse to
+    /// generate for a reason sitting below the fold of a screen the operator did not
+    /// author.
+    #[test]
+    fn a_multi_step_template_binds_every_step() {
+        let dir = tempdir().unwrap();
+        let (mut data, _) = load_temp(dir.path());
+
+        let cnc = data.create_from_template(Profile::Cnc, "genmitsu_3018").unwrap();
+        let fixture = data
+            .create_from_template(Profile::Fixture, "starter_desktop")
+            .unwrap();
+        let toolset = data
+            .create_from_template(Profile::Toolset, "manual_tool_change")
+            .unwrap();
+
+        let id = data
+            .create_from_template(Profile::Machining, "double_sided_engrave_drill_and_cut")
+            .expect("create machining from template");
+
+        let steps = data.step_count(id);
+        assert!(steps > 1, "this test needs a template with more than one step");
+
+        let doc = data.get(id).expect("profile present");
+        for step in 0..steps {
+            for (field, expected) in [("cnc", cnc), ("fixture", fixture), ("toolset", toolset)] {
+                let bound = doc
+                    .root
+                    .get_pointer(&format!("/steps/{step}/{field}"))
+                    .unwrap_or_else(|| panic!("step {step} has no '{field}' after creation"));
+                assert!(
+                    matches!(&bound.value, NodeValue::Ref(r) if r.raw == expected),
+                    "step {step}'s '{field}' did not bind to the sole profile: {:?}",
+                    bound.value,
+                );
+            }
+        }
+        assert!(doc.status.is_complete(), "{:?}", doc.status);
+    }
+
+    /// Every bundled machining template obeys the rules the readiness gate enforces.
+    ///
+    /// Two steps may not claim the same operation on the same face, and a locating-pins
+    /// step must be the first step — with pins present at all whenever the profile turns
+    /// the board over, because they are the datum the second setup registers against
+    /// (`runtime::tooling::locating_pin_faults`). A template breaking either rule hands the
+    /// operator a profile the Job screen then refuses, with the fault in a file they did
+    /// not write and cannot be expected to suspect.
+    #[test]
+    fn every_machining_template_obeys_the_step_rules() {
+        for (key, text) in MACHINING_TEMPLATES {
+            let value = parse_yaml_value(text)
+                .unwrap_or_else(|| panic!("machining template '{key}' does not parse"));
+            let steps: Vec<(String, bool, Vec<String>)> = value
+                .get("steps")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("machining template '{key}' has no steps"))
+                .iter()
+                .map(|step| {
+                    let name = step.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    // Absent `board_face` is the schema default, `front`.
+                    let back = step.get("board_face").and_then(Value::as_str) == Some("back");
+                    let operations = step
+                        .get("operations")
+                        .and_then(Value::as_array)
+                        .map(|ops| {
+                            ops.iter().filter_map(Value::as_str).map(str::to_string).collect()
+                        })
+                        .unwrap_or_default();
+                    (name, back, operations)
+                })
+                .collect();
+
+            let conflicts = crate::data::model::conflicting_operations(
+                steps.iter().map(|(name, back, ops)| (name.as_str(), *back, ops.as_slice())),
+            );
+            assert!(
+                conflicts.is_empty(),
+                "machining template '{key}' claims an operation twice on one face: {conflicts:?}",
+            );
+
+            for (index, (_, _, operations)) in steps.iter().enumerate() {
+                assert!(
+                    index == 0 || !operations.iter().any(|op| op == "drill_locating_pins"),
+                    "machining template '{key}' drills locating pins in step {}, which the                      readiness gate refuses — registration goes in the first step",
+                    index + 1,
+                );
+            }
+
+            let first_face = steps.first().map(|(_, back, _)| *back).unwrap_or(false);
+            if steps.iter().any(|(_, back, _)| *back != first_face) {
+                let pinned = steps
+                    .first()
+                    .is_some_and(|(_, _, ops)| ops.iter().any(|op| op == "drill_locating_pins"));
+                assert!(
+                    pinned,
+                    "machining template '{key}' turns the board over but drills no locating                      pins first — the second setup would have nothing to register against",
                 );
             }
         }

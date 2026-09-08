@@ -1,0 +1,56 @@
+# Board taped to a sacrificial backboard on a desktop machine.
+#
+# The same bench as `starter_desktop` with the clamps taken off: the board is stuck down
+# over its whole area with double-sided tape rather than pinched at its edges. Two things
+# follow from that, and they are the only reasons this is a template of its own.
+#
+# ## Nothing stands proud, so the travel heights come down
+#
+# `z_safe` exists to clear whatever is on the bed. Under clamps that is 20 mm of hardware;
+# under tape the tallest thing on the table is the board itself, so 8 mm is generous and
+# every rapid across the work is that much shorter. `z_retract` — the hop between holes —
+# comes down with it, which is where most of the time in a drilling program goes. Put both
+# back up the moment anything is bolted to the bed.
+#
+# ## Tape holds by area, and the outline is where it runs out
+#
+# The last part of an outline cut is where the remaining glued area is smallest and the
+# pull is greatest, so tabs matter more here than under clamps. That is a machining-profile
+# setting (`route_board.outline.retention`), not a fixture one — but it is the thing to
+# look at when a part lifts off a taped board.
+#
+# ## backboard_thickness is still the dangerous one
+#
+# It ships at the schema's conservative default, exactly as `starter_desktop` does:
+# `breakthrough` is bounded by it so the tool never reaches the bed, and declaring it
+# *larger* than reality is what puts a drill into the machine. Measure it.
+
+$schema: fixture.yaml
+schema_version: 1
+
+name: "G54 — taped to a backboard"
+
+# See the note above: conservative on purpose, and not a measurement of anything.
+backboard_thickness: "2.5mm"
+
+board_holding_method: tape
+
+origin_reference: G54
+
+board_flip_axis: y
+
+origin:
+  x0: left
+  y0: near
+
+work_clearance:
+  x: "2mm"
+  y: "2mm"
+
+bed_clearance: "0.5mm"
+
+breakthrough: "0.5mm"
+
+# Low, deliberately: with the board taped flat there is nothing on the bed to clear.
+z_retract: "2mm"
+z_safe: "8mm"

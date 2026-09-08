@@ -25,10 +25,10 @@
 $schema: machining.yaml
 schema_version: 3
 
-name: "Drill and cut out"
+name: "Single sided — drill and cut edges"
 
 steps:
-  - name: "Drill and cut out"
+  - name: "Drill and cut edges"
     board_face: front
     operations:
       - drill_pth

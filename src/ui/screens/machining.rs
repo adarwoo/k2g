@@ -32,12 +32,12 @@ pub fn MachiningProfilesScreen(state: Signal<crate::runtime::AppCtx>) -> Element
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
     let mut dialog_name = use_signal(|| "My machining".to_string());
-    // The bundled machining templates, and which one the add dialog is offering. The
-    // first is pre-selected so the dialog always has an answer; an empty list leaves
-    // this empty, which `create_named_from_template` reads as "from schema defaults".
+    // The bundled machining templates, and which one the add dialog is offering. Empty
+    // means "User defined" — `create_named_from_template` reads it as "from schema
+    // defaults" — and the dialog puts that entry at the head of the list, so this is both
+    // the opening answer and what a kind with no templates at all gets.
     let templates = use_templates(Profile::Machining);
-    let mut selected_template =
-        use_signal(|| templates.first().map(|(key, _)| key.clone()).unwrap_or_default());
+    let mut selected_template = use_signal(String::new);
     let mut selected = use_signal(|| None::<Uuid>);
 
     let profiles = use_profiles(Profile::Machining);

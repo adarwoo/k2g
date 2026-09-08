@@ -1,0 +1,51 @@
+# Drill first, plate the board off the machine, then come back for the copper and the
+# outline.
+#
+# Chemical through-plating deposits copper *inside the holes*, so the holes have to exist
+# before the board goes in the bath — and the process leaves a film of copper over the whole
+# surface that the isolation pass then has to cut through. That inverts the usual order,
+# and it cannot be one setup, so this profile is two:
+#
+# 1. **Before plating**: the locating pins and every hole. The board then comes off the bed
+#    for the chemistry.
+# 2. **After plating**: the copper isolation, then the outline that releases the part.
+#
+# ## The pins are what makes the second setup possible
+#
+# The board leaves the machine between the two steps, so whatever zero the first setup used
+# is gone by the time it comes back. Step 1 drills registration holes and the board is
+# remounted on pins for step 2 — the same trick `double_sided_engrave_drill_and_cut` uses
+# for its flip, for the same reason. Without them the isolation lands wherever the board
+# happened to be re-clamped, and for a 0.25 mm channel that is nowhere near good enough.
+#
+# ## Both steps machine the front
+#
+# Nothing is turned over: `board_face: front` on both. A *double-sided* plated board is this
+# profile with a back-face isolation step added between the two, which the step editor can
+# do and which is a decision about a real bench rather than something to bundle.
+#
+# ## What it needs
+#
+# A drill matching `drill_locating_pins.pin_diameter`, the drills the board's holes call
+# for, a V-bit and an end mill — plus the plating chemistry, which is not this program's
+# department. Each step is emitted as its own program, so the gap between them is simply
+# the gap between two runs.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Chemically plated — drill, then engrave and cut edges"
+
+steps:
+  - name: "Before plating — pins and holes"
+    board_face: front
+    operations:
+      - drill_locating_pins
+      - drill_pth
+      - drill_npth
+
+  - name: "After plating — isolation and edges"
+    board_face: front
+    operations:
+      - engrave_copper
+      - route_board

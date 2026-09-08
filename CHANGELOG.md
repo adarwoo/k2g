@@ -11,6 +11,17 @@ name is usually the shorter answer to "what changed".
 ## [Unreleased]
 
 ### Added
+- **Every Add dialog now starts from *User defined*, and the bundled template lists are
+  worth reading.** Machining offers seven — the two single-sided profiles, isolation on its
+  own, a double-sided job, a chemically-plated one that drills before the bath and finishes
+  after it, drill-only and cut-edges-only — and Fixtures offers three benches (clamped,
+  taped, and pinned for double-sided work) rather than one. None of them saves more than a
+  minute of ticking boxes; what they carry is the *order*, which is what a first job gets
+  wrong: isolation before drilling, locating pins in the step above a flip, plating between
+  two setups.
+- **A machining template may describe more than one setup.** Templates now bind their
+  CNC, fixture and toolset on every step instead of only the first, so a two-step profile
+  arrives ready to generate rather than half-wired.
 - **The user manual is searchable from inside the application.** Typing in the Manual
   screen's search field marks every occurrence, narrows the contents rail to the sections
   that contain one, and steps between matches with Enter / shift+Enter. Matching runs while

@@ -64,8 +64,10 @@ pub fn ProfileManager(
     let mut show_name_dialog = use_signal(|| false);
     let mut dialog_is_clone = use_signal(|| false);
     let mut dialog_name = use_signal(|| format!("My {}", type_label.to_lowercase()));
-    let default_template = templates.first().map(|(k, _)| k.clone()).unwrap_or_default();
-    let mut selected_template = use_signal(|| default_template);
+    // Empty is "User defined" — from the schema's own defaults. The dialog prepends that
+    // entry to whatever templates this kind has and it leads the list, so the picker opens
+    // on it rather than on somebody else's machine or bench. See `ProfileNameDialog`.
+    let mut selected_template = use_signal(String::new);
     let mut selected = use_signal(|| None::<Uuid>);
 
     let has_templates = !templates.is_empty();

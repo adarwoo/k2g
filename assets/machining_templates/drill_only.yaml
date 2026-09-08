@@ -1,0 +1,30 @@
+# Drill the holes and nothing else.
+#
+# For the board that is cut to size some other way — sheared, guillotined, or routed from a
+# second profile — where all this machine is asked for is the hole pattern.
+#
+# Both kinds are drilled. `drill_pth` and `drill_npth` differ only in which KiCad layer the
+# holes came from (plated and non-plated), and a profile taking one without the other
+# produces a board that looks finished and is missing its mounting holes. They are separate
+# operations because a step may legitimately want only one of them, not because a normal
+# job does.
+#
+# The hole strategy — route fallback, oversize/undersize allowances, how an oblong slot is
+# produced — comes from the schema's own defaults, so this file stays about the choice it
+# is making. The Tooling tab shows what each hole was assigned to.
+#
+# Not to be confused with `plated_through_holes`, which is also drill-first but is a
+# two-setup profile: it drills, the board leaves the bed for the plating bath, and it comes
+# back on pins to be isolated and cut out.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Drill only"
+
+steps:
+  - name: "Drill"
+    board_face: front
+    operations:
+      - drill_pth
+      - drill_npth

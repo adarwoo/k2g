@@ -136,8 +136,8 @@ check the plan, export".
    Nothing can be planned without tools. (§4)
 3. **Job → Create starter profiles.** With no machining profile yet, the Job sidebar
    asks which machine you have and creates the rest — a fixture, a toolset and a
-   *Drill and cut out* machining profile, bound to each other and selected. The job
-   summary fills in and generation starts by itself.
+   *Single sided — drill and cut edges* machining profile, bound to each other and
+   selected. The job summary fills in and generation starts by itself.
 4. **Open Fixtures and set the backboard thickness.** The starter fixture ships a
    deliberately conservative value, not a measurement of your bench. **This is the
    number that keeps the drill out of your bed** — see §7 before you cut anything.
@@ -159,18 +159,44 @@ creates, so you can also start from those and edit rather than from nothing.
    the spindle range, the feed ceilings and the ATC slot count. (§6)
 2. **Fixtures → Add Fixture.** Backboard thickness, bed origin corner, machine
    origin reference (`G54`…), safe and retract heights. **Get the backboard
-   thickness right — it is what keeps the drill out of your bed.** (§7)
+   thickness right — it is what keeps the drill out of your bed.** (§7) Three
+   benches are bundled — *clamped on a backboard*, *taped to a backboard*, and
+   *pinned backboard, double sided* — and they differ mostly in how high the tool has
+   to travel to clear what is on the table, and whether the board can be taken off and
+   put back on the same zero.
 3. **Toolset → Add Toolset.** Set the slot count to your rack, then pin the tools
    that live there permanently and leave the rest *Spare*. On a machine with no ATC,
    a one-slot spare toolset is enough. (§8)
 4. **Machining → Add Machining.** Bind the CNC, fixture and toolset to the step,
    tick the operations you want (*Drill plated holes*, *Drill non-plated holes*,
    *Cut board outline* is the usual first set), and set the outline options. (§9)
-   *Isolate, drill and cut out* is bundled too, and needs a V-bit in stock.
+   The bundled machining templates are listed below; each one is the same handful of
+   ticks, already in an order that works.
 5. **Job → sidebar → Machining profile**: select the profile you just made.
 
-Each **Add** dialog offers the bundled templates for that kind, so "from scratch"
-still starts from a working document rather than an empty one.
+### The bundled machining templates
+
+Every **Add** dialog opens on **User defined** — the profile the schema's own defaults
+describe — and lists the bundled templates for that kind underneath. Picking one is
+never more than a shortcut: each is a few ticks in the step editor, and every value can
+be changed afterwards. What they carry that a fresh profile does not is the *order*,
+which is where a first job usually goes wrong.
+
+| Template | Steps | Needs |
+|---|---|---|
+| *Single sided — drill and cut edges* | Holes, then the outline | Drills, an end mill |
+| *Single sided — engrave, drill and cut edges* | The whole board in one setup | …and a V-bit |
+| *Single sided — engrave only* | The isolation pass alone | A V-bit |
+| *Double sided — engrave, drill and cut edges* | Pins and front copper; then the board turned over for the back copper, the holes and the outline | A V-bit, a pin drill, drills, an end mill — and a fixture with pins |
+| *Chemically plated — drill, then engrave and cut edges* | Pins and holes; **the board comes off for the plating bath**; then isolation and the outline | As above |
+| *Drill only* | Plated and non-plated holes | Drills |
+| *Cut edges only* | The outline | An end mill |
+
+The two-step templates emit one program per step, so the flip — or the trip to the
+plating bath — happens between two runs rather than inside one. Both drill locating pins
+in their first step, because that is the datum the board is put back on; without them a
+second setup has nothing to register against, and the Job screen says so rather than
+cutting.
 
 ---
 

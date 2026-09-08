@@ -1,0 +1,30 @@
+# Cut the board out of the blank and nothing else.
+#
+# For the board that arrives drilled and etched and only needs releasing, and for the
+# second half of a job whose first half ran from a different profile or a different
+# machine.
+#
+# ## Why `route_cutouts` is not here
+#
+# "Cut edges" is the outline — the boundary that releases the part. Interior openings are a
+# separate claim on a separate tool, and a board that has them wants that box ticked as
+# well, which is one click in the step editor. Bundling it would put a tool requirement on
+# every profile created from this template whether the board has an opening or not.
+#
+# ## The tabs are what stop the part becoming a projectile
+#
+# `route_board.outline.retention` is left at the schema default: four 2 mm tabs, no mouse
+# bites. That is what holds the part in the blank until the operator breaks it out, and it
+# is the first thing to revisit when the part is heavy, thin, or has a connector where a
+# tab wants to be.
+
+$schema: machining.yaml
+schema_version: 3
+
+name: "Cut edges only"
+
+steps:
+  - name: "Cut edges"
+    board_face: front
+    operations:
+      - route_board
