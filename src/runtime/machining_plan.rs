@@ -1534,6 +1534,7 @@ fn plan_engrave_spans(
         // and one that has only just cleared the copper is already wider than its tip. The
         // pass narrows down to here and reports whatever it still could not fit.
         min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
+        remove_islands: raw.engrave_copper.remove_islands,
     };
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
@@ -1572,23 +1573,25 @@ fn plan_engrave_spans(
     }
     warnings.extend(narrowing_notes(ctx, &isolation.result.narrowed));
 
-    let spans = isolation
+    let place = |path: &[(i64, i64)]| -> Vec<Point> {
+        path.iter()
+            .map(|&(x, y)| {
+                placement.xy(&pcb::BoardPoint {
+                    x: Length::from_mm(x as f64 / 1e6),
+                    y: Length::from_mm(y as f64 / 1e6),
+                })
+            })
+            .collect()
+    };
+
+    let mut spans: Vec<EngraveSpan> = isolation
         .result
         .contours
         .iter()
         .enumerate()
         .map(|(n, contour)| EngraveSpan {
             source: format!("{}#{n}", contour.net),
-            path: contour
-                .path
-                .iter()
-                .map(|&(x, y)| {
-                    placement.xy(&pcb::BoardPoint {
-                        x: Length::from_mm(x as f64 / 1e6),
-                        y: Length::from_mm(y as f64 / 1e6),
-                    })
-                })
-                .collect(),
+            path: place(&contour.path),
             closed: contour.closed,
             // Negative machine-Z depth (board top is Z0; op-planner §6). Scaled from the
             // width this stretch actually achieved, not from the width that was asked for:
@@ -1597,7 +1600,70 @@ fn plan_engrave_spans(
         })
         .collect();
 
+    // The island rings go in the SAME block, as ordinary engrave spans: same bit, same
+    // face, same depth. So there is nothing to plan — the TSP orders them along with
+    // everything else, the op table lists them and the 3D view draws them, all for free.
+    //
+    // At the nominal depth, not `span_depth_mm`: an island is cut at the width the bit was
+    // chosen for, and only a contour that had to squeeze through a tight gap is shallower.
+    spans.extend(isolation.clearing.paths.iter().enumerate().map(|(n, path)| EngraveSpan {
+        source: format!("island #{}", n + 1),
+        path: place(path),
+        closed: true,
+        z_bottom: Length::from_mm(-choice.depth.as_mm()),
+    }));
+    if let Some(note) = clearing_note(&isolation.clearing) {
+        warnings.push(note);
+    }
+
     (spans, warnings)
+}
+
+/// What to tell the operator about the copper the pass left standing.
+///
+/// One note for the step rather than one per island: an opportunist pass that narrates
+/// every fragment of a board is a note nobody reads to the end.
+///
+/// The *left* half is the useful one. It says what a router would buy, the way
+/// `IsolationResult::widest_workable_nm` says what changing the channel width would buy —
+/// and until there is a router to offer, it is the only place a board's stranded copper is
+/// mentioned at all.
+fn clearing_note(clearing: &pcb::Clearing) -> Option<String> {
+    if clearing.removed == 0 && clearing.left == 0 {
+        return None;
+    }
+    let mm2 = |nm2: f64| nm2 / 1e12;
+
+    let mut note = if clearing.removed == 0 {
+        "No copper was left stranded that the engraver could take.".to_string()
+    } else {
+        format!(
+            "Removed {} copper island{} ({:.2} mm²) the isolation pass left stranded.",
+            clearing.removed,
+            if clearing.removed == 1 { "" } else { "s" },
+            mm2(clearing.removed_area_nm2),
+        )
+    };
+    if clearing.left > 0 {
+        note.push_str(&format!(
+            " {} more {} left standing, the widest {:.2} mm across — too wide for the bit \
+             already in the spindle to be worth it.",
+            clearing.left,
+            if clearing.left == 1 { "was" } else { "were" },
+            clearing.widest_left_nm as f64 / 1e6,
+        ));
+    }
+    // Never silently dropped: a piece of copper is cut, or it is accounted for. This is
+    // copper inside an island the tool could not reach without touching a net — which
+    // happens where the channel beside it had to narrow.
+    if clearing.missed_area_nm2 > 0.0 {
+        note.push_str(&format!(
+            " {:.2} mm² of that was too close to a net for the bit to reach and is still \
+             there.",
+            mm2(clearing.missed_area_nm2),
+        ));
+    }
+    Some(note)
 }
 
 /// How deep to sink `bit` to cut a channel `width_nm` across.
@@ -2775,6 +2841,7 @@ mod engrave_diagnostic_tests {
             layer_id: pcb::FRONT_COPPER,
             width_nm,
             min_width_nm: 150_000,
+            remove_islands: true,
         }
     }
 
@@ -2788,13 +2855,62 @@ mod engrave_diagnostic_tests {
                     result: Default::default(),
                     copper_warnings: Vec::new(),
                     copper_layer_count: 2,
+                    clearing: Default::default(),
                 }),
             );
         }
         state
     }
 
-    /// **The miss names the field that differs.** The spec is five fields and any one of
+    /// **The step says what it took and what it left.** The left half is the useful one:
+    /// until there is a router to offer, this note is the only place a board's stranded
+    /// copper is mentioned at all, and an operator who cannot see it has no way to know
+    /// there is copper on their board that the design never drew.
+    #[test]
+    fn the_clearing_note_says_what_was_taken_and_what_was_left() {
+        assert_eq!(clearing_note(&pcb::Clearing::default()), None, "a clean board says nothing");
+
+        let took = pcb::Clearing {
+            removed: 14,
+            removed_area_nm2: 0.42e12,
+            ..Default::default()
+        };
+        let note = clearing_note(&took).expect("a note");
+        assert!(note.contains("14 copper islands"), "{note}");
+        assert!(note.contains("0.42 mm²"), "{note}");
+        assert!(!note.contains("left standing"), "nothing was left: {note}");
+
+        let left = pcb::Clearing { left: 3, widest_left_nm: 910_000, ..took.clone() };
+        let note = clearing_note(&left).expect("a note");
+        assert!(note.contains("3 more were left standing"), "{note}");
+        assert!(note.contains("0.91 mm across"), "the number a router would be judged on: {note}");
+
+        // Singulars, because "1 islands" and "1 more were left" read as a bug in the tool.
+        let one = pcb::Clearing {
+            removed: 1,
+            removed_area_nm2: 0.01e12,
+            left: 1,
+            widest_left_nm: 800_000,
+            ..Default::default()
+        };
+        let note = clearing_note(&one).expect("a note");
+        assert!(note.contains("1 copper island ("), "{note}");
+        assert!(note.contains("1 more was left standing"), "{note}");
+
+        // Copper the bit could not reach without touching a net is named, never dropped.
+        let missed = pcb::Clearing { missed_area_nm2: 0.05e12, ..took.clone() };
+        let note = clearing_note(&missed).expect("a note");
+        assert!(note.contains("0.05 mm²"), "{note}");
+        assert!(note.contains("too close to a net"), "{note}");
+
+        // And a board where every island was too wide still gets told so.
+        let none = pcb::Clearing { left: 2, widest_left_nm: 1_200_000, ..Default::default() };
+        let note = clearing_note(&none).expect("a note");
+        assert!(note.starts_with("No copper was left stranded"), "{note}");
+        assert!(note.contains("2 more were left standing"), "{note}");
+    }
+
+    /// **The miss names the field that differs.** The spec is six fields and any one of
     /// them can hold an answer back; from the outside every case looks the same — no
     /// engraving, and a plan that keeps asking. This is what makes a persistent miss
     /// diagnosable from a log the operator can hand over.
@@ -2814,6 +2930,11 @@ mod engrave_diagnostic_tests {
             ("epoch", IsolationSpec { board_epoch: 2, ..held.clone() }),
             ("board", IsolationSpec { board_name: "other".into(), ..held.clone() }),
             ("layer", IsolationSpec { layer_id: pcb::BACK_COPPER, ..held.clone() }),
+            // The one that is a *setting* rather than a measurement, and so the one an
+            // operator changes while the board sits still. Left out of the spec, ticking
+            // "Remove islands" would match the held answer and do nothing whatever until
+            // the board was reloaded.
+            ("islands", IsolationSpec { remove_islands: false, ..held.clone() }),
         ] {
             assert!(
                 state.matching(&other).is_none(),

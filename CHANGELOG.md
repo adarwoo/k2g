@@ -10,6 +10,19 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+### Added
+- **The isolation pass now takes out the copper it leaves stranded.** Cutting a channel
+  round each net leaves everything else standing, so where two nets sit further apart than
+  twice the channel the copper between the two channels survives as an *island*: on no net,
+  on no layer of the design, and solder will bridge it. The commonest one is the ring a
+  ground pour's clearance leaves round every trace in it. **Remove islands** is on by
+  default in `engrave_copper`, bounded to islands no wider than three channels, and cut by
+  the V-bit already in the spindle at the depth it is already running — no tool change and
+  no rack slot. Wider copper is left alone and its width reported in the step's notes,
+  which is what says whether a router would be worth loading. Copper on a net is never
+  touched, and anything the bit could not reach without touching one is counted in the
+  notes rather than dropped in silence.
+
 ## [0.15.0] — 2026-09-08 — *templates*
 
 A library to start from, instead of whatever had been written first.

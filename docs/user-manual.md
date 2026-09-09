@@ -594,6 +594,38 @@ program runs straight past is not a test. Watch out for `M01` — that is an *op
 stop, and a controller with optional-stop switched off runs past it. All the bundled
 profiles use `M0`/`M00`.
 
+#### Remove islands
+
+**On by default.** The pass cuts a channel round each net and nothing else, so where two
+nets sit further apart than twice the channel, the copper *between* the two channels
+survives — a strip on no net, which exists on no layer of the design and which solder will
+happily bridge. Enclosed by what the pass cut, it is an **island**. The commonest one by
+far is the ring of copper a ground pour's clearance leaves standing round every trace in
+it: two channels, one either side, and whatever they cannot meet across is left floating.
+
+This takes them out with the bit already in the spindle, at the depth it is already
+running — no tool change, no rack slot, three or four more passes. That is why it is on by
+default and why it is bounded: an island wider than three channels is left alone, because
+clearing copper at that size is a router's job, and loading a router is a decision with a
+cost. The step's notes say how many were removed and how wide the widest one left was,
+which is the number that says what a router would buy.
+
+A V-bit is a perfectly good tool for this at this size. A cone cuts its full width *at the
+surface*, and copper only exists at the surface, so two grooves a channel apart leave
+nothing between them; the ridge they leave stands in the laminate below, where nothing is
+being separated. It is only a poor tool for *large* areas, where the number of passes is
+the problem.
+
+Copper on a net is never touched, whatever this is set to. Where the channel beside an
+island had to narrow, the bit may not be able to reach all of that island without touching
+the net on the far side — that copper is left and the notes say how much of it there is.
+
+**What it does not do:** copper that runs out into the surrounding field rather than
+closing into a ring is not an island. The strips between the pads of an SO8 on a board with
+no pour are the same copper and want the same treatment, but they are one piece with the
+field around them and are found by a different question — how thin is this *part* of the
+field — which is not built yet.
+
 ---
 
 ## 10. The Job screen

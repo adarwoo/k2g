@@ -415,12 +415,19 @@ pub(crate) struct EngraveConfigRaw {
     /// Cut a throwaway L in the waste and stop, so the operator can verify the depth before the
     /// copper is touched. Nothing else in the program checks that Z0 is the board surface.
     pub(crate) test_cut: bool,
+    /// Take out the copper the isolation pass leaves stranded between two channels.
+    ///
+    /// On by default, unlike `test_cut`, and for the opposite reason: this costs no tool
+    /// change, no rack slot and no stop — the bit is already in the spindle at the right
+    /// depth — while leaving it off ships boards with floating conductors on them that
+    /// nothing in the design ever drew. See `pcb::islands`.
+    pub(crate) remove_islands: bool,
 }
 
 impl Default for EngraveConfigRaw {
     fn default() -> Self {
         // The schema's own default for `engrave_copper`.
-        Self { width: Length::from_mm(0.25), test_cut: false }
+        Self { width: Length::from_mm(0.25), test_cut: false, remove_islands: true }
     }
 }
 
@@ -432,6 +439,8 @@ fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
     EngraveConfigRaw {
         width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
         test_cut: node_bool(root, &format!("{base}/test_cut")).unwrap_or(default.test_cut),
+        remove_islands: node_bool(root, &format!("{base}/remove_islands"))
+            .unwrap_or(default.remove_islands),
     }
 }
 

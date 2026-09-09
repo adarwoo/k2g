@@ -71,6 +71,12 @@ pub struct IsolationSpec {
     pub width_nm: i64,
     /// The narrowest cut the tool can make, nm: a V-bit's tip.
     pub min_width_nm: i64,
+    /// Whether to take out the copper the pass leaves stranded between two channels.
+    ///
+    /// **Part of the question, not of the answer.** Without it here a held result would
+    /// still match after the operator ticked the box, and the islands would never be
+    /// computed — the toggle would do nothing at all until the board was reloaded.
+    pub remove_islands: bool,
 }
 
 /// Contours for one layer, and what was wrong with the copper they came from.
@@ -88,6 +94,12 @@ pub struct Isolation {
     /// this way is two layers short of the design. That is a thing to say plainly rather
     /// than leave the operator to notice.
     pub copper_layer_count: u32,
+    /// The islands this pass left standing, and the rings that take them out.
+    ///
+    /// Cached beside the contours because it is derived from them and from the same
+    /// reading of the copper: recomputing it in the plan would mean reading the board
+    /// again. Empty when the spec did not ask for it.
+    pub clearing: pcb::Clearing,
 }
 
 /// What the context knows about isolation right now.
@@ -263,9 +275,28 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
         result.narrowed.len(),
     );
 
+    // After the isolation, from the same reading of the copper: what the pass left
+    // standing is a question about the channels it just cut.
+    let clearing = if spec.remove_islands {
+        let started = std::time::Instant::now();
+        let clearing = pcb::islands(&copper, &result.contours, spec.width_nm);
+        log::info!(
+            "Cleared layer {} of {} in {:?}: {} island(s) removed, {} left",
+            spec.layer_id,
+            spec.board_name,
+            started.elapsed(),
+            clearing.removed,
+            clearing.left,
+        );
+        clearing
+    } else {
+        pcb::Clearing::default()
+    };
+
     Ok(Isolation {
         spec: spec.clone(),
         result,
+        clearing,
         copper_warnings: copper.warnings,
         copper_layer_count,
     })
@@ -420,6 +451,7 @@ mod tests {
             layer_id: pcb::FRONT_COPPER,
             width_nm,
             min_width_nm: 100_000,
+            remove_islands: true,
         }
     }
 
@@ -438,6 +470,7 @@ mod tests {
                 result: IsolationResult::default(),
                 copper_warnings: Vec::new(),
                 copper_layer_count: 2,
+                clearing: pcb::Clearing::default(),
             }),
         );
     }
@@ -512,6 +545,7 @@ mod tests {
             },
             copper_warnings: Vec::new(),
             copper_layer_count: 2,
+            clearing: pcb::Clearing::default(),
         }
     }
 

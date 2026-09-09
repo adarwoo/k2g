@@ -39,10 +39,12 @@
 //! # Ok::<(), pcb::PcbError>(())
 //! ```
 
+mod clearing;
 mod copper;
 mod error;
 mod isolation;
 mod kicad;
+mod region;
 mod snapshot;
 mod stitching;
 
@@ -56,6 +58,7 @@ pub use copper::{
     is_copper_layer, CopperFeature, CopperSnapshot, CopperSource, Polygon,
     BACK_COPPER, COPPER_LAYER_IDS, FRONT_COPPER,
 };
+pub use clearing::{islands, Clearing, ISLAND_WIDTH_MULTIPLE};
 pub use isolation::{
     isolate, IsolationContour, IsolationResult, NarrowedPair, UncutStretch, LADDER_STEP_NM,
 };

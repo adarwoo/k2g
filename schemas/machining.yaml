@@ -487,6 +487,7 @@ $defs:
     default:
       width: 0.15mm
       test_cut: false
+      remove_islands: true
     properties:
       width:
         title: Minimum isolation width
@@ -596,6 +597,61 @@ $defs:
           re-zero after changing it. Needs a CNC profile whose pause really stops.
         type: boolean
         default: false
+      # -----------------------------------------------------------------------
+      # remove_islands — take out the copper the isolation pass leaves stranded.
+      #
+      # The pass cuts a channel round each net and nothing else. Where two nets
+      # sit further apart than twice the channel, the copper between the two
+      # channels survives: a strip on no net that exists on no layer of the
+      # design, which solder will bridge. Fully enclosed by what the pass cut, it
+      # is an ISLAND — and the commonest one by far is the ring of copper the
+      # clearance of a ground pour leaves standing round every trace in it.
+      #
+      # ON BY DEFAULT because it is opportunist and nearly free: the bit is
+      # already in the spindle, already at the right depth, and an island is
+      # bounded to three channels wide, which is three or four more passes of a
+      # tool that has nothing else to do. There is no rack slot to pay and no
+      # tool change. A V-bit is a perfectly good copper-clearing tool at this
+      # size — a cone cuts full width AT THE SURFACE, and copper only exists at
+      # the surface, so two grooves a channel apart leave nothing between them.
+      #
+      # It is only a poor one for LARGE areas, where the pass count is the
+      # problem, and that is a different question with a different answer: a
+      # router, a rack slot, and a threshold at which loading one is worth it.
+      # None of that is asked here. Copper too wide for the bound is left alone
+      # and its width reported in the step notes, which is the number that says
+      # what a router would buy.
+      #
+      # WHAT IT DOES NOT DO: copper that runs out into the surrounding field
+      # rather than closing into a ring is not an island — the strips between the
+      # pads of an SO8 on a board with no pour, for instance. Those are the same
+      # copper and want the same treatment, but they are found by a different
+      # question (how thin is this PART of the field) and that option is not
+      # built yet.
+      #
+      # Net copper is never touched, whatever this is set to: the region is
+      # derived by subtracting every piece of copper the design drew, so it
+      # cannot contain any. Nor does a clearing cut ever form an edge that
+      # matters electrically — every wall that does was already cut by the
+      # channel round it.
+      # -----------------------------------------------------------------------
+      remove_islands:
+        title: Remove islands
+        description: >-
+          Take out the copper the pass leaves stranded between two channels.
+          Cutting a channel round each net leaves everything else standing, so
+          where two nets are further apart than twice the channel the copper
+          between them survives as an island that is on no net and exists on no
+          layer of the design — solder will bridge it. Most often it is the ring
+          a pour clearance leaves round a trace. This removes the ones the
+          engraver can reach cheaply: an island nowhere wider than three
+          channels, cut by the bit already in the spindle at the depth it is
+          already running, costing no tool change. Wider copper is left alone,
+          and how wide it was is reported in the step notes. Copper that runs
+          out into the surrounding field instead of closing into a ring is not
+          an island and is not touched.
+        type: boolean
+        default: true
     required: [width]
     additionalProperties: false
 
@@ -771,6 +827,7 @@ $defs:
         default:
           width: 0.25mm
           test_cut: false
+          remove_islands: true
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it
