@@ -536,6 +536,10 @@ stretch and says which nets it narrowed, in the step's notes; it never widens an
 never cuts into a neighbour. Outer copper only (F.Cu or B.Cu, whichever the step's
 board face names).
 
+The **Board** tab draws the result — the copper this will leave, at the width it will
+really be cut — which is the quickest way to see whether a width suits the board before
+you cut one. See [The isolation pass](#the-isolation-pass).
+
 #### Cut a depth test first
 
 Engraving is the one operation whose quality is a depth tolerance, and it runs at one
@@ -670,6 +674,37 @@ the front**, click again to restore the drawing order. Reading the drawing:
   **hatched band**: the hatch is the tool path and its width is the feature's width.
 - Features the *selected step* does not make are ghosted: still drawn, because a
   board is unreadable without its own geometry, but plainly not this step's work.
+
+#### The isolation pass
+
+When the profile engraves copper, the Board view draws that pass — and draws it as the
+**copper it leaves behind**, not as a line the tool follows. The channel is as wide on
+screen as the bit actually cuts it, and it is taken *out* of the copper, so what is on
+screen is the board that comes off the machine.
+
+- **The whole face is copper**, not just the traces you drew. Isolation milling starts
+  from a board that is entirely copper and removes only the channel, so the field between
+  the nets stays standing — which is why islands exist, and why the view shows it. That
+  faint wash is real copper, and it is on the board when you unclamp it.
+- **A V-bit shows two tones.** The channel is the groove at the surface, which is what
+  removes the copper; the darker band inside it is the flat at the bottom of the V. A
+  flat-tipped cutter cuts one width however deep it goes, so it shows one band — which is
+  the whole difference between the two tools, drawn rather than described.
+- **Narrowed stretches are marked where they happen**, in the warning colour. The step's
+  notes say which nets forced it; this says which piece of the board it cost you.
+- **The tool's own line** runs down each channel, in the same colour the 3D view draws
+  that pass in. It is the one mark that survives two channels merging into one, so two
+  lines running through a single channel is two passes that overlapped there.
+- The legend row switches the whole thing off and puts the copper back whole — the
+  channels and the copper they remove are one question, so one tick answers it.
+- While the contours are still being worked out the legend says so, and the copper is
+  drawn uncut until they land. If another step engraves this face, its pass is still
+  drawn — the board in front of you is still the board that will be isolated — but the
+  tool marks are faint, the way a kerf is faint for a step that does not route it.
+
+Islands wider than the pass will take are counted in the legend rather than drawn: no
+geometry is cut for them, so there is nothing to show. Contour the ladder could not cut
+at any width is reported in the step's notes only, for the same reason.
 
 ### Machining
 

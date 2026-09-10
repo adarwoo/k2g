@@ -53,6 +53,16 @@ pub const APP_STYLE: &str = r#"
        strength (the views hold copper well below full so the toolpaths win over it). */
     --copper-front: #c83434;
     --copper-back: #4d7fc4;
+    /* The isolation pass, and fixed for the same reason the copper pair is. `--iso-path` is
+       `scene::tool_colour(0)` written out: the isolation block is always the first of a step,
+       so this is the colour the 3D view draws that pass in and the colour its legend swatch
+       shows. Two views of one tool that disagreed about its colour would be worse than either
+       having no colour at all. `--iso-groove` is the bottom of a V-groove — below the surface,
+       so darker than the channel it sits in, and dark rather than tinted because it is a
+       depth and not a material — so it is mixed from `--bg` rather than fixed, and follows the
+       theme the way the shadow of a groove follows the surface it is cut into. */
+    --iso-path: #4ea3ff;
+    --iso-groove: color-mix(in srgb, var(--bg) 45%, black);
 }
 
 .theme-light {
@@ -3940,6 +3950,67 @@ th {
 
 .board-copper-back {
     color: color-mix(in srgb, var(--copper-back) 38%, transparent);
+}
+
+/*
+ * The copper isolation milling leaves standing between the nets.
+ *
+ * A board is entirely copper before it is isolated, and a mill takes out only the channel —
+ * so the field between the traces is still copper when the board comes off the machine. The
+ * design's copper is what KiCad has to give and it is not the same thing, which is why this
+ * goes on underneath it: without the field the picture is of an etched board, and the whole
+ * question the isolation view answers is what a *milled* one looks like.
+ *
+ * Colour from the group, like everything else here, so the wash is the face's own colour;
+ * the opacity puts it well under the design copper drawn over it, which still has to read as
+ * the nets. It is the same shape as the outside-route mask's material region, so the wash
+ * stops where the board does — including at the edge of an interior cut-out.
+ */
+.board-copper-field {
+    fill: currentColor;
+    stroke: none;
+    opacity: 0.32;
+}
+
+/*
+ * The isolation pass: what the tool did, over copper the mask has already cut away.
+ *
+ * The channel itself is *not* painted. It is absent copper, and absence is what the mask
+ * makes — paint it and the view would be asserting a colour where the answer is "nothing is
+ * there". So these three marks say only what the mask cannot: how deep, where it was squeezed,
+ * and where the centre ran.
+ *
+ * The two band widths are set inline, in view units, and carry no `vector-effect`: they are
+ * real widths and must scale with zoom, unlike every annotation around them. The centre line
+ * is the opposite case and says so.
+ */
+.board-iso-groove {
+    fill: none;
+    /* The flat at the bottom of the V, sunk below the surface — so it is darker than the
+       channel around it, which is the board itself showing through. */
+    stroke: var(--iso-groove);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.board-iso-narrowed {
+    fill: none;
+    /* A stretch the ladder had to give up width on. Warn-coloured and translucent: it marks
+       a compromise rather than a fault, and it must not bury the groove beneath it. */
+    stroke: color-mix(in srgb, var(--warn) 55%, transparent);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.board-iso-centerline {
+    fill: none;
+    /* The isolation block is always the first of a step, so this is `scene::tool_colour(0)` —
+       the same blue the 3D view draws the pass in and the same swatch its legend shows. One
+       tool, one colour, whichever view is open. */
+    stroke: var(--iso-path);
+    stroke-width: 0.8;
+    vector-effect: non-scaling-stroke;
+    opacity: 0.85;
 }
 
 /*

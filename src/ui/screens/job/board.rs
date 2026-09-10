@@ -11,13 +11,15 @@
 //! whose router is a per-step choice this view cannot see).
 
 use dioxus::prelude::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use pcb::{BoardEdgeShape, BoardSnapshot, Contour, HoleKind};
 use units::Length;
 
-use crate::runtime::tooling::{step_targets, StepTargets};
+use crate::runtime::isolation::Isolation;
+use crate::runtime::tooling::{engrave_target, step_targets, EngraveTarget, StepTargets};
 use crate::runtime::AppCtx;
 use units::user_format as unit_format;
 
@@ -210,6 +212,18 @@ fn drill_symbol_from_index(index: usize) -> (DrillBaseShape, DrillModifier, f64)
 enum BoardLayer {
     CopperFront,
     CopperBack,
+    /// The isolation pass: the channels milled round each net, and the tool that cuts them.
+    ///
+    /// **One row, not one per face.** The pass shown is the one the selected step engraves
+    /// (see [`engrave_target`]), so a two-sided profile shows its front pass while a front
+    /// step is selected and its back pass while a back one is — the same rule the rest of this
+    /// view follows. A row per face would leave one of them permanently empty on the single-
+    /// sided boards that are most of the work.
+    ///
+    /// This row is the only one that governs something outside itself: switching it off also
+    /// takes the mask off the copper, restoring the board to whole copper. That is deliberate —
+    /// "show me the isolation" and "show me the copper it leaves" are one question.
+    Isolation,
     Via,
     Pth,
     Npth,
@@ -243,9 +257,14 @@ fn layer_visible(hidden: &BTreeSet<BoardLayer>, layer: BoardLayer) -> bool {
 /// Copper underneath because that is where it is on the board, then the kerf band, the
 /// edge line, and the drilled and routed features on top of everything — those are what
 /// the view is read for, and they are small marks that must not be buried.
-const DEFAULT_DRAW_ORDER: [BoardLayer; 7] = [
+///
+/// The isolation overlay sits directly on the copper, because it is a statement *about* the
+/// copper: the groove and the tool's line belong in the channel they were cut in. It still
+/// goes under the drill marks, which stay the smallest and topmost marks on the board.
+const DEFAULT_DRAW_ORDER: [BoardLayer; 8] = [
     BoardLayer::CopperBack,
     BoardLayer::CopperFront,
+    BoardLayer::Isolation,
     BoardLayer::OutsideRoute,
     BoardLayer::EdgeCut,
     BoardLayer::Via,
@@ -698,6 +717,251 @@ fn copper_layer_svg(
     CopperLayerSvg { solid, zones }
 }
 
+/// Every stretch the pass cut at one width, as one path.
+///
+/// Grouped by width because width is a *stroke property*, so one element can carry as many
+/// stretches as share it — and the ladder has a handful of rungs, so a board whose 349 loops
+/// became 3416 slivers still draws in four paths. Ungrouped it would be one element per
+/// contour, which is the cost the copper render already went out of its way to avoid.
+#[derive(Clone, PartialEq)]
+struct ChannelGroup {
+    /// The channel's width in view units.
+    ///
+    /// A **real** width, so it scales with zoom — unlike the drill symbols and edge lines,
+    /// which are annotations and carry `non-scaling-stroke`. A channel drawn at a fixed screen
+    /// width would be a picture of a board that does not exist.
+    width_units: f64,
+    /// True when this rung is below the width the bit was chosen for — a stretch the ladder
+    /// had to squeeze through a tight gap.
+    narrowed: bool,
+    d: String,
+}
+
+/// The isolation pass as SVG, in the view's coordinates.
+#[derive(Clone, PartialEq)]
+struct IsolationSvg {
+    /// The copper face this cuts — `pcb::FRONT_COPPER` or `pcb::BACK_COPPER`. Only that face's
+    /// copper is masked by it; the other side of the board is untouched by this pass.
+    layer_id: i32,
+    channels: Vec<ChannelGroup>,
+    /// The tool centre's own line, every stretch merged. Hairline, and the only thing that
+    /// distinguishes two passes whose channels have merged into one — which is what an overlap
+    /// looks like from above.
+    centrelines: String,
+    /// The flat at the bottom of the groove, in view units; zero for a flat-ended tool, whose
+    /// bottom *is* its channel.
+    tip_units: f64,
+}
+
+/// What the isolation render is derived from, identified cheaply.
+///
+/// The point of the type is its [`PartialEq`]: the held contours are compared by **pointer**,
+/// not by walking a few hundred thousand points, so the expensive builder downstream re-runs
+/// when the answer changes and not merely when the context does. `BoardCopper` is held the
+/// same way and for the same reason.
+#[derive(Clone)]
+struct IsolationInput {
+    target: EngraveTarget,
+    /// `None` while the worker is still on it — which the legend says out loud rather than
+    /// showing whole copper as though nothing were going to be cut.
+    held: Option<Arc<Isolation>>,
+    /// The board's bounds in mm, which is all the mapping needs.
+    bbox: (f64, f64, f64, f64),
+}
+
+impl PartialEq for IsolationInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.bbox == other.bbox
+            && match (&self.held, &other.held) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+/// The isolation pass to draw, and the answer held for it.
+///
+/// Cheap enough to run on every render — a datastore read of the profile's steps and a bit
+/// choice, the same two the Board view already makes for [`step_targets`] — which is what lets
+/// it stand between the context and the path builder.
+fn isolation_input(ctx: &AppCtx) -> Option<IsolationInput> {
+    let target = engrave_target(ctx, ctx.selected_step)?;
+    let bbox = ctx.board.as_ref()?.bounding_box.as_ref()?;
+    let (width, height) = (bbox.width.as_mm(), bbox.height.as_mm());
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let held = ctx.isolation.matching(&target.spec).cloned();
+    Some(IsolationInput { target, held, bbox: (bbox.x.as_mm(), bbox.y.as_mm(), width, height) })
+}
+
+/// The isolation contours as paths, mapped into the view the way the copper is.
+///
+/// **The channels are what the tool sweeps, not what it traces.** A round tool run along a
+/// polyline sweeps exactly a round-capped, round-joined stroke of its own width — so stroking
+/// the contour at the width it achieved is not an approximation of the cut, it *is* the cut.
+/// That is what lets the copper be shown as it will be left without a single boolean op: the
+/// same paths go into a mask, and the copper under them is gone.
+fn build_isolation_svg(input: &IsolationInput) -> Option<IsolationSvg> {
+    let held = input.held.as_ref()?;
+    let (min_x, min_y, width, height) = input.bbox;
+    let view_height = BOARD_VIEW_WIDTH * (height / width);
+    let units_per_mm = BOARD_VIEW_WIDTH / width;
+    let tx = |px: f64| ((px - min_x) / width) * BOARD_VIEW_WIDTH;
+    let ty = |py: f64| ((py - min_y) / height) * view_height;
+
+    let append = |out: &mut String, path: &[(i64, i64)], closed: bool| {
+        for (i, &(x, y)) in path.iter().enumerate() {
+            let (x, y) = (tx(x as f64 / 1e6), ty(y as f64 / 1e6));
+            out.push_str(if i == 0 { "M" } else { "L" });
+            out.push_str(&format!("{x:.2} {y:.2} "));
+        }
+        // Per subpath, so one `d` can hold closed loops and open spans together — which it has
+        // to, because a contour that took one width the whole way round stays a loop while one
+        // that had to narrow arrives as spans, and both may be the same rung of the ladder.
+        if closed {
+            out.push_str("Z ");
+        }
+    };
+
+    let mut by_width: BTreeMap<i64, String> = BTreeMap::new();
+    let mut centrelines = String::new();
+    for contour in &held.result.contours {
+        if contour.path.len() < 2 {
+            continue;
+        }
+        append(by_width.entry(contour.width_nm).or_default(), &contour.path, contour.closed);
+        append(&mut centrelines, &contour.path, contour.closed);
+    }
+    // The island rings are cut by the same bit at its nominal width — they are the pass at full
+    // depth, not a narrowed stretch — so they join that rung rather than getting a group of
+    // their own. Stroked, the concentric rings union into the cleared island, which is exactly
+    // what `pcb::clearing::fill` laid them out to do.
+    for ring in &held.clearing.paths {
+        if ring.len() < 3 {
+            continue;
+        }
+        append(by_width.entry(input.target.spec.width_nm).or_default(), ring, true);
+        append(&mut centrelines, ring, true);
+    }
+    if by_width.is_empty() {
+        return None;
+    }
+
+    Some(IsolationSvg {
+        layer_id: input.target.spec.layer_id,
+        // Widest first, so a narrowed stretch is painted over the full-width channel it
+        // branches off rather than under it.
+        channels: by_width
+            .into_iter()
+            .rev()
+            .map(|(width_nm, d)| ChannelGroup {
+                width_units: (width_nm as f64 / 1e6) * units_per_mm,
+                narrowed: width_nm < input.target.spec.width_nm,
+                d,
+            })
+            .collect(),
+        centrelines,
+        // A flat-ended tool cuts its own width however deep it goes, so its groove has no
+        // narrower bottom to draw; drawing one would flood the channel with a single tone and
+        // say something about the cut that is not true.
+        tip_units: if input.target.point_angle.as_degrees() >= 180.0 {
+            0.0
+        } else {
+            input.target.tip.as_mm() * units_per_mm
+        },
+    })
+}
+
+/// What the isolation legend row says: its title, the line beneath the heading, and the facts.
+///
+/// Split out because it is prose about numbers rather than markup, and because it is the half
+/// of this feature that has to be right when the picture is *not*: a channel drawn 0.35 mm
+/// wide when 0.40 was asked for looks like any other channel, and this is where that is said.
+///
+/// Returns `("", "", vec![])` when there is no pass, which the caller reads as "no row".
+fn isolation_legend(
+    target: Option<&EngraveTarget>,
+    held: Option<&Isolation>,
+    unit: units::UserUnitSystem,
+) -> (String, String, Vec<String>) {
+    let Some(target) = target else {
+        return (String::new(), String::new(), Vec::new());
+    };
+    let len = |length: Length| unit_format::format_length_display(length, unit);
+
+    let face = if target.spec.layer_id == pcb::BACK_COPPER {
+        "Bottom copper (B.Cu)"
+    } else {
+        "Top copper (F.Cu)"
+    };
+    let label = format!("{face} · {} channel", len(target.achieved));
+
+    let Some(held) = held else {
+        // Not an error and not an empty pass — the worker is on it. Saying nothing here is how
+        // a board once sat on screen looking as though its copper would be left whole.
+        return (
+            label,
+            "Working out the isolation contours…".to_string(),
+            Vec::new(),
+        );
+    };
+
+    // A cone widens with depth, so its tip is not its channel and both numbers are worth
+    // having; a flat tool has one width there is, and quoting a "tip" for it invites the reader
+    // to look for a second band that is not there.
+    let bit = if target.point_angle.as_degrees() >= 180.0 {
+        format!("{} ⌀{}, flat", target.tool_label, len(target.tip))
+    } else {
+        format!(
+            "{} · tip ⌀{} at {:.0}°",
+            target.tool_label,
+            len(target.tip),
+            target.point_angle.as_degrees(),
+        )
+    };
+
+    let mut facts = vec![bit];
+    facts.push(format!(
+        "Asked for at least {}; this bit cuts {}.",
+        len(target.requested),
+        len(target.achieved),
+    ));
+
+    let narrowed = held.result.contours.iter().filter(|c| c.width_nm < target.spec.width_nm).count();
+    if narrowed > 0 {
+        facts.push(format!(
+            "{narrowed} stretch(es) narrowed to fit between close nets — marked on the board.",
+        ));
+    }
+
+    // The islands, said the way the step says them: what was taken, and what a router would
+    // still be needed for.
+    let clearing = &held.clearing;
+    if target.removes_islands {
+        if clearing.removed > 0 {
+            facts.push(format!("{} stranded island(s) trimmed.", clearing.removed));
+        }
+        if clearing.left > 0 {
+            facts.push(format!(
+                "{} piece(s) of free copper left standing, the widest {}.",
+                clearing.left,
+                len(Length::from_mm(clearing.widest_left_nm as f64 / 1e6)),
+            ));
+        }
+    } else {
+        facts.push("Island trimming is off for this step.".to_string());
+    }
+
+    let note = "Channels are cut to scale, so the copper shown is the copper the board is \
+                left with. The field between nets stays standing — isolation milling only \
+                takes the channel."
+        .to_string();
+    (label, note, facts)
+}
+
 fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String {
     let d = 2.0 * (sx * (my - ey) + mx * (ey - sy) + ex * (sy - my));
     if d.abs() < 1e-9 {
@@ -1117,13 +1381,87 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let copper_svg = use_memo(move || build_copper_svg(&state.read()));
     let copper_svg = copper_svg.read();
 
+    // The isolation pass, in two stages. The first is cheap and runs whenever the context
+    // moves; the second is the expensive one and runs only when the first says the *answer*
+    // moved. Splitting them is the whole reason `IsolationInput` compares its contours by
+    // pointer — a bare memo over the context would rebuild every channel path each time a
+    // setting anywhere in the app was touched.
+    let iso_input = use_memo(move || isolation_input(&state.read()));
+    let isolation_svg = use_memo(move || iso_input.read().as_ref().and_then(build_isolation_svg));
+    let iso_input = iso_input.read();
+    let isolation_svg = isolation_svg.read();
+
+    // Nothing else asks. The machining plan requests contours too, but it runs on the
+    // generation path — which is gated on the job being ready to machine — and from the
+    // Machining tab, so a board sitting on this tab would wait forever. Asking twice is free
+    // (`request_isolation` drops a repeat of what it is already working on), and a failed run
+    // being asked again is the deliberate behaviour: KiCad answers `AS_BUSY` while it re-pours
+    // and the retry is what waits for the pour.
+    if let Some(input) = iso_input.as_ref() {
+        if input.held.is_none() {
+            crate::runtime::isolation::request_isolation(input.target.spec.clone());
+        }
+    }
+    let iso_target = iso_input.as_ref().map(|input| &input.target);
+    let iso_held = iso_input.as_ref().and_then(|input| input.held.as_ref());
+    let (isolation_label, isolation_note, isolation_facts) =
+        isolation_legend(iso_target, iso_held.map(Arc::as_ref), snapshot.unit_system);
+    let iso_shown = isolation_svg
+        .as_ref()
+        .filter(|_| layer_visible(&hidden, BoardLayer::Isolation));
+    // The copper layer whose face the pass cuts. The other face keeps its copper whole — a
+    // front channel takes no copper off the back of the board, and painting one opaquely over
+    // both is exactly the lie the mask exists to avoid.
+    let iso_face = iso_shown.map(|iso| {
+        if iso.layer_id == pcb::BACK_COPPER {
+            BoardLayer::CopperBack
+        } else {
+            BoardLayer::CopperFront
+        }
+    });
+
+    // The stitched contours, in view units — the source for the outside-route band, and for
+    // the field-copper wash beneath the isolation pass.
+    // Only a clean stitch is usable: with errors the contours are not closed, so there
+    // is no reliable inside to keep the band out of.
+    let stitched_outline = snapshot
+        .stitched_board_data
+        .as_ref()
+        .filter(|stitched| stitched.errors.is_empty())
+        .zip(snapshot.board.as_ref().and_then(|b| b.bounding_box.as_ref()))
+        .filter(|(_, bbox)| bbox.width.as_mm() > 0.0 && bbox.height.as_mm() > 0.0)
+        .and_then(|(stitched, bbox)| {
+            let min_x = bbox.x.as_mm();
+            let min_y = bbox.y.as_mm();
+            let width = bbox.width.as_mm();
+            let height = bbox.height.as_mm();
+            stitched_outline_path(&stitched.contours, |px, py| {
+                (
+                    ((px - min_x) / width) * board_view_width,
+                    ((py - min_y) / height) * board_view_height,
+                )
+            })
+        });
+
     // Each layer's marks, built up front so they can be emitted in whatever order the
     // reader has asked for. Hidden layers build nothing at all rather than building
     // something empty, which keeps the cost of a switched-off copper layer at zero.
     let copper_marks = |which: BoardLayer, class: &'static str, layer: Option<&CopperLayerSvg>| {
         let layer = layer.filter(|_| layer_visible(&hidden, which))?;
+        // Isolation milling starts from a face that is **entirely** copper and takes a channel
+        // out around each net, so the copper between nets stays standing. Drawing only the
+        // design's copper would be a picture of an etched board — which is why the wash goes on
+        // beneath it, cut by the same mask: it is the field the pass leaves behind, and it is
+        // what makes every channel edge a visible copper boundary right across the face.
+        let cut = iso_face == Some(which);
+        let field = cut.then(|| stitched_outline.as_ref()).flatten();
         Some(rsx! {
-            g { class: "{class}",
+            g {
+                class: "{class}",
+                mask: if cut { "url(#board-isolation-mask)" } else { "none" },
+                if let Some(field) = field {
+                    path { d: "{field}", class: "board-copper-field", fill_rule: "evenodd" }
+                }
                 for (zone_idx , zone) in layer.zones.iter().enumerate() {
                     path {
                         key: "{class}-zone-{zone_idx}",
@@ -1163,27 +1501,51 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
         })
     };
 
-    // The stitched contours, in view units — the source for the outside-route band.
-    // Only a clean stitch is usable: with errors the contours are not closed, so there
-    // is no reliable inside to keep the band out of.
-    let stitched_outline = snapshot
-        .stitched_board_data
-        .as_ref()
-        .filter(|stitched| stitched.errors.is_empty())
-        .zip(snapshot.board.as_ref().and_then(|b| b.bounding_box.as_ref()))
-        .filter(|(_, bbox)| bbox.width.as_mm() > 0.0 && bbox.height.as_mm() > 0.0)
-        .and_then(|(stitched, bbox)| {
-            let min_x = bbox.x.as_mm();
-            let min_y = bbox.y.as_mm();
-            let width = bbox.width.as_mm();
-            let height = bbox.height.as_mm();
-            stitched_outline_path(&stitched.contours, |px, py| {
-                (
-                    ((px - min_x) / width) * board_view_width,
-                    ((py - min_y) / height) * board_view_height,
-                )
-            })
-        });
+    // The tool's own signature, over the copper the mask has already cut.
+    //
+    // The channel itself is not painted here — it is absent copper, and absence is what the
+    // mask makes. What is left to say is what the *tool* did: how deep the groove goes, where
+    // it had to be squeezed, and where its centre ran.
+    //
+    // Ghosted when another step engraves this face, the way the outline band ghosts for a step
+    // that does not route it. The mask is not ghosted with it: the copper genuinely will be
+    // cut, whichever step happens to be on screen.
+    let isolation_marks = || {
+        let iso = iso_shown?;
+        let ghost = iso_target.is_some_and(|target| !target.is_selected_step);
+        Some(rsx! {
+            g { class: if ghost { "board-step-ghost" } else { "" },
+                // The flat at the bottom of the V, drawn inside the channel it sits in. Two
+                // tones for a cone, one band for a flat cutter — and that falls out of the
+                // geometry rather than a branch on tool kind, because a flat tool's tip *is*
+                // its channel and `tip_units` comes back zero for it.
+                if iso.tip_units > 0.0 && !iso.centrelines.is_empty() {
+                    path {
+                        d: "{iso.centrelines}",
+                        class: "board-iso-groove",
+                        stroke_width: "{iso.tip_units}",
+                    }
+                }
+                // Where the ladder had to give up width. The step already says *that* it
+                // narrowed and between which nets; this says **where**, which is the half no
+                // amount of prose can give you.
+                for (idx , group) in iso.channels.iter().filter(|group| group.narrowed).enumerate() {
+                    path {
+                        key: "iso-narrow-{idx}",
+                        d: "{group.d}",
+                        class: "board-iso-narrowed",
+                        stroke_width: "{group.width_units}",
+                    }
+                }
+                // The tool centre. A hairline, and the only mark that survives two channels
+                // merging into one — two centre lines in a single channel is what an overlap
+                // looks like from directly above.
+                if !iso.centrelines.is_empty() {
+                    path { d: "{iso.centrelines}", class: "board-iso-centerline" }
+                }
+            }
+        })
+    };
 
     // Outside routing: the kerf the outline cutter sweeps. It lies wholly beyond the edge
     // cut, so the finished board keeps its nominal size. Without a clean stitch there is
@@ -1241,6 +1603,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                 BoardLayer::CopperFront => {
                     copper_marks(layer, "board-copper-front", copper_svg.front.as_ref())
                 }
+                BoardLayer::Isolation => isolation_marks(),
                 BoardLayer::OutsideRoute => outline_marks.clone(),
                 BoardLayer::EdgeCut => edge_marks.clone(),
                 BoardLayer::Via | BoardLayer::Pth | BoardLayer::Npth => hole_marks(layer),
@@ -1386,6 +1749,28 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         {hatch_pattern("board-outline-hatch", "board-hatch-outline", hatch_pitch, hatch_line_width, true)}
                                                         {hatch_pattern("board-outline-hatch-legend", "board-hatch-outline", HATCH_PITCH_LEGEND, HATCH_PITCH_LEGEND * 0.4, true)}
 
+                                                        // The isolation swatch's own channel,
+                                                        // pitched for the 24×24 legend user
+                                                        // space. Mask ids resolve document-wide,
+                                                        // which is why the swatch can use one
+                                                        // declared in the board's `defs`.
+                                                        mask {
+                                                            id: "board-isolation-legend-mask",
+                                                            mask_units: "userSpaceOnUse",
+                                                            x: "0",
+                                                            y: "0",
+                                                            width: "24",
+                                                            height: "24",
+                                                            rect { x: "0", y: "0", width: "24", height: "24", fill: "white" }
+                                                            path {
+                                                                d: "M 3 12 L 21 12",
+                                                                fill: "none",
+                                                                stroke: "black",
+                                                                stroke_width: "5",
+                                                                stroke_linecap: "round",
+                                                            }
+                                                        }
+
                                                         // Keeps the outside-route band out of the board: white is
                                                         // kept, and the stitched material region is painted black.
                                                         // Stroking the contours at twice the kerf then masking the
@@ -1408,6 +1793,45 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                                     fill: "white",
                                                                 }
                                                                 path { d: "{outline}", fill: "black", fill_rule: "evenodd", stroke: "none" }
+                                                            }
+                                                        }
+
+                                                        // The copper the isolation pass takes
+                                                        // away. White is kept; each channel is
+                                                        // stroked in black at the width it was
+                                                        // actually cut, round-capped and
+                                                        // round-joined — precisely the region a
+                                                        // round tool sweeps along a polyline.
+                                                        // Hung on the copper group of the face
+                                                        // this pass cuts, it leaves the copper
+                                                        // the board will be left with: no
+                                                        // boolean geometry, and exact.
+                                                        if let Some(iso) = iso_shown {
+                                                            mask {
+                                                                id: "board-isolation-mask",
+                                                                mask_units: "userSpaceOnUse",
+                                                                x: "{content_x}",
+                                                                y: "{content_y}",
+                                                                width: "{content_w}",
+                                                                height: "{content_h}",
+                                                                rect {
+                                                                    x: "{content_x}",
+                                                                    y: "{content_y}",
+                                                                    width: "{content_w}",
+                                                                    height: "{content_h}",
+                                                                    fill: "white",
+                                                                }
+                                                                for (idx , group) in iso.channels.iter().enumerate() {
+                                                                    path {
+                                                                        key: "iso-cut-{idx}",
+                                                                        d: "{group.d}",
+                                                                        fill: "none",
+                                                                        stroke: "black",
+                                                                        stroke_width: "{group.width_units}",
+                                                                        stroke_linecap: "round",
+                                                                        stroke_linejoin: "round",
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -1751,6 +2175,56 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                         }
                                                     }
                                                 }
+
+                                                // The isolation pass. Only when the profile
+                                                // actually engraves — a row explaining a pass
+                                                // that is not in the job is a row that has to be
+                                                // read to find that out.
+                                                if let Some(target) = iso_target {
+                                                    h4 { "Isolation" }
+                                                    div { class: "board-drill-legend-note", "{isolation_note}" }
+                                                    LegendLayerRow {
+                                                        layer: BoardLayer::Isolation,
+                                                        hidden: hidden_layers,
+                                                        top: top_layer,
+                                                        // The swatch is the board's own picture
+                                                        // in miniature: copper, a channel taken
+                                                        // out of it, the groove in the channel
+                                                        // and the tool's line down the middle.
+                                                        svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                            g { class: "board-copper-front",
+                                                                rect {
+                                                                    x: "3",
+                                                                    y: "5",
+                                                                    width: "18",
+                                                                    height: "14",
+                                                                    rx: "2",
+                                                                    class: "board-copper-fill",
+                                                                    mask: "url(#board-isolation-legend-mask)",
+                                                                }
+                                                            }
+                                                            path {
+                                                                d: "M 3 12 L 21 12",
+                                                                class: "board-iso-groove",
+                                                                stroke_width: "2.4",
+                                                            }
+                                                            path { d: "M 3 12 L 21 12", class: "board-iso-centerline" }
+                                                        }
+                                                        span { "{isolation_label}" }
+                                                    }
+                                                    for line in isolation_facts.iter() {
+                                                        div {
+                                                            key: "iso-fact-{line}",
+                                                            class: "board-drill-legend-note",
+                                                            "{line}"
+                                                        }
+                                                    }
+                                                    if !target.is_selected_step {
+                                                        div { class: "board-drill-legend-note",
+                                                            "Cut by another step, so the tool marks are drawn faint. The copper is shown as that step will leave it."
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                         p {
@@ -1888,6 +2362,232 @@ mod tests {
 
 
 #[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use crate::runtime::isolation::IsolationSpec;
+    use units::{Angle, UserUnitSystem};
+
+    /// A 100 mm board, so the mapping is a round ten view units per millimetre and every
+    /// expected width below can be read off by eye.
+    const UNITS_PER_MM: f64 = BOARD_VIEW_WIDTH / 100.0;
+
+    fn spec(width_nm: i64) -> IsolationSpec {
+        IsolationSpec {
+            board_name: "b".into(),
+            board_epoch: 1,
+            layer_id: pcb::FRONT_COPPER,
+            width_nm,
+            min_width_nm: 150_000,
+            remove_islands: true,
+        }
+    }
+
+    fn target(width_nm: i64, tip_mm: f64, angle_deg: f64) -> EngraveTarget {
+        EngraveTarget {
+            spec: spec(width_nm),
+            is_selected_step: true,
+            requested: Length::from_mm(0.3),
+            achieved: Length::from_mm(width_nm as f64 / 1e6),
+            tip: Length::from_mm(tip_mm),
+            point_angle: Angle::from_degrees(angle_deg),
+            tool_label: "V-bit".into(),
+            removes_islands: true,
+        }
+    }
+
+    fn contour(width_nm: i64, closed: bool) -> pcb::IsolationContour {
+        pcb::IsolationContour {
+            net: "GND".into(),
+            path: vec![(0, 0), (10_000_000, 0), (10_000_000, 10_000_000)],
+            closed,
+            width_nm,
+        }
+    }
+
+    fn input(
+        target: EngraveTarget,
+        contours: Vec<pcb::IsolationContour>,
+        islands: Vec<Vec<(i64, i64)>>,
+    ) -> IsolationInput {
+        let held = Isolation {
+            spec: target.spec.clone(),
+            result: pcb::IsolationResult {
+                layer_id: target.spec.layer_id,
+                contours,
+                ..Default::default()
+            },
+            copper_warnings: Vec::new(),
+            copper_layer_count: 2,
+            clearing: pcb::Clearing { paths: islands, ..Default::default() },
+        };
+        IsolationInput {
+            target,
+            held: Some(Arc::new(held)),
+            bbox: (0.0, 0.0, 100.0, 100.0),
+        }
+    }
+
+    /// **Why the grouping is by width.** Width is a stroke property, so one element carries
+    /// every stretch that shares it — which is what keeps a board whose loops fragmented into
+    /// thousands of slivers down to a handful of paths. The copper render already went out of
+    /// its way to avoid one element per feature; this must not reintroduce it.
+    #[test]
+    fn each_achieved_width_becomes_one_path_widest_first() {
+        let iso = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, true), contour(400_000, true), contour(250_000, false)],
+            Vec::new(),
+        ))
+        .expect("three contours over two widths");
+
+        assert_eq!(iso.channels.len(), 2, "two rungs of the ladder, two paths");
+        assert!((iso.channels[0].width_units - 0.4 * UNITS_PER_MM).abs() < 1e-9);
+        assert!((iso.channels[1].width_units - 0.25 * UNITS_PER_MM).abs() < 1e-9);
+        assert_eq!(iso.channels[0].d.matches('M').count(), 2, "both full-width loops in one path");
+    }
+
+    /// A stretch below the width the bit was chosen for is one the ladder had to squeeze, and
+    /// the view marks it. The full-width rung is not marked — every contour would light up,
+    /// which is the same as none of them lighting up.
+    #[test]
+    fn only_a_rung_below_the_chosen_width_counts_as_narrowed() {
+        let iso = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, true), contour(250_000, true)],
+            Vec::new(),
+        ))
+        .expect("contours");
+
+        assert!(!iso.channels[0].narrowed, "the width the bit was chosen for is not a compromise");
+        assert!(iso.channels[1].narrowed, "a rung below it is");
+    }
+
+    /// A contour that took one width the whole way round is a closed loop; one that had to
+    /// narrow arrives as open spans. Both may be the same rung, so one `d` has to hold both —
+    /// which works only because `Z` is per subpath.
+    #[test]
+    fn a_loop_closes_its_subpath_and_a_span_does_not() {
+        let closed = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, true)],
+            Vec::new(),
+        ))
+        .expect("contours");
+        let open = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, false)],
+            Vec::new(),
+        ))
+        .expect("contours");
+
+        assert!(closed.channels[0].d.ends_with("Z "));
+        assert!(!open.channels[0].d.contains('Z'));
+    }
+
+    /// **Islands are the pass at full depth, not a narrowed stretch.** They are cut by the same
+    /// bit at the width it was chosen for, so they join that rung rather than opening one of
+    /// their own — and a group of their own would be drawn as though the tool had backed off
+    /// for them, which is the opposite of what happened.
+    #[test]
+    fn island_rings_join_the_rung_the_bit_was_chosen_for() {
+        let iso = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, true)],
+            vec![vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000)]],
+        ))
+        .expect("contours");
+
+        assert_eq!(iso.channels.len(), 1, "the ring is cut at the nominal width, not its own");
+        assert_eq!(iso.channels[0].d.matches('M').count(), 2, "contour and ring in one path");
+        assert!(!iso.channels[0].narrowed);
+    }
+
+    /// A flat-ended tool cuts its own width however deep it goes, so its groove has no narrower
+    /// bottom. Drawing one would flood the channel with a single tone and assert a depth the
+    /// cut does not have — and this is the whole of the "two tones for a V-bit, one for a
+    /// milling bit" behaviour, with no branch on tool kind anywhere.
+    #[test]
+    fn a_flat_tool_has_no_groove_and_a_cone_does() {
+        let flat = build_isolation_svg(&input(
+            target(400_000, 0.4, 180.0),
+            vec![contour(400_000, true)],
+            Vec::new(),
+        ))
+        .expect("contours");
+        let cone = build_isolation_svg(&input(
+            target(400_000, 0.1, 30.0),
+            vec![contour(400_000, true)],
+            Vec::new(),
+        ))
+        .expect("contours");
+
+        assert_eq!(flat.tip_units, 0.0);
+        assert!((cone.tip_units - 0.1 * UNITS_PER_MM).abs() < 1e-9);
+        assert!(cone.tip_units < cone.channels[0].width_units, "the groove sits inside its channel");
+    }
+
+    /// Contours still being computed draw nothing rather than drawing whole copper — which
+    /// would say the board comes off the machine uncut.
+    #[test]
+    fn nothing_held_draws_nothing() {
+        let mut pending = input(target(400_000, 0.1, 30.0), vec![contour(400_000, true)], Vec::new());
+        pending.held = None;
+
+        assert!(build_isolation_svg(&pending).is_none());
+    }
+
+    /// The held answer is compared by **pointer**, so the expensive path builder downstream
+    /// re-runs when the contours change and not merely when the context does. Comparing the
+    /// contents would walk a few hundred thousand points on every render.
+    #[test]
+    fn the_input_compares_its_contours_by_pointer() {
+        let a = input(target(400_000, 0.1, 30.0), vec![contour(400_000, true)], Vec::new());
+        let same = IsolationInput { held: a.held.clone(), ..a.clone() };
+        // Byte-identical contours, built separately.
+        let other = input(target(400_000, 0.1, 30.0), vec![contour(400_000, true)], Vec::new());
+
+        // Compared rather than `assert_eq!`-ed: a failure message here would print every
+        // contour the input holds, which is the very thing this exists to avoid touching.
+        assert!(a == same, "the same answer is the same input");
+        assert!(a != other, "a different Arc is a different answer, cheaply");
+    }
+
+    /// While the worker is still on it the legend says so. Silence here is how a board once sat
+    /// on screen looking as though its copper would be left whole.
+    #[test]
+    fn a_pass_with_no_contours_yet_says_it_is_working() {
+        let target = target(400_000, 0.1, 30.0);
+        let (label, note, facts) = isolation_legend(Some(&target), None, UserUnitSystem::Metric);
+
+        assert!(label.contains("Top copper"), "the face is named even before the answer lands");
+        assert!(note.contains("Working out"));
+        assert!(facts.is_empty());
+    }
+
+    /// The narrowing count is read off the contours rather than off `narrowed`, which counts
+    /// *pairs of nets* — a different question, and one that cannot be pointed at on the canvas.
+    #[test]
+    fn the_legend_counts_the_stretches_it_marks() {
+        let target = target(400_000, 0.1, 30.0);
+        let held = input(
+            target.clone(),
+            vec![contour(400_000, true), contour(250_000, true), contour(200_000, true)],
+            Vec::new(),
+        );
+        let (_, _, facts) = isolation_legend(
+            Some(&target),
+            held.held.as_deref(),
+            UserUnitSystem::Metric,
+        );
+
+        assert!(
+            facts.iter().any(|line| line.starts_with("2 stretch(es) narrowed")),
+            "two of the three contours are below the chosen width: {facts:?}",
+        );
+    }
+}
+
+#[cfg(test)]
 mod layer_tests {
     use super::*;
 
@@ -1941,6 +2641,7 @@ mod layer_tests {
         for layer in [
             BoardLayer::CopperFront,
             BoardLayer::CopperBack,
+            BoardLayer::Isolation,
             BoardLayer::Via,
             BoardLayer::Pth,
             BoardLayer::Npth,
@@ -1949,6 +2650,21 @@ mod layer_tests {
         ] {
             assert!(DEFAULT_DRAW_ORDER.contains(&layer), "{layer:?} is never painted");
             assert_eq!(draw_order(Some(layer)).len(), DEFAULT_DRAW_ORDER.len());
+        }
+    }
+
+    /// The isolation overlay is a statement *about* the copper, so it goes on top of it — but
+    /// it must stay under the drill marks, which are the smallest marks on the board and the
+    /// ones it is read for. Getting this the other way round buries a 0.3 mm hole symbol under
+    /// a channel drawn at true width.
+    #[test]
+    fn the_isolation_overlay_sits_between_the_copper_and_the_drill_marks() {
+        let at = |layer: BoardLayer| DEFAULT_DRAW_ORDER.iter().position(|l| *l == layer).unwrap();
+
+        assert!(at(BoardLayer::CopperFront) < at(BoardLayer::Isolation));
+        assert!(at(BoardLayer::CopperBack) < at(BoardLayer::Isolation));
+        for mark in [BoardLayer::Via, BoardLayer::Pth, BoardLayer::Npth] {
+            assert!(at(BoardLayer::Isolation) < at(mark), "{mark:?} must stay on top");
         }
     }
 

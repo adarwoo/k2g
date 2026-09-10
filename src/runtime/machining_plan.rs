@@ -1496,6 +1496,44 @@ fn plan_test_cut(
     )
 }
 
+/// The isolation question this step asks: which face, cut how wide, narrowing how far.
+///
+/// **The one place it is phrased.** It used to be built inline in `plan_engrave_spans`, which
+/// was fine while the plan was the only thing that wanted contours. The Board view wants them
+/// too — to draw the copper that will be left — and a view that asks a *near* question gets a
+/// near answer: contours held for a 0.35 mm channel, drawn over a board about to be cut at
+/// 0.40. Nothing in [`IsolationState::matching`](crate::runtime::isolation::IsolationState)
+/// can catch that, because a spec built two ways is two questions and matching only ever
+/// compares one against what is held. So both callers phrase it here or neither does.
+///
+/// A mill reaches the surface, so the face the step machines decides the layer. The placement
+/// already mirrors a back-face step, and copper arrives in the same board coordinates the
+/// holes do, so B.Cu needs nothing further.
+///
+/// Both widths come from the **chosen bit**, not from the step's setting. The setting is a
+/// minimum the operator states; what the pass has to lay out is the channel the bit in the
+/// rack actually cuts, and how far that bit can be backed off where the board is tight.
+/// Neither is knowable before a bit is picked.
+pub(crate) fn isolation_spec(
+    board: &pcb::BoardSnapshot,
+    board_epoch: u64,
+    raw: &StepRaw,
+    choice: &EngraveChoice,
+) -> IsolationSpec {
+    IsolationSpec {
+        board_name: board.name.clone(),
+        board_epoch,
+        layer_id: if raw.machines_back { pcb::BACK_COPPER } else { pcb::FRONT_COPPER },
+        width_nm: (choice.width.as_mm() * 1e6).round() as i64,
+        // The narrowest cut this bit can make, at minimum penetration — **not** its tip.
+        // The tip is a width it can never produce: a V-bit sunk to nothing cuts nothing,
+        // and one that has only just cleared the copper is already wider than its tip. The
+        // pass narrows down to here and reports whatever it still could not fit.
+        min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
+        remove_islands: raw.engrave_copper.remove_islands,
+    }
+}
+
 /// The isolation cuts for this step's copper face, and what the operator should know.
 ///
 /// Asks the [isolation worker](crate::runtime::isolation) rather than computing anything:
@@ -1516,26 +1554,7 @@ fn plan_engrave_spans(
         return (Vec::new(), warnings);
     };
 
-    // A mill reaches the surface, so the face the step machines decides the layer. The
-    // placement already mirrors a back-face step, and copper arrives in the same board
-    // coordinates the holes do, so B.Cu needs nothing further.
-    //
-    // Both widths come from the **chosen bit**, not from the step's setting. The setting is
-    // a minimum the operator states; what the pass has to lay out is the channel the bit in
-    // the rack actually cuts, and how far that bit can be backed off where the board is
-    // tight. Neither is knowable before a bit is picked.
-    let spec = IsolationSpec {
-        board_name: board.name.clone(),
-        board_epoch: ctx.board_epoch,
-        layer_id: if raw.machines_back { pcb::BACK_COPPER } else { pcb::FRONT_COPPER },
-        width_nm: (choice.width.as_mm() * 1e6).round() as i64,
-        // The narrowest cut this bit can make, at minimum penetration — **not** its tip.
-        // The tip is a width it can never produce: a V-bit sunk to nothing cuts nothing,
-        // and one that has only just cleared the copper is already wider than its tip. The
-        // pass narrows down to here and reports whatever it still could not fit.
-        min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
-        remove_islands: raw.engrave_copper.remove_islands,
-    };
+    let spec = isolation_spec(board, ctx.board_epoch, raw, choice);
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
         // **Say so.** This used to return silently, on the argument that work in progress
@@ -2982,6 +3001,32 @@ mod engrave_diagnostic_tests {
         assert!(
             head.contains("log_isolation_miss"),
             "and must log which field differs, or a persistent miss is undiagnosable",
+        );
+    }
+
+    /// **Both askers phrase the question here, or neither does.** The Board view asks the
+    /// isolation worker for contours so it can draw the copper the pass will leave, and
+    /// `matching` only ever compares one spec against what is held — so a view that built its
+    /// own would not get a *wrong* answer, it would get no answer, ask again forever, and show
+    /// whole copper over a board about to be cut. Asserted on the source because the failure is
+    /// a second `IsolationSpec { .. }` literal appearing, which no amount of running the plan
+    /// can catch.
+    #[test]
+    fn the_isolation_question_is_phrased_in_exactly_one_place() {
+        let source = include_str!("machining_plan.rs");
+        // Only the shipping half. The test modules below build specs freely — that is what
+        // they are for — so counting the whole file would measure the tests instead.
+        let (production, _) = source
+            .split_once("#[cfg(test)]")
+            .expect("this file has tests");
+        // Counted on a field rather than on `IsolationSpec {`, which also matches a return
+        // type: every construction sets this exactly once, and nothing else mentions it.
+        let built = production.matches("min_width_nm:").count();
+
+        assert_eq!(built, 1, "`isolation_spec` must be the only place a spec is built");
+        assert!(
+            production.contains("let spec = isolation_spec(board, ctx.board_epoch, raw, choice);"),
+            "`plan_engrave_spans` must go through it rather than rebuilding one inline",
         );
     }
 

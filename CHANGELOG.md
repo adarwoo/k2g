@@ -11,6 +11,17 @@ name is usually the shorter answer to "what changed".
 ## [Unreleased]
 
 ### Added
+- **The Board view now shows the isolation pass, as the copper it leaves behind.** Not a
+  centre line — the channel is drawn at the width the bit actually cuts, taken out of the
+  copper it removes, so what is on screen is the board that comes off the machine. A face
+  about to be isolated is drawn as it really is before the cut: entirely copper, because
+  milling takes only the channel and the field between the nets stays standing. A V-bit
+  shows the flat at the bottom of its groove as a darker band inside the channel; a
+  flat-ended cutter shows one band, which is what it makes. Stretches the pass had to
+  narrow to fit between close nets are marked where they happen, rather than only counted
+  in the step's notes, and the tool's own line runs down each channel in the colour the 3D
+  view draws it — so two lines in one channel is two passes that overlapped. The legend row
+  switches the whole thing off and puts the copper back whole. The 3D view is unchanged.
 - **The isolation pass now takes out the copper it leaves stranded.** Cutting a channel
   round each net leaves everything else standing, so where two nets sit further apart than
   twice the channel the copper between the two channels survives as an *island*: on no net,

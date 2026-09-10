@@ -1046,6 +1046,98 @@ pub fn step_targets(ctx: &AppState, index: usize) -> Option<StepTargets> {
     })
 }
 
+/// The isolation pass the Board view draws, and the bit that makes it.
+///
+/// The view's counterpart to [`StepTargets`]: enough to ask the isolation worker the *same*
+/// question the machining plan asks, and enough to draw the answer to scale. Everything here
+/// is derived from the same reads and the same [`pick_engraver`] call the plan makes, so the
+/// picture cannot describe a cut the program will not make.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngraveTarget {
+    /// The question, phrased by [`crate::runtime::machining_plan::isolation_spec`] — the one
+    /// place it is phrased, so the view and the plan cannot ask near-identical questions and
+    /// get answers for each other's.
+    pub spec: crate::runtime::isolation::IsolationSpec,
+    /// Whether the step the operator has selected is the one that cuts these contours.
+    ///
+    /// `false` still draws them — the copper genuinely will be cut, whatever step is on
+    /// screen — but ghosts the tool overlay, the way the outline band ghosts for a step that
+    /// does not route it.
+    pub is_selected_step: bool,
+    /// The channel the operator asked for: `engrave_copper.width`, a minimum.
+    pub requested: Length,
+    /// The channel the chosen bit actually cuts. Contours narrower than this are stretches
+    /// the ladder had to squeeze, and the view marks them.
+    pub achieved: Length,
+    /// The bit's tip — for a V-bit, the flat at the bottom of the groove. The catalogue's
+    /// `diameter` *is* the tip; see the V-bit note in `assets/catalogs/generic.yaml`.
+    pub tip: Length,
+    /// `>= 180°` means a flat-ended tool, whose groove has no bottom narrower than its
+    /// channel — so the view draws one band rather than two.
+    pub point_angle: units::Angle,
+    /// How the legend names the bit.
+    pub tool_label: String,
+    /// Islands are removed only when the step asks for it, and the legend says which.
+    pub removes_islands: bool,
+}
+
+/// The isolation pass to draw for the step at `index`, or `None` when the profile has none.
+///
+/// **Not "the selected step's pass".** The selected step is preferred when it engraves, but a
+/// profile that isolates in step 1 and drills in step 2 must not lose the copper picture the
+/// moment the operator clicks step 2 — the board in front of them is still the board that will
+/// be isolated. So it falls back to the first step that engraves and says, through
+/// [`EngraveTarget::is_selected_step`], that this is another step's work.
+///
+/// Shaped like [`step_targets`] and for its reason: the Board view must not re-decide anything
+/// the plan decides. The bit comes from the same [`pick_engraver`] call, with the same copper
+/// thickness and the same [`PenetrationBudget`], so a bit the plan refuses is a pass this
+/// draws nothing for.
+pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<EngraveTarget> {
+    let profile_id = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    if !appdata_ready() {
+        return None;
+    }
+    let board = ctx.board.as_ref()?;
+
+    let steps = read_steps(profile_id);
+    // The selected step first, then the profile's own order — so the fallback is the pass the
+    // job runs first rather than whichever happens to be nearest.
+    let engraving = steps
+        .get(index)
+        .filter(|raw| raw.engraves_copper())
+        .map(|raw| (index, raw))
+        .or_else(|| steps.iter().enumerate().find(|(_, raw)| raw.engraves_copper()))?;
+    let (engrave_index, raw) = engraving;
+
+    let toolset = raw
+        .toolset_id
+        .and_then(|id| ctx.toolsets.iter().find(|t| t.id == id.to_string()))?;
+    let (copper, _assumed) = copper_thickness(Some(board), raw.machines_back);
+    let choice = pick_engraver(
+        &ctx.tools,
+        toolset,
+        raw.engrave_copper.width,
+        copper,
+        PenetrationBudget::current(),
+    )?;
+    let bit = ctx.tools.iter().find(|t| t.id == choice.tool_id)?;
+
+    Some(EngraveTarget {
+        spec: crate::runtime::machining_plan::isolation_spec(board, ctx.board_epoch, raw, &choice),
+        is_selected_step: engrave_index == index,
+        requested: raw.engrave_copper.width,
+        achieved: choice.width,
+        tip: bit.diameter,
+        point_angle: bit.point_angle,
+        tool_label: bit.display_name(),
+        removes_islands: raw.engrave_copper.remove_islands,
+    })
+}
+
 /// One machining step as the Job chrome needs it: what to call it, and the couple of
 /// facts that decide what is shown for it.
 #[derive(Clone, Debug, PartialEq)]
