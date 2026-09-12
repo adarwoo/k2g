@@ -79,15 +79,22 @@ rhai = "1"
 thiserror = "2"
 serde_json = "1"
 serde_yaml = "0.9"
-jsonschema = "0.28"
+# `default-features = false` drops `resolve-http`, which is the feature that would
+# let a `$ref` be fetched over the network — the exact thing `NoRemoteRefs` exists to
+# refuse (`catalog_io::validator`, `datastore::schema`). Leaving it on cost a second
+# HTTP stack beside our own: reqwest 0.13 alongside the 0.12 the update check uses,
+# plus `rustls-platform-verifier` and the C/assembly `aws-lc-sys`. That is a new
+# native build dependency and a second set of trust decisions, in service of a code
+# path this application has deliberately disabled.
+jsonschema = { version = "0.50", default-features = false }
 log = "0.4"
-image = "0.24"
-base64 = "0.22"
-rfd = "0.15"
+image = "0.25"
+base64 = "0.23"
+rfd = "0.17"
 # Resolves the host's default save location (Windows Downloads known folder,
 # XDG_DOWNLOAD_DIR on Linux) for the first G-code save.
 dirs = "6"
-pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 uuid = { version = "1", features = ["v5", "v7"] }
 dioxus-logger = "0.7.9"
 tracing = "0.1.44"
@@ -98,7 +105,10 @@ synoptic = "2"
 # `rustls-tls` rather than the default `native-tls`: one TLS stack whose trust
 # decisions are the same on every platform, and no OpenSSL to track advisories for.
 # Blocking, because the check runs on its own thread rather than in an async runtime.
-# `reqwest` is already in the tree via `jsonschema`, so this adds no new supply chain.
+# This is now the *only* thing in the tree pulling `reqwest`: `jsonschema` used to bring
+# one too, and no longer does since its `resolve-http` was turned off above. So the
+# update check owns this HTTP/TLS stack outright rather than sharing one already present
+# — which is the preferable direction, but it does mean reqwest's advisories are ours.
 reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
     "json",
@@ -187,4 +197,4 @@ windows-sys = { version = "0.61", features = [
 winresource = "0.1"
 # Renders the multi-size `.ico` from the single PNG source, so there is no second
 # icon file to keep in sync.
-image = "0.24"
+image = "0.25"
