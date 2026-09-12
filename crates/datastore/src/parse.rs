@@ -115,7 +115,7 @@ pub(crate) fn parse_document(
             errors.push(DataError::new(
                 schema_id,
                 &source,
-                error.instance_path.to_string(),
+                error.instance_path().to_string(),
                 DataErrorKind::Validation,
                 error.to_string(),
             ));

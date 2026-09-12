@@ -12,7 +12,9 @@ description = "Generic schema-driven data store: validate, default, type units/i
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
-jsonschema = "0.28"
+# See the note in the workspace root: `resolve-http` is the network `$ref` fetch that
+# `NoRemoteRefs` refuses, and it drags in a second HTTP/TLS stack to do it.
+jsonschema = { version = "0.50", default-features = false }
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
