@@ -731,7 +731,7 @@ mod tests {
         let instance = manifest(&launcher_file_name());
         let errors: Vec<String> = validator
             .iter_errors(&instance)
-            .map(|error| format!("{}: {error}", error.instance_path))
+            .map(|error| format!("{}: {error}", error.instance_path()))
             .collect();
 
         assert!(

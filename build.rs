@@ -208,7 +208,11 @@ mod windows_icon {
 
     use image::codecs::ico::{IcoEncoder, IcoFrame};
     use image::imageops::FilterType;
-    use image::ColorType;
+    // `ExtendedColorType`, not `ColorType`: since image 0.25 the encoders take the
+    // wider enum — it can name layouts (packed / sub-byte formats) that `ColorType`,
+    // which only describes buffers image itself can hold in memory, cannot. `Rgba8`
+    // exists in both, so this is a rename at the call site and nothing more.
+    use image::ExtendedColorType;
 
     /// Source artwork — the same file `Dioxus.toml` points the bundler at.
     const ICON_PNG: &str = "assets/icons/icon.png";
@@ -267,7 +271,7 @@ mod windows_icon {
                 // Lanczos3 holds the artwork's edges together at 16px, where a cheaper
                 // filter turns fine detail to mush.
                 let scaled = image::imageops::resize(&source, size, size, FilterType::Lanczos3);
-                IcoFrame::as_png(scaled.as_raw(), size, size, ColorType::Rgba8)
+                IcoFrame::as_png(scaled.as_raw(), size, size, ExtendedColorType::Rgba8)
                     .map_err(|e| format!("cannot encode the {size}px frame: {e}"))
             })
             .collect::<Result<Vec<_>, _>>()?;

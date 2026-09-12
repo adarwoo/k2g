@@ -1,4 +1,4 @@
-use jsonschema::{options, Resource, Validator};
+use jsonschema::{options, Registry, Resource, Validator};
 use serde_json::Value;
 use super::error::ConfigError;
 
@@ -18,7 +18,7 @@ struct NoRemoteRefs;
 impl jsonschema::Retrieve for NoRemoteRefs {
     fn retrieve(
         &self,
-        uri: &jsonschema::Uri<&str>,
+        uri: &jsonschema::Uri<String>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         Err(format!(
             "refusing to fetch the external schema reference '{uri}'. k2g validates \
@@ -49,22 +49,38 @@ impl SchemaValidator {
     /// published separately and never loaded back — see
     /// [`crate::data::schema_export`].
     pub fn new(schema: &Value, refs: &[(&str, &str)]) -> Result<Self, ConfigError> {
-        let mut opts = options();
-        opts.with_retriever(NoRemoteRefs);
-
+        // Since jsonschema 0.50 the resources are collected into a `Registry` up front
+        // rather than pushed one at a time onto the options: `with_resource` is gone, and
+        // the builders take `self` by value instead of `&mut self`.
+        let mut resources = Vec::with_capacity(refs.len() * 2);
         for (file_name, text) in refs {
             let yaml_value: serde_yaml::Value = serde_yaml::from_str(text)
                 .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
             let json_value: Value = serde_json::to_value(yaml_value)
                 .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
-            let resource = Resource::from_contents(json_value)
-                .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
+            // `Resource::from_contents` is infallible now — the draft is detected from
+            // the contents and falls back to the default rather than erroring.
+            let resource = Resource::from_contents(json_value);
 
-            opts.with_resource((*file_name).to_string(), resource.clone());
-            opts.with_resource(format!("json-schema:///{file_name}"), resource);
+            resources.push(((*file_name).to_string(), resource.clone()));
+            resources.push((format!("json-schema:///{file_name}"), resource));
         }
 
-        let compiled = opts
+        // `NoRemoteRefs` is installed on both halves, because they retrieve at different
+        // moments and neither covers the other: the registry resolves the `$ref`s between
+        // the embedded schemas, while the options' retriever is what a `$ref` in `schema`
+        // — the catalog-supplied, untrusted half — reaches for when it names something the
+        // registry does not hold. The test below pins that second one.
+        let registry = Registry::new()
+            .retriever(NoRemoteRefs)
+            .extend(resources)
+            .map_err(|e| ConfigError::SchemaParse(e.to_string()))?
+            .prepare()
+            .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
+
+        let compiled = options()
+            .with_registry(&registry)
+            .with_retriever(NoRemoteRefs)
             .build(schema)
             .map_err(|e| ConfigError::SchemaParse(e.to_string()))?;
         Ok(Self { compiled })

@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
-use jsonschema::{options, Resource, Validator};
+use jsonschema::{options, Registry, Resource, Validator};
 use serde_json::Value;
 
 use crate::error::SchemaError;
@@ -200,7 +200,7 @@ pub(crate) struct NoRemoteRefs;
 impl jsonschema::Retrieve for NoRemoteRefs {
     fn retrieve(
         &self,
-        uri: &jsonschema::Uri<&str>,
+        uri: &jsonschema::Uri<String>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         Err(format!(
             "refusing to fetch the external schema reference '{uri}'. k2g validates \
@@ -215,14 +215,36 @@ impl jsonschema::Retrieve for NoRemoteRefs {
 /// cross-file `$ref`s (`units.yaml#/...`) resolve without external retrieval — and
 /// with [`NoRemoteRefs`] installed so an unregistered one fails instead of fetching.
 fn compile_with_resources(schemas: &IndexMap<String, RawSchema>, root: &Value) -> Result<Validator, String> {
-    let mut opts = options();
-    opts.with_retriever(NoRemoteRefs);
+    // Since jsonschema 0.50 the resources live in a `Registry` built up front rather than
+    // being pushed one at a time onto the options: `with_resource` is gone, and the
+    // builders take `self` by value instead of `&mut self`. Same two registrations per
+    // schema as before — the bare id and the `json-schema:///` URI form — because a
+    // `$ref` is written the first way and the resolver normalizes it to the second.
+    let mut resources = Vec::with_capacity(schemas.len() * 2);
     for (id, raw) in schemas {
-        let resource = Resource::from_contents(raw.value.clone()).map_err(|e| e.to_string())?;
-        opts.with_resource(id.clone(), resource.clone());
-        opts.with_resource(format!("json-schema:///{id}"), resource);
+        // `Resource::from_contents` no longer returns a `Result`; the draft is detected
+        // from the contents and falls back to the default rather than failing.
+        let resource = Resource::from_contents(raw.value.clone());
+        resources.push((id.clone(), resource.clone()));
+        resources.push((format!("json-schema:///{id}"), resource));
     }
-    opts.build(root).map_err(|e| e.to_string())
+
+    // `NoRemoteRefs` goes on both halves, because they retrieve at different moments and
+    // neither covers the other: the registry resolves the `$ref`s *between* the schemas
+    // registered here, while the options' retriever is what a `$ref` in `root` — the
+    // untrusted half — reaches for when it names something the registry does not hold.
+    let registry = Registry::new()
+        .retriever(NoRemoteRefs)
+        .extend(resources)
+        .map_err(|e| e.to_string())?
+        .prepare()
+        .map_err(|e| e.to_string())?;
+
+    options()
+        .with_registry(&registry)
+        .with_retriever(NoRemoteRefs)
+        .build(root)
+        .map_err(|e| e.to_string())
 }
 
 /// Parses YAML (BOM-tolerant) into a JSON value.
