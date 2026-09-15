@@ -248,6 +248,16 @@ pub struct AppState {
     /// An install is downloading and verifying. Holds the banner's buttons shut so a
     /// second click cannot start a second download over the first.
     pub update_installing: bool,
+    /// The verified installer has been handed to the OS and is running outside k2g.
+    ///
+    /// In-memory only, like [`Self::available_update`]. Distinct from
+    /// `update_installing`, which that field's own doc names as covering only
+    /// "downloading and verifying" — once the installer is actually running, nothing
+    /// in this session can do anything further but wait to be closed, and the banner
+    /// needs to say so plainly rather than leave its last in-flight message
+    /// ("Downloading and checking the signature…") standing after the one-shot toast
+    /// that announced this has already faded.
+    pub update_installer_launched: bool,
 }
 
 include!("state.rs");

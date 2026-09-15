@@ -71,6 +71,23 @@ const MAX_DOWNLOAD_BYTES: u64 = 400 * 1024 * 1024;
 /// so a build that has not had a real key set cannot install anything.
 pub const PUBLIC_KEY: &str = include_str!("../../assets/release-signing.pub");
 
+/// Forces the update mechanism to run now and to treat the latest published release as
+/// available, regardless of the daily interval, any postponement, whether this version
+/// was previously skipped, or whether the installed build is already current.
+///
+/// A reproduction/support tool, not a feature — nothing in the UI sets it and nothing
+/// persists it. It changes only "is there something to show": [`verify_signature`]'s
+/// path is completely untouched, so the real compiled-in key still gates what can
+/// actually be installed. Set it and launch to walk the real download/verify/launch
+/// path against the real latest release on demand, instead of waiting up to a day (or
+/// never, if the installed version is already current) for it to happen on its own.
+///
+/// `K2G_FORCE_UPDATE_CHECK=1 k2g` (Unix), `$env:K2G_FORCE_UPDATE_CHECK=1` then run it
+/// (PowerShell). Any value other than `0` counts as set.
+fn force_update_check() -> bool {
+    std::env::var("K2G_FORCE_UPDATE_CHECK").is_ok_and(|v| v != "0")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum UpdateError {
     #[error("Could not reach GitHub: {0}")]
@@ -215,7 +232,7 @@ pub fn fetch_latest(current_version: &str) -> Result<Option<AvailableUpdate>, Up
     if feed.draft || feed.prerelease {
         return Ok(None);
     }
-    if !version::is_newer(&feed.tag_name, current_version) {
+    if !force_update_check() && !version::is_newer(&feed.tag_name, current_version) {
         return Ok(None);
     }
 
@@ -396,7 +413,41 @@ fn download_to_file(
         let _ = std::fs::remove_file(path);
         return Err(UpdateError::TooLarge(MAX_DOWNLOAD_BYTES));
     }
+    // The moment a browser would mark it, and the same reason: an installer that
+    // spent this function unmarked would never enter SmartScreen's evaluation at all
+    // when it is later launched, signed or not.
+    mark_downloaded(path);
     Ok(())
+}
+
+/// Marks `path` as downloaded from the internet, the way a browser does.
+///
+/// Windows decides whether to run SmartScreen's reputation check — and whether
+/// Explorer shows "Open File - Security Warning" before running an unrecognised
+/// program — from this mark (an NTFS alternate data stream) rather than from where
+/// the bytes actually came from. k2g's own HTTP download never set it before this,
+/// which was not a safety property: it meant the installer simply never entered
+/// SmartScreen's evaluation at all, rather than passing it. Setting it here puts the
+/// OS's own defence-in-depth back in the path, on top of — never instead of —
+/// [`verify_signature`], which remains the actual root of trust here.
+///
+/// Best-effort and non-fatal: an installer that cannot be marked is still verified
+/// and still runs. This is additional caution, not a gate — the one gate that
+/// matters is the signature check, which does not depend on this at all.
+#[cfg(windows)]
+fn mark_downloaded(path: &Path) {
+    let mut ads_path = path.as_os_str().to_owned();
+    ads_path.push(":Zone.Identifier");
+    // ZoneId 3 is "Internet" — the same zone a browser stamps a download with.
+    if let Err(err) = std::fs::write(&ads_path, b"[ZoneTransfer]\r\nZoneId=3\r\n") {
+        warn!("Could not mark {} as downloaded from the internet: {err}", path.display());
+    }
+}
+
+#[cfg(not(windows))]
+fn mark_downloaded(_path: &Path) {
+    // Not a Windows concept: macOS's quarantine flag and Linux's descendent-of-a-download
+    // tracking are different mechanisms this function does not attempt to unify with.
 }
 
 /// Check `bytes` against the detached minisign signature in `signature`.
@@ -426,9 +477,27 @@ fn verify_against(public_key: &str, bytes: &[u8], signature: &[u8]) -> Result<()
 
 /// Run a verified installer and leave. The caller is expected to close k2g
 /// immediately afterwards — an installer cannot replace a running executable.
+///
+/// Handed to the OS's own "open this" mechanism (`open::that_detached`) rather than
+/// executed directly. **An MSI is not a program.** It is a Windows Installer package —
+/// OLE structured storage, not a PE binary — so `Command::new(msi).spawn()`, a raw
+/// `CreateProcess`, fails it outright: `"%1 is not a valid Win32 application"`
+/// (`ERROR_BAD_EXE_FORMAT`, os error 193), because the loader tried to read a PE header
+/// out of bytes that were never one. Reported and reproduced on the bench — every
+/// Windows update attempt failed this way, because [`pick_installer`] prefers the MSI
+/// over the `.exe` precisely because it upgrades an existing install in place, which is
+/// the install the docs recommend "if you want the in-app updater to work smoothly."
+/// It was the one installer format that could not.
+///
+/// What actually knows to hand an `.msi` to `msiexec.exe /i` is the file association,
+/// and only the shell — never a raw `CreateProcess` — consults it. The same is true of
+/// a `.dmg` on macOS (a disk image, not a Mach-O binary) and would be true of a `.deb`
+/// were [`pick_installer`] ever to fall back to one instead of an `.AppImage`. This is
+/// exactly the request `about.rs`/`manual.rs` already make of `open::that_detached` to
+/// hand a URL to the system browser: a local path to open is the identical ask, and the
+/// OS already knows how.
 pub fn launch_installer(path: &Path) -> Result<(), UpdateError> {
-    std::process::Command::new(path)
-        .spawn()
+    open::that_detached(path)
         .map_err(|e| UpdateError::Launch(format!("{}: {e}", path.display())))?;
     info!("Launched the k2g installer at {}", path.display());
     Ok(())
@@ -459,12 +528,14 @@ pub fn start_update_check() {
         )
     });
 
-    if !check_is_due(
-        enabled,
-        last_check.as_deref(),
-        postponed.as_deref(),
-        chrono::Utc::now(),
-    ) {
+    if !force_update_check()
+        && !check_is_due(
+            enabled,
+            last_check.as_deref(),
+            postponed.as_deref(),
+            chrono::Utc::now(),
+        )
+    {
         if !enabled {
             info!("Update check is switched off; k2g will make no network requests");
         }
@@ -495,7 +566,7 @@ pub fn start_update_check() {
             );
 
             match found {
-                Ok(Some(update)) if Some(&update.version) == skipped.as_ref() => {
+                Ok(Some(update)) if !force_update_check() && Some(&update.version) == skipped.as_ref() => {
                     info!("Release {} is available but was skipped by the user", update.version);
                 }
                 Ok(Some(update)) => {
@@ -670,6 +741,27 @@ mod tests {
             );
         }
         assert_eq!(safe_file_name("k2g-0.9.1.msi"), Some("k2g-0.9.1.msi"));
+    }
+
+    /// The whole point: a file this function has touched must actually carry the
+    /// mark Windows looks for, in the zone a genuine download should carry. Not a
+    /// smoke test that the call does not panic — reading the stream back and
+    /// checking its content is what would have caught a wrong ZoneId or a stream
+    /// nobody could actually read.
+    #[cfg(windows)]
+    #[test]
+    fn a_downloaded_installer_is_marked_with_the_internet_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake-installer.msi");
+        std::fs::write(&path, b"pretend this is an installer").unwrap();
+
+        mark_downloaded(&path);
+
+        let mut ads_path = path.as_os_str().to_owned();
+        ads_path.push(":Zone.Identifier");
+        let marked = std::fs::read_to_string(&ads_path)
+            .expect("the Zone.Identifier stream should be readable back");
+        assert!(marked.contains("ZoneId=3"), "must mark the internet zone: {marked}");
     }
 
     /// Verification must fail closed on every malformed input, and — most
