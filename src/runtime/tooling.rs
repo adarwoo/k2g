@@ -2699,6 +2699,32 @@ pub(crate) fn narrower_channel_reason(
     )
 }
 
+/// That the requested width is asking for less than any bit needs to work at all — the
+/// opposite direction from [`narrower_channel_reason`], and the one case `pick_engraver`
+/// leaves unreported.
+///
+/// `pick_engraver` writes a note when a bit falls short of the request; it stays silent
+/// when every candidate reaches it with room to spare, because ordinarily that is
+/// unremarkable — the pass cuts wider wherever the board has room, by design, and a small
+/// overshoot is not news. It stops being unremarkable when the chosen bit is already at
+/// **its own floor** (`achieved == floor`, `EngraveChoice::floor`, at minimum
+/// penetration): then the request was never a target the bit stopped short of, it was a
+/// number the stock cannot get anywhere near, and nothing about the setting is doing
+/// anything. Without this, the operator's only signal is a board-fit fault that does not
+/// move when the width does — indistinguishable, from the fault text alone, from the
+/// setting being ignored.
+pub(crate) fn floor_channel_reason(ctx: &AppState, min_width: Length, floor: Length) -> String {
+    format!(
+        "This step asks for a channel down to {}, but the finest bit in stock or rack \
+         cannot cut narrower than {} on this board — every candidate is already at its own \
+         minimum penetration. Lowering the width further will not narrow the cut. Stock a \
+         finer or steeper V-bit, or check whether the board's tightest clearance genuinely \
+         needs a channel this narrow.",
+        fmt_len(ctx, min_width),
+        fmt_len(ctx, floor),
+    )
+}
+
 /// Why a step that asks to engrave cannot — the one refusal that remains.
 ///
 /// Nothing engraver-shaped in stock at all, which no argument about depth or width can work
@@ -4931,6 +4957,30 @@ mod engraver_tests {
             PenetrationBudget { min: Length::from_nm(20_000), max: Length::from_mm(1.0) },
         );
         assert!(generous.is_some(), "the cap is what refused it, not the bit");
+    }
+
+    /// The mirror image of falling short, and the case the reported fault turned out to
+    /// be: a request narrower than any bit's own floor is still "met" — trivially, since
+    /// every bit already clears it at minimum penetration — so `fell_short_of` stays
+    /// `None` (nothing fell short of anything) even though the achieved width has nothing
+    /// to do with the request. Lowering the request further does nothing further, because
+    /// every candidate was already floored out before it was asked. This is exactly the
+    /// case `floor_channel_reason` exists to name, since `fell_short_of` cannot.
+    #[test]
+    fn a_request_narrower_than_any_floor_is_met_trivially_at_the_floor() {
+        let choice = pick(&catalogue(), 0.01).expect("every bit reaches 0.01mm trivially");
+        assert!(choice.fell_short_of.is_none(), "nothing fell short of a request this low");
+        assert!(
+            choice.floor.as_mm() > 0.01,
+            "the achieved width is pinned at the bit's own floor, not the request: {}",
+            choice.floor.as_mm(),
+        );
+        assert!(
+            (choice.width.as_mm() - choice.floor.as_mm()).abs() < 1e-9,
+            "achieved equals the floor when the request undershoots it: {} vs {}",
+            choice.width.as_mm(),
+            choice.floor.as_mm(),
+        );
     }
 
     /// The requested width is a floor, so overshoot is the thing to minimise: every micron

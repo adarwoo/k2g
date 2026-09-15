@@ -675,6 +675,16 @@ fn plan_step(
                 copper,
                 budget,
             ));
+        } else if raw.engrave_copper.width.as_mm() + 1e-6 < choice.floor.as_mm() {
+            // The opposite mismatch: the request is narrower than the chosen bit can go
+            // even at minimum penetration, so it reached the request trivially rather
+            // than by targeting it. A board-fit fault that follows can look exactly like
+            // the setting being ignored without this — see `floor_channel_reason`.
+            notes.push(crate::runtime::tooling::floor_channel_reason(
+                ctx,
+                raw.engrave_copper.width,
+                choice.floor,
+            ));
         }
     }
 
