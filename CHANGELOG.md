@@ -10,6 +10,16 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-09-17 — *clearing*
+
+The copper that isolation leaves standing is now taken out, not only cut around.
+
+- The Board view draws the isolation pass as the copper it leaves behind.
+- Stranded copper islands are removed by the V-bit already cutting the channel.
+- Free copper up to a chosen width can be cleared with a milling bit.
+- The *Engraver* tool family is now *Milling*, and the generic catalog carries milling bits.
+- The in-app updater can install on Windows.
+
 ### Added
 - **The Board view now shows the isolation pass, as the copper it leaves behind.** Not a
   centre line — the channel is drawn at the width the bit actually cuts, taken out of the
@@ -33,6 +43,47 @@ name is usually the shorter answer to "what changed".
   which is what says whether a router would be worth loading. Copper on a net is never
   touched, and anything the bit could not reach without touching one is counted in the
   notes rather than dropped in silence.
+- **Narrow copper can be cleared with a milling bit.** Island removal reuses the V-bit and
+  stops at three channels wide; `engrave_copper` now also offers **Clear narrow copper with
+  a mill**, which loads a flat milling bit and clears free copper up to **Clear copper
+  narrower than** (2 mm by default), at the isolation depth, and never closer to a net than
+  **Clearing safety margin** (0.2 mm). The bit is the largest milling bit in stock no wider
+  than the threshold. It costs a tool change and a rack slot, so it is off by default. A step
+  with no suitable bit skips the pass and says so in its notes rather than refusing to
+  generate, and copper too narrow for the chosen bit to enter is reported, not left in
+  silence.
+- **Each piece of copper is cleared in one continuous run.** An island's rings, and a
+  clearing pass's, are cut outside-in with a short hop from one ring to the next, instead of
+  a retract and a re-plunge between every ring.
+- **The generic catalog has a *Milling bits* section**: eight flat end mills from 0.5 mm to
+  2.5 mm, for the clearing pass. Like everything else in `generic.yaml`, the feeds and speeds
+  are placeholders to calibrate on your own machine before production use.
+- `K2G_FORCE_UPDATE_CHECK` runs the update check immediately against the latest release,
+  bypassing the daily interval, postponements, skipped versions and the "is it newer"
+  comparison. Signature verification still applies. For diagnosing the updater.
+
+### Changed
+- **The *Engraver* tool family is now called *Milling*** in stock, catalogs and their
+  filters. Only the label changed: files still store `engraver`, so existing stock and
+  catalogs load as they are.
+- **The bundled catalogs follow the installed build.** `generic.yaml`, `kyocera.yaml` and
+  `unionfab.yaml` in the catalogs folder are rewritten whenever the build's own copy differs,
+  so tools added in a release reach installs that were seeded by an older one. This replaces
+  hand edits to those three files as well. Catalogs under any other name are never touched.
+- Dependencies updated: jsonschema 0.50 (with network `$ref` fetching now compiled out, not
+  only refused), image 0.25, rfd 0.17, pulldown-cmark 0.13 and base64 0.23. The lockfile is
+  31 packages smaller.
+
+### Fixed
+- **The in-app updater can install on Windows.** It started the downloaded `.msi` as if it
+  were a program, which Windows refuses, so every update failed. The installer is now opened
+  the way double-clicking it would. Once it has started, the update banner says so instead of
+  staying on "Downloading and checking the signature…", and the download is marked as coming
+  from the internet so SmartScreen evaluates it. **0.15.0 still carries the old updater, so
+  an existing install has to be updated to 0.16.0 by hand, once.**
+- **When the requested isolation width is below what the finest bit can cut, the step says
+  so.** Lowering the width further changed nothing, and nothing on screen explained why; the
+  step's notes now name the floor the finest bit in stock or rack sets.
 
 ## [0.15.0] — 2026-09-08 — *templates*
 
@@ -151,7 +202,8 @@ Job and profile ownership migration, and summary updates.
 
 Processing schema, UI and persistence brought into step.
 
-[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...HEAD
+[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.16.0-clearing...HEAD
+[0.16.0]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...v0.16.0-clearing
 [0.15.0]: https://github.com/adarwoo/k2g/compare/v0.14.0-first-board...v0.15.0-templates
 [0.14.0]: https://github.com/adarwoo/k2g/compare/v0.13.0-retention...v0.14.0-first-board
 [0.13.0]: https://github.com/adarwoo/k2g/compare/v0.12.0-signed...v0.13.0-retention
