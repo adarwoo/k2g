@@ -488,6 +488,9 @@ $defs:
       width: 0.15mm
       test_cut: false
       remove_islands: true
+      clear_narrow_copper: false
+      clearing_threshold: 2mm
+      clearing_guard_band: 0.2mm
     properties:
       width:
         title: Minimum isolation width
@@ -652,6 +655,84 @@ $defs:
           an island and is not touched.
         type: boolean
         default: true
+      # -----------------------------------------------------------------------
+      # clear_narrow_copper / clearing_threshold / clearing_guard_band — take out
+      # free copper up to an operator-set width, with a dedicated milling cutter.
+      #
+      # `remove_islands` above is opportunist and bounded to three channels wide
+      # because it reuses the V-bit already in the spindle — going wider costs
+      # passes on a tool built for a fine channel, not for area clearing. This is
+      # the different question `remove_islands`'s own note names and declines to
+      # answer: a genuine milling bit, loaded for the job, clearing free copper up
+      # to whatever width the operator judges worth the rack slot.
+      #
+      # OFF BY DEFAULT, unlike `remove_islands`: it costs a real tool change and a
+      # rack slot, where island removal costs neither. A step that turns it on but
+      # stocks no milling bit narrow enough for the threshold simply skips the
+      # pass and says so in the step notes — it does not refuse the step, since
+      # the isolation channel and everything else the step does are unaffected.
+      #
+      # The bit is chosen the way a slot router is: the largest milling bit in
+      # stock no wider than `clearing_threshold`, since among bits that fit, the
+      # largest clears fastest and needs the fewest passes. Only `type: engraver`
+      # (labelled "Milling" — see the catalogue) tools are eligible; a V-bit is
+      # deliberately excluded even though its tip could technically reach, because
+      # the whole point of this pass is a tool built for area clearing rather than
+      # for a fine channel.
+      #
+      # `clearing_guard_band` is the cross-cutting safety margin this pass keeps
+      # from every piece of net copper, ON TOP OF never overlapping it. Unlike
+      # `remove_islands`, which only ever sweeps ground the isolation channel has
+      # already walled off, this pass clears copper independently of that
+      # channel — so its own margin has to be stated rather than inherited. It is
+      # a flat number, not a per-net-class DRC lookup: a single, cross-cutting
+      # clearance the operator sets once, not a rule engine reading the design's
+      # own clearance table. Set it to at least the isolation channel width; a
+      # smaller number gives this pass licence to come closer to a net than the
+      # isolation V-bit itself was trusted to.
+      #
+      # Cut at the SAME depth as the isolation channel, whatever the milling
+      # bit's own rating: both passes only have to sever the copper at the
+      # surface, and the isolation depth already does that reliably. There is no
+      # separate depth to solve for, unlike the V-bit's own width-to-depth
+      # relationship.
+      # -----------------------------------------------------------------------
+      clear_narrow_copper:
+        title: Clear narrow copper with a mill
+        description: >-
+          Take out free copper up to the threshold below, with a dedicated
+          milling cutter rather than the isolation bit. Where `remove_islands` is
+          opportunist and bounded to three channels wide because it reuses the
+          bit already in the spindle, this loads a genuine milling bit and clears
+          up to whatever width is judged worth the rack slot. Off by default
+          because, unlike island removal, it costs a real tool change. A step
+          that stocks no milling bit narrow enough for the threshold skips the
+          pass and says so, rather than refusing the step.
+        type: boolean
+        default: false
+      clearing_threshold:
+        title: Clear copper narrower than
+        description: >-
+          Free copper narrower than this is cleared by the milling pass; wider
+          copper is left alone. Set from how much stranded copper is acceptable
+          on the finished board, not from the mill's own diameter — the largest
+          in-stock milling bit no wider than this is chosen automatically, and
+          copper narrower than the threshold but too narrow for that bit to enter
+          is reported rather than silently left.
+        $ref: "units.yaml#/$defs/size"
+        default: 2mm
+      clearing_guard_band:
+        title: Clearing safety margin
+        description: >-
+          How close the milling pass may come to any net copper, on top of never
+          overlapping it. This pass clears copper independently of the isolation
+          channel, so — unlike island removal, which only ever sweeps ground that
+          channel already walled off — its own margin from a net has to be
+          stated rather than inherited. Set it to at least the isolation width;
+          a smaller number lets this pass approach a net more closely than the
+          isolation bit itself was trusted to.
+        $ref: "units.yaml#/$defs/size"
+        default: 0.2mm
     required: [width]
     additionalProperties: false
 
@@ -828,6 +909,9 @@ $defs:
           width: 0.25mm
           test_cut: false
           remove_islands: true
+          clear_narrow_copper: false
+          clearing_threshold: 2mm
+          clearing_guard_band: 0.2mm
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it

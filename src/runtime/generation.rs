@@ -527,6 +527,7 @@ mod tests {
             },
             primitive: "drill",
             source: "h1".to_string(),
+            continues_from_previous: false,
         };
         let plan = MachiningPlan {
             steps: vec![StepPlan {
@@ -896,6 +897,7 @@ mod tests {
                 },
                 primitive: "drill",
                 source: "h".to_string(),
+                continues_from_previous: false,
             }],
             travel_mm: 0.0,
             verify_stop: None,

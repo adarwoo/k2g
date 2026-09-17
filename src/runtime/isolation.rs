@@ -77,6 +77,20 @@ pub struct IsolationSpec {
     /// still match after the operator ticked the box, and the islands would never be
     /// computed — the toggle would do nothing at all until the board was reloaded.
     pub remove_islands: bool,
+    /// Whether to also clear free copper up to `clearing_threshold_nm` with a dedicated
+    /// milling cutter — `false` when the step does not ask for it, or asks but no suitable
+    /// mill is in stock, in which case the fields below are meaningless and ignored.
+    ///
+    /// Part of the question for the same reason `remove_islands` is: without it, ticking
+    /// the box would hold a result computed before it was ticked.
+    pub clear_narrow_copper: bool,
+    /// Free copper narrower than this is cleared, nm. See `pcb::clear_narrow_copper`.
+    pub clearing_threshold_nm: i64,
+    /// How close the clearing pass may come to net copper, on top of never overlapping it, nm.
+    pub clearing_guard_band_nm: i64,
+    /// The diameter of the milling cutter resolved for the clearing pass, nm. Contours cut
+    /// by a different mill are a different question — see `width_nm`'s own reasoning.
+    pub clearing_mill_diameter_nm: i64,
 }
 
 /// Contours for one layer, and what was wrong with the copper they came from.
@@ -100,6 +114,12 @@ pub struct Isolation {
     /// reading of the copper: recomputing it in the plan would mean reading the board
     /// again. Empty when the spec did not ask for it.
     pub clearing: pcb::Clearing,
+    /// Free copper a dedicated milling cutter took out, beyond what `clearing` reaches.
+    ///
+    /// Cached for the same reason `clearing` is, and empty for the same reason: the spec
+    /// did not ask for it, either because the step has the pass off or because no mill in
+    /// stock was narrow enough for the threshold.
+    pub mill_clearing: pcb::Clearing,
 }
 
 /// What the context knows about isolation right now.
@@ -293,10 +313,38 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
         pcb::Clearing::default()
     };
 
+    // A dedicated mill, clearing wider than `clearing` reaches. Fed `clearing.paths` as
+    // ground already taken, at the isolation channel's own width, so it does not re-cut
+    // what the V-bit already removed opportunistically.
+    let mill_clearing = if spec.clear_narrow_copper && spec.clearing_mill_diameter_nm > 0 {
+        let started = std::time::Instant::now();
+        let mill_clearing = pcb::clear_narrow_copper(
+            &copper,
+            &result.contours,
+            spec.clearing_threshold_nm,
+            spec.clearing_mill_diameter_nm,
+            spec.clearing_guard_band_nm,
+            &clearing.paths,
+            spec.width_nm,
+        );
+        log::info!(
+            "Milled layer {} of {} in {:?}: {} piece(s) cleared, {} unreachable",
+            spec.layer_id,
+            spec.board_name,
+            started.elapsed(),
+            mill_clearing.removed,
+            mill_clearing.unreachable,
+        );
+        mill_clearing
+    } else {
+        pcb::Clearing::default()
+    };
+
     Ok(Isolation {
         spec: spec.clone(),
         result,
         clearing,
+        mill_clearing,
         copper_warnings: copper.warnings,
         copper_layer_count,
     })
@@ -452,6 +500,10 @@ mod tests {
             width_nm,
             min_width_nm: 100_000,
             remove_islands: true,
+            clear_narrow_copper: false,
+            clearing_threshold_nm: 0,
+            clearing_guard_band_nm: 0,
+            clearing_mill_diameter_nm: 0,
         }
     }
 
@@ -471,6 +523,7 @@ mod tests {
                 copper_warnings: Vec::new(),
                 copper_layer_count: 2,
                 clearing: pcb::Clearing::default(),
+                mill_clearing: pcb::Clearing::default(),
             }),
         );
     }
@@ -546,6 +599,7 @@ mod tests {
             copper_warnings: Vec::new(),
             copper_layer_count: 2,
             clearing: pcb::Clearing::default(),
+            mill_clearing: pcb::Clearing::default(),
         }
     }
 

@@ -4,12 +4,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::warn;
+use log::{info, warn};
 
 use pcb::{BoardSnapshot, KiCad, StitchResult};
-use crate::catalog_io::{
-    backfill_catalog_fields, ensure_default_files, normalize_catalog_fields,
-};
+use crate::catalog_io::{canonicalize_catalog_text, normalize_catalog_fields};
 use crate::catalog_io::yaml_service::parse_yaml_with_schema;
 use crate::data::model::catalog::{catalog_dir, default_catalogs, Catalog, CatalogManager};
 use crate::data::model::state::RackSlot;

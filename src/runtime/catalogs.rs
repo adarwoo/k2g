@@ -1,12 +1,73 @@
+/// Keeps the user's on-disk copy of every *bundled* catalog (`kyocera.yaml`,
+/// `unionfab.yaml`, `generic.yaml`) in step with the copy embedded in this binary.
+///
+/// The binary is the reference; the file on disk is a convenience — it exists only
+/// so a bundled catalog loads through the same `CatalogManager::load_dir` path as
+/// everything else, not as a place to hand-edit. When a new build embeds a tool the
+/// disk copy doesn't have yet (or any other content change), the disk copy is
+/// replaced outright — including a hand edit, which is indistinguishable here from
+/// staleness — the same way `data::schema_export`'s `write_if_changed` keeps the
+/// published schema docs in step with the schemas compiled into the app. A
+/// user-imported catalog — anything in the directory that isn't one of these three
+/// names — is never touched here; only files present in [`default_catalogs`] are
+/// ever candidates.
+///
+/// The comparison is against the *canonicalised* embedded text (run through the
+/// same enrichment `canonicalize_catalog_text` applies — inject missing `id`/`sku`/
+/// `schema`/`point_angle`/`z_min_depth`), not the raw embedded source: the bundled
+/// catalogs are authored without those fields, so a freshly-synced file never
+/// matches its own raw source again once they're filled in — comparing against raw
+/// text would make every disk copy look perpetually stale and rewrite it on every
+/// single startup.
+///
+/// Returns how many of the built-in files were (re)written, so a test can assert
+/// "nothing to do" on a second call the same way `schema_export::ensure_schema_files`
+/// does.
+fn sync_builtin_catalogs(dir: &std::path::Path) -> usize {
+    let mut written = 0;
+
+    for (name, embedded) in default_catalogs() {
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("catalog");
+
+        let canonical = match canonicalize_catalog_text(embedded, stem) {
+            Ok(text) => text,
+            Err(e) => {
+                warn!("Could not canonicalize bundled catalog '{name}': {e}");
+                continue;
+            }
+        };
+
+        let dest = dir.join(name);
+        let up_to_date =
+            std::fs::read_to_string(&dest).is_ok_and(|existing| existing == canonical);
+        if up_to_date {
+            continue;
+        }
+
+        match std::fs::write(&dest, &canonical) {
+            Ok(()) => {
+                info!(
+                    "Synced bundled catalog '{}' to the version embedded in this build: {}",
+                    name,
+                    dest.display()
+                );
+                written += 1;
+            }
+            Err(e) => warn!("Could not write catalog '{}': {e}", dest.display()),
+        }
+    }
+
+    written
+}
+
 fn load_catalog_index() -> Vec<CatalogStockCatalog> {
     let mut source_catalogs: Vec<(String, Catalog, bool)> = Vec::new();
 
     if let Ok(dir) = catalog_dir() {
-        ensure_default_files(&dir, default_catalogs(), "catalog", |path| {
-            if let Err(e) = backfill_catalog_fields(path) {
-                warn!("Could not backfill catalog '{}': {e}", path.display());
-            }
-        });
+        sync_builtin_catalogs(&dir);
     }
 
     // The bundled catalogs are seeded into the user's catalog dir and then loaded
@@ -118,6 +179,67 @@ fn slug(input: &str) -> String {
         "catalog".to_string()
     } else {
         out
+    }
+}
+
+#[cfg(test)]
+mod bundled_catalog_sync_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// The bug this exists to prevent: a tool added to `assets/catalogs/generic.yaml`
+    /// in a new build never reached a user whose catalog directory already held a
+    /// copy seeded by an older build — `ensure_default_files`' "existing files are
+    /// preserved" policy left it frozen at whatever it looked like the first time it
+    /// was ever seeded. Simulating that here: seed once, then append a tool to what
+    /// the "embedded" source would be understood as (by writing a stale disk copy
+    /// missing it) and confirm a resync replaces it with the current, complete form.
+    #[test]
+    fn a_stale_disk_copy_is_replaced_with_the_currently_embedded_catalog() {
+        let dir = tempdir().unwrap();
+
+        assert!(sync_builtin_catalogs(dir.path()) > 0, "first run seeds every bundled catalog");
+
+        let generic = dir.path().join("generic.yaml");
+        let current = std::fs::read_to_string(&generic).unwrap();
+        std::fs::write(&generic, "# a build from before this tool existed\nname: Old\n").unwrap();
+
+        assert_eq!(
+            sync_builtin_catalogs(dir.path()),
+            1,
+            "only the one file that drifted from the binary is rewritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&generic).unwrap(),
+            current,
+            "restored to what this build embeds, tools included"
+        );
+    }
+
+    /// The steady-state case a bare "seed if missing" gate can't tell apart from the
+    /// one above: nothing changed, so nothing should be rewritten. Confirmed by
+    /// return value rather than a modification-time check, the same way
+    /// `schema_export::ensure_schema_files`'s own idempotency test is written.
+    #[test]
+    fn an_up_to_date_catalog_is_not_rewritten() {
+        let dir = tempdir().unwrap();
+
+        assert!(sync_builtin_catalogs(dir.path()) > 0, "first launch writes");
+        assert_eq!(sync_builtin_catalogs(dir.path()), 0, "second launch has nothing to do");
+    }
+
+    /// A catalog a user dropped into the directory under a name that isn't one of
+    /// the three bundled ones is a real import, not a stale copy — it must never be
+    /// touched by the built-in sync.
+    #[test]
+    fn a_user_imported_catalog_is_left_alone() {
+        let dir = tempdir().unwrap();
+        let imported = dir.path().join("my_import.yaml");
+        std::fs::write(&imported, "name: Mine\nsections: []\n").unwrap();
+
+        sync_builtin_catalogs(dir.path());
+
+        assert_eq!(std::fs::read_to_string(&imported).unwrap(), "name: Mine\nsections: []\n");
     }
 }
 

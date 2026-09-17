@@ -10,9 +10,7 @@
 pub mod error;
 pub mod validator;
 pub mod yaml_service;
-pub mod bootstrap;
 pub mod catalog_normalizer;
 
 pub use validator::SchemaValidator;
-pub use bootstrap::ensure_default_files;
-pub use catalog_normalizer::{backfill_catalog_fields, normalize_catalog_fields};
+pub use catalog_normalizer::{canonicalize_catalog_text, normalize_catalog_fields};

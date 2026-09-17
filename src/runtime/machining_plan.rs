@@ -45,14 +45,15 @@ use crate::gcode::assigner::{
 use crate::gcode::placement::{BoardFlip, BoardOrigin, Margin, Placement, PlacementSpec};
 use crate::gcode::plan::{MachiningPlan, Point, StepPlan, VerifyStop};
 use crate::gcode::planner::{
-    plan_drilling, plan_engrave, plan_outline, plan_routing, DrillTarget, EngraveSpan, OutlineSpan,
-    RouteShape, RouteTarget, TestCut,
+    plan_drilling, plan_engrave, plan_outline, plan_routing, DrillTarget, EngraveChain,
+    EngraveSpan, OutlineSpan, RouteShape, RouteTarget, TestCut,
 };
 use crate::gcode::{oblong, outline, pins, scene, testcut};
 use crate::runtime::isolation::IsolationSpec;
 use crate::runtime::tooling::{
-    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_engraver,
-    pick_pin_tool, plan_routers, read_steps, EngraveChoice, HoleGroup, PenetrationBudget, PinTool,
+    build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_clearing_mill,
+    pick_engraver, pick_pin_tool, plan_routers, read_steps, EngraveChoice, HoleGroup,
+    PenetrationBudget, PinTool,
     RouterPlan, StepRaw,
 };
 use crate::runtime::AppCtx;
@@ -688,6 +689,18 @@ fn plan_step(
         }
     }
 
+    // The milling-clearing pass's own tool, resolved the same way the pin tool and the
+    // isolation bit are: outside the assigner, so nothing else would reserve it a slot.
+    // Only asked for when the step both engraves (there is nothing to clear otherwise) and
+    // asks for the pass; `None` when it does not, or when nothing in stock is narrow enough
+    // — either way a note rather than a step failure, since the pass is additive and off by
+    // default.
+    let clearing_mill = if raw.engraves_copper() && raw.engrave_copper.clear_narrow_copper {
+        pick_clearing_mill(&ctx.tools, toolset, raw.engrave_copper.clearing_threshold)
+    } else {
+        None
+    };
+
     // Nothing to assign *and* nothing to route. Cutouts count as work in their own right:
     // a step that only cuts interior openings has no holes, no outline and no pins, and
     // before they were an operation of their own that combination could only mean an empty
@@ -731,6 +744,11 @@ fn plan_step(
     // exists to use would be the one bit the rack does not hold.
     if let Some(choice) = engraver.as_ref() {
         mandatory.push(choice.tool_id.clone());
+    }
+    // The clearing mill too: it is a second, distinct tool from the isolation bit above,
+    // reserved the same way and for the same reason.
+    if let Some(id) = clearing_mill.as_ref() {
+        mandatory.push(id.clone());
     }
     mandatory.sort();
     mandatory.dedup();
@@ -1027,7 +1045,9 @@ fn plan_step(
                     fmt_len(ctx, copper),
                 ));
             }
-            let (spans, warnings) = plan_engrave_spans(ctx, raw, bit, choice, &placement);
+            let clearing_bit = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
+            let (spans, clearing_spans, warnings) =
+                plan_engrave_spans(ctx, raw, bit, choice, clearing_bit, &placement);
             notes.extend(warnings);
             let (test_cut, test_notes) =
                 plan_test_cut(ctx, raw, cnc, bit, choice, &placement, frame);
@@ -1055,6 +1075,22 @@ fn plan_step(
                 );
             }
             blocks.extend(engraved);
+
+            // A SEPARATE block: the clearing pass loads its own tool, so it cannot join the
+            // isolation block above without claiming a tool change never happens. No test
+            // cut of its own — it cuts at the depth the isolation test cut already verified.
+            if let Some(clearing_bit) = clearing_bit {
+                let cleared = plan_engrave(
+                    &clearing_spans,
+                    None,
+                    &clearing_bit.id,
+                    clearing_bit.diameter,
+                    placement.z_retract(),
+                    start,
+                    &slots,
+                );
+                blocks.extend(cleared);
+            }
         }
     }
 
@@ -1524,11 +1560,17 @@ fn plan_test_cut(
 /// minimum the operator states; what the pass has to lay out is the channel the bit in the
 /// rack actually cuts, and how far that bit can be backed off where the board is tight.
 /// Neither is knowable before a bit is picked.
+///
+/// `clearing_mill_diameter` is the milling-clearing pass's own chosen-bit question, resolved
+/// the same way by both callers (`pick_clearing_mill`) before this is phrased — `None` when
+/// the step does not ask for the pass, or asks and no suitable mill is in stock, either of
+/// which turns the pass off in the spec regardless of `raw.engrave_copper.clear_narrow_copper`.
 pub(crate) fn isolation_spec(
     board: &pcb::BoardSnapshot,
     board_epoch: u64,
     raw: &StepRaw,
     choice: &EngraveChoice,
+    clearing_mill_diameter: Option<Length>,
 ) -> IsolationSpec {
     IsolationSpec {
         board_name: board.name.clone(),
@@ -1541,6 +1583,12 @@ pub(crate) fn isolation_spec(
         // pass narrows down to here and reports whatever it still could not fit.
         min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
         remove_islands: raw.engrave_copper.remove_islands,
+        clear_narrow_copper: raw.engrave_copper.clear_narrow_copper && clearing_mill_diameter.is_some(),
+        clearing_threshold_nm: (raw.engrave_copper.clearing_threshold.as_mm() * 1e6).round() as i64,
+        clearing_guard_band_nm: (raw.engrave_copper.clearing_guard_band.as_mm() * 1e6).round() as i64,
+        clearing_mill_diameter_nm: clearing_mill_diameter
+            .map(|d| (d.as_mm() * 1e6).round() as i64)
+            .unwrap_or(0),
     }
 }
 
@@ -1557,14 +1605,18 @@ fn plan_engrave_spans(
     raw: &StepRaw,
     bit: &Tool,
     choice: &EngraveChoice,
+    clearing_mill: Option<&Tool>,
     placement: &Placement,
-) -> (Vec<EngraveSpan>, Vec<String>) {
+) -> (Vec<EngraveChain>, Vec<EngraveChain>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
     let Some(board) = ctx.board.as_ref() else {
-        return (Vec::new(), warnings);
+        return (Vec::new(), Vec::new(), warnings);
     };
+    if raw.engrave_copper.clear_narrow_copper && clearing_mill.is_none() {
+        warnings.push(no_clearing_mill_reason(raw.engrave_copper.clearing_threshold));
+    }
 
-    let spec = isolation_spec(board, ctx.board_epoch, raw, choice);
+    let spec = isolation_spec(board, ctx.board_epoch, raw, choice, clearing_mill.map(|t| t.diameter));
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
         // **Say so.** This used to return silently, on the argument that work in progress
@@ -1588,7 +1640,7 @@ fn plan_engrave_spans(
         // fix and the one that took a board off the machine with its copper untouched.
         log_isolation_miss(&ctx.isolation, &spec);
         crate::runtime::isolation::request_isolation(spec);
-        return (Vec::new(), warnings);
+        return (Vec::new(), Vec::new(), warnings);
     };
 
     warnings.extend(isolation.copper_warnings.iter().cloned());
@@ -1613,12 +1665,10 @@ fn plan_engrave_spans(
             .collect()
     };
 
-    let mut spans: Vec<EngraveSpan> = isolation
-        .result
-        .contours
-        .iter()
-        .enumerate()
-        .map(|(n, contour)| EngraveSpan {
+    // Reassembles pieces the ladder split apart when a net's channel had to narrow,
+    // grouped strictly by net before anything is ever tried against anything else.
+    let mut chains: Vec<EngraveChain> =
+        chain_isolation_contours(&isolation.result.contours, |contour, n| EngraveSpan {
             source: format!("{}#{n}", contour.net),
             path: place(&contour.path),
             closed: contour.closed,
@@ -1626,26 +1676,472 @@ fn plan_engrave_spans(
             // width this stretch actually achieved, not from the width that was asked for:
             // a narrowed stretch is a shallower cut, and that is the whole mechanism.
             z_bottom: Length::from_mm(-span_depth_mm(bit, contour.width_nm, choice.depth)),
-        })
-        .collect();
+        });
 
     // The island rings go in the SAME block, as ordinary engrave spans: same bit, same
     // face, same depth. So there is nothing to plan — the TSP orders them along with
     // everything else, the op table lists them and the 3D view draws them, all for free.
+    // One chain per island, outside-in, with no retract between its own nested rings —
+    // see `ring_chains`. An island is never a fragment of a net's own loop, so it is
+    // never stitched to anything outside its own group.
     //
     // At the nominal depth, not `span_depth_mm`: an island is cut at the width the bit was
     // chosen for, and only a contour that had to squeeze through a tight gap is shallower.
-    spans.extend(isolation.clearing.paths.iter().enumerate().map(|(n, path)| EngraveSpan {
-        source: format!("island #{}", n + 1),
-        path: place(path),
-        closed: true,
-        z_bottom: Length::from_mm(-choice.depth.as_mm()),
-    }));
+    chains.extend(ring_chains(
+        &isolation.clearing,
+        &place,
+        Length::from_mm(-choice.depth.as_mm()),
+        "island",
+    ));
     if let Some(note) = clearing_note(&isolation.clearing) {
         warnings.push(note);
     }
 
-    (spans, warnings)
+    // A SEPARATE block, unlike the islands above: this pass loads a different tool, so its
+    // chains cannot join the isolation bit's own without claiming a tool change never
+    // happens. Cut at the same nominal depth — both passes only have to sever the copper at
+    // the surface, and the isolation depth already does that. One chain per region this
+    // pass clears, same as the islands above — stitching *this* pass's chains into the
+    // isolation ladder's is the general, cross-feature connector work explicitly deferred
+    // (see the design note).
+    let clearing_chains: Vec<EngraveChain> = ring_chains(
+        &isolation.mill_clearing,
+        &place,
+        Length::from_mm(-choice.depth.as_mm()),
+        "clearing",
+    );
+    if let Some(note) = mill_clearing_note(&isolation.mill_clearing) {
+        warnings.push(note);
+    }
+
+    (chains, clearing_chains, warnings)
+}
+
+/// Builds one chain per group of nested rings [`pcb::Clearing::groups`] identifies —
+/// an island's (or a clearing pass's) own outer ring, then each ring nested inside it,
+/// cut continuously with no retract between them.
+///
+/// The order and entry point of each ring is [`pcb::Clearing::chains`]'s answer, not
+/// this function's: where a ring starts decides where the connector between two rings
+/// runs, so it is toolpath rather than presentation, and the board preview has to be
+/// able to draw the same path this plans. All this adds is placement into machine space
+/// and the span bookkeeping around it.
+///
+/// Rotating in board nm before `place` rather than after is the same answer: `place` is
+/// a rigid placement with uniform scale — a bottom-side mirror included — so which
+/// vertex is nearest survives it.
+///
+/// All members cut at one depth: an island/clearing ring is cut at the width the bit
+/// was chosen for, not the narrowed depth an isolation contour under `span_depth_mm`
+/// might want. `label` and the group/member index it is combined with (`"island
+/// 2#1"`) are for the op table and diagnostics only.
+fn ring_chains(
+    clearing: &pcb::Clearing,
+    place: &dyn Fn(&[(i64, i64)]) -> Vec<Point>,
+    z_bottom: Length,
+    label: &str,
+) -> Vec<EngraveChain> {
+    clearing
+        .chains()
+        .iter()
+        .enumerate()
+        .map(|(group_index, rings)| {
+            rings
+                .iter()
+                .enumerate()
+                .map(|(member_index, ring)| EngraveSpan {
+                    source: format!("{label} {}#{}", group_index + 1, member_index),
+                    path: place(ring),
+                    closed: true,
+                    z_bottom,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod ring_chain_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> Point {
+        Point::new(Length::from_mm(x), Length::from_mm(y))
+    }
+
+    fn square_ring() -> Vec<(i64, i64)> {
+        // A closed ring as `pcb`'s geometry stores one — distinct vertices, the closing
+        // edge implied — at board nm, 1mm on a side.
+        vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000), (0, 1_000_000)]
+    }
+
+    fn identity_place(path: &[(i64, i64)]) -> Vec<Point> {
+        path.iter().map(|&(x, y)| pt(x as f64 / 1e6, y as f64 / 1e6)).collect()
+    }
+
+    fn clearing_of(paths: Vec<Vec<(i64, i64)>>, groups: Vec<usize>) -> pcb::Clearing {
+        pcb::Clearing { paths, groups, ..Default::default() }
+    }
+
+    /// One island, two nested rings: one chain, the second member rotated to start near
+    /// the first's own start point (a closed ring exits exactly where it entered).
+    ///
+    /// The rotation rule itself belongs to `pcb::Clearing::chains` and is tested there;
+    /// what this pins is that the placement and span bookkeeping here preserve it.
+    #[test]
+    fn one_group_of_two_rings_becomes_one_chain_with_the_inner_ring_rotated() {
+        let outer = square_ring();
+        // Same four corners as a real offset would produce, but listed starting from the
+        // one *farthest* from the outer ring's start (0,0) — so a correct rotation has
+        // real work to do, and a no-op (start index 0) would fail this test.
+        let inner: Vec<(i64, i64)> = vec![
+            (800_000, 800_000), // farthest from (0,0) — listed first on purpose
+            (200_000, 800_000),
+            (200_000, 200_000), // nearest to (0,0) — must become index 0 after rotation
+            (800_000, 200_000),
+        ];
+
+        let chains = ring_chains(
+            &clearing_of(vec![outer, inner], vec![2]),
+            &identity_place,
+            Length::from_mm(-0.1),
+            "island",
+        );
+
+        assert_eq!(chains.len(), 1, "one group, one chain");
+        let chain = &chains[0];
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].path[0], pt(0.0, 0.0), "the outer ring's own start is untouched");
+        assert_eq!(
+            chain[1].path[0],
+            pt(0.2, 0.2),
+            "the inner ring is rotated to start at its vertex nearest the outer ring's start",
+        );
+        assert_eq!(chain[1].path.len(), 4, "no vertex gained or lost by the rotation");
+    }
+
+    /// Two groups — two separate islands — become two independent chains, never merged
+    /// into one, however the flat `paths`/`groups` pair from [`pcb::Clearing`] hands them
+    /// over.
+    #[test]
+    fn two_groups_become_two_independent_chains() {
+        let island_a = square_ring();
+        let island_b: Vec<(i64, i64)> =
+            vec![(50_000_000, 0), (51_000_000, 0), (51_000_000, 1_000_000), (50_000_000, 1_000_000)];
+
+        let chains = ring_chains(
+            &clearing_of(vec![island_a, island_b], vec![1, 1]),
+            &identity_place,
+            Length::from_mm(-0.1),
+            "island",
+        );
+
+        assert_eq!(chains.len(), 2);
+        assert_eq!(chains[0].len(), 1);
+        assert_eq!(chains[1].len(), 1);
+    }
+}
+
+/// How close two same-net contour-piece endpoints must be to be treated as the exact
+/// point the isolation ladder split the loop at, mm.
+///
+/// The pieces come from the same original vertex data, clipped in board space and then
+/// carried through the same linear placement transform — so two endpoints that were
+/// meant to coincide differ only by floating-point noise, not by any real geometric
+/// gap. 1 µm is generous against that noise and, at PCB scale, nowhere near a distance
+/// two genuinely unrelated features could share by coincidence.
+const CHAIN_ENDPOINT_TOLERANCE_MM: f64 = 0.001;
+
+/// Groups isolation-ladder pieces by net and reassembles each net's own pieces into
+/// ordered chains (see [`stitch_net_pieces`]).
+///
+/// Grouping happens **here**, structurally, so that function's contract — operate on
+/// one net's pieces, never mix nets — cannot be violated by a future call site: nothing
+/// downstream of this function ever holds a `Vec<EngraveSpan>` mixing two nets, because
+/// nothing is stitched before its net's own group is fully separated out. A `BTreeMap`
+/// keeps this `O(n log n)` over the board's net count rather than the `O(n²)` a linear
+/// per-piece scan would cost on a dense board.
+///
+/// `span_for` builds the placed, depth-assigned span for one contour piece — kept as a
+/// caller-supplied closure rather than fixed logic so this stays testable on bare
+/// `IsolationContour` fixtures, with no `Placement`/`Tool`/`AppCtx` required.
+fn chain_isolation_contours(
+    contours: &[pcb::IsolationContour],
+    mut span_for: impl FnMut(&pcb::IsolationContour, usize) -> EngraveSpan,
+) -> Vec<EngraveChain> {
+    let mut by_net: std::collections::BTreeMap<String, Vec<EngraveSpan>> =
+        std::collections::BTreeMap::new();
+    for (n, contour) in contours.iter().enumerate() {
+        by_net.entry(contour.net.clone()).or_default().push(span_for(contour, n));
+    }
+    by_net.into_values().flat_map(stitch_net_pieces).collect()
+}
+
+/// Reassembles one net's isolation-ladder pieces into ordered chains, by matching the
+/// endpoints the ladder's own clipping left exactly coincident.
+///
+/// A net that never had to narrow arrives as one closed piece and leaves as one chain
+/// of one — nothing to stitch. A net the ladder *did* narrow arrives as several open
+/// fragments (`crates/pcb/src/isolation.rs::walk_ladder`) with no ordering or
+/// connection between them: collectively they retrace the net's whole loop, but
+/// nothing says which fragment continues which. This finds out by matching endpoints
+/// within [`CHAIN_ENDPOINT_TOLERANCE_MM`] on the machine-space points the placement has
+/// already produced.
+///
+/// **Order-independent and conservative.** The input order carries no meaning —
+/// Clipper's piece order after several clip operations is not the loop's walk order —
+/// so every fragment is tried against every other regardless of where it started. A
+/// fragment that matches nothing (an `uncut` gap the ladder never closed, or any other
+/// case this cannot make sense of) becomes its own chain of one: today's independent
+/// per-piece behaviour, never dropped and never guessed into a connection the tolerance
+/// does not support.
+///
+/// A fully-closed piece (`EngraveSpan::closed`) is never a stitching candidate — it is
+/// already a complete loop by itself, and joining it to anything else would fabricate a
+/// connection this net's geometry never asked for.
+fn stitch_net_pieces(spans: Vec<EngraveSpan>) -> Vec<EngraveChain> {
+    let touches = |a: Point, b: Point| a.distance_mm(&b) <= CHAIN_ENDPOINT_TOLERANCE_MM;
+
+    // An empty path defines no endpoints to match on. `plan_engrave` already drops
+    // anything shorter than two points before cutting, so this can only ever throw
+    // away a piece nothing was ever going to cut — never a piece stitching skipped.
+    let (closed, open): (Vec<EngraveSpan>, Vec<EngraveSpan>) = spans
+        .into_iter()
+        .filter(|s| !s.path.is_empty())
+        .partition(|s| s.closed);
+    let mut chains: Vec<EngraveChain> = closed.into_iter().map(|s| vec![s]).collect();
+
+    let mut remaining = open;
+    while let Some(seed) = remaining.pop() {
+        let mut chain: EngraveChain = vec![seed];
+        loop {
+            let tail = *chain.last().unwrap().path.last().unwrap();
+            if let Some(index) = remaining.iter().position(|p| touches(tail, *p.path.first().unwrap()))
+            {
+                chain.push(remaining.remove(index));
+                continue;
+            }
+            if let Some(index) = remaining.iter().position(|p| touches(tail, *p.path.last().unwrap()))
+            {
+                let mut piece = remaining.remove(index);
+                piece.path.reverse();
+                chain.push(piece);
+                continue;
+            }
+
+            let head = *chain.first().unwrap().path.first().unwrap();
+            if let Some(index) = remaining.iter().position(|p| touches(head, *p.path.last().unwrap()))
+            {
+                chain.insert(0, remaining.remove(index));
+                continue;
+            }
+            if let Some(index) =
+                remaining.iter().position(|p| touches(head, *p.path.first().unwrap()))
+            {
+                let mut piece = remaining.remove(index);
+                piece.path.reverse();
+                chain.insert(0, piece);
+                continue;
+            }
+
+            break;
+        }
+        chains.push(chain);
+    }
+    chains
+}
+
+#[cfg(test)]
+mod chain_stitching_tests {
+    use super::*;
+
+    fn pt(x: f64, y: f64) -> Point {
+        Point::new(Length::from_mm(x), Length::from_mm(y))
+    }
+
+    fn open(source: &str, path: Vec<Point>) -> EngraveSpan {
+        EngraveSpan { source: source.to_string(), path, closed: false, z_bottom: Length::from_mm(-0.1) }
+    }
+
+    fn closed(source: &str, path: Vec<Point>) -> EngraveSpan {
+        EngraveSpan { source: source.to_string(), path, closed: true, z_bottom: Length::from_mm(-0.1) }
+    }
+
+    /// A square's four sides, drawn as open pieces that share exact corner points — the
+    /// same shape the ladder produces around one net once several rungs are stitched.
+    /// Returned in a fixed order; callers scramble it to test order-independence.
+    fn square_sides() -> Vec<EngraveSpan> {
+        vec![
+            open("N#0", vec![pt(0.0, 0.0), pt(1.0, 0.0)]),
+            open("N#1", vec![pt(1.0, 0.0), pt(1.0, 1.0)]),
+            open("N#2", vec![pt(1.0, 1.0), pt(0.0, 1.0)]),
+            open("N#3", vec![pt(0.0, 1.0), pt(0.0, 0.0)]),
+        ]
+    }
+
+    /// The one property this pass exists for: a net's split pieces come back as one
+    /// chain, walkable start to end with no gap — regardless of the scrambled, direction-
+    /// flipped order Clipper actually hands them back in.
+    #[test]
+    fn a_nets_split_pieces_reassemble_into_one_walkable_chain_in_any_input_order() {
+        let orderings: Vec<Vec<EngraveSpan>> = vec![
+            square_sides(),
+            square_sides().into_iter().rev().collect(),
+            {
+                // Every third piece cut backwards — plausible Clipper output, since
+                // nothing about the ladder's clipping promises a consistent winding.
+                let mut sides = square_sides();
+                sides[1].path.reverse();
+                sides[3].path.reverse();
+                vec![sides[2].clone(), sides[0].clone(), sides[3].clone(), sides[1].clone()]
+            },
+        ];
+
+        for (label, spans) in orderings.into_iter().enumerate() {
+            let chains = stitch_net_pieces(spans);
+            assert_eq!(chains.len(), 1, "ordering {label}: one net, one loop, one chain");
+            let chain = &chains[0];
+            assert_eq!(chain.len(), 4, "ordering {label}: all four sides joined");
+            for pair in chain.windows(2) {
+                let exit = *pair[0].path.last().unwrap();
+                let entry = *pair[1].path.first().unwrap();
+                assert!(
+                    exit.distance_mm(&entry) <= CHAIN_ENDPOINT_TOLERANCE_MM,
+                    "ordering {label}: {:?} must end where {:?} begins",
+                    pair[0].source,
+                    pair[1].source,
+                );
+            }
+            // And the loop actually closes: the last piece's exit is the first piece's entry.
+            let first_entry = *chain[0].path.first().unwrap();
+            let last_exit = *chain[3].path.last().unwrap();
+            assert!(first_entry.distance_mm(&last_exit) <= CHAIN_ENDPOINT_TOLERANCE_MM);
+        }
+    }
+
+    /// A piece with nothing to connect to — an `uncut` gap the ladder never closed, or
+    /// simply a net with only one narrowed rung — is never dropped and never forced into
+    /// a connection the tolerance does not support. It falls back to exactly today's
+    /// independent-cut behaviour: a chain of one.
+    #[test]
+    fn an_unmatched_piece_stays_its_own_chain_rather_than_being_dropped_or_guessed() {
+        // Three sides that connect into one open run — (0,0)→(1,0)→(1,1)→(0,1) — plus a
+        // piece nowhere near it, sharing no endpoint with anything.
+        let mut sides = square_sides();
+        sides.truncate(3);
+        sides.push(open("Z#0", vec![pt(50.0, 50.0), pt(60.0, 50.0)]));
+
+        let chains = stitch_net_pieces(sides);
+        assert_eq!(chains.len(), 2, "the connected run, and the piece with nothing to connect to");
+        let sizes: Vec<usize> = {
+            let mut s: Vec<usize> = chains.iter().map(Vec::len).collect();
+            s.sort_unstable();
+            s
+        };
+        assert_eq!(sizes, vec![1, 3], "one orphan, one chain of the other three");
+    }
+
+    /// Matching is by net, not by proximity. [`stitch_net_pieces`] itself has no net
+    /// field to check — its contract is that the caller pre-groups by net, and the
+    /// structural enforcement of that contract lives in [`chain_isolation_contours`],
+    /// which is what this test exercises: two different nets whose pieces happen to
+    /// touch must still come back as two independent chains, never one that silently
+    /// connects copper that has to stay separate.
+    #[test]
+    fn pieces_are_never_chained_across_nets() {
+        let a = pcb::IsolationContour {
+            net: "A".into(),
+            path: vec![(0, 0), (1_000_000, 0)],
+            closed: false,
+            width_nm: 200_000,
+        };
+        let b = pcb::IsolationContour {
+            // Touches `a`'s endpoint exactly, but belongs to a different net.
+            net: "B".into(),
+            path: vec![(1_000_000, 0), (2_000_000, 0)],
+            closed: false,
+            width_nm: 200_000,
+        };
+
+        let chains = chain_isolation_contours(&[a, b], |contour, n| EngraveSpan {
+            source: format!("{}#{n}", contour.net),
+            path: contour.path.iter().map(|&(x, y)| pt(x as f64 / 1e6, y as f64 / 1e6)).collect(),
+            closed: contour.closed,
+            z_bottom: Length::from_mm(-0.1),
+        });
+
+        assert_eq!(chains.len(), 2, "touching endpoints alone must not merge different nets");
+    }
+
+    /// A fully-closed piece is already a complete loop — the common case, a net that
+    /// never had to narrow — and must never be treated as a stitching candidate even
+    /// when another (unrelated) open piece happens to touch it.
+    #[test]
+    fn a_closed_piece_is_never_chained_to_anything() {
+        let ring = closed("N#0", vec![pt(0.0, 0.0), pt(1.0, 0.0), pt(1.0, 1.0), pt(0.0, 0.0)]);
+        let stray = open("N#1", vec![pt(0.0, 0.0), pt(-1.0, 0.0)]);
+
+        let chains = stitch_net_pieces(vec![ring, stray]);
+        assert_eq!(chains.len(), 2, "the closed ring stays alone");
+        assert!(chains.iter().any(|c| c.len() == 1 && c[0].closed));
+    }
+}
+
+/// Why the milling-clearing pass is skipped: the step asks for it but nothing in stock is a
+/// milling bit narrow enough for the threshold.
+///
+/// A note, not a step failure — unlike [`no_engraver_reason`](crate::runtime::tooling::no_engraver_reason),
+/// this pass is additive and off by default, so a step that cannot run it is still exactly
+/// as complete as one that never asked: the isolation channel and everything else the step
+/// does are unaffected.
+fn no_clearing_mill_reason(threshold: Length) -> String {
+    format!(
+        "No milling bit in stock is narrow enough to clear copper below {}, so the \
+         milling-clearing pass is skipped. Add one to the stock list, or raise the \
+         threshold, or turn the pass off for this step.",
+        threshold,
+    )
+}
+
+/// What to tell the operator about the copper the milling pass took out, and what it left.
+///
+/// [`clearing_note`]'s counterpart for a dedicated mill rather than the isolation bit: the
+/// same shape, plus the failure mode only a cutter chosen independently of the geometry can
+/// have — copper narrow enough to qualify that the mill itself is too wide to enter.
+fn mill_clearing_note(clearing: &pcb::Clearing) -> Option<String> {
+    if clearing.removed == 0 && clearing.unreachable == 0 {
+        return None;
+    }
+    let mm2 = |nm2: f64| nm2 / 1e12;
+
+    let mut note = if clearing.removed == 0 {
+        "The milling pass found no copper it could clear.".to_string()
+    } else {
+        format!(
+            "The milling pass cleared {} piece{} of free copper ({:.2} mm²).",
+            clearing.removed,
+            if clearing.removed == 1 { "" } else { "s" },
+            mm2(clearing.removed_area_nm2),
+        )
+    };
+    if clearing.unreachable > 0 {
+        note.push_str(&format!(
+            " {} piece{} narrow enough to qualify {} too narrow for the chosen mill to \
+             enter, the widest {:.2} mm across — a narrower mill would reach {}.",
+            clearing.unreachable,
+            if clearing.unreachable == 1 { "" } else { "s" },
+            if clearing.unreachable == 1 { "was" } else { "were" },
+            clearing.widest_unreachable_nm as f64 / 1e6,
+            if clearing.unreachable == 1 { "it" } else { "them" },
+        ));
+    }
+    if clearing.missed_area_nm2 > 0.0 {
+        note.push_str(&format!(
+            " {:.2} mm² of that was too close to a net for the mill to reach and is still \
+             there.",
+            mm2(clearing.missed_area_nm2),
+        ));
+    }
+    Some(note)
 }
 
 /// What to tell the operator about the copper the pass left standing.
@@ -2871,6 +3367,10 @@ mod engrave_diagnostic_tests {
             width_nm,
             min_width_nm: 150_000,
             remove_islands: true,
+            clear_narrow_copper: false,
+            clearing_threshold_nm: 0,
+            clearing_guard_band_nm: 0,
+            clearing_mill_diameter_nm: 0,
         }
     }
 
@@ -2885,6 +3385,7 @@ mod engrave_diagnostic_tests {
                     copper_warnings: Vec::new(),
                     copper_layer_count: 2,
                     clearing: Default::default(),
+                    mill_clearing: Default::default(),
                 }),
             );
         }
@@ -2939,7 +3440,50 @@ mod engrave_diagnostic_tests {
         assert!(note.contains("2 more were left standing"), "{note}");
     }
 
-    /// **The miss names the field that differs.** The spec is six fields and any one of
+    /// [`mill_clearing_note`]'s own shape: what a dedicated mill took, and the failure mode
+    /// only a cutter chosen independently of the geometry has — copper narrow enough to
+    /// qualify that the mill itself cannot enter.
+    #[test]
+    fn the_mill_clearing_note_names_what_it_took_and_what_it_could_not_enter() {
+        assert_eq!(mill_clearing_note(&pcb::Clearing::default()), None, "nothing to say");
+
+        let took = pcb::Clearing { removed: 3, removed_area_nm2: 1.5e12, ..Default::default() };
+        let note = mill_clearing_note(&took).expect("a note");
+        assert!(note.contains("3 piece"), "{note}");
+        assert!(note.contains("1.50 mm²"), "{note}");
+        assert!(!note.contains("too narrow"), "nothing was unreachable: {note}");
+
+        let one = pcb::Clearing { removed: 1, removed_area_nm2: 0.1e12, ..Default::default() };
+        assert!(
+            mill_clearing_note(&one).unwrap().contains("1 piece of free copper ("),
+            "no dangling plural"
+        );
+
+        // Narrow enough to qualify but too narrow for the chosen mill to enter — a first-order
+        // outcome for a cutter picked before the geometry is seen.
+        let unreachable = pcb::Clearing {
+            unreachable: 2,
+            widest_unreachable_nm: 400_000,
+            ..took.clone()
+        };
+        let note = mill_clearing_note(&unreachable).expect("a note");
+        assert!(note.contains("2 piece"), "{note}");
+        assert!(note.contains("0.40 mm across"), "{note}");
+        assert!(note.contains("a narrower mill would reach them"), "{note}");
+
+        // Nothing cleared, but something was seen and rejected — still worth a note, unlike
+        // `clearing_note` where an empty `Clearing` says nothing at all.
+        let only_unreachable = pcb::Clearing {
+            unreachable: 1,
+            widest_unreachable_nm: 300_000,
+            ..Default::default()
+        };
+        let note = mill_clearing_note(&only_unreachable).expect("a note");
+        assert!(note.starts_with("The milling pass found no copper it could clear."), "{note}");
+        assert!(note.contains("a narrower mill would reach it"), "singular: {note}");
+    }
+
+    /// **The miss names the field that differs.** The spec is ten fields and any one of
     /// them can hold an answer back; from the outside every case looks the same — no
     /// engraving, and a plan that keeps asking. This is what makes a persistent miss
     /// diagnosable from a log the operator can hand over.
@@ -2964,6 +3508,14 @@ mod engrave_diagnostic_tests {
             // "Remove islands" would match the held answer and do nothing whatever until
             // the board was reloaded.
             ("islands", IsolationSpec { remove_islands: false, ..held.clone() }),
+            // The four settings behind the milling-clearing pass — left out, any of them
+            // would suffer the same fate as "islands" above: ticking the box, widening the
+            // threshold, loosening the guard band, or swapping the resolved mill would all
+            // match a result computed before the change and never recompute.
+            ("mill on", IsolationSpec { clear_narrow_copper: true, ..held.clone() }),
+            ("mill threshold", IsolationSpec { clearing_threshold_nm: 3_000_000, ..held.clone() }),
+            ("mill guard band", IsolationSpec { clearing_guard_band_nm: 300_000, ..held.clone() }),
+            ("mill diameter", IsolationSpec { clearing_mill_diameter_nm: 1_000_000, ..held.clone() }),
         ] {
             assert!(
                 state.matching(&other).is_none(),
@@ -3035,7 +3587,10 @@ mod engrave_diagnostic_tests {
 
         assert_eq!(built, 1, "`isolation_spec` must be the only place a spec is built");
         assert!(
-            production.contains("let spec = isolation_spec(board, ctx.board_epoch, raw, choice);"),
+            production.contains(
+                "let spec = isolation_spec(board, ctx.board_epoch, raw, choice, \
+                 clearing_mill.map(|t| t.diameter));"
+            ),
             "`plan_engrave_spans` must go through it rather than rebuilding one inline",
         );
     }
@@ -3406,6 +3961,30 @@ mod block_order_tests {
                 engrave < at(later),
                 "`{later}` is pushed before the engrave block, so the program would not \
                  open with the engraving tool",
+            );
+        }
+    }
+
+    /// **The clearing pass follows the isolation block, before anything else.** It is a
+    /// second, distinct tool — its own block, not folded into the isolation one — but it
+    /// cuts the same copper the isolation bit just opened, so nothing should come between
+    /// the two: a hole drilled in between is a place a mill sunk into the same shallow
+    /// copper pass could catch on freshly exposed board.
+    #[test]
+    fn the_clearing_block_follows_the_engrave_block_before_any_other() {
+        let engrave = at("blocks.extend(engraved);");
+        let clearing = at("blocks.extend(cleared);");
+        assert!(clearing > engrave, "the clearing block must come after the isolation block");
+
+        for later in [
+            "blocks.extend(plan_drilling(",
+            "blocks.extend(plan_routing(",
+            "blocks.extend(plan_outline(",
+        ] {
+            assert!(
+                clearing < at(later),
+                "`{later}` is pushed before the clearing block, so the program would not \
+                 finish the shallow copper work before drilling or routing begins",
             );
         }
     }

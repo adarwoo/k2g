@@ -476,15 +476,15 @@ Universal filtering and sorting apply across the full stock list.
 
 Single-table behavior requirements:
 
-- The table supports faceted filtering by tool family (drill, router, engraver, v-bit)
-- The table exposes an explicit type filter with: All, Drill, Router, V-bit, Engraving
+- The table supports faceted filtering by tool family (drill, router, milling, v-bit)
+- The table exposes an explicit type filter with: All, Drill, Router, V-bit, Milling
 - Multiple filter facets can be combined with text search
 - Users can save and reapply filter presets
 - The table supports configurable columns so type-specific fields can be shown without splitting into sublists
 Each stock item includes:
 
-- Tool family shown in the list as one of: Drill, Router, V-bit, Engraving
-- Tool family is color-coded in the list: blue for Drill, green for Router, yellow for V-bit, red for Engraving
+- Tool family shown in the list as one of: Drill, Router, V-bit, Milling
+- Tool family is color-coded in the list: blue for Drill, green for Router, yellow for V-bit, red for Milling
 - Name display always starts with the composite tool label; if the user supplies a practical name in tool properties, it is appended after a dash
 - Source catalog
 - Source SKU (read-only when catalog-derived)

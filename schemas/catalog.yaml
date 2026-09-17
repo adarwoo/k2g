@@ -110,16 +110,18 @@ $defs:
       type:
         type: string
         enum: [drillbit, routerbit, engraver, vbit, endmill]
-        x-enum-labels: [Drill, Router, Engraver, V-bit, End mill]
+        x-enum-labels: [Drill, Router, Milling, V-bit, End mill]
         description: Tool type discriminator.
 
       # Geometry.
       diameter:
         description: >-
           The width the tool cuts: a drill's hole, a router's kerf, and for a
-          V-bit or engraver the flat at its tip — the narrowest channel it can
-          make, which widens as it is sunk deeper. Never the shank, which
-          nothing in the generator acts on and so is not recorded.
+          V-bit the flat at its tip — the narrowest channel it can make, which
+          widens as it is sunk deeper. A milling bit (`engraver` with a
+          `point_angle` of 180deg — a flat end, not a cone) cuts at this same
+          width regardless of depth. Never the shank, which nothing in the
+          generator acts on and so is not recorded.
         $ref: "units.yaml#/$defs/size"
       flute_length:
         description: Flute length.

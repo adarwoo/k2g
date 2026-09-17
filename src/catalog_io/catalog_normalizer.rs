@@ -1,43 +1,37 @@
-use log::info;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
 
 use units::{
     Angle, AngleUnit, FeedRate, FeedRateUnit, Length, LengthUnit, RotationalSpeed,
     RotationalSpeedUnit,
 };
 
-pub fn backfill_catalog_fields(path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
-
+/// Parses catalogue YAML `text` and applies the seed-time enrichment: inject the
+/// missing `id`/`sku`/`schema`/`point_angle`/`z_min_depth` fields the bundled
+/// catalogues are deliberately authored without (see [`normalize_catalog_fields`]),
+/// then serialize the result back to YAML text, unconditionally.
+///
+/// Takes and returns plain text, with no file involved, so the *embedded*
+/// catalogue source can be canonicalised in memory: the caller
+/// (`runtime::catalogs`'s bundled-catalog sync) compares this against whatever is
+/// already on disk to decide whether the disk copy needs replacing, which is the
+/// only way to tell "the binary added a tool" apart from "this file was already
+/// enriched once" — the two look identical if you only ever diff the disk file
+/// against the raw embedded source.
+pub fn canonicalize_catalog_text(text: &str, stem: &str) -> Result<String, String> {
     let yaml_value: serde_yaml::Value =
-        serde_yaml::from_str(&text).map_err(|e| format!("yaml parse failed: {e}"))?;
+        serde_yaml::from_str(text).map_err(|e| format!("yaml parse failed: {e}"))?;
 
     let mut json_value: Value =
         serde_json::to_value(yaml_value).map_err(|e| format!("yaml->json conversion failed: {e}"))?;
 
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("catalog")
-        .to_string();
-
-    if !normalize_catalog_fields(&mut json_value, &stem, true, false) {
-        return Ok(());
-    }
+    normalize_catalog_fields(&mut json_value, stem, true, false);
 
     let out_yaml: serde_yaml::Value =
         serde_json::from_value(json_value).map_err(|e| format!("json->yaml conversion failed: {e}"))?;
 
-    let out_text = serde_yaml::to_string(&out_yaml)
-        .map_err(|e| format!("yaml serialization failed: {e}"))?;
-
-    std::fs::write(path, out_text).map_err(|e| format!("write failed: {e}"))?;
-
-    info!("Backfilled catalog metadata: {}", path.display());
-    Ok(())
+    serde_yaml::to_string(&out_yaml).map_err(|e| format!("yaml serialization failed: {e}"))
 }
 
 pub fn normalize_catalog_fields(
