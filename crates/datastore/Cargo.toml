@@ -14,7 +14,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 # See the note in the workspace root: `resolve-http` is the network `$ref` fetch that
 # `NoRemoteRefs` refuses, and it drags in a second HTTP/TLS stack to do it.
-jsonschema = { version = "0.50", default-features = false }
+jsonschema = { version = "0.56", default-features = false }
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"
 indexmap = { version = "2", features = ["serde"] }
