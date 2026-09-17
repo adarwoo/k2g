@@ -81,6 +81,10 @@ The copper that isolation leaves standing is now taken out, not only cut around.
   staying on "Downloading and checking the signature…", and the download is marked as coming
   from the internet so SmartScreen evaluates it. **0.15.0 still carries the old updater, so
   an existing install has to be updated to 0.16.0 by hand, once.**
+- **The TLS library behind the update check is patched** (rustls 0.23.45, RUSTSEC-2026-0285).
+  It accepted handshake messages sent unencrypted that should have been encrypted. That
+  could not alter or complete a connection, and a downloaded installer is signature-checked
+  whatever the connection, but it is the one network path k2g has.
 - **When the requested isolation width is below what the finest bit can cut, the step says
   so.** Lowering the width further changed nothing, and nothing on screen explained why; the
   step's notes now name the floor the finest bit in stock or rack sets.
