@@ -86,7 +86,7 @@ serde_yaml = "0.9"
 # plus `rustls-platform-verifier` and the C/assembly `aws-lc-sys`. That is a new
 # native build dependency and a second set of trust decisions, in service of a code
 # path this application has deliberately disabled.
-jsonschema = { version = "0.50", default-features = false }
+jsonschema = { version = "0.56", default-features = false }
 log = "0.4"
 image = "0.25"
 base64 = "0.23"
