@@ -93,7 +93,7 @@ base64 = "0.23"
 rfd = "0.17"
 # Resolves the host's default save location (Windows Downloads known folder,
 # XDG_DOWNLOAD_DIR on Linux) for the first G-code save.
-dirs = "6"
+dirs = "7"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 uuid = { version = "1", features = ["v5", "v7"] }
 dioxus-logger = "0.7.9"
