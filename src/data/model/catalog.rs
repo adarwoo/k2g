@@ -42,11 +42,14 @@ pub enum ToolType {
 }
 
 impl ToolType {
+    /// Catalog format is external and untouched by the stock-side rename: a catalog's
+    /// own `Engraver` stays `Engraver` on the wire. Only where it lands changes — the
+    /// stock family it imports into is now called `Milling` (see `ToolKind`'s doc).
     pub fn to_tool_kind(self) -> ToolKind {
         match self {
             Self::Drillbit => ToolKind::Drillbit,
             Self::Routerbit => ToolKind::Routerbit,
-            Self::Engraver => ToolKind::Engraver,
+            Self::Engraver => ToolKind::Milling,
             Self::Vbit => ToolKind::Vbit,
             Self::Endmill => ToolKind::Endmill,
         }

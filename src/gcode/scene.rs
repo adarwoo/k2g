@@ -249,9 +249,26 @@ pub fn trace_step(step: &StepPlan) -> Vec<ToolTrace> {
 ///
 /// `None` when the block has no such op, which is what an index left over from a plan that
 /// has since changed looks like.
-pub fn trace_op(block: &ToolBlock, op: usize) -> Option<Vec<Polyline>> {
-    let op = block.ops.get(op)?;
-    Some(expand_op(op.kind.clone(), op.entry, op.exit, op.z, block.diameter))
+pub fn trace_op(block: &ToolBlock, index: usize) -> Option<Vec<Polyline>> {
+    let op = block.ops.get(index)?;
+    Some(expand_op(
+        op.kind.clone(),
+        op.entry,
+        op.exit,
+        op.z,
+        block.diameter,
+        op.continues_from_previous,
+        continues_after(block, index),
+    ))
+}
+
+/// Whether the op after `index` is cut without lifting off this one first.
+///
+/// The lift-off belongs to the op being drawn, but the fact that there is none belongs
+/// to the op after it — the same lookahead `program.rs` does before deciding whether to
+/// emit a retract.
+fn continues_after(block: &ToolBlock, index: usize) -> bool {
+    block.ops.get(index + 1).is_some_and(|next| next.continues_from_previous)
 }
 
 /// Walks one block's ops into runs of motion.
@@ -265,14 +282,31 @@ fn trace_block(block: &ToolBlock, index: usize) -> ToolTrace {
     // an unknown position.
     let mut at: Option<ScenePoint> = None;
 
-    for op in &block.ops {
-        let expanded = expand_op(op.kind.clone(), op.entry, op.exit, op.z, block.diameter);
-        for run in expanded {
-            // Join the previous run's end to this one's start with a rapid, so the
-            // transit between features is visible as the travel the TSP minimised.
+    for (index, op) in block.ops.iter().enumerate() {
+        let expanded = expand_op(
+            op.kind.clone(),
+            op.entry,
+            op.exit,
+            op.z,
+            block.diameter,
+            op.continues_from_previous,
+            continues_after(block, index),
+        );
+        for (run_index, run) in expanded.into_iter().enumerate() {
+            // Join the previous run's end to this one's start, so the transit between
+            // features is visible as the travel the TSP minimised.
             if let (Some(from), Some(&first)) = (at, run.points.first()) {
                 if from != first {
-                    push_run(&mut moves, Polyline { kind: MoveKind::Rapid, points: vec![from, first] });
+                    // A chained op is reached **without lifting**: `program.rs` cuts
+                    // straight to it at depth, so the connector is a feed, not a rapid.
+                    // Only the op's own first run is that connector — runs within one op
+                    // already meet, and a later one that did not would be real travel.
+                    let kind = if op.continues_from_previous && run_index == 0 {
+                        MoveKind::Feed
+                    } else {
+                        MoveKind::Rapid
+                    };
+                    push_run(&mut moves, Polyline { kind, points: vec![from, first] });
                 }
             }
             at = run.points.last().copied();
@@ -309,12 +343,21 @@ fn push_run(moves: &mut Vec<Polyline>, run: Polyline) {
 }
 
 /// One op's motion, as runs.
+///
+/// `continues` and `next_continues` are [`AtomicOp::continues_from_previous`](crate::gcode::plan::AtomicOp)
+/// for this op and the one after it. They exist because the drop-in and lift-off drawn
+/// here are **synthesised** — the plan does not store them — and `program.rs` does not
+/// emit them for a chained op. Ignoring them, which this did until the 3D view was found
+/// showing lifts the machine never makes, draws a retract and a re-plunge between every
+/// nested clearing ring of an island that is in fact cut in one continuous pass.
 fn expand_op(
     kind: OpKind,
     entry: Point,
     exit: Point,
     z: ZProfile,
     tool_diameter: Length,
+    continues: bool,
+    next_continues: bool,
 ) -> Vec<Polyline> {
     match kind {
         // A point drill's cycle is inside the primitive, so it is reconstructed: arrive
@@ -344,18 +387,31 @@ fn expand_op(
             from_solid,
         )),
         // A contour span carries its own path; the drop-in and lift-off around it are
-        // what make the retaining tabs visible as gaps.
+        // what make the retaining tabs visible as gaps — except where the span is one
+        // link of a chain, which is cut without ever coming up.
         OpKind::RouteContour { path } => {
             let mut moves = Vec::with_capacity(path.len() + 2);
-            if let Some(&first) = path.first() {
-                moves.push(RouteMove::Rapid { x: first.x, y: first.y, z: z.z_retract });
-                moves.push(RouteMove::Plunge { x: first.x, y: first.y, z: z.z_bottom });
+            if continues {
+                // Already down, one short hop away. `program.rs` reaches this path with a
+                // plain cut at depth, so there is no drop-in to draw and the run has to
+                // begin on the path's own first point; the connector to it is drawn by
+                // `trace_block`, as the feed move it really is.
+                moves.extend(path.iter().map(|p| RouteMove::Cut { x: p.x, y: p.y, z: z.z_bottom }));
+            } else {
+                if let Some(&first) = path.first() {
+                    moves.push(RouteMove::Rapid { x: first.x, y: first.y, z: z.z_retract });
+                    moves.push(RouteMove::Plunge { x: first.x, y: first.y, z: z.z_bottom });
+                }
+                moves.extend(
+                    path.iter().skip(1).map(|p| RouteMove::Cut { x: p.x, y: p.y, z: z.z_bottom }),
+                );
             }
-            moves.extend(
-                path.iter().skip(1).map(|p| RouteMove::Cut { x: p.x, y: p.y, z: z.z_bottom }),
-            );
-            if let Some(&last) = path.last() {
-                moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: z.z_retract });
+            // The lift-off is the *next* op's business as much as this one's: it stays
+            // down when the next op continues from here, exactly as `program.rs` does.
+            if !next_continues {
+                if let Some(&last) = path.last() {
+                    moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: z.z_retract });
+                }
             }
             runs_from_moves(&moves)
         }
@@ -476,6 +532,7 @@ mod tests {
             z: z(),
             primitive: "x",
             source: "s".into(),
+            continues_from_previous: false,
         }
     }
 
@@ -681,6 +738,75 @@ mod tests {
         assert!(
             across.points.iter().all(|p| p.z == 2.0 || p.z == -2.0),
             "the transit stays at the retract plane, never through the board"
+        );
+    }
+
+    /// Two nested rings — an island's clearing pass as `plan_engrave` builds it, where
+    /// every ring after the first is marked [`AtomicOp::continues_from_previous`].
+    fn nested_rings(chained: bool) -> ToolBlock {
+        let outer = vec![pt(0.0, 0.0), pt(4.0, 0.0), pt(4.0, 4.0), pt(0.0, 4.0), pt(0.0, 0.0)];
+        let inner = vec![pt(1.0, 1.0), pt(3.0, 1.0), pt(3.0, 3.0), pt(1.0, 3.0), pt(1.0, 1.0)];
+        let mut second = op(OpKind::RouteContour { path: inner.clone() }, inner[0], inner[4]);
+        second.continues_from_previous = chained;
+        block(1.0, vec![op(OpKind::RouteContour { path: outer.clone() }, outer[0], outer[4]), second])
+    }
+
+    /// **The counterpart to the transit test above, and the defect it was written for.**
+    /// An island's nested rings are cut as one continuous pass: `program.rs` reaches each
+    /// one with a plain cut at depth instead of a retract and a re-plunge. This module
+    /// ignored `continues_from_previous` outright and synthesised a lift around every
+    /// contour, so the 3D view showed the operator a retract between every ring that the
+    /// machine never performs — and the picture, not the toolpath, is what sent someone
+    /// looking to optimise an already-optimal path.
+    #[test]
+    fn a_chained_ring_is_drawn_without_ever_lifting() {
+        let traces = trace_step(&step_of(vec![nested_rings(true)]));
+        let moves = &traces[0].moves;
+
+        assert_eq!(moves.len(), 2, "one feed through both rings, then one lift: {moves:?}");
+        assert_eq!(moves[0].kind, MoveKind::Feed);
+        assert_eq!(moves[1].kind, MoveKind::Rapid, "the only rapid is the final lift");
+
+        let cut = &moves[0].points;
+        assert!(cut.contains(&ScenePoint::new(4.0, 4.0, -2.0)), "the outer ring is cut: {cut:?}");
+        assert!(cut.contains(&ScenePoint::new(3.0, 3.0, -2.0)), "and so is the inner: {cut:?}");
+        assert!(
+            cut.windows(2).any(|w| w[0] == ScenePoint::new(0.0, 0.0, -2.0)
+                && w[1] == ScenePoint::new(1.0, 1.0, -2.0)),
+            "the hop between them is cut at depth, not flown over: {cut:?}"
+        );
+        assert_eq!(
+            cut.iter().filter(|p| p.z > -2.0).count(),
+            1,
+            "nothing but the first approach is ever above depth: {cut:?}"
+        );
+    }
+
+    /// The same two rings *unchained* must still lift — otherwise the test above would
+    /// pass on a renderer that had simply stopped drawing retracts at all.
+    #[test]
+    fn two_unchained_rings_still_lift_between_them() {
+        let traces = trace_step(&step_of(vec![nested_rings(false)]));
+        let moves = &traces[0].moves;
+        assert!(
+            moves.iter().any(|m| m.kind == MoveKind::Rapid
+                && m.points.iter().any(|p| p.z == 2.0)
+                && m.points.iter().any(|p| p.x == 1.0 && p.y == 1.0)),
+            "an unchained second ring is reached over the retract plane: {moves:?}"
+        );
+    }
+
+    /// Highlighting one link of a chain must not draw a drop-in the chain does not have,
+    /// or the highlight would disagree with the trace it is drawn over.
+    #[test]
+    fn a_highlight_of_a_chained_ring_starts_on_the_path_at_depth() {
+        let block = nested_rings(true);
+        let runs = trace_op(&block, 1).expect("the second ring is op 1");
+        assert_eq!(runs[0].kind, MoveKind::Feed, "entered by cutting, not plunging: {runs:?}");
+        assert_eq!(
+            runs[0].points[0],
+            ScenePoint::new(1.0, 1.0, -2.0),
+            "and it begins on the ring itself: {runs:?}"
         );
     }
 

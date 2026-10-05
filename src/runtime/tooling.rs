@@ -422,12 +422,35 @@ pub(crate) struct EngraveConfigRaw {
     /// depth — while leaving it off ships boards with floating conductors on them that
     /// nothing in the design ever drew. See `pcb::islands`.
     pub(crate) remove_islands: bool,
+    /// Take out free copper up to [`clearing_threshold`](Self::clearing_threshold), with a
+    /// dedicated milling bit rather than the isolation V-bit.
+    ///
+    /// Off by default, unlike `remove_islands`, and for the opposite reason: this loads a
+    /// genuine milling bit, which costs a real tool change and a rack slot — the different
+    /// question `remove_islands`'s own doc names and declines to answer. See
+    /// `pcb::clear_narrow_copper`.
+    pub(crate) clear_narrow_copper: bool,
+    /// Free copper narrower than this is cleared by the milling pass; wider copper is left.
+    pub(crate) clearing_threshold: Length,
+    /// How close the milling pass may come to net copper, on top of never overlapping it.
+    ///
+    /// Stated rather than inherited: unlike `remove_islands`, which only ever sweeps ground
+    /// the isolation channel already walled off, this pass clears copper independently of
+    /// that channel.
+    pub(crate) clearing_guard_band: Length,
 }
 
 impl Default for EngraveConfigRaw {
     fn default() -> Self {
         // The schema's own default for `engrave_copper`.
-        Self { width: Length::from_mm(0.25), test_cut: false, remove_islands: true }
+        Self {
+            width: Length::from_mm(0.25),
+            test_cut: false,
+            remove_islands: true,
+            clear_narrow_copper: false,
+            clearing_threshold: Length::from_mm(2.0),
+            clearing_guard_band: Length::from_mm(0.2),
+        }
     }
 }
 
@@ -441,6 +464,12 @@ fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
         test_cut: node_bool(root, &format!("{base}/test_cut")).unwrap_or(default.test_cut),
         remove_islands: node_bool(root, &format!("{base}/remove_islands"))
             .unwrap_or(default.remove_islands),
+        clear_narrow_copper: node_bool(root, &format!("{base}/clear_narrow_copper"))
+            .unwrap_or(default.clear_narrow_copper),
+        clearing_threshold: node_length(root, &format!("{base}/clearing_threshold"))
+            .unwrap_or(default.clearing_threshold),
+        clearing_guard_band: node_length(root, &format!("{base}/clearing_guard_band"))
+            .unwrap_or(default.clearing_guard_band),
     }
 }
 
@@ -1079,6 +1108,17 @@ pub struct EngraveTarget {
     pub tool_label: String,
     /// Islands are removed only when the step asks for it, and the legend says which.
     pub removes_islands: bool,
+    /// Whether the step asks for the milling-clearing pass — regardless of whether a
+    /// suitable mill was actually found; see [`clearing_tool_label`](Self::clearing_tool_label)
+    /// for that half.
+    pub clears_narrow_copper: bool,
+    /// The threshold asked for: free copper narrower than this is cleared.
+    pub clearing_threshold: Length,
+    /// How the legend names the milling cutter, when the step asks for the pass and a
+    /// suitable one was found in stock. `None` either because the pass is off, or because
+    /// it is on and nothing in stock is narrow enough for the threshold — the legend tells
+    /// the two apart using [`clears_narrow_copper`](Self::clears_narrow_copper).
+    pub clearing_tool_label: Option<String>,
 }
 
 /// The isolation pass to draw for the step at `index`, or `None` when the profile has none.
@@ -1126,8 +1166,22 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
     )?;
     let bit = ctx.tools.iter().find(|t| t.id == choice.tool_id)?;
 
+    // Same resolution `plan_step` makes, so a mill the plan cannot find is a pass this
+    // draws nothing for either — see `isolation_spec`'s own note on why both callers must
+    // agree here.
+    let clearing_mill = raw.engrave_copper.clear_narrow_copper.then(|| {
+        pick_clearing_mill(&ctx.tools, toolset, raw.engrave_copper.clearing_threshold)
+    }).flatten();
+    let clearing_mill_tool = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
+
     Some(EngraveTarget {
-        spec: crate::runtime::machining_plan::isolation_spec(board, ctx.board_epoch, raw, &choice),
+        spec: crate::runtime::machining_plan::isolation_spec(
+            board,
+            ctx.board_epoch,
+            raw,
+            &choice,
+            clearing_mill_tool.map(|t| t.diameter),
+        ),
         is_selected_step: engrave_index == index,
         requested: raw.engrave_copper.width,
         achieved: choice.width,
@@ -1135,6 +1189,9 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
         point_angle: bit.point_angle,
         tool_label: bit.display_name(),
         removes_islands: raw.engrave_copper.remove_islands,
+        clears_narrow_copper: raw.engrave_copper.clear_narrow_copper,
+        clearing_threshold: raw.engrave_copper.clearing_threshold,
+        clearing_tool_label: clearing_mill_tool.map(|t| t.display_name()),
     })
 }
 
@@ -2177,7 +2234,7 @@ fn is_router_tool(tool: &Tool) -> bool {
 pub(crate) fn tool_mills(tool: &Tool) -> bool {
     matches!(
         ToolKind::from_kind_label(&tool.kind),
-        ToolKind::Routerbit | ToolKind::Endmill | ToolKind::Vbit | ToolKind::Engraver
+        ToolKind::Routerbit | ToolKind::Endmill | ToolKind::Vbit | ToolKind::Milling
     )
 }
 
@@ -2209,7 +2266,7 @@ fn stock_routers(tools: &[Tool]) -> impl Iterator<Item = &Tool> {
 fn is_engraver_tool(tool: &Tool) -> bool {
     matches!(
         ToolKind::from_kind_label(&tool.kind),
-        ToolKind::Vbit | ToolKind::Engraver
+        ToolKind::Vbit | ToolKind::Milling
     )
 }
 
@@ -2523,6 +2580,101 @@ fn pick_slot_router(
         .map(|t| t.id.clone())
 }
 
+/// The milling bit that clears free copper up to `threshold` across: the **largest**
+/// cutter that still fits, chosen the way [`pick_slot_router`] chooses a slot cutter and
+/// for the same reason — among bits that fit, the largest clears fastest and needs the
+/// fewest passes.
+///
+/// **Only `ToolKind::Milling`, never a V-bit.** A V-bit's tip could technically reach — a
+/// cone cuts full width at the surface, same as a flat mill — but `remove_islands` already
+/// covers what a V-bit can clear opportunistically, and the whole point of loading a
+/// dedicated tool for this pass is one built for area clearing rather than for a fine
+/// channel; see the schema's `clear_narrow_copper` note. A toolset-fixed mill that fits
+/// beats a larger in-stock one, since it costs no rack slot.
+pub(crate) fn pick_clearing_mill(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    threshold: Length,
+) -> Option<String> {
+    let is_mill = |t: &Tool| matches!(ToolKind::from_kind_label(&t.kind), ToolKind::Milling);
+    let limit_um = micron(threshold);
+
+    let mut fixed = toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_ref())
+        .filter_map(|id| tools.iter().find(|t| &t.id == id));
+    if let Some(tool) = fixed.find(|t| is_mill(t) && micron(t.diameter) <= limit_um) {
+        return Some(tool.id.clone());
+    }
+
+    tools
+        .iter()
+        .filter(|t| {
+            is_mill(t)
+                && t.status == crate::data::model::ToolStatus::InStock
+                && micron(t.diameter) <= limit_um
+        })
+        .max_by_key(|t| micron(t.diameter))
+        .map(|t| t.id.clone())
+}
+
+#[cfg(test)]
+mod clearing_mill_tests {
+    use super::*;
+
+    fn mill(id: &str, diameter_mm: f64) -> Tool {
+        let mut tool = super::tests::router(id, diameter_mm);
+        tool.kind = "Milling".to_string();
+        tool.name = format!("Milling {diameter_mm}mm");
+        tool
+    }
+
+    /// Among mills that fit the threshold, the largest wins — fewer passes, stiffer cut —
+    /// the same tie-break `pick_slot_router` makes for a slot.
+    #[test]
+    fn the_largest_mill_within_the_threshold_is_chosen() {
+        let tools = vec![mill("m0_5", 0.5), mill("m1_5", 1.5), mill("m2_5", 2.5)];
+        let toolset = super::tests::toolset_with_fixed(&[]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("m1_5"), "widest that still fits under 2mm");
+    }
+
+    /// A mill wider than the threshold cannot enter the copper it would be asked to clear
+    /// at all, so it is never a candidate — not even as a fallback.
+    #[test]
+    fn a_mill_wider_than_the_threshold_is_never_chosen() {
+        let tools = vec![mill("m3", 3.0)];
+        let toolset = super::tests::toolset_with_fixed(&[]);
+
+        assert_eq!(pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0)), None);
+    }
+
+    /// A V-bit is never picked for this pass, however well its tip would fit — it is a
+    /// different family, kept for the isolation channel it is chosen for elsewhere.
+    #[test]
+    fn a_v_bit_is_never_chosen_however_well_it_would_fit() {
+        let mut vbit = super::tests::router("v1", 0.2);
+        vbit.kind = "V-bit".to_string();
+        let tools = vec![vbit, mill("m1", 1.0)];
+        let toolset = super::tests::toolset_with_fixed(&[]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("m1"), "the V-bit is skipped, not merely deprioritised");
+    }
+
+    /// A smaller mill already fixed in the rack beats a larger one that would cost a slot.
+    #[test]
+    fn a_fixed_mill_beats_a_larger_in_stock_one() {
+        let tools = vec![mill("fixed", 1.0), mill("bigger", 1.8)];
+        let toolset = super::tests::toolset_with_fixed(&["fixed"]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("fixed"), "already racked, so it costs no slot");
+    }
+}
+
 /// How a locating-pin hole gets made.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PinTool {
@@ -2696,6 +2848,32 @@ pub(crate) fn narrower_channel_reason(
         fmt_len(ctx, min_width),
         fmt_len(ctx, budget.max),
         fmt_len(ctx, copper),
+    )
+}
+
+/// That the requested width is asking for less than any bit needs to work at all — the
+/// opposite direction from [`narrower_channel_reason`], and the one case `pick_engraver`
+/// leaves unreported.
+///
+/// `pick_engraver` writes a note when a bit falls short of the request; it stays silent
+/// when every candidate reaches it with room to spare, because ordinarily that is
+/// unremarkable — the pass cuts wider wherever the board has room, by design, and a small
+/// overshoot is not news. It stops being unremarkable when the chosen bit is already at
+/// **its own floor** (`achieved == floor`, `EngraveChoice::floor`, at minimum
+/// penetration): then the request was never a target the bit stopped short of, it was a
+/// number the stock cannot get anywhere near, and nothing about the setting is doing
+/// anything. Without this, the operator's only signal is a board-fit fault that does not
+/// move when the width does — indistinguishable, from the fault text alone, from the
+/// setting being ignored.
+pub(crate) fn floor_channel_reason(ctx: &AppState, min_width: Length, floor: Length) -> String {
+    format!(
+        "This step asks for a channel down to {}, but the finest bit in stock or rack \
+         cannot cut narrower than {} on this board — every candidate is already at its own \
+         minimum penetration. Lowering the width further will not narrow the cut. Stock a \
+         finer or steeper V-bit, or check whether the board's tightest clearance genuinely \
+         needs a channel this narrow.",
+        fmt_len(ctx, min_width),
+        fmt_len(ctx, floor),
     )
 }
 
@@ -4838,6 +5016,31 @@ mod engraver_tests {
         );
     }
 
+    /// **The milling-clearing pass is off unless it is asked for**, for the same reason and
+    /// checked the same way: unlike `remove_islands`, this costs a real tool change, so a
+    /// profile that never mentions it must not suddenly demand a milling bit in stock.
+    #[test]
+    fn clear_narrow_copper_is_off_in_the_rust_fallback_and_in_the_schema() {
+        assert!(!EngraveConfigRaw::default().clear_narrow_copper, "the Rust fallback is off");
+
+        let lines: Vec<&str> = include_str!("../../schemas/machining.yaml").lines().collect();
+        let declared = lines
+            .iter()
+            .position(|l| l.trim() == "clear_narrow_copper:")
+            .expect("the schema declares the option");
+        let default = lines[declared..]
+            .iter()
+            .take_while(|l| !l.trim().is_empty())
+            .find(|l| l.trim().starts_with("default:"))
+            .expect("and gives it a default");
+        assert_eq!(
+            default.trim(),
+            "default: false",
+            "the schema default must be off too, or a profile gains a tool change it never \
+             asked for",
+        );
+    }
+
     /// A V-bit: a tip flat of `tip_mm` on a cone of `angle_deg`.
     fn vbit(id: &str, tip_mm: f64, angle_deg: f64) -> Tool {
         // The diameter *is* the tip — the narrowest channel the bit can cut.
@@ -4931,6 +5134,30 @@ mod engraver_tests {
             PenetrationBudget { min: Length::from_nm(20_000), max: Length::from_mm(1.0) },
         );
         assert!(generous.is_some(), "the cap is what refused it, not the bit");
+    }
+
+    /// The mirror image of falling short, and the case the reported fault turned out to
+    /// be: a request narrower than any bit's own floor is still "met" — trivially, since
+    /// every bit already clears it at minimum penetration — so `fell_short_of` stays
+    /// `None` (nothing fell short of anything) even though the achieved width has nothing
+    /// to do with the request. Lowering the request further does nothing further, because
+    /// every candidate was already floored out before it was asked. This is exactly the
+    /// case `floor_channel_reason` exists to name, since `fell_short_of` cannot.
+    #[test]
+    fn a_request_narrower_than_any_floor_is_met_trivially_at_the_floor() {
+        let choice = pick(&catalogue(), 0.01).expect("every bit reaches 0.01mm trivially");
+        assert!(choice.fell_short_of.is_none(), "nothing fell short of a request this low");
+        assert!(
+            choice.floor.as_mm() > 0.01,
+            "the achieved width is pinned at the bit's own floor, not the request: {}",
+            choice.floor.as_mm(),
+        );
+        assert!(
+            (choice.width.as_mm() - choice.floor.as_mm()).abs() < 1e-9,
+            "achieved equals the floor when the request undershoots it: {} vs {}",
+            choice.width.as_mm(),
+            choice.floor.as_mm(),
+        );
     }
 
     /// The requested width is a floor, so overshoot is the thing to minimise: every micron

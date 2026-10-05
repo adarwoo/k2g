@@ -76,3 +76,36 @@ sections:
       - { type: vbit, diameter: '0.20mm', point_angle: '45deg', spindle_rpm: '18000rpm', table_feed: '450mm/min', z_feed: '110mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V45-T0.20' }
       - { type: vbit, diameter: '0.20mm', point_angle: '60deg', spindle_rpm: '16000rpm', table_feed: '500mm/min', z_feed: '120mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V60-T0.20' }
       - { type: vbit, diameter: '0.30mm', point_angle: '90deg', spindle_rpm: '14000rpm', table_feed: '500mm/min', z_feed: '150mm/min', z_min_depth: '0mm', sku_name: 'generic-Vbits-V90-T0.30' }
+
+  # Flat end mills for clearing copper directly, as distinct from the V-bits above
+  # (isolation, one bit cutting a channel that widens with depth) and the router
+  # bits (cutting all the way through the board). A flat cutter's width does not
+  # change with depth — unlike a V-bit's cone, it cuts its own diameter at any
+  # engagement — which is what lets it clear a wider area of copper in far fewer
+  # passes than the opportunistic V-bit sweep, at the cost of a rack slot.
+  # `point_angle: 180deg` is how the generator already recognises "flat, no
+  # taper": see the V-bit note above and `ToolKind`'s own doc.
+  #
+  # `z_min_depth: 0mm` for the same reason it is zero on the V-bits above: the cut
+  # this tool makes is a shallow skim through copper foil and a sliver of
+  # substrate beneath it, nowhere near what a depth rating meant for a tool
+  # plunging into stock is guarding against.
+  #
+  # Feeds assume that same light, shallow pass — not the router-bit table above,
+  # which cuts all the way through 1.6mm FR4. The lateral feed is faster than a
+  # same-diameter router bit because the engagement depth here is a fraction of a
+  # routed slot's; the plunge feed stays conservative for a small precision tip.
+  # Generic placeholders, like everything else in this file — calibrate to your
+  # own substrate, machine and tool brand before production use.
+  - name: Milling bits
+    default_flute_length_unit: mm
+    description: Flat end mills for clearing copper directly, sized for a shallow pass
+    tools:
+      - { type: engraver, diameter: '0.50mm', point_angle: '180deg', spindle_rpm: '30000rpm', table_feed:  '600mm/min', z_feed: '100mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M0.50' }
+      - { type: engraver, diameter: '0.60mm', point_angle: '180deg', spindle_rpm: '28000rpm', table_feed:  '700mm/min', z_feed: '110mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M0.60' }
+      - { type: engraver, diameter: '0.80mm', point_angle: '180deg', spindle_rpm: '26000rpm', table_feed:  '900mm/min', z_feed: '130mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M0.80' }
+      - { type: engraver, diameter: '1.00mm', point_angle: '180deg', spindle_rpm: '24000rpm', table_feed: '1100mm/min', z_feed: '150mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M1.00' }
+      - { type: engraver, diameter: '1.20mm', point_angle: '180deg', spindle_rpm: '22000rpm', table_feed: '1300mm/min', z_feed: '170mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M1.20' }
+      - { type: engraver, diameter: '1.50mm', point_angle: '180deg', spindle_rpm: '20000rpm', table_feed: '1500mm/min', z_feed: '200mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M1.50' }
+      - { type: engraver, diameter: '2.00mm', point_angle: '180deg', spindle_rpm: '17000rpm', table_feed: '1800mm/min', z_feed: '230mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M2.00' }
+      - { type: engraver, diameter: '2.50mm', point_angle: '180deg', spindle_rpm: '14000rpm', table_feed: '2000mm/min', z_feed: '250mm/min', z_min_depth: '0mm', sku_name: 'generic-Milling-M2.50' }

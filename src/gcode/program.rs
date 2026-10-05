@@ -334,8 +334,17 @@ pub fn render_step_body(
                 }
                 OpKind::RouteContour { ref path } => {
                     // The span carries its own geometry: drop in at its start, feed
-                    // through it, lift off at its end. The gap to the next span is the
-                    // retaining tab, so the retract between them is not optional.
+                    // through it, lift off at its end. The gap to the next span is
+                    // normally the retaining tab, so the retract between them is not
+                    // optional — **unless** this op continues a chain
+                    // (`AtomicOp::continues_from_previous`), in which case there is no
+                    // tab: either the previous op's cutter is already sitting exactly on
+                    // this path's first point (two pieces of one net's loop, split only
+                    // because the channel had to narrow), or it is a short, bounded hop
+                    // away (one clearing ring nested inside the one before it) — either
+                    // way lifting to a full retract would waste the one move that is
+                    // never in question, and the pieces were always going to meet, or
+                    // nearly meet, right here.
                     //
                     // The path arrives as a polyline because the routing offset is a
                     // polygon operation (`pcb::routing_offset`), so a curved board edge
@@ -344,16 +353,36 @@ pub fn render_step_body(
                     // turns those back into `G2`/`G3`. A run that no arc describes within
                     // tolerance stays exactly the chords it already was.
                     let mut moves = Vec::with_capacity(path.len() + 2);
-                    moves.push(RouteMove::Rapid {
-                        x: path[0].x,
-                        y: path[0].y,
-                        z: op.z.z_retract,
-                    });
-                    moves.push(RouteMove::Plunge {
-                        x: path[0].x,
-                        y: path[0].y,
-                        z: op.z.z_bottom,
-                    });
+                    if op.continues_from_previous {
+                        // The connector: travel (if any) plus a depth step (if any), in
+                        // one move, only if the tool is not already exactly here — most
+                        // ladder-seam transitions need neither, since the two pieces
+                        // already meet at the same point and the same depth.
+                        let already_here = op_index
+                            .checked_sub(1)
+                            .and_then(|i| block.ops.get(i))
+                            .is_some_and(|previous| {
+                                previous.exit == path[0] && previous.z.z_bottom == op.z.z_bottom
+                            });
+                        if !already_here {
+                            moves.push(RouteMove::Cut {
+                                x: path[0].x,
+                                y: path[0].y,
+                                z: op.z.z_bottom,
+                            });
+                        }
+                    } else {
+                        moves.push(RouteMove::Rapid {
+                            x: path[0].x,
+                            y: path[0].y,
+                            z: op.z.z_retract,
+                        });
+                        moves.push(RouteMove::Plunge {
+                            x: path[0].x,
+                            y: path[0].y,
+                            z: op.z.z_bottom,
+                        });
+                    }
                     let mut here = path[0];
                     for seg in arcfit::fit(path, render.curve_tolerance) {
                         match seg {
@@ -372,8 +401,15 @@ pub fn render_step_body(
                         }
                         here = seg.end();
                     }
-                    let last = path[path.len() - 1];
-                    moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
+                    // Skip the retract when the *next* op continues from this one — the
+                    // tool stays down for it, the same way the leading rapid/plunge was
+                    // skipped above.
+                    let next_continues =
+                        block.ops.get(op_index + 1).is_some_and(|next| next.continues_from_previous);
+                    if !next_continues {
+                        let last = path[path.len() - 1];
+                        moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
+                    }
                     out.push_str(&render_moves(coder, render, moves, path[0], fs)?);
                 }
                 OpKind::RouteSlot { width, from_solid } => {
@@ -776,6 +812,7 @@ mod tests {
             },
             primitive: "drill",
             source: "h1".to_string(),
+            continues_from_previous: false,
         }
     }
 
@@ -818,6 +855,7 @@ mod tests {
                     },
                     primitive: "route_contour",
                     source: "outline".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -849,6 +887,7 @@ mod tests {
                     },
                     primitive: "route_hole",
                     source: "h1".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -991,6 +1030,7 @@ mod tests {
             },
             primitive: "route_contour",
             source: source.to_string(),
+            continues_from_previous: false,
         };
         StepPlan {
             index: 0,
@@ -1207,6 +1247,7 @@ mod tests {
                     },
                     primitive: "route_contour",
                     source: "outer#0.span0".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -1292,6 +1333,7 @@ mod tests {
                     },
                     primitive: "route_hole",
                     source: "h1".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -1334,6 +1376,7 @@ mod tests {
                     },
                     primitive: "route_slot",
                     source: "slot1".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -1380,6 +1423,7 @@ mod tests {
                     },
                     primitive: "route_contour",
                     source: "outer#0.span0".to_string(),
+                    continues_from_previous: false,
                 }],
                 travel_mm: 0.0,
                 verify_stop: None,
@@ -1394,6 +1438,144 @@ mod tests {
         assert_eq!(lines[cut + 2], "G1 X10 Y0 Z-2.1 F600");
         assert_eq!(lines[cut + 3], "G1 X10 Y5 Z-2.1 F600", "every vertex is cut through");
         assert_eq!(lines[cut + 4], "G0 X10 Y5 Z5", "lifts off, leaving the tab uncut");
+    }
+
+    /// A three-op block: an ordinary op, a same-depth chained continuation of it, and an
+    /// ordinary op again. The chained op must show up with no lead-in and (because
+    /// nothing continues from *it*) a normal lift-off; the op before it must show no
+    /// lift-off of its own (because the chained op continues from it); the op after must
+    /// be entirely ordinary, since nothing marks it as continuing anything.
+    fn contour_op(
+        path: Vec<Point>,
+        z_bottom: f64,
+        source: &str,
+        continues_from_previous: bool,
+    ) -> AtomicOp {
+        AtomicOp {
+            phase: Phase::Engrave,
+            kind: OpKind::RouteContour { path: path.clone() },
+            tool_id: "r1".to_string(),
+            entry: path[0],
+            exit: path[path.len() - 1],
+            z: ZProfile {
+                z_bottom: Length::from_mm(z_bottom),
+                z_retract: Length::from_mm(5.0),
+                z_feed: None,
+            },
+            primitive: "route_contour",
+            source: source.to_string(),
+            continues_from_previous,
+        }
+    }
+
+    fn xy(x: f64, y: f64) -> Point {
+        Point::new(Length::from_mm(x), Length::from_mm(y))
+    }
+
+    fn chained_step(ops: Vec<AtomicOp>) -> StepPlan {
+        StepPlan {
+            index: 0,
+            name: "Engrave".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(1),
+                diameter: Length::from_mm(1.0),
+                ops,
+                travel_mm: 0.0,
+                verify_stop: None,
+            }],
+            notes: vec![],
+        }
+    }
+
+    /// The seam a same-net chain shares no retract across, and nowhere else does: the
+    /// op before a continuation does not lift off, the continuation itself does not drop
+    /// in, and — since nothing continues from it — the continuation still lifts off
+    /// normally at its own end. A same-depth transition adds no move of its own.
+    #[test]
+    fn a_chained_op_shares_no_retract_with_the_one_before_it() {
+        let coder = Coder::new();
+        let step = chained_step(vec![
+            contour_op(vec![xy(0.0, 0.0), xy(1.0, 0.0)], -0.1, "N#0", false),
+            contour_op(vec![xy(1.0, 0.0), xy(1.0, 1.0)], -0.1, "N#1", true),
+            contour_op(vec![xy(5.0, 5.0), xy(6.0, 5.0)], -0.1, "M#0", false),
+        ]);
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        let start = lines.iter().position(|l| l.starts_with("G0 X0 Y0 Z5")).expect("first op's lead-in");
+        assert_eq!(
+            &lines[start..start + 5],
+            &[
+                "G0 X0 Y0 Z5",         // op0's own lead-in rapid
+                "G1 Z-0.1 F200",       // op0's own plunge
+                "G1 X1 Y0 Z-0.1 F600", // op0's cut
+                "G1 X1 Y1 Z-0.1 F600", // op1 continues straight in: no rapid, no plunge,
+                // and no Z-step move since the depth did not change
+                "G0 X1 Y1 Z5", // op1's own lift-off: op2 does not continue from it
+            ],
+            "got:\n{body}",
+        );
+        assert_eq!(
+            lines[start + 5..start + 5 + 3],
+            ["G0 X5 Y5 Z5", "G1 Z-0.1 F200", "G1 X6 Y5 Z-0.1 F600"],
+            "op2 is entirely ordinary: its own lead-in, unaffected by the chain before it",
+        );
+    }
+
+    /// A chained transition between two different depths — the ladder narrowing right at
+    /// the seam — steps Z at the shared point rather than retracting: a real move, not a
+    /// silent jump, but not a lift-and-replunge either.
+    #[test]
+    fn a_chained_transition_to_a_different_depth_steps_z_in_place() {
+        let coder = Coder::new();
+        let step = chained_step(vec![
+            contour_op(vec![xy(0.0, 0.0), xy(1.0, 0.0)], -0.1, "N#0", false),
+            contour_op(vec![xy(1.0, 0.0), xy(1.0, 1.0)], -0.15, "N#1", true),
+        ]);
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        let cut = lines.iter().position(|l| l.starts_with("G1 X1 Y0 Z-0.1")).expect("op0's cut");
+        assert_eq!(
+            &lines[cut + 1..cut + 3],
+            &[
+                "G1 X1 Y0 Z-0.15 F600", // the Z step, in place, at the new depth
+                "G1 X1 Y1 Z-0.15 F600", // then op1's own cut, at that same depth
+            ],
+            "got:\n{body}",
+        );
+    }
+
+    /// A nested clearing ring, unlike a ladder seam: the previous ring's own exit (a
+    /// closed ring exits where it entered) and this ring's start are genuinely different
+    /// points, a short hop apart. The connector must carry the real XY travel, not just a
+    /// same-point Z step — this is the case `ring_chains`/`rotate_ring_to_nearest`
+    /// (`src/runtime/machining_plan.rs`) build for one island's own nested rings.
+    #[test]
+    fn a_chained_ring_a_real_hop_away_gets_a_travelling_connector() {
+        let coder = Coder::new();
+        // op0: a closed 1x1 square ring, entering and exiting at (5,5).
+        let ring0 = vec![xy(5.0, 5.0), xy(6.0, 5.0), xy(6.0, 6.0), xy(5.0, 6.0), xy(5.0, 5.0)];
+        // op1: the next ring in, starting at (5.2, 5.2) — a real hop from (5,5), same depth.
+        let ring1 =
+            vec![xy(5.2, 5.2), xy(5.8, 5.2), xy(5.8, 5.8), xy(5.2, 5.8), xy(5.2, 5.2)];
+        let op0 = contour_op(ring0, -0.1, "island 1#0", false);
+        let op1 = contour_op(ring1, -0.1, "island 1#1", true);
+        let step = chained_step(vec![op0, op1]);
+
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+
+        let last_of_op0 = lines
+            .iter()
+            .position(|l| l.starts_with("G1 X5 Y5 Z-0.1"))
+            .expect("op0 closes its own loop back to (5,5)");
+        assert_eq!(
+            lines[last_of_op0 + 1],
+            "G1 X5.2 Y5.2 Z-0.1 F600",
+            "the connector carries the real hop to op1's start, not a same-point step:\n{body}",
+        );
     }
 
     /// The router used by the routing tests: 600 mm/min rated at a reachable speed, so

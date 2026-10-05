@@ -63,6 +63,11 @@ pub const APP_STYLE: &str = r#"
        theme the way the shadow of a groove follows the surface it is cut into. */
     --iso-path: #4ea3ff;
     --iso-groove: color-mix(in srgb, var(--bg) 45%, black);
+    /* The milling-clearing pass, fixed for the same reason `--iso-path` is: it is always the
+       step's second block when it runs at all — right after the isolation bit's own — so
+       this is `scene::tool_colour(1)` written out, the colour the 3D view and its legend
+       already draw that block in. */
+    --clearing-path: #ffb648;
 }
 
 .theme-light {
@@ -3314,7 +3319,7 @@ th {
     background: color-mix(in srgb, var(--warn) 20%, transparent);
 }
 
-.tool-type-engraving {
+.tool-type-milling {
     color: var(--err);
     background: color-mix(in srgb, var(--err) 18%, transparent);
 }
@@ -4008,6 +4013,16 @@ th {
        the same blue the 3D view draws the pass in and the same swatch its legend shows. One
        tool, one colour, whichever view is open. */
     stroke: var(--iso-path);
+    stroke-width: 0.8;
+    vector-effect: non-scaling-stroke;
+    opacity: 0.85;
+}
+
+.board-clearing-centerline {
+    fill: none;
+    /* A dedicated mill, not the isolation bit — a different tool cutting a different block,
+       so it earns a different colour rather than reading as part of the same pass. */
+    stroke: var(--clearing-path);
     stroke-width: 0.8;
     vector-effect: non-scaling-stroke;
     opacity: 0.85;

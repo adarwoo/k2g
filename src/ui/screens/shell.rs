@@ -272,6 +272,7 @@ pub fn UpdateBanner(state: Signal<crate::runtime::AppCtx>) -> Element {
         return rsx! {};
     };
     let installing = snapshot.update_installing;
+    let launched = snapshot.update_installer_launched;
 
     let current = env!("CARGO_PKG_VERSION");
     let version = update.version.clone();
@@ -298,7 +299,9 @@ pub fn UpdateBanner(state: Signal<crate::runtime::AppCtx>) -> Element {
                     div { class: "diag-banner-copy",
                         div { class: "diag-banner-title", "k2g {version} is available" }
                         div { class: "diag-banner-subtitle",
-                            if installing {
+                            if launched {
+                                "Installer started — close k2g to let it finish."
+                            } else if installing {
                                 "Downloading and checking the signature…"
                             } else if headline.is_empty() {
                                 "You are running {current}. The installer is signature-checked before it runs."
@@ -325,6 +328,11 @@ pub fn UpdateBanner(state: Signal<crate::runtime::AppCtx>) -> Element {
                                     match outcome {
                                         Ok(()) => {
                                             crate::runtime::with_ctx_mut(|ctx| {
+                                                // The toast fades in a few seconds — easily gone
+                                                // before an MSI wizard is clicked through to
+                                                // Finish. This flag is what keeps the banner
+                                                // itself saying so for as long as k2g stays open.
+                                                ctx.app.update_installer_launched = true;
                                                 ctx.log_event(
                                                     "Installer verified and started — close k2g to let it finish.",
                                                 );

@@ -4,12 +4,10 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::warn;
+use log::{info, warn};
 
 use pcb::{BoardSnapshot, KiCad, StitchResult};
-use crate::catalog_io::{
-    backfill_catalog_fields, ensure_default_files, normalize_catalog_fields,
-};
+use crate::catalog_io::{canonicalize_catalog_text, normalize_catalog_fields};
 use crate::catalog_io::yaml_service::parse_yaml_with_schema;
 use crate::data::model::catalog::{catalog_dir, default_catalogs, Catalog, CatalogManager};
 use crate::data::model::state::RackSlot;
@@ -248,6 +246,16 @@ pub struct AppState {
     /// An install is downloading and verifying. Holds the banner's buttons shut so a
     /// second click cannot start a second download over the first.
     pub update_installing: bool,
+    /// The verified installer has been handed to the OS and is running outside k2g.
+    ///
+    /// In-memory only, like [`Self::available_update`]. Distinct from
+    /// `update_installing`, which that field's own doc names as covering only
+    /// "downloading and verifying" — once the installer is actually running, nothing
+    /// in this session can do anything further but wait to be closed, and the banner
+    /// needs to say so plainly rather than leave its last in-flight message
+    /// ("Downloading and checking the signature…") standing after the one-shot toast
+    /// that announced this has already faded.
+    pub update_installer_launched: bool,
 }
 
 include!("state.rs");

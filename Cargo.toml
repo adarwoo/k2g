@@ -5,7 +5,7 @@ name = "k2g"
 # (seeded from CARGO_PKG_* by `build.rs`) and the crate metadata all read this one
 # value. `build.rs` warns when it falls behind the newest `vX.Y.Z-*` git tag, which is
 # how it reached 0.10.0 having sat at 0.1.0 through nine of them.
-version = "0.15.0"
+version = "0.16.0"
 edition = "2021"
 description = "GCode generator"
 authors = ["Bill Arreckx <software@arreckx.com>"]
@@ -86,14 +86,14 @@ serde_yaml = "0.9"
 # plus `rustls-platform-verifier` and the C/assembly `aws-lc-sys`. That is a new
 # native build dependency and a second set of trust decisions, in service of a code
 # path this application has deliberately disabled.
-jsonschema = { version = "0.50", default-features = false }
+jsonschema = { version = "0.56", default-features = false }
 log = "0.4"
 image = "0.25"
 base64 = "0.23"
 rfd = "0.17"
 # Resolves the host's default save location (Windows Downloads known folder,
 # XDG_DOWNLOAD_DIR on Linux) for the first G-code save.
-dirs = "6"
+dirs = "7"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 uuid = { version = "1", features = ["v5", "v7"] }
 dioxus-logger = "0.7.9"

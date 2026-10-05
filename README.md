@@ -1,21 +1,13 @@
 # K2G — KiCad to GCode
 
-**You design in KiCad, you have a CNC, you're 3 clicks away from making the board!**
+**You design in KiCad, you have a CNC, you're 3 clicks away from making your board!**<br/><br/>
 K2G reads the board open in KiCad and writes the
 GCode that drills and cuts it out: holes, oblong slots, board outline with breakaway
 tabs.
 <img width="2782" height="1588" alt="image" src="https://github.com/user-attachments/assets/979820d6-90e4-4c69-a53d-b3b2a9cabea6" />
 
-It is not a generic CAM package. It knows what a PCB is — plated and non-plated holes,
-pad stacks, board outline, cutouts — and what your machine is, so the questions it asks
-are about *machining a board*, not about polygons and offsets.
-
-Written in Rust. Runs as a desktop application beside KiCad and talks to it live over
-KiCad's IPC API, so there are no Gerber or Excellon files to export and re-import: edit
-the board, hit refresh, get a new program.
-
-![k2g in use — the board in KiCad, then the generated program, tooling, rack schedule, drill map and 3D toolpath]
-(https://raw.githubusercontent.com/adarwoo/k2g/main/assets/media/k2g-tour.gif)
+It is not a generic CAM package! - it knows what a PCB is!
+And it's fully integrated with your KiCAD instance.
 
 <sub>A board in KiCad, then k2g: the generated program, the tooling and rack schedule,
 the drill map, the toolpath in 3D, and the profiles that drive it.</sub>
@@ -214,6 +206,11 @@ hand. Details in [PRIVACY.md](PRIVACY.md).
 **On multiple KiCad instances:** KiCad serves one fixed API socket, and running instances
 are not individually addressable over it. With several KiCads open, k2g talks to whichever
 one owns the socket.
+
+## Implementation details
+Written in Rust. Runs as a desktop application beside KiCad and talks to it live over
+KiCad's IPC API, so there are no Gerber or Excellon files to export and re-import: edit
+the board, hit refresh, get a new program.
 
 ## Documentation
 

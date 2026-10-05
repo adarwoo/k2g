@@ -183,7 +183,7 @@ enum StockTypeFilter {
     Drill,
     Router,
     VBit,
-    Engraving,
+    Milling,
 }
 
 impl StockTypeFilter {
@@ -192,7 +192,7 @@ impl StockTypeFilter {
             "drill" => Self::Drill,
             "router" => Self::Router,
             "vbit" => Self::VBit,
-            "engraving" => Self::Engraving,
+            "milling" => Self::Milling,
             _ => Self::All,
         }
     }
@@ -203,7 +203,7 @@ impl StockTypeFilter {
             Self::Drill => "drill",
             Self::Router => "router",
             Self::VBit => "vbit",
-            Self::Engraving => "engraving",
+            Self::Milling => "milling",
         }
     }
 
@@ -213,7 +213,7 @@ impl StockTypeFilter {
             Self::Drill => stock_tool_type_label(kind) == "Drill",
             Self::Router => stock_tool_type_label(kind) == "Router",
             Self::VBit => stock_tool_type_label(kind) == "V-bit",
-            Self::Engraving => stock_tool_type_label(kind) == "Engraving",
+            Self::Milling => stock_tool_type_label(kind) == "Milling",
         }
     }
 }
@@ -365,7 +365,7 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                             option { value: "drill", "Drill" }
                             option { value: "router", "Router" }
                             option { value: "vbit", "V-bit" }
-                            option { value: "engraving", "Engraving" }
+                            option { value: "milling", "Milling" }
                         }
                         // Where the sort dropdown was. Sorting moved to the headers, which
                         // is where a table is sorted — leaving this spot for the one thing
@@ -999,7 +999,9 @@ fn stock_tool_type_label(kind: &str) -> &'static str {
     if normalized.contains("drill") {
         "Drill"
     } else if normalized.contains("engrav") {
-        "Engraving"
+        // The wire value stays "engraver" (see `ToolKind`'s doc) — only the label
+        // shown here changed, so this still matches every already-saved stock.yaml.
+        "Milling"
     } else if normalized.contains("v-bit") || normalized == "v" || normalized.starts_with('v') {
         "V-bit"
     } else {
@@ -1012,7 +1014,7 @@ fn stock_tool_type_class(kind: &str) -> &'static str {
         "Drill" => "tool-type-drill",
         "Router" => "tool-type-router",
         "V-bit" => "tool-type-vbit",
-        "Engraving" => "tool-type-engraving",
+        "Milling" => "tool-type-milling",
         _ => "tool-type-router",
     }
 }
@@ -1022,7 +1024,7 @@ fn stock_tool_type_rank(kind: &str) -> u8 {
         "Drill" => 0,
         "Router" => 1,
         "V-bit" => 2,
-        "Engraving" => 3,
+        "Milling" => 3,
         _ => 4,
     }
 }
@@ -1055,7 +1057,7 @@ fn catalog_tool_type(tool: &CatalogStockTool) -> &'static str {
     if lower_name.contains("v-bit") || lower_name.starts_with('v') {
         "V-bit"
     } else if lower_name.contains("engrav") {
-        "Engraving"
+        "Milling"
     } else if lower_name.contains("mill") || lower_name.contains("end") {
         "Router"
     } else {

@@ -167,6 +167,7 @@ pub fn plan_drilling(
                         },
                         primitive: "drill",
                         source: p.source.clone(),
+                        continues_from_previous: false,
                     }
                 })
                 .collect();
@@ -292,6 +293,7 @@ pub fn plan_routing(
                             z_feed: None,
                         },
                         source: p.source.clone(),
+                        continues_from_previous: false,
                     }
                 })
                 .collect();
@@ -375,6 +377,7 @@ pub fn plan_outline(
                 z: ZProfile { z_bottom, z_retract, z_feed: None },
                 primitive: "route_contour",
                 source: span.source.clone(),
+                continues_from_previous: false,
             }
         }));
 
@@ -433,7 +436,18 @@ pub struct TestCut {
     pub stop: VerifyStop,
 }
 
-/// Plans the isolation pass: one block for the engraver, its spans ordered by travel.
+/// A group of [`EngraveSpan`]s that must be cut back-to-back with no retract between
+/// them, in this fixed order — same-net pieces the isolation ladder split apart only
+/// because the channel had to narrow, reassembled by
+/// [`plan_engrave_spans`](crate::runtime::machining_plan::plan_engrave_spans) (they
+/// meet at an exact, verified-coincident point, never guessed and never across nets).
+///
+/// A span with nothing to chain it to — the overwhelmingly common case — is simply a
+/// chain of one: [`plan_engrave`] treats every chain identically, so today's
+/// independent-per-span behaviour is the degenerate case, not a separate code path.
+pub type EngraveChain = Vec<EngraveSpan>;
+
+/// Plans the isolation pass: one block for the engraver, its chains ordered by travel.
 ///
 /// One block, because one bit cuts all of it and the step should pay a single tool change
 /// however many nets the board has. `None` when there is nothing to cut, so no empty block
@@ -452,6 +466,17 @@ pub struct TestCut {
 /// Entry stays at `path[0]`. A closed loop could be entered anywhere, and choosing where
 /// is a real travel saving — and a separate piece of work from getting the cut right.
 ///
+/// ## Chains
+///
+/// A [`EngraveChain`] is toured as **one unit**: TSP runs over one representative point
+/// per chain (its first member's entry), and a chosen chain's members are always emitted
+/// in their given order, never reordered against each other. Every member after the
+/// first is marked [`AtomicOp::continues_from_previous`], which tells the renderer to
+/// skip the retract/re-plunge between them — see `program.rs`'s `OpKind::RouteContour`
+/// handling. A chain's own internal order is the chain-builder's responsibility, not
+/// this function's: by the time a chain arrives here, it is already exactly the sequence
+/// the cutter must walk.
+///
 /// ## The test cut
 ///
 /// `test_cut` leads the block, at `ops[0]`, **outside the tour** — the tour then runs from
@@ -465,7 +490,7 @@ pub struct TestCut {
 /// and then engraves nothing is worse than one that never stopped: the operator has answered a
 /// question about a board that is not going to be cut.
 pub fn plan_engrave(
-    spans: &[EngraveSpan],
+    chains: &[EngraveChain],
     test_cut: Option<TestCut>,
     tool_id: &str,
     tool_diameter: Length,
@@ -473,23 +498,32 @@ pub fn plan_engrave(
     start: Point,
     slots: &BTreeMap<String, u8>,
 ) -> Option<ToolBlock> {
-    let usable: Vec<&EngraveSpan> = spans.iter().filter(|s| s.path.len() >= 2).collect();
+    // Usable members only, per chain — dropping a degenerate (single-point) member keeps
+    // the rest of its chain intact rather than discarding the whole thing.
+    let usable: Vec<Vec<&EngraveSpan>> = chains
+        .iter()
+        .map(|chain| chain.iter().filter(|s| s.path.len() >= 2).collect::<Vec<_>>())
+        .filter(|chain| !chain.is_empty())
+        .collect();
     if usable.is_empty() {
         return None;
     }
 
-    // The spans are toured from wherever the test cut left the tool, so the L costs one lead-in
-    // hop and no detour. `travel_mm` gains that hop and nothing else: `route_length` tours
-    // *entries*, so it already leaves out every contour's own perimeter, and counting the L's
-    // legs would make it the one op whose cutting distance was included.
+    // The chains are toured from wherever the test cut left the tool, so the L costs one
+    // lead-in hop and no detour. `travel_mm` gains that hop and nothing else: `route_length`
+    // tours *entries*, so it already leaves out every contour's own perimeter, and counting
+    // the L's legs would make it the one op whose cutting distance was included.
     let from = test_cut.as_ref().map_or(start, |t| t.path[2]);
     let lead_mm = test_cut.as_ref().map_or(0.0, |t| start.distance_mm(&t.path[0]));
 
-    let entries: Vec<Point> = usable.iter().map(|s| s.path[0]).collect();
+    // One entry point per chain: it is toured as a single unit, so only where the *chain*
+    // sits in the tour is TSP's to decide.
+    let entries: Vec<Point> = usable.iter().map(|chain| chain[0].path[0]).collect();
     let order = tsp_order(from, &entries);
     let travel_mm = lead_mm + route_length(from, &entries, &order);
 
-    let mut ops: Vec<AtomicOp> = Vec::with_capacity(usable.len() + 1);
+    let op_count: usize = usable.iter().map(Vec::len).sum();
+    let mut ops: Vec<AtomicOp> = Vec::with_capacity(op_count + 1);
     if let Some(test) = test_cut.as_ref() {
         ops.push(AtomicOp {
             phase: Phase::Engrave,
@@ -500,13 +534,12 @@ pub fn plan_engrave(
             z: ZProfile { z_bottom: test.z_bottom, z_retract, z_feed: None },
             primitive: "route_contour",
             source: "Depth test cut".to_string(),
+            continues_from_previous: false,
         });
     }
 
-    ops.extend(order
-        .iter()
-        .map(|&i| {
-            let span = usable[i];
+    for &chain_index in &order {
+        for (member_index, span) in usable[chain_index].iter().enumerate() {
             let mut path = span.path.clone();
             // Close the loop. The geometry stores a ring as its distinct vertices, so the
             // segment from the last back to the first is implied — and an implied cut is
@@ -515,7 +548,7 @@ pub fn plan_engrave(
                 path.push(path[0]);
             }
             let exit = path[path.len() - 1];
-            AtomicOp {
+            ops.push(AtomicOp {
                 phase: Phase::Engrave,
                 kind: OpKind::RouteContour { path },
                 tool_id: tool_id.to_string(),
@@ -524,8 +557,10 @@ pub fn plan_engrave(
                 z: ZProfile { z_bottom: span.z_bottom, z_retract, z_feed: None },
                 primitive: "route_contour",
                 source: span.source.clone(),
-            }
-        }));
+                continues_from_previous: member_index > 0,
+            });
+        }
+    }
 
     Some(ToolBlock {
         slot: slots.get(tool_id).copied(),
@@ -1188,9 +1223,16 @@ mod engrave_tests {
         block_with(spans, None)
     }
 
+    /// Every span its own chain of one — the degenerate case these tests exercise;
+    /// `chained_block` below is for tests about multi-member chains specifically.
     fn block_with(spans: &[EngraveSpan], test_cut: Option<TestCut>) -> Option<ToolBlock> {
+        let chains: Vec<EngraveChain> = spans.iter().cloned().map(|s| vec![s]).collect();
+        chained_block(&chains, test_cut)
+    }
+
+    fn chained_block(chains: &[EngraveChain], test_cut: Option<TestCut>) -> Option<ToolBlock> {
         plan_engrave(
-            spans,
+            chains,
             test_cut,
             "v1",
             Length::from_mm(3.175),
@@ -1357,6 +1399,53 @@ mod engrave_tests {
             tested.travel_mm,
             plain.travel_mm,
         );
+    }
+
+    /// **A chain is one visiting unit.** Its members must come out in exactly the order
+    /// given — never re-sorted against each other, however travel-optimal that would be —
+    /// and only the first of them opens with a lead-in; every other member carries
+    /// [`AtomicOp::continues_from_previous`], which is what lets the renderer skip the
+    /// retract between them (see `program.rs`).
+    #[test]
+    fn a_chains_members_are_emitted_in_order_and_marked_as_continuations() {
+        // Deliberately laid out so TSP would visit member 2 before member 1 if it were
+        // ever allowed to reorder them independently — member 2 is nearer the tour start.
+        let member1 = span("N#0", vec![pt(10.0, 10.0), pt(10.0, 11.0)], false, -0.1);
+        let member2 = span("N#1", vec![pt(10.0, 11.0), pt(0.0, 11.0)], false, -0.1);
+        let chain: EngraveChain = vec![member1, member2];
+
+        let block = chained_block(&[chain], None).expect("one chain, one block");
+        assert_eq!(block.ops.len(), 2);
+        assert_eq!(block.ops[0].source, "N#0", "the first member leads");
+        assert_eq!(block.ops[1].source, "N#1", "and the second follows it, never swapped");
+        assert!(!block.ops[0].continues_from_previous, "a chain's first member opens normally");
+        assert!(block.ops[1].continues_from_previous, "every member after it continues");
+    }
+
+    /// TSP orders **chains**, not their individual members — a two-member chain is one
+    /// stop on the tour, chosen (and only chosen) by where its first member starts.
+    #[test]
+    fn chains_are_toured_as_single_units() {
+        let near: EngraveChain = vec![span("near#0", vec![pt(1.0, 0.0), pt(2.0, 0.0)], false, -0.1)];
+        let far_chain: EngraveChain = vec![
+            span("far#0", vec![pt(50.0, 0.0), pt(51.0, 0.0)], false, -0.1),
+            span("far#1", vec![pt(51.0, 0.0), pt(52.0, 0.0)], false, -0.1),
+        ];
+
+        // Presented far-chain-first; starting at the origin, the near chain must still be
+        // visited first, and the far chain's own two members must stay adjacent and in order.
+        let block = chained_block(&[far_chain, near], None).expect("two chains");
+        let sources: Vec<&str> = block.ops.iter().map(|op| op.source.as_str()).collect();
+        assert_eq!(sources, vec!["near#0", "far#0", "far#1"], "got {sources:?}");
+    }
+
+    /// A chain of one — the overwhelmingly common case, a net that never had to narrow —
+    /// behaves exactly like an ordinary independent span: no continuation flag, normal
+    /// lead-in and lift-off. Today's behaviour is the degenerate case, not a special one.
+    #[test]
+    fn a_singleton_chain_is_indistinguishable_from_an_ordinary_span() {
+        let block = block(&[span("GND", square(), true, -0.1)]).expect("one span");
+        assert!(!block.ops[0].continues_from_previous);
     }
 }
 

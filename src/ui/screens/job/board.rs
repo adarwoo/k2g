@@ -751,6 +751,14 @@ struct IsolationSvg {
     /// The flat at the bottom of the groove, in view units; zero for a flat-ended tool, whose
     /// bottom *is* its channel.
     tip_units: f64,
+    /// Free copper a dedicated milling cutter took out, merged into one path — empty when
+    /// the step does not run the pass. Kept apart from `channels` because it is a different
+    /// tool at a different, single width: folding it into that width-keyed map would need a
+    /// `narrowed` flag that means nothing here, since this pass has no ladder to squeeze.
+    clearing_d: String,
+    /// The milling cutter's own diameter, in view units. Zero (and `clearing_d` empty) when
+    /// the pass did not run.
+    clearing_width_units: f64,
 }
 
 /// What the isolation render is derived from, identified cheaply.
@@ -797,6 +805,25 @@ fn isolation_input(ctx: &AppCtx) -> Option<IsolationInput> {
     Some(IsolationInput { target, held, bbox: (bbox.x.as_mm(), bbox.y.as_mm(), width, height) })
 }
 
+/// One chain of nested clearing rings as the single open path the cutter actually walks.
+///
+/// Each ring contributes its own vertices plus a repeat of its first — the closing edge
+/// `pcb`'s geometry leaves implied — and the step from that repeat to the next ring's first
+/// vertex *is* the connector, cut at depth across ground the pass has already cleared. So
+/// the whole chain is one unbroken subpath, which is the point: drawn as separate closed
+/// loops it is indistinguishable from a path that retracts between every ring, and that is
+/// motion this program does not contain (`gcode::program`'s `continues_from_previous`).
+///
+/// Rings too degenerate to draw are skipped rather than breaking the chain around them.
+fn chain_path(rings: &[Vec<(i64, i64)>]) -> Vec<(i64, i64)> {
+    let mut out = Vec::new();
+    for ring in rings.iter().filter(|ring| ring.len() >= 3) {
+        out.extend_from_slice(ring);
+        out.push(ring[0]);
+    }
+    out
+}
+
 /// The isolation contours as paths, mapped into the view the way the copper is.
 ///
 /// **The channels are what the tool sweeps, not what it traces.** A round tool run along a
@@ -839,14 +866,35 @@ fn build_isolation_svg(input: &IsolationInput) -> Option<IsolationSvg> {
     // depth, not a narrowed stretch — so they join that rung rather than getting a group of
     // their own. Stroked, the concentric rings union into the cleared island, which is exactly
     // what `pcb::clearing::fill` laid them out to do.
-    for ring in &held.clearing.paths {
-        if ring.len() < 3 {
+    //
+    // Drawn a whole chain at a time, in `pcb::Clearing::chains`' own order, because that is
+    // what the machine really does: one drop-in per island, then inward from ring to ring
+    // across ground already cleared, never lifting. Ring-at-a-time — as this drew them until
+    // an operator quite reasonably read the picture as a retract between every ring — a single
+    // continuous pass looked like a stack of unrelated loops.
+    for rings in held.clearing.chains() {
+        let path = chain_path(&rings);
+        if path.is_empty() {
             continue;
         }
-        append(by_width.entry(input.target.spec.width_nm).or_default(), ring, true);
-        append(&mut centrelines, ring, true);
+        append(by_width.entry(input.target.spec.width_nm).or_default(), &path, false);
+        append(&mut centrelines, &path, false);
     }
-    if by_width.is_empty() {
+
+    // The dedicated mill's own rings, kept out of `by_width`: a different tool, at a width
+    // that has no relationship to the isolation channel's, so grouping it in there would
+    // make `narrowed` (which means "the isolation ladder squeezed here") answer a question
+    // this pass never asks.
+    let mut clearing_d = String::new();
+    for rings in held.mill_clearing.chains() {
+        let path = chain_path(&rings);
+        if path.is_empty() {
+            continue;
+        }
+        append(&mut clearing_d, &path, false);
+    }
+
+    if by_width.is_empty() && clearing_d.is_empty() {
         return None;
     }
 
@@ -872,6 +920,9 @@ fn build_isolation_svg(input: &IsolationInput) -> Option<IsolationSvg> {
         } else {
             input.target.tip.as_mm() * units_per_mm
         },
+        clearing_width_units: (input.target.spec.clearing_mill_diameter_nm as f64 / 1e6)
+            * units_per_mm,
+        clearing_d,
     })
 }
 
@@ -953,6 +1004,37 @@ fn isolation_legend(
         }
     } else {
         facts.push("Island trimming is off for this step.".to_string());
+    }
+
+    // The dedicated mill, said the same way: what it took, and what it could not reach.
+    if target.clears_narrow_copper {
+        match target.clearing_tool_label.as_deref() {
+            Some(tool_label) => {
+                let mill = &held.mill_clearing;
+                facts.push(format!(
+                    "{tool_label} clears free copper below {}.",
+                    len(target.clearing_threshold),
+                ));
+                if mill.removed > 0 {
+                    facts.push(format!(
+                        "{} piece(s) of free copper cleared by the mill.",
+                        mill.removed,
+                    ));
+                }
+                if mill.unreachable > 0 {
+                    facts.push(format!(
+                        "{} piece(s) too narrow for the mill to enter, the widest {}.",
+                        mill.unreachable,
+                        len(Length::from_mm(mill.widest_unreachable_nm as f64 / 1e6)),
+                    ));
+                }
+            }
+            None => facts.push(format!(
+                "No milling bit in stock is narrow enough to clear copper below {} — the \
+                 pass is skipped.",
+                len(target.clearing_threshold),
+            )),
+        }
     }
 
     let note = "Channels are cut to scale, so the copper shown is the copper the board is \
@@ -1543,6 +1625,11 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                 if !iso.centrelines.is_empty() {
                     path { d: "{iso.centrelines}", class: "board-iso-centerline" }
                 }
+                // The dedicated mill's own centre — a different colour, since it is a
+                // different tool cutting a block of its own, not a rung of the same ladder.
+                if !iso.clearing_d.is_empty() {
+                    path { d: "{iso.clearing_d}", class: "board-clearing-centerline" }
+                }
             }
         })
     };
@@ -1828,6 +1915,18 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                                         fill: "none",
                                                                         stroke: "black",
                                                                         stroke_width: "{group.width_units}",
+                                                                        stroke_linecap: "round",
+                                                                        stroke_linejoin: "round",
+                                                                    }
+                                                                }
+                                                                // The dedicated mill's own copper, taken out the same way — one
+                                                                // more stroke in the same mask, since it is absent copper too.
+                                                                if !iso.clearing_d.is_empty() {
+                                                                    path {
+                                                                        d: "{iso.clearing_d}",
+                                                                        fill: "none",
+                                                                        stroke: "black",
+                                                                        stroke_width: "{iso.clearing_width_units}",
                                                                         stroke_linecap: "round",
                                                                         stroke_linejoin: "round",
                                                                     }
@@ -2260,6 +2359,34 @@ mod tests {
         }
     }
 
+    /// An island's rings are one continuous cut, so they have to be one continuous path:
+    /// every ring closed back to its own start, and the step from there to the next ring's
+    /// start left in as the connector the tool really cuts. Drawn as separate closed loops
+    /// — which is what this did until an operator read the picture as a retract between
+    /// every ring — the preview cannot show the pass it is previewing.
+    #[test]
+    fn a_chain_of_rings_draws_as_one_unbroken_path() {
+        let outer = vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000), (0, 1_000_000)];
+        let inner = vec![(200_000, 200_000), (800_000, 200_000), (800_000, 800_000), (200_000, 800_000)];
+
+        let path = chain_path(&[outer.clone(), inner.clone()]);
+
+        assert_eq!(path.len(), 10, "four vertices and a closing repeat, twice: {path:?}");
+        assert_eq!(&path[..5], &[(0, 0), (1_000_000, 0), (1_000_000, 1_000_000), (0, 1_000_000), (0, 0)]);
+        assert_eq!(path[4], outer[0], "the outer ring closes back to its own start");
+        assert_eq!(path[5], inner[0], "and the very next step is the connector into the inner ring");
+        assert_eq!(path[9], inner[0], "which then closes too");
+    }
+
+    /// A ring too degenerate to draw is skipped without breaking the chain around it.
+    #[test]
+    fn a_degenerate_ring_does_not_break_its_chain() {
+        let ring = vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000)];
+        let path = chain_path(&[vec![(5, 5)], ring.clone(), Vec::new()]);
+        assert_eq!(path, vec![(0, 0), (1_000_000, 0), (1_000_000, 1_000_000), (0, 0)]);
+        assert!(chain_path(&[vec![(5, 5)]]).is_empty(), "nothing drawable is no path at all");
+    }
+
     /// The hatched band is the material the cutter sweeps: as long as the slot and
     /// exactly as wide, so the "hatch width == slot width" contract holds by geometry.
     #[test]
@@ -2379,6 +2506,10 @@ mod isolation_tests {
             width_nm,
             min_width_nm: 150_000,
             remove_islands: true,
+            clear_narrow_copper: false,
+            clearing_threshold_nm: 0,
+            clearing_guard_band_nm: 0,
+            clearing_mill_diameter_nm: 0,
         }
     }
 
@@ -2392,6 +2523,9 @@ mod isolation_tests {
             point_angle: Angle::from_degrees(angle_deg),
             tool_label: "V-bit".into(),
             removes_islands: true,
+            clears_narrow_copper: false,
+            clearing_threshold: Length::from_mm(2.0),
+            clearing_tool_label: None,
         }
     }
 
@@ -2418,7 +2552,15 @@ mod isolation_tests {
             },
             copper_warnings: Vec::new(),
             copper_layer_count: 2,
-            clearing: pcb::Clearing { paths: islands, ..Default::default() },
+            // One group per ring, because `paths` and `groups` are a pair — `pcb::fill`
+            // never produces one without the other, and `Clearing::chains` reads the
+            // grouping to know which rings are cut as one continuous pass.
+            clearing: pcb::Clearing {
+                groups: vec![1; islands.len()],
+                paths: islands,
+                ..Default::default()
+            },
+            mill_clearing: pcb::Clearing::default(),
         };
         IsolationInput {
             target,

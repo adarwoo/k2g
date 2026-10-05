@@ -2234,7 +2234,7 @@ mod tests {
             let text = fs::read_to_string(&path).expect("catalog file is readable");
             let mut value = parse_yaml_value(&text)
                 .unwrap_or_else(|| panic!("catalog {} is not valid YAML", path.display()));
-            // Same enrichment the seeding path applies via `backfill_catalog_fields`
+            // Same enrichment the sync path applies via `canonicalize_catalog_text`
             // (inject missing, don't canonicalize typed values).
             crate::catalog_io::normalize_catalog_fields(&mut value, stem, true, false);
 
@@ -2455,14 +2455,24 @@ mod tests {
                     if !matches!(tool.tool_type, ToolType::Vbit | ToolType::Engraver) {
                         continue;
                     }
-                    assert!(
-                        tool.diameter.as_mm() <= TIP_CEILING_MM,
-                        "{} in {} has a {}mm diameter — that is a shank, and the diameter \
-                         of a V-bit is its tip",
-                        tool.sku.clone().unwrap_or_default(),
-                        path.display(),
-                        tool.diameter.as_mm(),
-                    );
+                    // A flat cutter — point_angle 180° or more — has no tip narrower
+                    // than its own body to confuse with a shank: unlike a V-bit's
+                    // cone, its diameter simply *is* the tool, tip and all. The
+                    // "Milling bits" section exists precisely to be wider than an
+                    // isolation V-bit's tip, so it is excluded from this ceiling
+                    // rather than the ceiling being raised to fit it — which would
+                    // let a real tip-for-shank mistake back in on every V-bit this
+                    // test exists to catch.
+                    if tool.point_angle.as_degrees() < 180.0 {
+                        assert!(
+                            tool.diameter.as_mm() <= TIP_CEILING_MM,
+                            "{} in {} has a {}mm diameter — that is a shank, and the diameter \
+                             of a V-bit is its tip",
+                            tool.sku.clone().unwrap_or_default(),
+                            path.display(),
+                            tool.diameter.as_mm(),
+                        );
+                    }
                     // And through the projection every stock adapter goes via.
                     assert_eq!(tool.to_tool_core().diameter, tool.diameter);
                     checked += 1;

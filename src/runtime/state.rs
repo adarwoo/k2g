@@ -128,6 +128,7 @@ impl AppState {
             security_log_enabled: load_persisted_flag("security_log_enabled", true),
             available_update: None,
             update_installing: false,
+            update_installer_launched: false,
         };
 
         state.hydrate_from_persistence();

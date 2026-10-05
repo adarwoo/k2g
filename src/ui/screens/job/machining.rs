@@ -468,6 +468,7 @@ mod selection_tests {
             },
             primitive: "drill",
             source: "pth#0".into(),
+            continues_from_previous: false,
         }
     }
 
