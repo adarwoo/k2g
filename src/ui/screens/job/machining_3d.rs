@@ -51,6 +51,21 @@ fn hidden_tools() -> &'static Mutex<BTreeSet<String>> {
 /// a node, because `eval` runs in page scope with no reference to Dioxus's tree.
 const CANVAS_ID: &str = "k2g-machining-3d";
 
+/// Forwards each 3D-mouse input to the canvas, for as long as the view is mounted.
+///
+/// One long-lived script with a receive loop rather than an `eval` per input: the device
+/// reports a hundred-odd times a second while the cap is held, and each fresh `eval` is a
+/// script compiled and run. Looks the canvas up on every input rather than once, because
+/// the canvas is replaced whenever the view is rebuilt and this loop outlives none of them
+/// by design — a missing canvas or hook just drops the input.
+const NAV_PUMP_SCRIPT: &str = r#"
+  while (true) {
+    const input = await dioxus.recv();
+    const canvas = document.getElementById("CANVAS_ID_PLACEHOLDER");
+    if (canvas && canvas.__k2g_nav) canvas.__k2g_nav(input);
+  }
+"#;
+
 /// The scene script. Four placeholders are substituted before it is evaluated:
 /// `CANVAS_ID_PLACEHOLDER`, `TRACES_PLACEHOLDER` (the serialised
 /// [`ToolTrace`](crate::gcode::scene::ToolTrace) list), `BOARD_PLACEHOLDER` (the
@@ -618,6 +633,121 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       saveView();
     };
 
+    // --- the 3D mouse ------------------------------------------------------------------
+    //
+    // `runtime::spacemouse` reads the device; the pump in `Machining3dView` hands each input
+    // to `__k2g_nav`. What arrives is a *deflection* — how far the cap is pushed, in −1..1 per
+    // axis — so it is a rate, and is integrated here over each frame's own time: smooth at
+    // whatever rate the reports come, and still the moment the cap is let go.
+    //
+    // It moves the *object*, as 3Dconnexion's own default ("object mode") does in every CAD
+    // program: push the cap right and the board goes right, twist it and the board turns
+    // with it. Twist and tilt orbit about the controls' target — the same pivot the mouse
+    // orbits about — push and pull zoom, and sliding the cap pans.
+    //
+    // NAV_SIGNS maps the device's axes onto those. Set against a real SpaceMouse under
+    // 3DxWare: left/right and up/down were right first time; forward/back (zoom) and the
+    // twist (spin) both ran backwards and were flipped. The tilt sign is still the guess
+    // from the HID convention. If an axis runs the wrong way, it is one sign here.
+    const NAV_SIGNS = { panRight: 1, panUp: -1, zoomIn: 1, spin: -1, tilt: 1 };
+    // Rates at full deflection: a fraction of the viewing distance per second for panning,
+    // e-folds of distance per second for zooming, radians per second for orbiting (about a
+    // quarter turn). Gentle on purpose — a 3D mouse is a fine-control device, and the cap is
+    // easy to push all the way.
+    const NAV_PAN = 0.9, NAV_ZOOM = 1.4, NAV_ORBIT = 1.6;
+    // A deflection older than this is treated as released. The devices restate a held
+    // deflection continuously, so silence this long means a lost release report — the cable
+    // pulled mid-push, k2g losing the front — and the view must not drift on regardless.
+    const NAV_STALE_MS = 250;
+
+    let navDeflection = null;   // the cap's deflection, or null at rest
+    let navStamp = 0;           // when it arrived, performance.now()
+    let navLast = performance.now();
+    let navButtons = 0;
+    // Until when wheel events are swallowed: 3DxWare drives an application it has no profile
+    // for by sending mouse-wheel scrolls alongside the raw input, which would zoom the view a
+    // second time through OrbitControls. PrusaSlicer filters the same thing.
+    let navWheelUntil = 0;
+
+    canvas.__k2g_nav = function (input) {
+      if (input.kind === "motion") {
+        const d = input.deflection;
+        const still = d.t.every(function (v) { return v === 0; }) &&
+                      d.r.every(function (v) { return v === 0; });
+        // Released: remember where it was left, as a mouse drag's `end` does.
+        if (still && navDeflection) saveView();
+        navDeflection = still ? null : d;
+        navStamp = performance.now();
+      } else if (input.kind === "buttons") {
+        // On the press, not the release, and only for a button that was not already down.
+        // The two buttons every model has, left and right: frame the work again, and flip
+        // between the 3D and flat projections — the two things done most in this view.
+        const pressed = input.mask & ~navButtons;
+        navButtons = input.mask;
+        if (pressed & 1) canvas.__k2g_view("reset");
+        if (pressed & 2) canvas.__k2g_view("projection");
+      }
+    };
+
+    // One frame's worth of the current deflection.
+    function applyNav(now) {
+      const dt = Math.min((now - navLast) / 1000, 0.1);   // a stalled tab must not jump
+      navLast = now;
+      if (!navDeflection) return;
+      if (now - navStamp > NAV_STALE_MS) {
+        navDeflection = null;
+        saveView();
+        return;
+      }
+      navWheelUntil = now + 300;
+      const t = navDeflection.t, r = navDeflection.r;
+
+      // Orbit and zoom in spherical coordinates about +Z — the machine's up and the
+      // camera's — rather than by rotating vectors, so the tilt can be stopped short of the
+      // poles: past straight-down the orbit flips, and the board turns upside down on
+      // screen with no way to tell why.
+      const offset = camera.position.clone().sub(controls.target);
+      let radius = offset.length() || 1;
+      let theta = Math.atan2(offset.y, offset.x);
+      let phi = Math.acos(Math.max(-1, Math.min(1, offset.z / radius)));
+      theta -= NAV_SIGNS.spin * r[2] * NAV_ORBIT * dt;
+      phi = Math.max(0.02, Math.min(Math.PI - 0.02, phi - NAV_SIGNS.tilt * r[0] * NAV_ORBIT * dt));
+      radius *= Math.exp(-NAV_SIGNS.zoomIn * t[1] * NAV_ZOOM * dt);
+      // Kept within reach of the work: not through the target, and not so far out that it
+      // leaves the far plane `frameScene` set.
+      if (framed) radius = Math.max(framed.span * 0.01, Math.min(framed.span * 8, radius));
+      offset.set(
+        radius * Math.sin(phi) * Math.cos(theta),
+        radius * Math.sin(phi) * Math.sin(theta),
+        radius * Math.cos(phi)
+      );
+
+      // Pan in the screen's own plane, scaled by distance so it feels the same close up
+      // and far out. Object mode: the board goes the way the cap is pushed, so the eye and
+      // its target go the other way.
+      const forward = offset.clone().negate().normalize();
+      const right = new T.Vector3().crossVectors(forward, camera.up).normalize();
+      const up = new T.Vector3().crossVectors(right, forward);
+      const step = radius * NAV_PAN * dt;
+      controls.target
+        .addScaledVector(right, -NAV_SIGNS.panRight * t[0] * step)
+        .addScaledVector(up, -NAV_SIGNS.panUp * t[2] * step);
+
+      camera.position.copy(controls.target).add(offset);
+      camera.lookAt(controls.target);
+      // The flat view's size follows the orbit distance (`syncOrtho`), so zooming it is
+      // the same change of distance as zooming the 3D one.
+      if (camera === ortho) syncOrtho();
+    }
+
+    // Captured on the canvas's parent so it runs before OrbitControls' own listener on the
+    // canvas, and only while the 3D mouse is in use — an ordinary scroll still zooms.
+    const navWheelHost = canvas.parentElement;
+    const onNavWheel = function (event) {
+      if (performance.now() < navWheelUntil) event.stopPropagation();
+    };
+    if (navWheelHost) navWheelHost.addEventListener("wheel", onNavWheel, { capture: true });
+
     // Number keys, matching the buttons. On `window` because the canvas is not focusable
     // and nobody clicks a 3D view before using it — but that means every text field in
     // the application would otherwise eat a digit, hence the guards: anything typed into
@@ -677,6 +807,8 @@ const BOOTSTRAP_SCRIPT: &str = r#"
         if (++orphaned > ORPHAN_FRAMES) {
           canvas.__k2g_draw = null;
           canvas.__k2g_view = null;
+          canvas.__k2g_nav = null;
+          if (navWheelHost) navWheelHost.removeEventListener("wheel", onNavWheel, { capture: true });
           // Goes with the renderer: the listener is on `window`, which outlives every
           // canvas, so leaving it behind would keep this whole closure — scene, geometry
           // and all — reachable for the life of the page.
@@ -690,6 +822,7 @@ const BOOTSTRAP_SCRIPT: &str = r#"
       }
       orphaned = 0;
       requestAnimationFrame(frame);
+      applyNav(performance.now());
       controls.update();
       renderer.render(scene, camera);
     })();
@@ -900,6 +1033,20 @@ pub fn Machining3dView(
     // profile edit can reorder them. An index would then carry the hidden flag onto
     // whichever tool inherited the position.
     let mut hidden = use_signal(|| hidden_tools().lock().map(|set| set.clone()).unwrap_or_default());
+
+    // The 3D mouse, while this view exists: subscribing replaces any earlier view's
+    // subscription, and the future — and with it the receiver — is dropped when the view
+    // unmounts, which is what stops the device thread passing input on to nobody.
+    use_future(|| async move {
+        let mut input = crate::runtime::spacemouse::subscribe();
+        let pump = document::eval(&NAV_PUMP_SCRIPT.replace("CANVAS_ID_PLACEHOLDER", CANVAS_ID));
+        while let Some(next) = input.recv().await {
+            if let Err(err) = pump.send(next) {
+                log::warn!("3D mouse: the view stopped taking input: {err}");
+                break;
+            }
+        }
+    });
 
     let payload = use_memo(move || {
         let _ = crate::ui::bindings::data_revision();

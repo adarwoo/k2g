@@ -36,6 +36,10 @@ name is usually the shorter answer to "what changed".
   detected".
 
 ### Added
+- **3D mouse support (Windows).** A 3Dconnexion SpaceMouse now steers the Machining 3D
+  view: slide to pan, push or pull to zoom, twist and tilt to orbit, with the left button
+  resetting the view and the right one switching between flat and 3D. It works alongside
+  the 3DxWare driver and only while k2g is the window in front.
 - **Preview the setup sheet.** The eye button beside the setup sheet in the Export dialog
   opens it in your PDF viewer without exporting it, so you can check it, or print it, first.
 - **Operations are added, removed and ordered within a step.** The operation checkboxes

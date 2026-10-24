@@ -142,7 +142,7 @@ tempfile = "3"
 minisign = "0.9"
 
 # Windows-only: the removable-media (USB key / SD card) detect + eject facility in
-# `src/runtime/removable/win32.rs`, which is the only `unsafe` in this crate.
+# `src/runtime/removable/win32.rs` — with the 3D mouse below, the only `unsafe` in this crate.
 # `windows-sys` rather than `windows`: 0.61 is already in the lockfile via
 # tokio/rfd/dirs-sys, so this compiles no additional crate, and the higher-level
 # wrappers would still be `unsafe` at every call site while pulling `windows-core` in
@@ -183,6 +183,19 @@ windows-sys = { version = "0.61", features = [
     # with STORAGE_PROPERTY_QUERY / STORAGE_DEVICE_DESCRIPTOR — the bus-type test that
     # keeps virtual drive letters out of the removable-media list.
     "Win32_System_Ioctl",
+    # The 3D mouse (`src/runtime/spacemouse/windows.rs`), read as raw HID input:
+    # RegisterRawInputDevices / GetRawInputData / GetRawInputDeviceInfoW and their
+    # RAWINPUT* structs.
+    "Win32_UI_Input",
+    # The message-only window that raw input is delivered to, its message loop, and
+    # GetForegroundWindow / GetWindowThreadProcessId for "is k2g in front?".
+    "Win32_UI_WindowsAndMessaging",
+    # WNDCLASSW is gated on this because one field is an HBRUSH, which we leave null.
+    "Win32_Graphics_Gdi",
+    # GetModuleHandleW, for the window class's instance handle.
+    "Win32_System_LibraryLoader",
+    # GetCurrentProcessId, the other half of the foreground test.
+    "Win32_System_Threading",
     # CreateToolhelp32Snapshot / Process32FirstW / Process32NextW — used by
     # `runtime::kicad_integration` to refuse editing kicad_common.json while KiCad
     # is running, since KiCad rewrites that file wholesale when it exits.

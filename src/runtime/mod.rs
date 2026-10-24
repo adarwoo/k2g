@@ -486,6 +486,10 @@ pub use log_capture::CaptureLayer;
 /// UI needs no `cfg`.
 pub mod removable;
 
+/// The 3D mouse (3Dconnexion SpaceMouse), read as raw input for the Machining 3D view.
+/// Windows only for now; elsewhere it subscribes to nothing.
+pub mod spacemouse;
+
 /// Registering k2g as a KiCad IPC plugin, and enabling KiCad's API server. Both are
 /// user-initiated: nothing here touches KiCad's installation without being asked.
 pub mod kicad_integration;

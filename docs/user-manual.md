@@ -766,6 +766,11 @@ The operation plan, and the 3D toolpath render above it.
   | **Front** (1) | Look straight at the board's front (red) face — the same red the 2D view paints the front copper in. On a step that machines the back, the board is lying turned over — so this looks up at it from underneath, which is the view that shows whether the mirrored artwork came out right. |
   | **Back** (2) | The same for the back (green) face. |
   | **Flat / 3D** (3) | Switch between a flat (orthographic) view and the 3D one. Flat is the one to judge alignment in: perspective pushes anything away from the middle of the picture sideways, so two paths that line up only look like it in the flat view. |
+- **3D mouse** (3Dconnexion SpaceMouse, Windows): the view follows the cap, moving the
+  board the way you push it — slide to pan, push or pull to zoom, twist and tilt to
+  orbit. The left button is **Reset**, the right one **Flat / 3D**. It steers k2g only
+  while k2g's window is in front, and needs nothing set up: keep 3DxWare installed as
+  it is. The log says `3D mouse: found 3Dconnexion device …` when it is picked up.
 - Below: the step's summary (operation count, tool blocks, travel), then one table
   per tool block listing the atomic operations in the order the planner chose, with
   coordinates. Long blocks are capped at 40 rows with a "+N more" line.
@@ -1051,7 +1056,7 @@ Two records that look alike and are not the same thing.
 | Where | Gesture |
 |---|---|
 | Board view | Wheel = zoom · drag = pan · **+** / **−** / **Reset** buttons |
-| 3D view | Drag = orbit · wheel = zoom · legend checkboxes hide tools · **0** reset · **1** front face · **2** back face · **3** flat/3D |
+| 3D view | Drag = orbit · wheel = zoom · legend checkboxes hide tools · **0** reset · **1** front face · **2** back face · **3** flat/3D · 3D mouse: slide/push/twist, left button reset, right button flat/3D (Windows) |
 | Board legend | Click a row to raise that layer; click again to restore |
 | Catalog picker | Click = select · Shift-click = the run since the last plain click · section header box = whole section |
 | Stock table | Double-click a row = tool detail · checkboxes = multi-select |
