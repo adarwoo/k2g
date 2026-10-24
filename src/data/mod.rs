@@ -799,17 +799,25 @@ impl AppData {
         })
     }
 
-    /// Appends a fresh default step with one operation (op-config objects materialize
-    /// on re-parse). Bindings are filled in where they are unambiguous — see
-    /// [`Self::bind_sole_profiles`] — and otherwise left absent until the user picks them.
+    /// Adds a fresh default step with one operation (op-config objects materialize on
+    /// re-parse), and returns where it went. Bindings are filled in where they are
+    /// unambiguous — see [`Self::bind_sole_profiles`] — and otherwise left absent until the
+    /// user picks them.
     ///
     /// The operation is the first the new step is actually allowed to run: most of them
     /// may only be claimed by one step per board side, so defaulting to `drill_pth`
     /// unconditionally would make "+ Add step" produce a profile that cannot generate.
     /// The new step machines the top side (the schema default), so only top-side steps
     /// are counted against it.
-    pub fn add_step(&mut self, id: Uuid) -> bool {
-        self.edit_document_value(id, |value| {
+    ///
+    /// **Where** it goes is [`step_insert_position`](crate::data::model::step_insert_position):
+    /// the end, unless a step already cuts the outline — then the latest place before it,
+    /// because a step after the outline machines a released board. An operation with no
+    /// such place at all is passed over for the next candidate; only if none has one does
+    /// the step go at the end, as it always did, for the readiness gate to explain.
+    pub fn add_step(&mut self, id: Uuid) -> Option<usize> {
+        let mut added = None;
+        let edited = self.edit_document_value(id, |value| {
             let Some(steps) = value.get_mut("steps").and_then(Value::as_array_mut) else {
                 return;
             };
@@ -839,37 +847,68 @@ impl AppData {
             // when everything once-per-face is claimed does a repeatable operation stand in
             // — a step must carry at least one (`minItems: 1`), and a step the readiness
             // gate then complains about is better than one the schema rejects.
-            let operation = MACHINING_OPERATIONS
+            //
+            // Only a *repeatable* one stands in — never the job-scoped locating pins, which
+            // belong to the first step and would be refused here both by the readiness gate
+            // and by the editor's own greyed-out box. Spelled out rather than left as "not
+            // once-per-face", which caught the pins too and stayed correct only because
+            // engraving happens to come first in the list.
+            let candidates: Vec<&str> = MACHINING_OPERATIONS
                 .iter()
-                .find(|op| op.scope == OperationScope::OncePerFace && !claimed.contains(&op.key))
-                // Only a *repeatable* one stands in — never the job-scoped locating pins,
-                // which belong to the first step and would be refused here both by the
-                // readiness gate and by the editor's own greyed-out box. Spelled out
-                // rather than left as "not once-per-face", which caught the pins too and
-                // stayed correct only because engraving happens to come first in the list.
-                .or_else(|| {
-                    MACHINING_OPERATIONS
-                        .iter()
-                        .find(|op| op.scope == OperationScope::Repeatable)
+                .filter(|op| op.scope == OperationScope::OncePerFace && !claimed.contains(&op.key))
+                .chain(MACHINING_OPERATIONS.iter().filter(|op| op.scope == OperationScope::Repeatable))
+                .map(|op| op.key)
+                .collect();
+
+            let existing: Vec<Vec<String>> = steps
+                .iter()
+                .map(|step| {
+                    step.get("operations")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
                 })
-                .map_or(MACHINING_OPERATIONS[0].key, |op| op.key);
+                .collect();
+            let existing: Vec<&[String]> = existing.iter().map(Vec::as_slice).collect();
+
+            // The first candidate with somewhere to run, and that place. A profile whose
+            // one step drills *and* cuts the outline has no room for a cutouts step
+            // anywhere — every place is either before the holes or after the release — so
+            // the cutouts are passed over for something that can run, rather than parked
+            // after the outline.
+            let (operation, at) = candidates
+                .iter()
+                .find_map(|&key| {
+                    crate::data::model::step_insert_position(&existing, &[key.to_string()])
+                        .map(|at| (key, at))
+                })
+                .unwrap_or((
+                    candidates.first().copied().unwrap_or(MACHINING_OPERATIONS[0].key),
+                    steps.len(),
+                ));
 
             // The placeholder name, which `step_display_name` reads as "not named yet" and
             // replaces with one built from the step's operations until the operator types
             // their own.
-            steps.push(serde_json::json!({
-                "name": crate::data::model::UNNAMED_STEP,
-                "operations": [operation],
-                // Merged below rather than written here: the bindings are read off the
-                // store, which this closure is in the middle of editing.
-            }));
-        }) && {
-            // A step with no machine is as unrunnable as a profile with none, and the
-            // operator who has one of each has nothing to choose here either.
-            let added = self.step_count(id).saturating_sub(1);
-            self.bind_sole_profiles(id, added);
-            true
-        }
+            steps.insert(
+                at,
+                serde_json::json!({
+                    "name": crate::data::model::UNNAMED_STEP,
+                    "operations": [operation],
+                    // Merged below rather than written here: the bindings are read off the
+                    // store, which this closure is in the middle of editing.
+                }),
+            );
+            added = Some(at);
+        });
+        let added = added.filter(|_| edited)?;
+        // A step with no machine is as unrunnable as a profile with none, and the operator
+        // who has one of each has nothing to choose here either.
+        self.bind_sole_profiles(id, added);
+        Some(added)
     }
 
     /// How many steps the machining profile `id` has.
@@ -2059,6 +2098,31 @@ fn rename_side_to_board_face(obj: &mut serde_json::Map<String, Value>) {
     obj.insert("board_face".into(), Value::from(face));
 }
 
+/// Moves a per-operation `depth_per_pass` up to the step's `router_depth_per_pass`.
+///
+/// The limit was briefly a field on `route_board` and on `route_cutouts`. That left the
+/// holes and slots the drill operations mill with no limit at all, and asked the same
+/// question twice of one router and one way of holding the board — so it became one field
+/// on the step. A profile saved in between carries the old fields, which
+/// `additionalProperties: false` would refuse, so they are dropped here; the outline's
+/// value wins over the cutouts' when both are set, since it is the cut that most needs it.
+/// A step that already has the new field keeps it.
+fn lift_router_depth(step: &mut serde_json::Map<String, Value>) {
+    let mut lifted = None;
+    for key in ["route_cutouts", "route_board"] {
+        if let Some(value) = step
+            .get_mut(key)
+            .and_then(Value::as_object_mut)
+            .and_then(|op| op.remove("depth_per_pass"))
+        {
+            lifted = Some(value);
+        }
+    }
+    if let Some(value) = lifted {
+        step.entry("router_depth_per_pass").or_insert(value);
+    }
+}
+
 /// Operation config objects are left in place (always materialized by the
 /// loader); only their `enabled` flag is stripped.
 fn normalize_step_value(step: &mut Value, file: &str) {
@@ -2073,12 +2137,17 @@ fn normalize_step_value(step: &mut Value, file: &str) {
     }
 
     // The retired `routing` block (`cut_depth_strategy` / `multi_pass_max_depth`).
-    // Routing is single-pass at the tool's rated feed — the feed rating already
-    // assumes cutting a board's full thickness — so the setting was removed rather
-    // than left as a knob that changed nothing. Every profile written before that
-    // still carries the block, and `additionalProperties: false` would reject it on
-    // load, so it is dropped here.
+    // It was removed while it still changed nothing — nothing read it — on the
+    // argument that a router's feed rating already assumes the full thickness. The
+    // limit came back as `router_depth_per_pass` for a reason that argument missed
+    // (a full-depth cut can shift the board). The old value is not carried over: it
+    // never had an effect, so honouring it now would change a program nobody asked to
+    // change, and the new field defaults to the 1mm it almost always held anyway.
+    // Every profile written before still carries the block, and
+    // `additionalProperties: false` would reject it on load, so it is dropped here.
     obj.remove("routing");
+
+    lift_router_depth(obj);
 
     rename_side_to_board_face(obj);
 
@@ -2688,7 +2757,7 @@ mod tests {
         let cnc = data.create(Profile::Cnc).expect("create cnc");
         let id = data.create(Profile::Machining).expect("create machining");
 
-        assert!(data.add_step(id), "step added");
+        assert!(data.add_step(id).is_some(), "step added");
         let doc = data.get(id).expect("the profile exists");
         let bound = doc.root.get_pointer("/steps/1/cnc").expect("the added step is bound");
         assert!(
@@ -2739,7 +2808,7 @@ mod tests {
         };
 
         // Add a second step and configure it distinctly.
-        assert!(data.add_step(id));
+        assert!(data.add_step(id).is_some());
         assert_eq!(step_count(&data), 2);
         assert!(data.set_step_operations(id, 1, &["route_board".to_string()]));
         assert!(data.set_field(id, "/steps/1/name", NodeValue::Str("Route".into())).unwrap_or(false));
@@ -2793,11 +2862,11 @@ mod tests {
 
         assert_eq!(operations(&data, 0), vec!["drill_pth".to_string()], "the seeded step");
 
-        assert!(data.add_step(id));
+        assert!(data.add_step(id).is_some());
         assert_eq!(operations(&data, 1), vec!["drill_npth".to_string()], "PTH is taken");
-        assert!(data.add_step(id));
+        assert!(data.add_step(id).is_some());
         assert_eq!(operations(&data, 2), vec!["route_cutouts".to_string()], "and so is NPTH");
-        assert!(data.add_step(id));
+        assert!(data.add_step(id).is_some());
         assert_eq!(
             operations(&data, 3),
             vec!["route_board".to_string()],
@@ -2805,15 +2874,19 @@ mod tests {
         );
 
         // Past the once-per-side operations it settles on a repeatable one rather
-        // than running out — a step must carry at least one operation.
-        assert!(data.add_step(id));
-        assert!(data.add_step(id));
-        assert_eq!(operations(&data, 4), vec!["engrave_copper".to_string()]);
+        // than running out — a step must carry at least one operation. And it does not go
+        // at the end: that is after the outline, on a released board. It goes in the latest
+        // place it can run, which is ahead of the cutouts.
+        assert_eq!(data.add_step(id), Some(2), "ahead of the cutouts, not after the outline");
+        assert_eq!(operations(&data, 2), vec!["engrave_copper".to_string()]);
+        assert_eq!(operations(&data, 3), vec!["route_cutouts".to_string()]);
+        assert_eq!(operations(&data, 4), vec!["route_board".to_string()], "the outline is still last");
         assert_eq!(
-            operations(&data, 5),
-            vec!["engrave_copper".to_string()],
-            "engraving is repeatable, so it stays available"
+            data.add_step(id),
+            Some(3),
+            "engraving is repeatable, so it stays available — and goes after the first"
         );
+        assert_eq!(operations(&data, 3), vec!["engrave_copper".to_string()]);
     }
 
     /// **A new step never defaults to a repeatable operation while real work is
@@ -2830,7 +2903,7 @@ mod tests {
         let (mut data, _) = load_temp(dir.path());
         let id = data.create(Profile::Machining).expect("create machining");
 
-        assert!(data.add_step(id));
+        assert!(data.add_step(id).is_some());
         let step = data
             .get(id)
             .unwrap()
@@ -3133,6 +3206,31 @@ mod tests {
     /// leaves the step cutting no outline at all, and folding it without carrying
     /// `outline.cut` leaves it cutting a contour with the default 2 mm kerf — a different
     /// board, cut by a tool the operator did not choose.
+    #[test]
+    fn a_per_operation_depth_limit_moves_up_to_the_step() {
+        let mut step = serde_json::json!({
+            "name": "Cut out",
+            "operations": ["route_cutouts", "route_board"],
+            "route_board": { "outline": { "cut": "route" }, "depth_per_pass": "0.8mm" },
+            "route_cutouts": { "retain_island": true, "depth_per_pass": "0.5mm" },
+        });
+        normalize_step_value(&mut step, "test.yaml");
+
+        assert_eq!(
+            step.pointer("/router_depth_per_pass").and_then(Value::as_str),
+            Some("0.8mm"),
+            "the outline's limit wins: it is the cut that most needs one"
+        );
+        assert!(step.pointer("/route_board/depth_per_pass").is_none());
+        assert!(step.pointer("/route_cutouts/depth_per_pass").is_none());
+
+        // A step that already has the new field keeps it, and a second load changes nothing.
+        let mut again = step.clone();
+        again["route_board"]["depth_per_pass"] = Value::from("2mm");
+        normalize_step_value(&mut again, "test.yaml");
+        assert_eq!(again.pointer("/router_depth_per_pass").and_then(Value::as_str), Some("0.8mm"));
+    }
+
     #[test]
     fn a_step_that_milled_its_outline_still_cuts_it_by_milling() {
         let mut step = serde_json::json!({

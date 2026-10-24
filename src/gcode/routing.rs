@@ -3,7 +3,8 @@
 //! bed), and an **oblong slot**.
 //!
 //! **One strategy, by design** (settled 2026-07-25): plunge inside the feature, clear
-//! outward removing *all* the material, and finish with a lap on the wall. This is the
+//! outward removing *all* the material, and finish with a lap on the wall — for a round
+//! hole, followed by the slow spring lap and exit spiral described below. This is the
 //! only approach that never leaves a centre island (the flying-debris hazard of a
 //! tangential contour) and leaves no entry witness mark on the finished wall — for a
 //! through feature the interior is removed material anyway. There is deliberately **no**
@@ -30,6 +31,25 @@
 //! handling. Passes are stepped out by the pitch; the scallops between them are interior
 //! material and the final pass sits exactly on the wall.
 //!
+//! **A round hole is finished in three parts** (revised 2026-10-19, after locating pins
+//! milled for 3.2 mm with a 2 mm router measured exactly 3.0):
+//!
+//! 1. **The finishing lap** — one full circle on the wall at the table feed, right after the
+//!    spiral. It is *not* a light cut: it takes off the crescent the spiral's last, still
+//!    growing turn left, at full depth. Under that load the cutter bends away from the wall,
+//!    and a bent cutter cuts a small hole.
+//! 2. **The spring lap** — one more full circle on the same radius, in the same climb
+//!    direction, at [`FINISH_FEED_FRACTION`] of the table feed. With almost nothing left to
+//!    cut, the cutter straightens and takes the wall to its programmed size. One turn,
+//!    exactly: it closes where the finishing lap did, and goes nowhere new.
+//! 3. **The exit spiral** — an Archimedean spiral *inward*, one turn, still climb and still
+//!    slow, from the wall to the centre. The cutter leaves the wall gradually instead of
+//!    stopping on it, so there is no dwell and no witness mark, and it lifts from the
+//!    middle of the hole rather than rubbing the finished edge on the way up.
+//!
+//! The slow feed is a [`RouteMove::Feed`] marker, not a feed carried by each move; it lasts
+//! to the end of the hole's own moves. Slots are finished by their single lap for now.
+//!
 //! **Arc direction is climb milling.** With an M03 (clockwise, seen from above) spindle,
 //! the cut is climb when the material lies to the **right** of the direction of travel —
 //! which inside a pocket means travelling **counter-clockwise**. Every wall pass here is
@@ -45,6 +65,12 @@ use crate::gcode::plan::Point;
 
 /// Radial stepover as a fraction of the router diameter. Not user-exposed (KISS).
 pub const STEPOVER_FRACTION: f64 = 0.5;
+
+/// The finishing pass's feed, as a fraction of the tool's table feed. See the module note.
+///
+/// A quarter: slow enough that the little the spring lap has to take off does not bend the
+/// cutter again, and that the wall it leaves is a cut rather than a rub.
+pub const FINISH_FEED_FRACTION: f64 = 0.25;
 
 /// Chord tolerance for the spiral's `G1` approximation, in millimetres.
 ///
@@ -110,10 +136,17 @@ pub enum RouteMove {
     /// An arc (G2/G3) whose centre is at the start plus `(i, j)`. Always the
     /// incremental-centre (I/J) form; a full circle is the case `end == start`.
     Arc { x: Length, y: Length, i: Length, j: Length, ccw: bool },
+    /// From here to the end of the move list, lateral moves (`Cut`, `Arc`) run at this
+    /// fraction of the tool's table feed. Modal, like `F` itself, and moves nothing.
+    ///
+    /// A marker rather than a feed on every move because only the finishing pass slows
+    /// down, and it is a run of moves, not one. It does not reach past its own list: each
+    /// op's moves are rendered on their own, starting at the full feed. Plunges keep the
+    /// plunge feed throughout.
+    Feed { fraction: f64 },
 }
 
-/// Builds the spiral-pocket toolpath for one hole (single depth pass — PCBs are thin;
-/// multi-pass depth is a later refinement that repeats the spiral per level).
+/// Builds the spiral-pocket toolpath for one hole.
 ///
 /// - `center` — hole centre in machine coordinates.
 /// - `z_retract` — height above the surface to rapid at (the fixture R-plane).
@@ -121,27 +154,32 @@ pub enum RouteMove {
 /// - `hole_diameter` / `tool_diameter` — the router must be smaller (the assigner
 ///   guarantees it); the tool centre sweeps out to `(hole − tool)/2` so the tool's
 ///   outer edge meets the wall.
+/// - `pass_depth` — the step's router depth limit. The **clearing** (plunge and spiral) is
+///   repeated at each of the [`depth_levels`], coming back to the centre across the floor
+///   it has just cleared before plunging again. The **finishing** — the lap on the wall,
+///   the spring lap and the exit spiral — runs once, at full depth, after the last level:
+///   it takes off only the crescents the spirals left, so it pulls little on the board,
+///   and one lap down the whole wall leaves one surface rather than a ridge per level.
 pub fn spiral_hole(
     center: Point,
     z_retract: Length,
     z_bottom: Length,
     hole_diameter: Length,
     tool_diameter: Length,
+    pass_depth: Option<Length>,
 ) -> Vec<RouteMove> {
     let cx = center.x.as_mm();
     let cy = center.y.as_mm();
     let reach = (hole_diameter.as_mm() - tool_diameter.as_mm()) / 2.0; // max tool-centre radius
     let pitch = (STEPOVER_FRACTION * tool_diameter.as_mm()).max(MIN_REACH_MM);
+    let levels = depth_levels(z_bottom, pass_depth);
 
-    // Rapid to the centre above the work, then plunge — this removes the centre so no
-    // island can survive.
-    let mut moves = vec![
-        RouteMove::Rapid { x: mm(cx), y: mm(cy), z: z_retract },
-        RouteMove::Plunge { x: mm(cx), y: mm(cy), z: z_bottom },
-    ];
+    // Rapid to the centre above the work; each level then plunges there — which removes
+    // the centre, so no island can survive.
+    let mut moves = vec![RouteMove::Rapid { x: mm(cx), y: mm(cy), z: z_retract }];
 
     // An Archimedean spiral out to the wall, then one full circle to finish it. When the
-    // tool nearly fills the hole (`reach ≈ 0`) the plunge alone finishes it.
+    // tool nearly fills the hole (`reach ≈ 0`) the plunges alone finish it.
     if reach > MIN_REACH_MM {
         // Whole turns, so the spiral ends back on the +X axis at exactly `reach` — which
         // is where the finishing lap then starts and closes. Rounding up also makes the
@@ -158,16 +196,24 @@ pub fn spiral_hole(
         };
         let segments = (total_angle / step.max(f64::EPSILON)).ceil().max(1.0) as usize;
 
-        for n in 1..=segments {
-            let angle = total_angle * (n as f64) / (segments as f64);
-            // Radius linear in angle — that is what makes it Archimedean, and what keeps
-            // the radial advance (and so the cutting engagement) constant.
-            let radius = reach * (n as f64) / (segments as f64);
-            moves.push(RouteMove::Cut {
-                x: mm(cx + radius * angle.cos()),
-                y: mm(cy + radius * angle.sin()),
-                z: z_bottom,
-            });
+        for (level, &z) in levels.iter().enumerate() {
+            // Back to the centre for the next level, at the depth just cleared — the whole
+            // disc is open there, so this is a move through air, not a cut.
+            if level > 0 {
+                moves.push(RouteMove::Cut { x: mm(cx), y: mm(cy), z: levels[level - 1] });
+            }
+            moves.push(RouteMove::Plunge { x: mm(cx), y: mm(cy), z });
+            for n in 1..=segments {
+                let angle = total_angle * (n as f64) / (segments as f64);
+                // Radius linear in angle — that is what makes it Archimedean, and what keeps
+                // the radial advance (and so the cutting engagement) constant.
+                let radius = reach * (n as f64) / (segments as f64);
+                moves.push(RouteMove::Cut {
+                    x: mm(cx + radius * angle.cos()),
+                    y: mm(cy + radius * angle.sin()),
+                    z,
+                });
+            }
         }
 
         // The finishing lap: one true circle on the wall, so the finished surface is cut
@@ -180,21 +226,42 @@ pub fn spiral_hole(
             ccw: true,
         });
 
-        // Retract straight up from the wall.
-        moves.push(RouteMove::Rapid {
-            x: mm(cx + reach),
-            y: mm(cy),
-            z: z_retract,
-        });
+        // The finishing pass — see the module note. From here on lateral moves run at
+        // [`FINISH_FEED_FRACTION`] of the table feed.
+        moves.push(RouteMove::Feed { fraction: FINISH_FEED_FRACTION });
+
+        // One spring lap on the wall: the same radius, the same climb direction, one full
+        // turn closing on the +X axis where the finishing lap ended.
+        moves.push(RouteMove::Arc { x: mm(cx + reach), y: mm(cy), i: mm(-reach), j: mm(0.0), ccw: true });
+
+        // Then spiral **in** to the centre over one more turn, still counter-clockwise, so
+        // the cutter leaves the wall gradually and lifts from the middle of the hole, clear
+        // of the surface it has just finished.
+        let segments = (std::f64::consts::TAU / step.max(f64::EPSILON)).ceil().max(1.0) as usize;
+        for n in 1..=segments {
+            let along = n as f64 / segments as f64;
+            let angle = std::f64::consts::TAU * along;
+            let radius = reach * (1.0 - along);
+            moves.push(RouteMove::Cut {
+                x: mm(cx + radius * angle.cos()),
+                y: mm(cy + radius * angle.sin()),
+                z: z_bottom,
+            });
+        }
+
+        // Retract straight up from the centre.
+        moves.push(RouteMove::Rapid { x: mm(cx), y: mm(cy), z: z_retract });
     } else {
+        // The tool fills the hole: it is a drilled hole made with a router, and the depth
+        // limit makes it a peck — straight down, a level at a time.
+        moves.extend(levels.iter().map(|&z| RouteMove::Plunge { x: mm(cx), y: mm(cy), z }));
         moves.push(RouteMove::Rapid { x: mm(cx), y: mm(cy), z: z_retract });
     }
 
     moves
 }
 
-/// Builds the stadium-pocket toolpath for one oblong slot (single depth pass, as
-/// [`spiral_hole`]).
+/// Builds the stadium-pocket toolpath for one oblong slot.
 ///
 /// - `a` / `b` — the slot's **medial-axis end centres** in machine coordinates: the two
 ///   points a drill making the slot's end holes would sit on. Taking the axis as two
@@ -211,6 +278,12 @@ pub fn spiral_hole(
 /// landing exactly on the wall at `(slot_width − tool)/2`. Each is a CCW stadium loop
 /// (two straights + two 180° end arcs); the axis pass itself is a single straight run,
 /// and it is what guarantees no island is left behind.
+///
+/// `pass_depth` is the step's router depth limit, applied as in [`spiral_hole`]: the
+/// clearing passes (the axis and the step-outs) are repeated at each of the
+/// [`depth_levels`], and the lap on the wall runs once at full depth after the last. A slot
+/// the tool fills has no wall lap — its axis pass *is* the full-width cut — so that pass
+/// is stepped.
 pub fn slot_route(
     a: Point,
     b: Point,
@@ -219,6 +292,7 @@ pub fn slot_route(
     slot_width: Length,
     tool_diameter: Length,
     from_solid: bool,
+    pass_depth: Option<Length>,
 ) -> Vec<RouteMove> {
     let (ax, ay) = (a.x.as_mm(), a.y.as_mm());
     let (bx, by) = (b.x.as_mm(), b.y.as_mm());
@@ -227,7 +301,7 @@ pub fn slot_route(
     // No travel means the "slot" is a circle — that is precisely the spiral pocket, so
     // reuse it rather than carry a degenerate stadium through the rest of this function.
     if travel <= MIN_REACH_MM {
-        return spiral_hole(a, z_retract, z_bottom, slot_width, tool_diameter);
+        return spiral_hole(a, z_retract, z_bottom, slot_width, tool_diameter, pass_depth);
     }
 
     // Axis unit vector; passes are offset along its normal (taken per loop, below).
@@ -237,49 +311,61 @@ pub fn slot_route(
     // Which offsets to cut. Clearing from solid runs the axis (r = 0) and then steps out;
     // a chain-opened slot needs only the wall lap — unless the tool fills the slot, when
     // the axis pass *is* the wall lap.
-    let mut offsets: Vec<f64> = Vec::new();
+    let mut clearing: Vec<f64> = Vec::new();
     let clears_interior = from_solid || reach <= MIN_REACH_MM;
     if clears_interior {
-        offsets.push(0.0);
+        clearing.push(0.0);
         let pitch = (STEPOVER_FRACTION * tool_diameter.as_mm()).max(MIN_REACH_MM);
         let mut r = pitch;
         while r < reach - MIN_REACH_MM {
-            offsets.push(r);
+            clearing.push(r);
             r += pitch;
         }
     }
-    if reach > MIN_REACH_MM {
-        offsets.push(reach); // finishing lap on the wall
-    }
+    let wall = (reach > MIN_REACH_MM).then_some(reach); // finishing lap on the wall
 
-    // Enter on the axis at `a` — inside the slot either way, and for the drilled-ends
-    // strategies it is an already-open hole.
-    let mut moves = vec![
-        RouteMove::Rapid { x: a.x, y: a.y, z: z_retract },
-        RouteMove::Plunge { x: a.x, y: a.y, z: z_bottom },
-    ];
+    // Stepped only when there is clearing to step: a chain-opened slot is all wall lap, cut
+    // once at full depth into the channel the drills already opened.
+    let levels = if clearing.is_empty() { vec![z_bottom] } else { depth_levels(z_bottom, pass_depth) };
 
-    // The axis pass leaves the tool at `b`, so every loop after it enters and closes at
-    // the `b` end; without it the loops stay at the `a` end where the plunge left off.
-    // Either way the entry end never changes, so consecutive loops only step out.
-    let mut at_b = false;
-    for &r in &offsets {
+    // One pass at offset `r` and depth `z`: the axis run, or a stadium loop. The axis pass
+    // leaves the tool at `b`, so every loop after it enters and closes at the `b` end;
+    // without it the loops stay at the `a` end where the plunge left off. Either way the
+    // entry end never changes within a level, so consecutive loops only step out.
+    let pass = |moves: &mut Vec<RouteMove>, at_b: &mut bool, r: f64, z: Length| {
         if r <= MIN_REACH_MM {
-            moves.push(RouteMove::Cut { x: b.x, y: b.y, z: z_bottom });
-            at_b = true;
-            continue;
+            moves.push(RouteMove::Cut { x: b.x, y: b.y, z });
+            *at_b = true;
+            return;
         }
         // The loop runs `from` → `to`, so its normal is taken from *that* direction —
         // which is what makes the traversal counter-clockwise from either end.
-        let (from, to) = if at_b { ((bx, by), (ax, ay)) } else { ((ax, ay), (bx, by)) };
-        let n = if at_b { (uy, -ux) } else { (-uy, ux) };
+        let (from, to) = if *at_b { ((bx, by), (ax, ay)) } else { ((ax, ay), (bx, by)) };
+        let n = if *at_b { (uy, -ux) } else { (-uy, ux) };
         // Step out perpendicular, onto the -n side of the entry end: the loop's start.
-        moves.push(RouteMove::Cut {
-            x: mm(from.0 - r * n.0),
-            y: mm(from.1 - r * n.1),
-            z: z_bottom,
-        });
-        moves.extend(stadium_loop_ccw(from, to, n, r, z_bottom));
+        moves.push(RouteMove::Cut { x: mm(from.0 - r * n.0), y: mm(from.1 - r * n.1), z });
+        moves.extend(stadium_loop_ccw(from, to, n, r, z));
+    };
+
+    // Enter on the axis at `a` — inside the slot either way, and for the drilled-ends
+    // strategies it is an already-open hole.
+    let mut moves = vec![RouteMove::Rapid { x: a.x, y: a.y, z: z_retract }];
+    let mut at_b = false;
+    for (level, &z) in levels.iter().enumerate() {
+        // Back to `a` for the next level, at the depth just cleared. Everything within
+        // the last offset of the axis is open there, and that region is convex, so the
+        // straight move is through air.
+        if level > 0 {
+            moves.push(RouteMove::Cut { x: a.x, y: a.y, z: levels[level - 1] });
+            at_b = false;
+        }
+        moves.push(RouteMove::Plunge { x: a.x, y: a.y, z });
+        for &r in &clearing {
+            pass(&mut moves, &mut at_b, r, z);
+        }
+    }
+    if let Some(r) = wall {
+        pass(&mut moves, &mut at_b, r, z_bottom);
     }
 
     // Retract from wherever the last pass finished.
@@ -289,7 +375,7 @@ pub fn slot_route(
         .find_map(|m| match *m {
             RouteMove::Cut { x, y, .. } | RouteMove::Plunge { x, y, .. } => Some((x, y)),
             RouteMove::Arc { x, y, .. } => Some((x, y)),
-            RouteMove::Rapid { .. } => None,
+            RouteMove::Rapid { .. } | RouteMove::Feed { .. } => None,
         })
         .unwrap_or((a.x, a.y));
     moves.push(RouteMove::Rapid { x: last.0, y: last.1, z: z_retract });
@@ -343,9 +429,145 @@ fn stadium_loop_ccw(
     ]
 }
 
+/// The depths a routed contour is cut at, top first, ending on `z_bottom`: as few equal
+/// passes as keep each one within `pass_depth` of the last, starting from the board
+/// surface (Z0). `None` (or a non-positive limit) is a single pass straight to `z_bottom`.
+///
+/// **Equal passes, not full ones and a remainder.** A 2.1 mm cut at 1 mm a pass is three
+/// passes of 0.7 mm rather than 1 + 1 + 0.1: the limit is there to cap the load on the
+/// board, and nothing is gained by loading it right up to the cap twice and then taking a
+/// sliver that rubs rather than cuts.
+///
+/// **The last level is `z_bottom` itself**, never rebuilt from the arithmetic: a value that
+/// came back through `as_mm()` could land an ulp off the depth every other op in the plan
+/// agrees on (the same trap `coder.rs`'s depth-loop test pins down for templates).
+///
+/// The count is taken at 1 µm, like every other fit in the planner, so a 2 mm cut at 1 mm
+/// a pass is two passes and not three because the division came out at 2.000000001.
+pub fn depth_levels(z_bottom: Length, pass_depth: Option<Length>) -> Vec<Length> {
+    let depth = -z_bottom.as_mm();
+    let Some(limit) = pass_depth.map(|d| d.as_mm()).filter(|&d| d > 0.0) else {
+        return vec![z_bottom];
+    };
+    if depth <= limit {
+        return vec![z_bottom];
+    }
+    let passes = ((depth - 0.001) / limit).ceil().max(1.0) as usize;
+    (1..passes)
+        .map(|k| mm(-depth * k as f64 / passes as f64))
+        .chain(std::iter::once(z_bottom))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Z of every feed move (`Plunge`/`Cut`) in order — arcs carry none.
+    fn feed_depths(moves: &[RouteMove]) -> Vec<f64> {
+        moves
+            .iter()
+            .filter_map(|m| match *m {
+                RouteMove::Plunge { z, .. } | RouteMove::Cut { z, .. } => Some(z.as_mm()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A milled hole clears a level at a time — a plunge per level, each spiral at its own
+    /// depth — and is finished once, at full depth: every arc (the finishing and spring
+    /// laps) comes after the last plunge, and nothing after it is cut shallower.
+    #[test]
+    fn a_hole_is_cleared_in_levels_and_finished_at_full_depth() {
+        let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
+            Length::from_mm(3.2), Length::from_mm(1.0), Some(Length::from_mm(1.0)));
+        let plunges: Vec<(usize, f64)> = moves
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| match *m {
+                RouteMove::Plunge { z, .. } => Some((i, z.as_mm())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plunges.iter().map(|p| p.1).collect::<Vec<_>>(), [-1.0, -2.0]);
+
+        let last_plunge = plunges[1].0;
+        let first_arc = moves.iter().position(|m| matches!(m, RouteMove::Arc { .. })).unwrap();
+        assert!(first_arc > last_plunge, "the finishing laps follow the last level");
+        assert!(
+            feed_depths(&moves[last_plunge..]).iter().all(|&z| z == -2.0),
+            "everything from the last plunge on is at full depth"
+        );
+        let arcs = moves.iter().filter(|m| matches!(m, RouteMove::Arc { .. })).count();
+        assert_eq!(arcs, 2, "one finishing lap and one spring lap, not one per level");
+    }
+
+    /// A hole the router fills is a peck: straight down, a level at a time.
+    #[test]
+    fn a_hole_the_router_fills_is_pecked_in_levels() {
+        let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
+            Length::from_mm(1.0), Length::from_mm(1.0), Some(Length::from_mm(1.0)));
+        assert_eq!(feed_depths(&moves), [-1.0, -2.0]);
+    }
+
+    /// A slot clears its axis at each level and laps its wall once, at full depth.
+    #[test]
+    fn a_slot_is_cleared_in_levels_and_lapped_at_full_depth() {
+        let moves = slot_route(at((0.0, 0.0)), at((4.0, 0.0)), Length::from_mm(2.0),
+            Length::from_mm(-2.0), Length::from_mm(2.0), Length::from_mm(1.0), true,
+            Some(Length::from_mm(1.0)));
+        let plunges: Vec<f64> = moves
+            .iter()
+            .filter_map(|m| match *m {
+                RouteMove::Plunge { z, .. } => Some(z.as_mm()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(plunges, [-1.0, -2.0]);
+        let arcs = moves.iter().filter(|m| matches!(m, RouteMove::Arc { .. })).count();
+        assert_eq!(arcs, 2, "one stadium lap on the wall — its two end caps — not one per level");
+    }
+
+    /// No limit, or one the cut already fits within, is the single pass it always was.
+    #[test]
+    fn a_cut_within_the_limit_is_one_pass() {
+        let bottom = Length::from_mm(-2.1);
+        assert_eq!(depth_levels(bottom, None), vec![bottom]);
+        assert_eq!(depth_levels(bottom, Some(Length::from_mm(0.0))), vec![bottom], "0 means no limit");
+        assert_eq!(depth_levels(bottom, Some(Length::from_mm(3.0))), vec![bottom]);
+        assert_eq!(depth_levels(bottom, Some(Length::from_mm(2.1))), vec![bottom]);
+    }
+
+    /// The passes are equal, and none is deeper than the limit: 2.1 mm at 1 mm a pass is
+    /// three of 0.7, not two full ones and a 0.1 mm sliver.
+    #[test]
+    fn the_depth_is_split_into_equal_passes_within_the_limit() {
+        let levels = depth_levels(Length::from_mm(-2.1), Some(Length::from_mm(1.0)));
+        let mm: Vec<f64> = levels.iter().map(|z| z.as_mm()).collect();
+        assert_eq!(mm.len(), 3);
+        for (got, want) in mm.iter().zip([-0.7, -1.4, -2.1]) {
+            assert!((got - want).abs() < 1e-9, "{mm:?}");
+        }
+    }
+
+    /// An exact multiple is that many passes — the count is taken at 1 µm, so float noise
+    /// in the division cannot add a pass of nothing.
+    #[test]
+    fn an_exact_multiple_takes_no_extra_pass() {
+        let levels = depth_levels(Length::from_mm(-2.0), Some(Length::from_mm(1.0)));
+        assert_eq!(levels.len(), 2, "{levels:?}");
+        let levels = depth_levels(Length::from_mm(-0.3), Some(Length::from_mm(0.1)));
+        assert_eq!(levels.len(), 3, "{levels:?}");
+    }
+
+    /// The last level is the bottom the plan asked for, in the unit it was written in —
+    /// not a value rebuilt through millimetres.
+    #[test]
+    fn the_last_pass_lands_exactly_on_the_bottom() {
+        let bottom = Length::from_inch(-0.1);
+        let levels = depth_levels(bottom, Some(Length::from_mm(1.0)));
+        assert_eq!(levels.last(), Some(&bottom));
+    }
 
     fn at(center_mm: (f64, f64)) -> Point {
         Point::new(Length::from_mm(center_mm.0), Length::from_mm(center_mm.1))
@@ -356,7 +578,7 @@ mod tests {
     #[test]
     fn plunges_the_centre_first_so_no_island_remains() {
         let moves = spiral_hole(at((5.0, 5.0)), Length::from_mm(2.0), Length::from_mm(-2.4),
-            Length::from_mm(3.2), Length::from_mm(1.0));
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
         assert_eq!(moves[0], RouteMove::Rapid { x: Length::from_mm(5.0), y: Length::from_mm(5.0), z: Length::from_mm(2.0) });
         assert_eq!(moves[1], RouteMove::Plunge { x: Length::from_mm(5.0), y: Length::from_mm(5.0), z: Length::from_mm(-2.4) },
             "the centre is plunged before any spiral");
@@ -369,10 +591,13 @@ mod tests {
     fn the_spiral_grows_to_the_wall_without_overshooting_or_gapping() {
         // 3.2 mm hole, 1.0 mm tool → reach 1.1 mm, stepover 0.5 mm.
         let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(3.2), Length::from_mm(1.0));
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
 
+        // The outward spiral only: everything up to the finishing lap. The exit spiral after
+        // the laps comes back in, which is its own test's business.
         let radii: Vec<f64> = moves
             .iter()
+            .take_while(|m| !matches!(m, RouteMove::Arc { .. }))
             .filter_map(|m| match m {
                 RouteMove::Cut { x, y, .. } => Some((x.as_mm().powi(2) + y.as_mm().powi(2)).sqrt()),
                 _ => None,
@@ -396,11 +621,11 @@ mod tests {
     /// circle that closes on itself — a constant-radius pass over the finished surface,
     /// rather than leaving the last still-growing turn as the wall.
     #[test]
-    fn a_single_finishing_lap_closes_the_wall() {
+    fn the_finishing_lap_closes_the_wall() {
         let moves = spiral_hole(at((10.0, 20.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(3.2), Length::from_mm(1.0));
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
         let arcs: Vec<&RouteMove> = moves.iter().filter(|m| matches!(m, RouteMove::Arc { .. })).collect();
-        assert_eq!(arcs.len(), 1, "exactly one lap, at the end");
+        assert_eq!(arcs.len(), 2, "the finishing lap, then the one spring lap");
 
         let RouteMove::Arc { x, y, i, j, ccw } = arcs[0] else { unreachable!() };
         assert!((x.as_mm() - 11.1).abs() < 1e-6 && (y.as_mm() - 20.0).abs() < 1e-6,
@@ -410,12 +635,58 @@ mod tests {
         assert!(*ccw, "counter-clockwise: climb milling inside a pocket");
 
         // The spiral has to hand over to it exactly, or the lap starts with a jump.
-        let before = moves.iter().rev().find_map(|m| match m {
+        let lap = moves.iter().position(|m| matches!(m, RouteMove::Arc { .. })).expect("a lap");
+        let before = moves[..lap].iter().rev().find_map(|m| match m {
             RouteMove::Cut { x, y, .. } => Some((x.as_mm(), y.as_mm())),
             _ => None,
         }).expect("the spiral precedes the lap");
         assert!((before.0 - 11.1).abs() < 1e-6 && (before.1 - 20.0).abs() < 1e-6,
             "the lap begins where the spiral left off, got {before:?}");
+    }
+
+    /// After the finishing lap: the feed drops to a quarter, one spring lap goes round the
+    /// wall exactly once in the same climb direction, and an inward spiral brings the cutter
+    /// off the wall to the centre, where it lifts — never from the finished edge.
+    #[test]
+    fn the_finishing_pass_slows_laps_once_and_spirals_in() {
+        let moves = spiral_hole(at((10.0, 20.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
+        let feed = moves
+            .iter()
+            .position(|m| matches!(m, RouteMove::Feed { .. }))
+            .expect("the finishing pass sets its feed");
+        let RouteMove::Feed { fraction } = moves[feed] else { unreachable!() };
+        assert_eq!(fraction, FINISH_FEED_FRACTION);
+        assert_eq!(FINISH_FEED_FRACTION, 0.25);
+        assert!(matches!(moves[feed - 1], RouteMove::Arc { .. }), "slowed only after the finishing lap");
+
+        // Exactly one spring lap: a full circle on the wall, climb, closing where it began.
+        let RouteMove::Arc { x, y, i, j, ccw } = moves[feed + 1] else { panic!("the spring lap follows") };
+        assert!(ccw, "climb, like the finishing lap");
+        assert!((x.as_mm() - 11.1).abs() < 1e-6 && (y.as_mm() - 20.0).abs() < 1e-6, "one whole turn");
+        assert!((i.as_mm() + 1.1).abs() < 1e-6 && j.as_mm().abs() < 1e-6, "on the wall's own radius");
+        assert_eq!(moves.iter().skip(feed + 1).filter(|m| matches!(m, RouteMove::Arc { .. })).count(), 1);
+
+        // Then the exit spiral: the radius only shrinks, and it ends on the centre.
+        let spiral: Vec<(f64, f64)> = moves[feed + 2..]
+            .iter()
+            .filter_map(|m| match m {
+                RouteMove::Cut { x, y, .. } => Some((x.as_mm() - 10.0, y.as_mm() - 20.0)),
+                _ => None,
+            })
+            .collect();
+        assert!(spiral.len() > 8, "a spiral, not a straight line in");
+        let radii: Vec<f64> = spiral.iter().map(|(x, y)| x.hypot(*y)).collect();
+        assert!(radii.windows(2).all(|w| w[1] < w[0] + 1e-9), "always moving inward: {radii:?}");
+        assert!(radii.last().unwrap().abs() < 1e-9, "ends at the centre");
+        // Counter-clockwise, like everything else on this wall: the signed area of the path
+        // from the wall in is positive.
+        let area: f64 = spiral.windows(2).map(|w| w[0].0 * w[1].1 - w[1].0 * w[0].1).sum();
+        assert!(area > 0.0, "climb direction on the way in too");
+
+        let Some(RouteMove::Rapid { x, y, z }) = moves.last() else { panic!("ends with a retract") };
+        assert!((x.as_mm() - 10.0).abs() < 1e-9 && (y.as_mm() - 20.0).abs() < 1e-9, "lifts at the centre");
+        assert!((z.as_mm() - 2.0).abs() < 1e-9);
     }
 
     /// The whole point of the change: no radial step-outs. Every move after the plunge
@@ -424,7 +695,7 @@ mod tests {
     #[test]
     fn the_spiral_never_steps_out_radially() {
         let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(3.2), Length::from_mm(1.0));
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
         let cuts: Vec<(f64, f64)> = moves
             .iter()
             .filter_map(|m| match m {
@@ -451,7 +722,7 @@ mod tests {
     #[test]
     fn a_tool_with_no_reach_is_a_plain_plunge() {
         let moves = spiral_hole(at((0.0, 0.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(1.0), Length::from_mm(1.0));
+            Length::from_mm(1.0), Length::from_mm(1.0), None);
         assert!(!moves.iter().any(|m| matches!(m, RouteMove::Arc { .. })), "no spiral without reach");
         assert!(matches!(moves[1], RouteMove::Plunge { .. }), "still plunges the centre");
     }
@@ -463,11 +734,12 @@ mod tests {
     fn path_points(moves: &[RouteMove]) -> Vec<(f64, f64)> {
         moves
             .iter()
-            .map(|m| match *m {
+            .filter_map(|m| match *m {
                 RouteMove::Rapid { x, y, .. }
                 | RouteMove::Plunge { x, y, .. }
                 | RouteMove::Cut { x, y, .. }
-                | RouteMove::Arc { x, y, .. } => (x.as_mm(), y.as_mm()),
+                | RouteMove::Arc { x, y, .. } => Some((x.as_mm(), y.as_mm())),
+                RouteMove::Feed { .. } => None,
             })
             .collect()
     }
@@ -483,6 +755,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(tool_mm),
             from_solid,
+            None,
         )
     }
 
@@ -603,6 +876,7 @@ mod tests {
                     RouteMove::Rapid { x, y, .. }
                     | RouteMove::Plunge { x, y, .. }
                     | RouteMove::Cut { x, y, .. } => ((x.as_mm(), y.as_mm()), None),
+                    RouteMove::Feed { .. } => continue,
                 };
                 if let Some((i, j)) = arc {
                     let centre = (here.0 + i, here.1 + j);
@@ -655,10 +929,10 @@ mod tests {
         let slot = slot_route(
             at((3.0, 3.0)), at((3.0, 3.0)),
             Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(3.2), Length::from_mm(1.0), true,
+            Length::from_mm(3.2), Length::from_mm(1.0), true, None,
         );
         let hole = spiral_hole(at((3.0, 3.0)), Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(3.2), Length::from_mm(1.0));
+            Length::from_mm(3.2), Length::from_mm(1.0), None);
         assert_eq!(slot, hole);
     }
 
@@ -671,7 +945,7 @@ mod tests {
         let along_y = slot_route(
             at((0.0, 0.0)), at((0.0, 4.0)),
             Length::from_mm(2.0), Length::from_mm(-2.0),
-            Length::from_mm(2.0), Length::from_mm(1.0), true,
+            Length::from_mm(2.0), Length::from_mm(1.0), true, None,
         );
         assert_eq!(along_x.len(), along_y.len());
         for (a, b) in path_points(&along_x).iter().zip(path_points(&along_y).iter()) {

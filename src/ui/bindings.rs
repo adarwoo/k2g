@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
 use crate::data::model::{
-    blocking_step, conflicting_operations, operation_scope, step_reference, MachiningOperation,
+    blocking_step, conflicting_operations, insert_position, move_target, operation_scope,
+    step_reference, MachiningOperation,
     OperationConflict, OperationScope, UserUnitSystem, MACHINING_OPERATIONS,
 };
 use units::user_format as unit_format;
@@ -581,10 +582,12 @@ pub fn use_step_count(id: Uuid) -> usize {
     })
 }
 
-/// Appends a fresh machining step and triggers re-render.
-pub fn add_step(id: Uuid) {
-    with_appdata_mut(|data| data.add_step(id));
+/// Adds a fresh machining step where it can run — the end, or before a step that cuts
+/// the outline — triggers re-render, and returns its index.
+pub fn add_step(id: Uuid) -> Option<usize> {
+    let added = with_appdata_mut(|data| data.add_step(id));
     bump_render();
+    added
 }
 
 /// Removes the step at `step` (a profile keeps at least one) and re-renders.
@@ -760,9 +763,14 @@ pub fn BoardFacePicker(id: Uuid, step: usize) -> Element {
     };
     let current = field.display.clone();
 
+    let help = field.description.clone().unwrap_or_default();
+
     rsx! {
-        div { class: "field",
-            label { "{field.label}" }
+        div { class: "field", title: "{help}",
+            label {
+                "{field.label}"
+                FieldInfo { shown: !help.is_empty() }
+            }
             div { class: "field-control board-face-control",
                 for opt in field.enum_options.clone() {
                     {
@@ -795,115 +803,192 @@ pub fn BoardFacePicker(id: Uuid, step: usize) -> Element {
                     }
                 }
             }
-            if let Some(desc) = field.description.clone() {
-                p { class: "field-hint", "{desc}" }
+        }
+    }
+}
+
+/// Adds operation `key` to `step`, where [`insert_position`] says it goes, and re-renders.
+///
+/// Placed by the rules rather than appended, so "add engraving" to a step that drills and
+/// routes puts it where it can run — not after the outline, where it cannot.
+pub fn add_operation(id: Uuid, step: usize, key: &str) {
+    let mut operations = read_operations(id, step);
+    if operations.iter().any(|op| op == key) {
+        return;
+    }
+    let Some(at) = insert_position(&operations, key) else {
+        return;
+    };
+    operations.insert(at, key.to_string());
+    set_operations(id, step, &operations);
+}
+
+/// Removes the operation at `index` of `step`, unless it is the step's last — the schema
+/// requires one (`minItems: 1`), and a step that does nothing is removed as a step.
+///
+/// Removing never makes a valid order invalid: every rule in `order_fault` is about what
+/// sits next to or after what, and taking one item out of a valid list leaves the rest in
+/// the same relative order.
+pub fn remove_operation(id: Uuid, step: usize, index: usize) {
+    let mut operations = read_operations(id, step);
+    if operations.len() <= 1 || index >= operations.len() {
+        return;
+    }
+    operations.remove(index);
+    set_operations(id, step, &operations);
+}
+
+/// Moves the operation at `index` of `step` one valid place up or down ([`move_target`])
+/// and re-renders. A move the rules refuse does nothing; the button for it is disabled.
+pub fn move_operation(id: Uuid, step: usize, index: usize, up: bool) {
+    let mut operations = read_operations(id, step);
+    let Ok(to) = move_target(&operations, index, up) else {
+        return;
+    };
+    let key = operations.remove(index);
+    operations.insert(to, key);
+    set_operations(id, step, &operations);
+}
+
+/// Why operation `key` cannot be added to `step` — another step already runs it — in the
+/// terms that particular operation is limited by, or `None` when it can be.
+///
+/// "which machines the same side" is the reason a second outline is refused and is simply
+/// untrue of the pins, which are refused on either side — an explanation that does not
+/// match what the operator sees is worse than none, because it sends them to change the
+/// face.
+fn add_refusal(id: Uuid, step: usize, key: &str) -> Option<String> {
+    let (index, name) = operation_owner(id, step, key)?;
+    let owner = step_reference(index, &name);
+    Some(match operation_scope(key) {
+        OperationScope::OncePerJob => format!(
+            "Already drilled in {owner}. The pins register the whole job, so one step drills \
+             them — and it has to be the first."
+        ),
+        _ => format!("Already run by {owner}, which machines the same face."),
+    })
+}
+
+/// The ↑ ↓ ✕ controls on one operation's section header.
+///
+/// A refused move is a disabled button whose tooltip says which rule refuses it, rather
+/// than a button that is missing: an arrow that is simply not there reads as "this cannot
+/// be reordered", when the truth is usually "not past *that*".
+#[component]
+pub fn OperationControls(id: Uuid, step: usize, index: usize) -> Element {
+    let operations = use_operations(id, step);
+    let up = move_target(&operations, index, true);
+    let down = move_target(&operations, index, false);
+    let last_one = operations.len() <= 1;
+    let up_title = up.as_ref().err().cloned().unwrap_or_else(|| "Move up".to_string());
+    let down_title = down.as_ref().err().cloned().unwrap_or_else(|| "Move down".to_string());
+    rsx! {
+        div { class: "op-section-actions",
+            button {
+                r#type: "button", class: "icon-btn",
+                disabled: up.is_err(), title: "{up_title}",
+                onclick: move |_| move_operation(id, step, index, true),
+                "↑"
+            }
+            button {
+                r#type: "button", class: "icon-btn",
+                disabled: down.is_err(), title: "{down_title}",
+                onclick: move |_| move_operation(id, step, index, false),
+                "↓"
+            }
+            button {
+                r#type: "button", class: "icon-btn icon-btn-danger",
+                disabled: last_one,
+                title: if last_one {
+                    "A step needs at least one operation — remove the step instead"
+                } else {
+                    "Remove operation"
+                },
+                onclick: move |_| remove_operation(id, step, index),
+                "✕"
             }
         }
     }
 }
 
-/// The machining operations toggle set for a step: enables/disables each
-/// operation, keeping the stored `operations` array in schema order.
+/// The step's *Add operation* button and the overlay it opens.
+///
+/// The overlay lists only what the step does not already run, in board-making order. An
+/// operation another step has claimed is listed but greyed, with the step that has it —
+/// the board has that feature once, so leaving it out would hide *why* it cannot be added,
+/// and a missing choice is indistinguishable from a bug. The button is disabled once the
+/// step runs everything.
 #[component]
-pub fn OperationsEditor(id: Uuid, step: usize) -> Element {
-    let enabled = use_operations(id, step);
+pub fn AddOperationButton(id: Uuid, step: usize) -> Element {
+    let mut open = use_signal(|| false);
+    let operations = use_operations(id, step);
+    let remaining: Vec<&'static MachiningOperation> = MACHINING_OPERATIONS
+        .iter()
+        .filter(|op| !operations.iter().any(|key| key == op.key))
+        .collect();
+    let none_left = remaining.is_empty();
+
     rsx! {
-        div { class: "field operations-editor",
-            label { "Operations" }
-            for op in MACHINING_OPERATIONS.iter() {
-                {
-                    let checked = enabled.iter().any(|enabled_key| enabled_key == op.key);
-                    // Only an *unticked* box is ever blocked. If two steps somehow both
-                    // hold the operation — a hand-edited profile — both stay tickable,
-                    // because otherwise neither could be unticked and the conflict would
-                    // be unfixable from the editor that reported it.
-                    let owner = (!checked)
-                        .then(|| operation_owner(id, step, op.key))
-                        .flatten();
-                    rsx! {
-                        OperationToggle {
-                            id,
-                            step,
-                            op_key: op.key.to_string(),
-                            label: op.label.to_string(),
-                            checked,
-                            blocked_by: owner,
+        button {
+            r#type: "button",
+            class: "btn btn-secondary add-operation-btn",
+            disabled: none_left,
+            title: if none_left { "This step already runs every operation" } else { "" },
+            onclick: move |_| open.set(true),
+            "+ Add operation"
+        }
+        if open() {
+            div {
+                class: "wizard-overlay",
+                // A click on the backdrop closes; one on the dialog must not reach it.
+                onclick: move |_| open.set(false),
+                div {
+                    class: "wizard-dialog add-operation-dialog",
+                    tabindex: "-1",
+                    onclick: move |evt| evt.stop_propagation(),
+                    onmounted: move |evt| async move {
+                        let _ = evt.set_focus(true).await;
+                    },
+                    onkeydown: move |evt| {
+                        let key = evt.key().to_string().to_ascii_lowercase();
+                        if key == "escape" || key == "esc" {
+                            open.set(false);
+                        }
+                    },
+                    h2 { "Add operation" }
+                    div { class: "add-operation-list",
+                        for op in remaining {
+                            {
+                                let refusal = add_refusal(id, step, op.key);
+                                let key = op.key;
+                                rsx! {
+                                    button {
+                                        key: "{key}",
+                                        r#type: "button",
+                                        class: "add-operation-choice",
+                                        disabled: refusal.is_some(),
+                                        title: "{refusal.clone().unwrap_or_default()}",
+                                        onclick: move |_| {
+                                            add_operation(id, step, key);
+                                            open.set(false);
+                                        },
+                                        span { "{op.label}" }
+                                        if let Some(reason) = refusal.clone() {
+                                            span { class: "operation-blocked-note", "{reason}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "wizard-actions",
+                        button {
+                            class: "btn btn-secondary",
+                            onclick: move |_| open.set(false),
+                            "Cancel"
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// One operation checkbox within an [`OperationsEditor`].
-///
-/// `blocked_by` is the `(index, name)` of the step that already runs this operation on
-/// the same board side, which makes the box unavailable — the board has the feature
-/// once, so cutting it in a second step cuts it twice.
-#[component]
-fn OperationToggle(
-    id: Uuid,
-    step: usize,
-    op_key: String,
-    label: String,
-    checked: bool,
-    blocked_by: Option<(usize, String)>,
-) -> Element {
-    // Why the box is unavailable, in the terms that particular operation is limited by.
-    // "which machines the same side" is the reason a second outline is refused and is
-    // simply untrue of the pins, which are refused on either side — an explanation that
-    // does not match what the operator sees is worse than none, because it sends them to
-    // change the face.
-    let title = match blocked_by.as_ref() {
-        Some((index, name)) => {
-            let owner = step_reference(*index, name);
-            match operation_scope(&op_key) {
-                OperationScope::OncePerJob => format!(
-                    "Already drilled in {owner}. The pins register the whole job, so one \
-                     step drills them — and it has to be the first."
-                ),
-                _ => format!("Already run by {owner}, which machines the same side"),
-            }
-        }
-        None => String::new(),
-    };
-    rsx! {
-        label {
-            class: if blocked_by.is_some() { "checkbox-line is-blocked" } else { "checkbox-line" },
-            title: "{title}",
-            input {
-                r#type: "checkbox",
-                checked,
-                disabled: blocked_by.is_some(),
-                onchange: move |evt| {
-                    let mut current = read_operations(id, step);
-                    if evt.checked() {
-                        if !current.iter().any(|op| op == &op_key) {
-                            current.push(op_key.clone());
-                        }
-                    } else {
-                        current.retain(|op| op != &op_key);
-                    }
-                    // Persist in schema order regardless of click order.
-                    let ordered: Vec<String> = MACHINING_OPERATIONS
-                        .iter()
-                        .filter(|op| current.iter().any(|enabled_key| enabled_key == op.key))
-                        .map(|op| op.key.to_string())
-                        .collect();
-                    set_operations(id, step, &ordered);
-                    // Ticking locating pins used to force the step's board face to front,
-                    // on the reasoning that pins are drilled before the board is ever
-                    // turned over. It does not follow — see `locating_pin_faults`. The
-                    // face is the operator's either way, and machining the harder side
-                    // first is a reason to want the back.
-                },
-            }
-            span { "{label}" }
-            // The ordinal alone beside the box; the full reference is in the tooltip.
-            // Steps often share a name, so the number is the part that identifies one.
-            if let Some((index, _)) = blocked_by.as_ref() {
-                span { class: "operation-blocked-note", "in step {index + 1}" }
             }
         }
     }
@@ -1506,13 +1591,22 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
         "field-control"
     };
 
+    // The schema's description, as the field's tooltip rather than a paragraph under it.
+    // Written to explain the setting fully, a description runs to several lines — a form
+    // of a dozen fields became a wall of prose the settings themselves were lost in, and
+    // the operator reads one of them only when unsure of that one field. On the whole row,
+    // not just the label, so hovering the control asks the same question; a control's own
+    // `title` (the revert button's) still wins over it where it has one.
+    let help = field.description.clone().unwrap_or_default();
+
     rsx! {
-        div { class: "{field_class}",
+        div { class: "{field_class}", title: "{help}",
             label {
                 "{field.label}"
                 if field.required {
                     span { class: "field-required", " *" }
                 }
+                FieldInfo { shown: !help.is_empty() }
             }
             div { class: "{control_class}",
                 {input}
@@ -1529,9 +1623,21 @@ fn field_widget(addr: FieldAddr, ptr: String) -> Element {
                     }
                 }
             }
-            if let Some(desc) = field.description.clone() {
-                p { class: "field-hint", "{desc}" }
-            }
+        }
+    }
+}
+
+/// The marker beside a label that says the field has a tooltip.
+///
+/// A `title` on its own is invisible: nothing shows that hovering will tell you anything,
+/// and the descriptions used to sit in plain sight. The marker keeps that promise visible
+/// at the cost of one glyph. `aria-hidden` because a screen reader already announces the
+/// row's `title`, and would otherwise read the glyph as well.
+#[component]
+fn FieldInfo(shown: bool) -> Element {
+    rsx! {
+        if shown {
+            span { class: "field-info", "aria-hidden": "true", "ⓘ" }
         }
     }
 }

@@ -33,6 +33,26 @@ pub const READINESS_ERROR_DOMAIN: &str = "readiness";
 /// program engraved to it would be thousands of disconnected slivers.
 pub const ISOLATION_ERROR_DOMAIN: &str = "isolation";
 
+/// Faults in the board outline: the Edge.Cuts layer does not close, or nests a shape
+/// inside a hole. Its own domain, and so a blocking error, for the reason
+/// [`ISOLATION_ERROR_DOMAIN`] is: there is no program worth having from an outline that
+/// cannot be routed.
+pub const OUTLINE_ERROR_DOMAIN: &str = "outline";
+
+/// The screen a broken reference is fixed on, from its owner tag (`"process:<id>"`).
+///
+/// `None` for an owner with no screen of its own (`"project:current"`), where the message
+/// is all there is to go on.
+fn owner_screen(owner_tag: &str) -> Option<Screen> {
+    match owner_tag.split(':').next()? {
+        "process" => Some(Screen::MachiningProfiles),
+        "toolset" => Some(Screen::ToolsetProfiles),
+        "cnc" => Some(Screen::CncProfiles),
+        "fixture" => Some(Screen::FixtureProfiles),
+        _ => None,
+    }
+}
+
 impl AppState {
     // Creates runtime defaults, then hydrates persisted data from disk.
     pub fn new(boot: &UiLaunchData) -> Self {
@@ -55,6 +75,8 @@ impl AppState {
                 JobCenterView::Board
             },
             selected_step: if reopen { load_persisted_selected_step() } else { 0 },
+            board_focus: None,
+            last_export_zero: None,
             unit_system: load_persisted_unit_system(),
             theme: load_persisted_theme(),
             machines: vec![],
@@ -456,6 +478,15 @@ impl AppState {
         message: String,
         details: Option<String>,
     ) {
+        // A broken reference names its profile through the owner tag; the screen that
+        // profile lives on is where it gets fixed.
+        let fix_at = owner_tag.as_deref().and_then(owner_screen).map(AppPlace::screen);
+        self.push_issue_quiet(domain, owner_tag, Issue { message, details, places: Vec::new(), fix_at });
+    }
+
+    /// Records a diagnostic with its locations, without a toast. See
+    /// [`Self::push_runtime_error_quiet`] for why quiet.
+    fn push_issue_quiet(&mut self, domain: &str, owner_tag: Option<String>, issue: Issue) {
         let created_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as u64)
@@ -467,8 +498,10 @@ impl AppState {
             domain: domain.to_string(),
             owner_tag,
             is_error: true,
-            message,
-            details,
+            message: issue.message,
+            details: issue.details,
+            places: issue.places,
+            fix_at: issue.fix_at,
         });
         const MAX_ERRORS: usize = 200;
         if self.errors.len() > MAX_ERRORS {
@@ -492,9 +525,16 @@ impl AppState {
     /// Being a domain replace, this also *clears* itself: pass an empty list on a good run
     /// and the banner goes away without anyone having to remember to dismiss it.
     pub fn set_generation_errors(&mut self, failures: Vec<(String, Option<String>)>) {
+        self.set_generation_issues(
+            failures.into_iter().map(|(message, details)| Issue::new(message, details)).collect(),
+        );
+    }
+
+    /// [`Self::set_generation_errors`] for failures that say where they are fixed.
+    pub fn set_generation_issues(&mut self, failures: Vec<Issue>) {
         self.clear_runtime_errors(GENERATION_ERROR_DOMAIN);
-        for (message, details) in failures {
-            self.push_runtime_error_quiet(GENERATION_ERROR_DOMAIN, None, message, details);
+        for issue in failures {
+            self.push_issue_quiet(GENERATION_ERROR_DOMAIN, None, issue);
         }
     }
 
@@ -504,19 +544,63 @@ impl AppState {
     /// the contours came out. It cannot go through the tooling check that reports every
     /// other tool fault: that runs off [`AppState`] alone, and the contours live on the
     /// context because they are worked out on a thread.
-    pub fn set_isolation_errors(&mut self, faults: Vec<(String, Option<String>)>) {
+    pub fn set_isolation_errors(&mut self, faults: Vec<Issue>) {
+        self.replace_issues(ISOLATION_ERROR_DOMAIN, faults);
+    }
+
+    /// Replaces the board-outline diagnostics with what the stitcher reported.
+    ///
+    /// A domain of their own, posted where the stitch happens, so each fault is on screen as
+    /// itself — with its place on the board — rather than as one of three canned readiness
+    /// labels ("Open contours detected") that threw the position away. Being an error in a
+    /// domain of its own is also what holds the readiness gate shut, as an isolation fault
+    /// does.
+    pub fn set_outline_errors(&mut self, stitched: Option<&pcb::StitchResult>) {
+        let issues = stitched
+            .map(|stitched| {
+                stitched
+                    .errors
+                    .iter()
+                    .enumerate()
+                    .map(|(index, error)| Issue {
+                        message: "The board outline does not close into a usable shape.".to_string(),
+                        details: Some(format!("{error}. Fix the Edge.Cuts layer in KiCad.")),
+                        places: stitched
+                            .fault_marks
+                            .get(index)
+                            .map(|mark| BoardPlace {
+                                label: "Edge.Cuts".to_string(),
+                                layer: None,
+                                marks: vec![BoardMark::Path(mark.clone())],
+                            })
+                            .into_iter()
+                            .collect(),
+                        fix_at: None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.replace_issues(OUTLINE_ERROR_DOMAIN, issues);
+    }
+
+    /// Replaces one domain's standing issues, leaving an unchanged set alone.
+    ///
+    /// Left alone rather than cleared and re-pushed, because re-pushing mints fresh ids and
+    /// those key the banner's detail list: an operator reading one entry would have it torn
+    /// down and rebuilt under them on every unrelated edit.
+    fn replace_issues(&mut self, domain: &str, issues: Vec<Issue>) {
         let unchanged = self
             .errors
             .iter()
-            .filter(|error| error.domain == ISOLATION_ERROR_DOMAIN)
-            .map(|error| (error.message.clone(), error.details.clone()))
-            .eq(faults.iter().cloned());
+            .filter(|error| error.domain == domain)
+            .map(|error| (&error.message, &error.details, &error.places, &error.fix_at))
+            .eq(issues.iter().map(|issue| (&issue.message, &issue.details, &issue.places, &issue.fix_at)));
         if unchanged {
-            return; // avoid re-posting an identical standing condition
+            return;
         }
-        self.clear_runtime_errors(ISOLATION_ERROR_DOMAIN);
-        for (message, details) in faults {
-            self.push_runtime_error_quiet(ISOLATION_ERROR_DOMAIN, None, message, details);
+        self.clear_runtime_errors(domain);
+        for issue in issues {
+            self.push_issue_quiet(domain, None, issue);
         }
     }
 
@@ -542,26 +626,22 @@ impl AppState {
     /// and re-pushed. Re-pushing would mint fresh ids on every mutation, and those ids key
     /// the banner's detail list — so an operator with the details open would have the
     /// entry they were reading torn down and rebuilt under them as they typed elsewhere.
+    #[cfg(test)]
     pub fn set_readiness_errors(&mut self, reasons: &[String]) {
-        let unchanged = self
-            .errors
-            .iter()
-            .filter(|error| error.domain == READINESS_ERROR_DOMAIN)
-            .map(|error| error.message.as_str())
-            .eq(reasons.iter().map(String::as_str));
-        if unchanged {
-            return;
-        }
+        let issues: Vec<Issue> = reasons.iter().map(|reason| Issue::new(reason.clone(), None)).collect();
+        self.set_readiness_issues(&issues);
+    }
 
-        self.clear_runtime_errors(READINESS_ERROR_DOMAIN);
-        for reason in reasons {
-            self.push_runtime_error_quiet(
-                READINESS_ERROR_DOMAIN,
-                None,
-                reason.clone(),
-                Some("The job cannot be generated until this is resolved.".to_string()),
-            );
-        }
+    /// [`Self::set_readiness_errors`] for reasons that say where they are fixed.
+    pub fn set_readiness_issues(&mut self, reasons: &[Issue]) {
+        let issues = reasons
+            .iter()
+            .map(|reason| Issue {
+                details: Some("The job cannot be generated until this is resolved.".to_string()),
+                ..reason.clone()
+            })
+            .collect();
+        self.replace_issues(READINESS_ERROR_DOMAIN, issues);
     }
 
     fn profile_owner_tag(kind: &str, id: &str) -> String {
@@ -887,21 +967,21 @@ impl AppState {
     /// there is would be noise, and the whole point of the single-step case is that
     /// nothing hints steps exist.
     ///
-    /// Beyond one, the step is named by **the operator's own name for it** — a stick
-    /// holding `panel_Drill PTH.nc` and `panel_Route outline.nc` says what to load when,
-    /// which `panel_step1.nc` and `panel_step2.nc` do not, and the operator is the one
-    /// standing at the machine deciding. The ordinal is the fallback for a step left
-    /// unnamed, and for one whose name survives sanitising as nothing at all (a step
-    /// called `?` or `...`).
+    /// Beyond one, the file carries **the step's number and the operator's own name for
+    /// it**: `panel_step1_Drill PTH.nc`, `panel_step3_Route outline.nc`. The name says what
+    /// the step does; the number says which goes first, and that is the half that matters
+    /// at the machine — the files were named by step name alone once, and the order could
+    /// only be found by opening the setup sheet. The number also makes every name unique,
+    /// so two steps the operator called the same thing no longer collide.
+    ///
+    /// The name is dropped, leaving `panel_step2.nc`, for a step left unnamed or whose name
+    /// survives sanitising as nothing at all (a step called `?` or `...`).
     ///
     /// Sanitised the same way the board name is, so one convention governs the whole
     /// file name: characters Windows forbids become `_`, and spaces and case are kept
     /// (`panel v2` already survives here, so a step name should not be held to a
     /// stricter rule than the board is).
     ///
-    /// **Uniqueness is the caller's** — step names need not be unique, and this cannot
-    /// see its siblings. See `save_rows`, which drops the colliding ones back to their
-    /// ordinals.
     pub fn program_file_name(
         &self,
         index: usize,
@@ -928,12 +1008,51 @@ impl AppState {
         // A suffix made entirely of punctuation tells the operator nothing the ordinal
         // does not tell them better.
         let named = sanitize_file_stem(step_name);
-        let suffix = if named.chars().any(|c| c.is_alphanumeric()) {
-            named
+        let ordinal = format!("step{}", index + 1);
+        if named.chars().any(|c| c.is_alphanumeric()) {
+            format!("{stem}_{ordinal}_{named}.{extension}")
         } else {
-            format!("step{}", index + 1)
-        };
-        format!("{stem}_{suffix}.{extension}")
+            format!("{stem}_{ordinal}.{extension}")
+        }
+    }
+
+    /// Records the zero offset an export was just written against.
+    pub fn remember_export_zero(&mut self, offset: Option<(f64, f64)>) {
+        let board = self.board.as_ref().map(|b| b.name.clone()).unwrap_or_default();
+        self.last_export_zero = offset.map(|offset| ExportedZero { board, offset });
+    }
+
+    /// How far the work zero has moved, `(dx, dy)` mm, since this board's programs were last
+    /// exported — `None` when it has not, or there is nothing to compare with.
+    ///
+    /// Every program is written against one zero derived from **all** the steps, so changing
+    /// the steps after some were cut (adding an outline route, turning on a test cut) moves it
+    /// under work already on the machine. That is correct for a job planned at once and
+    /// wrong for one already half-made, and nothing used to say it had happened.
+    pub fn zero_shift_since_export(&self, current: Option<(f64, f64)>) -> Option<(f64, f64)> {
+        let last = self.last_export_zero.as_ref()?;
+        let board = self.board.as_ref().map(|b| b.name.as_str()).unwrap_or_default();
+        if last.board != board {
+            return None;
+        }
+        let (x, y) = current?;
+        let shift = (x - last.offset.0, y - last.offset.1);
+        // A micron, the precision every other comparison in the planner uses.
+        (shift.0.abs() > 1e-3 || shift.1.abs() > 1e-3).then_some(shift)
+    }
+
+    /// What the setup sheet is exported as: the board's name, sanitised the way a program's
+    /// is, with `-setup.pdf`. Beside the programs it describes, and sorted with them.
+    pub fn setup_sheet_file_name(&self) -> String {
+        let stem = self
+            .board
+            .as_ref()
+            .map(|board| board.name.trim())
+            .filter(|name| !name.is_empty())
+            .map(sanitize_file_stem)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "program".to_string());
+        format!("{stem}-setup.pdf")
     }
 
     /// The program for the step the Job views are showing, if that step has one.
@@ -1094,12 +1213,21 @@ impl AppState {
     /// job cannot be machined until it is fixed. De-duplicates against what is already
     /// posted so re-running on every mutation does not re-toast an unchanged failure.
     pub fn validate_tooling(&mut self, stitched: Option<&pcb::StitchResult>) {
-        let failures: Vec<(String, Vec<String>)> = if crate::data::appdata_ready() {
+        // Each failure carries the step it belongs to, so it opens that step's Tooling tab,
+        // and the holes behind it when holes are what failed, so they can be shown.
+        let next: Vec<Issue> = if crate::data::appdata_ready() {
             crate::runtime::tooling::plan_tooling(self, stitched)
                 .steps
                 .into_iter()
-                .filter_map(|step| match step.outcome {
-                    crate::runtime::tooling::StepOutcome::Failed(messages) => Some((step.name, messages)),
+                .enumerate()
+                .filter_map(|(index, step)| match step.outcome {
+                    crate::runtime::tooling::StepOutcome::Failed(messages) => Some(Issue {
+                        message: format!("No tooling solution for step '{}'.", step.name),
+                        details: Some(messages.join("
+")),
+                        places: step.fault_places,
+                        fix_at: Some(AppPlace::job(JobCenterView::Tooling, index)),
+                    }),
                     _ => None,
                 })
                 .collect()
@@ -1107,25 +1235,21 @@ impl AppState {
             Vec::new()
         };
 
-        let next: Vec<(String, Option<String>)> = failures
-            .into_iter()
-            .map(|(name, messages)| {
-                (format!("No tooling solution for step '{name}'."), Some(messages.join("\n")))
-            })
-            .collect();
-        let current: Vec<(String, Option<String>)> = self
+        let unchanged = self
             .errors
             .iter()
             .filter(|error| error.domain == "tooling")
-            .map(|error| (error.message.clone(), error.details.clone()))
-            .collect();
-        if next == current {
+            .map(|error| (&error.message, &error.details, &error.places, &error.fix_at))
+            .eq(next.iter().map(|issue| (&issue.message, &issue.details, &issue.places, &issue.fix_at)));
+        if unchanged {
             return; // unchanged — avoid re-posting and re-toasting
         }
 
         self.clear_runtime_errors("tooling");
-        for (message, details) in next {
-            self.push_runtime_error_owned("tooling", None, message, details);
+        for issue in next {
+            let message = issue.message.clone();
+            self.push_issue_quiet("tooling", None, issue);
+            self.log_event(message);
         }
     }
 
@@ -1694,6 +1818,40 @@ impl AppState {
     /// [`Self::hydrate_from_persistence`].
     pub fn select_step(&mut self, index: usize) {
         self.selected_step = index;
+    }
+
+    /// Takes the operator to where a fault is fixed: the screen, and the Job tab and step
+    /// when it names them.
+    pub fn go_to(&mut self, place: &AppPlace) {
+        self.select_screen(place.screen);
+        if let Some(view) = place.job_view {
+            self.select_job_view(view);
+        }
+        if let Some(step) = place.step {
+            self.select_step(step);
+        }
+    }
+
+    /// Shows one place on the board: opens the Board tab and asks it to zoom there.
+    ///
+    /// A place on one copper face also selects a step that shows that face, because a step
+    /// only draws its own face's copper: Show on back copper while a front step is selected
+    /// would otherwise zoom to a spot where nothing is drawn. The selected step is kept when
+    /// it already shows that face, and left alone when no step machines it.
+    pub fn show_on_board(&mut self, place: &BoardPlace) {
+        let Some(bounds) = place.bounds() else {
+            return;
+        };
+        if let Some(layer) = place.layer {
+            let back = layer == pcb::BACK_COPPER;
+            if let Some(step) = crate::runtime::tooling::step_for_face(self, back) {
+                self.select_step(step);
+            }
+        }
+        self.select_screen(Screen::Job);
+        self.select_job_view(JobCenterView::Board);
+        let nonce = self.board_focus.as_ref().map_or(0, |focus| focus.nonce.wrapping_add(1));
+        self.board_focus = Some(BoardFocus { bounds, nonce });
     }
 
     pub fn seed_rack_slots(&mut self, slot_count: u8) {
@@ -3223,14 +3381,19 @@ mod export_tests {
         assert_eq!(app.program_file_name(0, 1, "", "drl"), "panel.drl");
     }
 
-    /// Past one step the file is named for the step, because that is the name the operator
-    /// is working from: a stick holding `panel_Drill PTH.nc` says what to load when, and
-    /// `panel_step1.nc` does not.
+    /// Past one step the file carries the step's number and its name: the number says which
+    /// to run first, which a stick holding `panel_Drill PTH.nc` and `panel_Route outline.nc`
+    /// did not, and the name says what it does.
     #[test]
-    fn a_named_step_names_its_file() {
+    fn a_named_step_names_its_file_after_its_number() {
         let app = named_board("panel");
-        assert_eq!(app.program_file_name(0, 3, "Drill PTH", "nc"), "panel_Drill PTH.nc");
-        assert_eq!(app.program_file_name(2, 3, "Route outline", "nc"), "panel_Route outline.nc");
+        assert_eq!(app.program_file_name(0, 3, "Drill PTH", "nc"), "panel_step1_Drill PTH.nc");
+        assert_eq!(app.program_file_name(2, 3, "Route outline", "nc"), "panel_step3_Route outline.nc");
+        assert_ne!(
+            app.program_file_name(0, 3, "Drill", "nc"),
+            app.program_file_name(1, 3, "Drill", "nc"),
+            "two steps of one name are still two files"
+        );
     }
 
     /// The ordinal is the fallback, and has to survive a name that sanitises away to
@@ -3255,6 +3418,25 @@ mod export_tests {
         assert_eq!(app.program_file_name(0, 1, "", ".ngc"), "panel.ngc", "a stray dot is tolerated");
     }
 
+    /// The zero is compared with what the last export of **this** board used: a move is
+    /// reported with its size, an unchanged zero says nothing, and another board is another
+    /// job with nothing to compare against.
+    #[test]
+    fn a_zero_that_moved_since_the_last_export_is_noticed() {
+        let mut app = named_board("panel");
+        assert_eq!(app.zero_shift_since_export(Some((2.381, 6.8))), None, "nothing exported yet");
+
+        app.remember_export_zero(Some((2.381, 6.8)));
+        assert_eq!(app.zero_shift_since_export(Some((2.381, 6.8))), None, "unchanged");
+        let (dx, dy) = app.zero_shift_since_export(Some((4.1, 6.8))).expect("the outline step moved it");
+        assert!((dx - 1.719).abs() < 1e-9 && dy == 0.0, "{dx} {dy}");
+
+        let other = named_board("other");
+        let mut other = other;
+        other.last_export_zero = app.last_export_zero.clone();
+        assert_eq!(other.zero_shift_since_export(Some((4.1, 6.8))), None, "a different board");
+    }
+
     /// Both halves are sanitised, and by the same rule — the step name is the operator's
     /// free text and is the likelier of the two to carry a slash or a colon.
     #[test]
@@ -3263,7 +3445,7 @@ mod export_tests {
         assert_eq!(app.program_file_name(1, 2, "", "nc"), "panel v2_ rev_3_step2.nc");
         assert_eq!(
             app.program_file_name(0, 2, "Drill: PTH/NPTH", "nc"),
-            "panel v2_ rev_3_Drill_ PTH_NPTH.nc"
+            "panel v2_ rev_3_step1_Drill_ PTH_NPTH.nc"
         );
     }
 }

@@ -56,6 +56,10 @@ pub fn ExportProgramButton(state: Signal<AppCtx>) -> Element {
     let has_program = snapshot.has_any_program() && is_current;
 
     let mut rows = use_signal(Vec::<ExportRow>::new);
+    let mut sheet = use_signal(SheetRow::default);
+    // How far the zero has moved since the last export of this board, worked out as the
+    // dialog opens. See `AppState::zero_shift_since_export`.
+    let mut zero_shift = use_signal(|| Option::<(f64, f64)>::None);
     let mut destination = use_signal(PathBuf::new);
     // `Some` only when the dialog was opened from the USB button — which is what decides
     // whether an eject follows, so it is the intent that is remembered rather than where
@@ -75,6 +79,8 @@ pub fn ExportProgramButton(state: Signal<AppCtx>) -> Element {
         let snapshot = state.read().clone();
         let target = snapshot.export_target(&wants);
         rows.set(export_rows(&snapshot));
+        sheet.set(SheetRow { include: true, file_name: snapshot.setup_sheet_file_name() });
+        zero_shift.set(snapshot.zero_shift_since_export(crate::runtime::machining_plan::job_zero_offset(&snapshot)));
         destination.set(target.directory);
         eject_medium.set(target.medium);
         open.set(true);
@@ -115,12 +121,23 @@ pub fn ExportProgramButton(state: Signal<AppCtx>) -> Element {
             if *open.read() {
                 ExportProgramsDialog {
                     rows,
+                    sheet,
+                    zero_shift: *zero_shift.read(),
+                    unit: snapshot.unit_system,
                     destination,
                     medium_name: eject_medium.read().as_ref().map(|m| m.display_name()),
                     on_cancel: move |_| open.set(false),
+                    on_preview: move |_| {
+                        let rows = rows.read().clone();
+                        let sheet = sheet.read().clone();
+                        // Spawned for the same reason the export is: the PDF takes a moment
+                        // to build, and nothing about it belongs inside this event.
+                        spawn(async move { preview_sheet(state, &rows, &sheet) });
+                    },
                     on_export: move |_| {
                         open.set(false);
                         let rows = rows.read().clone();
+                        let sheet = sheet.read().clone();
                         let folder = destination.read().clone();
                         let eject = eject_medium.read().clone();
                         // Spawned, never called inline. `open.set(false)` above has just
@@ -128,7 +145,7 @@ pub fn ExportProgramButton(state: Signal<AppCtx>) -> Element {
                         // let its modal pump re-enter the event loop and render that
                         // pending unmount while the arena is still borrowed for this very
                         // event — see `profiles_common::dialog_parent`.
-                        spawn(async move { export_batch(state, rows, folder, eject).await });
+                        spawn(async move { export_batch(state, rows, sheet, folder, eject).await });
                     },
                 }
             }
@@ -160,6 +177,20 @@ fn UsbIcon() -> Element {
     }
 }
 
+/// An eye: look at it, without keeping it.
+#[component]
+fn PreviewIcon() -> Element {
+    rsx! {
+        svg {
+            class: "export-preview-svg",
+            view_box: "0 0 24 24",
+            "aria-hidden": "true",
+            path { d: "M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z" }
+            circle { cx: "12", cy: "12", r: "3" }
+        }
+    }
+}
+
 /// The export: what is being written, what each file is called, and where it is going.
 ///
 /// One dialog for one program and for ten. It used to appear only for a multi-step job,
@@ -172,15 +203,22 @@ fn UsbIcon() -> Element {
 #[component]
 fn ExportProgramsDialog(
     rows: Signal<Vec<ExportRow>>,
+    sheet: Signal<SheetRow>,
+    /// How far the zero has moved since this board was last exported, if it has.
+    zero_shift: Option<(f64, f64)>,
+    unit: units::UserUnitSystem,
     destination: Signal<PathBuf>,
     /// `Some` when the export was aimed at a stick — the note that it will be ejected.
     medium_name: Option<String>,
     on_cancel: EventHandler<()>,
+    /// Open the setup sheet as it would be written now, without writing it anywhere.
+    on_preview: EventHandler<()>,
     on_export: EventHandler<()>,
 ) -> Element {
     let current = rows.read().clone();
+    let current_sheet = sheet.read().clone();
     let folder = destination.read().clone();
-    let problem = validate_export(&current, &folder);
+    let problem = validate_export(&current, &current_sheet, &folder);
     // One program needs no checkbox: it cannot be unticked and still exported, and
     // `validate_export` refuses an empty selection anyway.
     let single = current.len() == 1;
@@ -237,7 +275,7 @@ fn ExportProgramsDialog(
                     for (position , row) in current.iter().enumerate() {
                         div {
                             key: "{row.step_index}",
-                            class: if single { "export-row export-row-single" } else { "export-row" },
+                            class: "export-row",
                             if !single {
                                 input {
                                     r#type: "checkbox",
@@ -248,6 +286,10 @@ fn ExportProgramsDialog(
                                         rows.write()[position].include = checked;
                                     },
                                 }
+                            } else {
+                                // Holds the checkbox's column, so the name lines up with the
+                                // setup sheet's row below, which always has one.
+                                span { class: "export-check-gap" }
                             }
                             div { class: "export-step",
                                 span { class: "export-step-name", "{row.step_label}" }
@@ -268,6 +310,41 @@ fn ExportProgramsDialog(
                                     let value = evt.value();
                                     rows.write()[position].file_name = value;
                                 },
+                            }
+                        }
+                    }
+                    // The setup sheet: always a checkbox, even beside a single program,
+                    // because leaving it out is a real choice where leaving out the only
+                    // program is not.
+                    div { class: "export-row export-row-sheet",
+                        input {
+                            r#type: "checkbox",
+                            checked: current_sheet.include,
+                            title: "Include the setup sheet",
+                            onchange: move |evt| sheet.write().include = evt.checked(),
+                        }
+                        div { class: "export-step",
+                            span { class: "export-step-name", "Setup sheet (PDF)" }
+                            span { class: "export-step-meta", "The board, every step's setup, rack and tools" }
+                        }
+                        // The name and the preview share the name column, so this row's name
+                        // box starts where every program's does.
+                        div { class: "export-name-with-action",
+                            input {
+                                class: "export-name",
+                                value: "{current_sheet.file_name}",
+                                disabled: !current_sheet.include,
+                                oninput: move |evt| sheet.write().file_name = evt.value(),
+                            }
+                            // Enabled whether or not the sheet is ticked: looking at it is
+                            // how the operator decides whether to include it.
+                            button {
+                                r#type: "button",
+                                class: "icon-btn export-preview-btn",
+                                title: "Preview the setup sheet",
+                                "aria-label": "Preview the setup sheet",
+                                onclick: move |_| on_preview.call(()),
+                                PreviewIcon {}
                             }
                         }
                     }
@@ -295,6 +372,13 @@ fn ExportProgramsDialog(
                     p { class: "export-eject-note",
                         "{name} will be ejected when the export finishes."
                     }
+                }
+
+                // A warning, not a refusal: the new zero is right for the job as it now
+                // stands, and wrong only for work already done with the old one — which
+                // only the operator knows about.
+                if let Some(text) = zero_shift.map(|shift| zero_shift_warning(shift, unit)) {
+                    p { class: "diag-status diag-warning", "{text}" }
                 }
 
                 if let Some(problem) = problem.clone() {
@@ -326,17 +410,22 @@ fn ExportProgramsDialog(
 async fn export_batch(
     state: Signal<AppCtx>,
     rows: Vec<ExportRow>,
+    sheet: SheetRow,
     folder: PathBuf,
     eject: Option<RemovableMedium>,
 ) {
     // The only overwrite guard there is. A native save dialog used to supply one for the
     // single-program case; with no picker anywhere in the flow, this covers every export.
-    if !confirm_overwrites(&rows, &folder).await {
+    if !confirm_overwrites(&rows, &sheet, &folder).await {
         return;
     }
 
     let snapshot = state.read().clone();
-    let report = write_rows(&snapshot, &rows, &folder);
+    let mut report = write_rows(&snapshot, &rows, &folder);
+    // After the programs, from the same snapshot, naming the files as they were written.
+    if sheet.include {
+        report.sheet = Some(write_sheet(&snapshot, &rows, &sheet, &folder));
+    }
 
     // Filed under the volume the files actually landed on, which Browse may have changed —
     // and read against the media list as it is *now*, so a folder on a stick is filed by
@@ -344,24 +433,38 @@ async fn export_batch(
     let media = removable::removable_media();
     let volume = removable::volume_key_for_path(&folder, &media);
     with_ctx_mut(|ctx| ctx.app.remember_export_directory(&volume, &folder));
+    // What these programs were written against, so the next export can tell if it moves.
+    if !report.written.is_empty() {
+        let offset = crate::runtime::machining_plan::job_zero_offset(&snapshot);
+        with_ctx_mut(|ctx| ctx.app.remember_export_zero(offset));
+    }
 
+    // The sheet is said separately: it is not a program, and a sheet that failed must not
+    // read as a program that did.
+    let with_sheet = match &report.sheet {
+        Some(Ok(_)) => " and the setup sheet",
+        _ => "",
+    };
     if !report.failed.is_empty() {
         let (name, err) = &report.failed[0];
         report_message(
             state,
             format!(
-                "Exported {} of {} — {name} failed: {err}",
+                "Exported {} of {}{with_sheet} — {name} failed: {err}",
                 report.written.len(),
                 report.written.len() + report.failed.len()
             ),
         );
     } else if let [only] = report.written.as_slice() {
-        report_message(state, format!("Exported {only} to {}", folder.display()));
+        report_message(state, format!("Exported {only}{with_sheet} to {}", folder.display()));
     } else {
         report_message(
             state,
-            format!("Exported {} programs to {}", report.written.len(), folder.display()),
+            format!("Exported {} programs{with_sheet} to {}", report.written.len(), folder.display()),
         );
+    }
+    if let Some(Err(err)) = &report.sheet {
+        report_message(state, format!("The setup sheet was not written: {err}"));
     }
 
     if let Some(medium) = eject_after_export(eject.as_ref(), &report, &media, &folder) {
@@ -439,31 +542,29 @@ pub(crate) struct ExportRow {
     pub file_name: String,
 }
 
-/// Which steps may take their file name from their own step name: `true` where that name
-/// belongs to exactly one step.
-///
-/// A step name is the operator's label for a setup and is under no obligation to be
-/// unique — two steps called "Drill" are a perfectly reasonable profile. Naming files
-/// after them would produce the same name twice, which `validate_export_rows` then refuses: a
-/// clash the application invented and left the operator to fix in the dialog before it
-/// would let them save.
-///
-/// So the colliding steps fall back to their ordinals, which are unique by construction,
-/// and only they pay for it — a job with one "Drill" and one "Route" keeps both names.
-///
-/// Compared trimmed and case-folded, matching `validate_export_rows`, which is the check this
-/// exists to stay ahead of — and matching Windows, where `Drill.nc` and `drill.nc` are
-/// one file and the second write would silently replace the first.
-///
-/// Blank names collide with each other on the empty string and so all take their ordinal,
-/// which is the same answer `program_file_name` would reach on its own.
-fn names_belong_to_one_step_each(names: &[String]) -> Vec<bool> {
-    let key = |name: &String| name.trim().to_lowercase();
-    let mut uses: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    for name in names {
-        *uses.entry(key(name)).or_insert(0) += 1;
+/// What the Export dialog says when the work zero has moved since the last export.
+fn zero_shift_warning((dx, dy): (f64, f64), unit: units::UserUnitSystem) -> String {
+    let len = |mm: f64| units::user_format::format_length_display(units::Length::from_mm(mm.abs()), unit);
+    let mut moves = Vec::new();
+    if dx.abs() > 1e-3 {
+        moves.push(format!("{} in X", len(dx)));
     }
-    names.iter().map(|name| uses.get(&key(name)).copied().unwrap_or(0) == 1).collect()
+    if dy.abs() > 1e-3 {
+        moves.push(format!("{} in Y", len(dy)));
+    }
+    format!(
+        "The work zero has moved {} since this board was last exported, because the steps \
+         changed. These programs are right for the job as it is now, but they will not line \
+         up with a board already cut using the earlier ones.",
+        moves.join(" and "),
+    )
+}
+
+/// The setup sheet's row in the export: whether it is written, and as what.
+#[derive(Clone, Default, PartialEq)]
+pub(crate) struct SheetRow {
+    pub include: bool,
+    pub file_name: String,
 }
 
 /// The rows a multi-step save starts from: one per step that produced a program.
@@ -475,14 +576,9 @@ fn export_rows(snapshot: &AppCtx) -> Vec<ExportRow> {
     let step_count = snapshot.programs.len();
     let ready = snapshot.ready_programs();
 
-    let names: Vec<String> = ready.iter().map(|(step, _)| step.name.clone()).collect();
-    let usable = names_belong_to_one_step_each(&names);
-
     ready
         .into_iter()
-        .enumerate()
-        .map(|(position, (step, program))| {
-            let unique = usable[position];
+        .map(|(step, program)| {
             ExportRow {
                 step_index: step.index,
                 step_label: if step.name.trim().is_empty() {
@@ -496,7 +592,7 @@ fn export_rows(snapshot: &AppCtx) -> Vec<ExportRow> {
                 file_name: snapshot.program_file_name(
                     step.index,
                     step_count,
-                    if unique { step.name.as_str() } else { "" },
+                    &step.name,
                     &program.extension,
                 ),
             }
@@ -508,14 +604,112 @@ fn export_rows(snapshot: &AppCtx) -> Vec<ExportRow> {
 ///
 /// The destination is checked here rather than only at the write, so a stick pulled while
 /// the dialog is open disables Export and says so, instead of failing every row.
-pub(crate) fn validate_export(rows: &[ExportRow], folder: &Path) -> Option<String> {
+pub(crate) fn validate_export(rows: &[ExportRow], sheet: &SheetRow, folder: &Path) -> Option<String> {
     if folder.as_os_str().is_empty() {
         return Some("Choose a folder to export to.".to_string());
     }
     if !folder.is_dir() {
         return Some(format!("{} is no longer there — choose another folder.", folder.display()));
     }
-    validate_export_rows(rows)
+    validate_export_rows(rows).or_else(|| validate_sheet(rows, sheet))
+}
+
+/// Why the setup sheet cannot be written as named, or `None` when it can.
+///
+/// The same rules as a program's name, plus one: it must not be any program's name too,
+/// or one file would silently replace the other.
+pub(crate) fn validate_sheet(rows: &[ExportRow], sheet: &SheetRow) -> Option<String> {
+    if !sheet.include {
+        return None;
+    }
+    let name = sheet.file_name.trim();
+    if name.is_empty() {
+        return Some("The setup sheet needs a file name.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some(format!("'{name}' cannot contain a path separator."));
+    }
+    let clashes = rows
+        .iter()
+        .filter(|row| row.include)
+        .any(|row| row.file_name.trim().eq_ignore_ascii_case(name));
+    clashes.then(|| format!("'{name}' is a program's name too — give the setup sheet its own."))
+}
+
+/// The file each included step is being written as, by step index — what the setup sheet
+/// lists, so it names the files that are actually on the stick.
+fn program_files(rows: &[ExportRow]) -> std::collections::BTreeMap<usize, String> {
+    rows.iter()
+        .filter(|row| row.include)
+        .map(|row| (row.step_index, row.file_name.trim().to_string()))
+        .collect()
+}
+
+/// Builds and writes the setup sheet. `Ok` holds the file name written.
+fn write_sheet(snapshot: &AppCtx, rows: &[ExportRow], sheet: &SheetRow, folder: &Path) -> Result<String, String> {
+    let bytes = crate::report::setup_sheet_pdf(snapshot, &program_files(rows))?;
+    let name = sheet.file_name.trim().to_string();
+    let path = folder.join(&name);
+    fs::write(&path, bytes).map_err(|err| {
+        log::error!("could not write {}: {err}", path.display());
+        err.to_string()
+    })?;
+    Ok(name)
+}
+
+/// Builds the setup sheet as the export would write it now and opens it in the system's
+/// PDF viewer, writing nothing to the export folder.
+///
+/// Handed to the OS rather than shown in the app because the app is a WebView, and not
+/// every WebView has a PDF viewer: WebView2 on Windows does, WebKitGTK on Linux does not.
+/// The system viewer is the one place every platform can show it, and it can print it
+/// too — which is often why the operator wanted to look.
+///
+/// It names the program files the dialog currently shows, so what is previewed is what
+/// would be exported.
+fn preview_sheet(state: Signal<AppCtx>, rows: &[ExportRow], sheet: &SheetRow) {
+    let snapshot = state.read().clone();
+    let opened = write_preview(&snapshot, rows, sheet)
+        .and_then(|path| open::that_detached(&path).map_err(|err| err.to_string()));
+    if let Err(err) = opened {
+        report_message(state, format!("The setup sheet could not be previewed: {err}"));
+    }
+}
+
+/// Writes the preview PDF into k2g's own folder under the system temp directory and returns
+/// its path.
+///
+/// Named after the sheet's file name, so the viewer's title bar says which sheet it is. A
+/// viewer may still have the last preview open — and on Windows an open file cannot be
+/// overwritten — so a refused write moves on to a numbered name instead of failing the
+/// preview. The temp directory is the OS's to clear; nothing here is meant to last.
+fn write_preview(snapshot: &AppCtx, rows: &[ExportRow], sheet: &SheetRow) -> Result<PathBuf, String> {
+    let bytes = crate::report::setup_sheet_pdf(snapshot, &program_files(rows))?;
+    let dir = std::env::temp_dir().join("k2g-preview");
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+
+    let stem = preview_stem(&sheet.file_name);
+    let mut last_error = String::new();
+    for n in 0..10 {
+        let path = if n == 0 { dir.join(format!("{stem}.pdf")) } else { dir.join(format!("{stem}-{n}.pdf")) };
+        match fs::write(&path, &bytes) {
+            Ok(()) => return Ok(path),
+            Err(err) => last_error = err.to_string(),
+        }
+    }
+    Err(last_error)
+}
+
+/// The preview's file name without its extension: the sheet's own name, or a plain one when
+/// that is blank or would reach outside the preview folder.
+fn preview_stem(file_name: &str) -> String {
+    let name = file_name.trim();
+    let name = name.strip_suffix(".pdf").or_else(|| name.strip_suffix(".PDF")).unwrap_or(name);
+    if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." {
+        "setup-sheet".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 /// Why the rows cannot be written yet, or `None` when they can.
@@ -554,11 +748,15 @@ pub(crate) fn validate_export_rows(rows: &[ExportRow]) -> Option<String> {
 struct ExportReport {
     written: Vec<String>,
     failed: Vec<(String, String)>,
+    /// The setup sheet's outcome, when it was asked for.
+    sheet: Option<Result<String, String>>,
 }
 
 impl ExportReport {
+    /// Everything asked for is on disk — the sheet included, so a stick is not ejected with
+    /// the programs on it and the sheet that describes them missing.
     fn all_written(&self) -> bool {
-        self.failed.is_empty() && !self.written.is_empty()
+        self.failed.is_empty() && !self.written.is_empty() && !matches!(self.sheet, Some(Err(_)))
     }
 }
 
@@ -567,7 +765,7 @@ impl ExportReport {
 /// Successful writes are **not** rolled back when a later one fails: they are valid
 /// programs, and deleting them would be the worse failure.
 fn write_rows(snapshot: &AppCtx, rows: &[ExportRow], folder: &Path) -> ExportReport {
-    let mut report = ExportReport { written: Vec::new(), failed: Vec::new() };
+    let mut report = ExportReport { written: Vec::new(), failed: Vec::new(), sheet: None };
     for row in rows.iter().filter(|row| row.include) {
         let Some(program) = snapshot
             .programs
@@ -594,11 +792,12 @@ fn write_rows(snapshot: &AppCtx, rows: &[ExportRow], folder: &Path) -> ExportRep
 /// `pick_folder` has no overwrite confirmation, where `save_file` gets one from the OS —
 /// so without this, saving a multi-step job would silently clobber, which is a regression
 /// against the single-step behaviour. Returns whether to proceed.
-async fn confirm_overwrites(rows: &[ExportRow], folder: &Path) -> bool {
+async fn confirm_overwrites(rows: &[ExportRow], sheet: &SheetRow, folder: &Path) -> bool {
     let existing: Vec<String> = rows
         .iter()
         .filter(|row| row.include)
         .map(|row| row.file_name.trim().to_string())
+        .chain(sheet.include.then(|| sheet.file_name.trim().to_string()))
         .filter(|name| folder.join(name).exists())
         .collect();
     if existing.is_empty() {
@@ -633,6 +832,18 @@ fn report_message(state: Signal<AppCtx>, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview is named after the sheet, so the viewer's title says which one it is —
+    /// but never with a name that would leave the preview folder, or none at all.
+    #[test]
+    fn the_preview_is_named_after_the_sheet_and_stays_in_its_folder() {
+        assert_eq!(preview_stem("panel-setup.pdf"), "panel-setup");
+        assert_eq!(preview_stem("  panel-setup  "), "panel-setup");
+        assert_eq!(preview_stem(""), "setup-sheet");
+        assert_eq!(preview_stem("../evil.pdf"), "setup-sheet");
+        assert_eq!(preview_stem("a\\b.pdf"), "setup-sheet");
+        assert_eq!(preview_stem(".."), "setup-sheet");
+    }
 
     fn row(step_index: usize, file_name: &str) -> ExportRow {
         ExportRow {
@@ -693,10 +904,16 @@ mod tests {
             free_bytes: 1 << 30,
         };
         let media = [stick.clone()];
-        let whole = ExportReport { written: vec!["panel.nc".into()], failed: Vec::new() };
+        let whole = ExportReport { written: vec!["panel.nc".into()], failed: Vec::new(), sheet: None };
         let partial = ExportReport {
             written: vec!["panel.nc".into()],
             failed: vec![("back.nc".into(), "denied".into())],
+            sheet: None,
+        };
+        let sheet_failed = ExportReport {
+            written: vec!["panel.nc".into()],
+            failed: Vec::new(),
+            sheet: Some(Err("denied".into())),
         };
         let on_stick = Path::new("E:\\jobs");
 
@@ -720,53 +937,48 @@ mod tests {
             eject_after_export(Some(&stick), &whole, &[], on_stick).is_none(),
             "pulled while the dialog was open"
         );
-    }
-
-    /// The rule that keeps the generated plan saveable.
-    ///
-    /// `validate_export_rows` refuses a duplicate file name, so a profile with two steps called
-    /// the same thing would have produced a plan the operator could not save without
-    /// editing it first — a clash the application created.
-    #[test]
-    fn a_step_name_is_used_only_when_it_belongs_to_one_step() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-
-        assert_eq!(
-            names_belong_to_one_step_each(&names(&["Drill", "Route"])),
-            [true, true],
-            "distinct names are each the step's own"
-        );
-        assert_eq!(
-            names_belong_to_one_step_each(&names(&["Drill", "Drill"])),
-            [false, false],
-            "both fall back; neither may claim the name"
-        );
-        assert_eq!(
-            names_belong_to_one_step_each(&names(&["Drill", "Route", "Drill"])),
-            [false, true, false],
-            "only the clashing pair pays for it"
+        assert!(
+            eject_after_export(Some(&stick), &sheet_failed, &media, on_stick).is_none(),
+            "the setup sheet did not land, so the stick stays mounted for a retry"
         );
     }
 
-    /// Case and surrounding space must not create a clash the check misses. On Windows
-    /// `Drill.nc` and `drill.nc` are one file, so the second write would replace the
-    /// first — silently, since neither the plan nor the overwrite prompt would see two
-    /// names as the same.
+    /// The setup sheet is named like a program, and never the same as one: the second
+    /// write would silently replace the first.
     #[test]
-    fn the_clash_check_folds_case_and_space() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    fn the_setup_sheet_needs_a_name_of_its_own() {
+        let rows = vec![row(0, "panel.nc")];
+        let sheet = |name: &str| SheetRow { include: true, file_name: name.into() };
 
-        assert_eq!(names_belong_to_one_step_each(&names(&["Drill", "drill"])), [false, false]);
-        assert_eq!(names_belong_to_one_step_each(&names(&["Drill", " Drill "])), [false, false]);
+        assert_eq!(validate_sheet(&rows, &sheet("panel-setup.pdf")), None);
+        assert!(validate_sheet(&rows, &sheet("  ")).is_some(), "a blank name");
+        assert!(validate_sheet(&rows, &sheet("out/sheet.pdf")).is_some(), "a path separator");
+        assert!(validate_sheet(&rows, &sheet("PANEL.NC")).is_some(), "a program's name, in any case");
+        assert_eq!(
+            validate_sheet(&rows, &SheetRow { include: false, file_name: String::new() }),
+            None,
+            "an unticked sheet is not checked"
+        );
     }
 
-    /// Unnamed steps all collide on the empty string, so every one of them takes its
-    /// ordinal — which is what `program_file_name` would have done anyway.
+    /// The sheet lists the programs under the names they are being written as, and only the
+    /// ones being written.
     #[test]
-    fn blank_names_all_fall_back() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    fn the_setup_sheet_names_the_files_being_written() {
+        let mut excluded = row(1, "panel_back.nc");
+        excluded.include = false;
+        let files = program_files(&[row(0, " panel_front.nc "), excluded]);
+        assert_eq!(files.get(&0).map(String::as_str), Some("panel_front.nc"), "trimmed, as written");
+        assert!(!files.contains_key(&1), "a step left out of the export is not named");
+    }
 
-        assert_eq!(names_belong_to_one_step_each(&names(&["", "  ", "Route"])), [false, false, true]);
-        assert_eq!(names_belong_to_one_step_each(&names(&[""])), [true], "one blank has no clash");
+    /// The warning says how far, and on which axes — only the ones that moved.
+    #[test]
+    fn the_zero_shift_warning_names_the_axes_that_moved() {
+        let text = zero_shift_warning((1.719, 0.0), units::UserUnitSystem::Metric);
+        assert!(text.contains("in X"), "{text}");
+        assert!(!text.contains("in Y"), "Y did not move: {text}");
+        let both = zero_shift_warning((-0.5, 0.25), units::UserUnitSystem::Metric);
+        assert!(both.contains("in X and") && both.contains("in Y"), "{both}");
     }
 }

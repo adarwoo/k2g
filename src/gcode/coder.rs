@@ -465,6 +465,7 @@ fn sample_steps() -> Vec<StepValue> {
             ("fixture".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bd9".into())),
             ("toolset".into(), StepValue::Text("019f9d89-93d2-7441-bd17-1185d43a7bda".into())),
             ("board_face".into(), StepValue::Text(face.into())),
+            ("router_depth_per_pass".into(), StepValue::Length(Length::from_mm(1.0))),
             (
                 "operations".into(),
                 StepValue::List(

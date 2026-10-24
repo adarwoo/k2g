@@ -152,6 +152,12 @@ pub struct StitchResult {
     /// Hard errors that prevent the board from being processed.
     /// An open contour or a floating island (depth ≥ 2) are both errors.
     pub errors: Vec<String>,
+    /// Where each error is, board nm: one polyline per entry of `errors`, same order.
+    ///
+    /// For an open contour, the line across the gap between its two loose ends: that is
+    /// what has to be closed, and it is often microns long on a board many centimetres
+    /// wide. For a floating island, its bounding box as a closed rectangle.
+    pub fault_marks: Vec<Vec<(i64, i64)>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -511,9 +517,11 @@ struct Chain {
     segments: Vec<Segment>,
 }
 
-fn stitch_fragments(fragments: Vec<Fragment>) -> (Vec<Chain>, Vec<String>) {
+/// The closed chains, and one `(message, gap)` per chain that would not close, `gap`
+/// being the line from its tail back to its head.
+fn stitch_fragments(fragments: Vec<Fragment>) -> (Vec<Chain>, Vec<(String, Vec<(i64, i64)>)>) {
     let mut closed: Vec<Chain> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<(String, Vec<(i64, i64)>)> = Vec::new();
 
     // Separate already-closed shapes from open ones (keep the whole fragment so its
     // segments travel with its points).
@@ -599,11 +607,14 @@ fn stitch_fragments(fragments: Vec<Fragment>) -> (Vec<Chain>, Vec<String>) {
                 closed.push(chain);
             }
         } else {
-            warnings.push(format!(
-                "open chain starting at fragment '{}' ({}pts, gap {:.1}µm)",
-                chain_labels.get(idx).map(|s| s.as_str()).unwrap_or("?"),
-                chain.points.len(),
-                (dist_sq(head, tail) as f64).sqrt() / 1_000.0,
+            warnings.push((
+                format!(
+                    "open chain starting at fragment '{}' ({}pts, gap {:.1}µm)",
+                    chain_labels.get(idx).map(|s| s.as_str()).unwrap_or("?"),
+                    chain.points.len(),
+                    (dist_sq(head, tail) as f64).sqrt() / 1_000.0,
+                ),
+                vec![tail, head],
             ));
         }
     }
@@ -646,15 +657,16 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
     let (closed_polys, open_chain_warnings) = stitch_fragments(fragments);
 
     // --- validate: open chains are hard errors ---
-    let mut errors: Vec<String> = open_chain_warnings
-        .iter()
-        .map(|w| format!("Open contour: {w}"))
-        .collect();
+    let (mut errors, mut fault_marks): (Vec<String>, Vec<Vec<(i64, i64)>>) = open_chain_warnings
+        .into_iter()
+        .map(|(w, gap)| (format!("Open contour: {w}"), gap))
+        .unzip();
 
     if closed_polys.is_empty() {
         return StitchResult {
             contours: Vec::new(),
             errors,
+            fault_marks,
         };
     }
 
@@ -718,6 +730,7 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
                 xmin as f64 / 1_000_000.0, ymin as f64 / 1_000_000.0,
                 xmax as f64 / 1_000_000.0, ymax as f64 / 1_000_000.0,
             ));
+            fault_marks.push(vec![(xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax), (xmin, ymin)]);
         }
     }
 
@@ -751,7 +764,7 @@ pub fn stitch_edge_shapes(shapes: &[BoardEdgeShape]) -> StitchResult {
         }
     }
 
-    StitchResult { contours, errors }
+    StitchResult { contours, errors, fault_marks }
 }
 
 fn bbox_nm(pts: &[(i64, i64)]) -> (i64, i64, i64, i64) {
@@ -1092,6 +1105,26 @@ mod tests {
                 "segment {i} end must meet segment {next} start",
             );
         }
+    }
+
+    /// An outline that does not close is marked by the gap between its loose ends: that is
+    /// what has to be fixed in KiCad, and the app zooms to it. One mark per error, in the
+    /// same order, so the app can pair them up.
+    #[test]
+    fn an_open_outline_is_marked_at_its_gap() {
+        // A 10 mm square with its left edge missing.
+        let shapes = vec![
+            segment("bottom", 0.0, 0.0, 10.0, 0.0),
+            segment("right", 10.0, 0.0, 10.0, 10.0),
+            segment("top", 10.0, 10.0, 0.0, 10.0),
+        ];
+        let result = stitch_edge_shapes(&shapes);
+
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert_eq!(result.fault_marks.len(), result.errors.len(), "one mark per error");
+        let mut ends = result.fault_marks[0].clone();
+        ends.sort();
+        assert_eq!(ends, vec![(0, 0), (0, 10_000_000)], "the mark spans the missing edge");
     }
 
     #[test]

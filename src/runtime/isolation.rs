@@ -408,7 +408,11 @@ const MIN_INTACT_FRACTION: f64 = 1.0 / 3.0;
 /// the contours that exist, and a contour that was never cut is not among them — a board
 /// can score a perfect fraction and still be joined. Reading only that ratio is exactly how
 /// a silently uncut board once passed every check this application makes.
-fn isolation_faults(isolation: &Isolation) -> Vec<(String, Option<String>)> {
+///
+/// The joined copper carries **where it is**: one place per net, worst first, on the face the
+/// pass cuts. A length and a net name were all an operator used to get, and finding 0.4 mm
+/// on a whole board from that was the hard half of the fix.
+fn isolation_faults(isolation: &Isolation) -> Vec<crate::runtime::Issue> {
     let result = &isolation.result;
     let mut faults = Vec::new();
 
@@ -416,9 +420,18 @@ fn isolation_faults(isolation: &Isolation) -> Vec<(String, Option<String>)> {
         let total: f64 = result.uncut.iter().map(|u| u.length_nm).sum();
         let mut worst: Vec<&pcb::UncutStretch> = result.uncut.iter().collect();
         worst.sort_by(|a, b| b.length_nm.total_cmp(&a.length_nm));
-        faults.push((
-            format!("{:.2} mm of this board's copper cannot be separated.", total / 1e6),
-            Some(format!(
+        let places = worst
+            .iter()
+            .filter(|stretch| !stretch.spans.is_empty())
+            .map(|stretch| crate::runtime::BoardPlace {
+                label: format!("{} ({:.2} mm)", stretch.net, stretch.length_nm / 1e6),
+                layer: Some(isolation.spec.layer_id),
+                marks: stretch.spans.iter().cloned().map(crate::runtime::BoardMark::Path).collect(),
+            })
+            .collect();
+        faults.push(crate::runtime::Issue {
+            message: format!("{:.2} mm of this board's copper cannot be separated.", total / 1e6),
+            details: Some(format!(
                 "No width down to the bit's own tip fits between them, so nothing was cut \
                  there and those nets stay joined — worst on {}. Reduce the isolation \
                  width, fit a bit with a finer tip, or re-lay the board.",
@@ -429,7 +442,9 @@ fn isolation_faults(isolation: &Isolation) -> Vec<(String, Option<String>)> {
                     .collect::<Vec<_>>()
                     .join(", "),
             )),
-        ));
+            places,
+            fix_at: None,
+        });
     }
 
     let intact = result.intact_fraction();
@@ -445,15 +460,19 @@ fn isolation_faults(isolation: &Isolation) -> Vec<(String, Option<String>)> {
             None => "Reduce the isolation width.".to_string(),
         };
 
-        faults.push((
-            format!("An isolation channel of {asked:.2} mm does not fit this board."),
-            Some(format!(
+        // No place on the board: the whole board is the place. What is fixed is the step's
+        // isolation width, which is set on the machining profile.
+        faults.push(crate::runtime::Issue {
+            message: format!("An isolation channel of {asked:.2} mm does not fit this board."),
+            details: Some(format!(
                 "Only {closed} of {} contours could take it; the rest were broken into \
                  narrowed fragments, which is thousands of short cuts rather than an outline \
                  round each net. {advice}",
                 result.contours.len(),
             )),
-        ));
+            places: Vec::new(),
+            fix_at: Some(crate::runtime::AppPlace::screen(crate::ui::navigation::Screen::MachiningProfiles)),
+        });
     }
 
     faults
@@ -464,8 +483,8 @@ const UNCUT_NETS_NAMED: usize = 5;
 
 fn publish_isolation(isolation: Isolation) {
     let faults = isolation_faults(&isolation);
-    for (headline, _) in &faults {
-        log::warn!("{headline}");
+    for fault in &faults {
+        log::warn!("{}", fault.message);
     }
     with_ctx_mut(|ctx| {
         ctx.isolation.error = None;
@@ -609,6 +628,7 @@ mod tests {
         isolation.result.uncut = vec![pcb::UncutStretch {
             net: "GND".into(),
             length_nm: uncut_mm * 1e6,
+            spans: vec![vec![(0, 0), ((uncut_mm * 1e6) as i64, 0)]],
         }];
         isolation
     }
@@ -622,9 +642,9 @@ mod tests {
         let faults = isolation_faults(&outcome(89, 3327, &[200_000, 250_000]));
 
         assert_eq!(faults.len(), 1);
-        let (headline, detail) = &faults[0];
+        let headline = &faults[0].message;
         assert!(headline.contains("0.80 mm"), "the width asked for: {headline}");
-        let detail = detail.clone().unwrap_or_default();
+        let detail = faults[0].details.clone().unwrap_or_default();
         assert!(detail.contains("89 of 3416"), "how little fit: {detail}");
         assert!(
             detail.contains("0.20 mm"),
@@ -660,12 +680,26 @@ mod tests {
         let faults = isolation_faults(&isolation);
 
         assert_eq!(faults.len(), 1, "the joined copper, and nothing else");
-        let (headline, detail) = &faults[0];
+        let headline = &faults[0].message;
         assert!(headline.contains("1.25 mm"), "how much: {headline}");
         assert!(headline.contains("cannot be separated"), "{headline}");
-        let detail = detail.clone().unwrap_or_default();
+        let detail = faults[0].details.clone().unwrap_or_default();
         assert!(detail.contains("GND"), "which net: {detail}");
         assert!(detail.contains("stay joined"), "what it means: {detail}");
+    }
+
+    /// The joined copper can be shown: one place per net, on the face the pass cuts, marking
+    /// exactly the stretches the ladder left uncut.
+    #[test]
+    fn copper_that_could_not_be_separated_says_where_it_is() {
+        let isolation = with_uncut(349, 1.25);
+        let faults = isolation_faults(&isolation);
+
+        assert_eq!(faults[0].places.len(), 1, "one net, one place");
+        let place = &faults[0].places[0];
+        assert!(place.label.contains("GND"), "{}", place.label);
+        assert_eq!(place.layer, Some(isolation.spec.layer_id), "on the face the pass cuts");
+        assert_eq!(place.bounds(), Some((0, 0, 1_250_000, 0)), "exactly the uncut span");
     }
 
     /// The two faults are independent, so a board can have both and must be told both: one
@@ -674,10 +708,10 @@ mod tests {
     fn a_shattered_board_with_joined_copper_raises_both_faults() {
         let mut isolation = outcome(89, 3327, &[200_000]);
         isolation.result.uncut =
-            vec![pcb::UncutStretch { net: "GND".into(), length_nm: 500_000.0 }];
+            vec![pcb::UncutStretch { net: "GND".into(), length_nm: 500_000.0, spans: Vec::new() }];
 
         let faults = isolation_faults(&isolation);
-        let headlines: Vec<&str> = faults.iter().map(|(h, _)| h.as_str()).collect();
+        let headlines: Vec<&str> = faults.iter().map(|fault| fault.message.as_str()).collect();
 
         assert_eq!(headlines.len(), 2, "{headlines:?}");
         assert!(headlines[0].contains("cannot be separated"), "the joined copper leads");
@@ -689,7 +723,7 @@ mod tests {
     #[test]
     fn a_pair_that_fits_nothing_is_not_suggested_as_the_width() {
         let faults = isolation_faults(&outcome(10, 990, &[0, 150_000]));
-        let detail = faults[0].1.clone().unwrap_or_default();
+        let detail = faults[0].details.clone().unwrap_or_default();
         assert!(detail.contains("0.15 mm"), "{detail}");
         assert!(!detail.contains("0.00 mm"), "{detail}");
     }

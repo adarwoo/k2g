@@ -109,6 +109,124 @@ pub struct AppError {
     pub is_error: bool,
     pub message: String,
     pub details: Option<String>,
+    /// Where on the board the fault is, one entry per place the operator can be taken to.
+    /// Empty for a fault with no position (a missing profile, KiCad being unreachable).
+    pub places: Vec<BoardPlace>,
+    /// Where in the app the cause is fixed, when that is somewhere other than the board.
+    pub fix_at: Option<AppPlace>,
+}
+
+/// One standing diagnostic as its source posts it: what it says, and where it can be shown.
+///
+/// What every `set_*_errors` takes, so a source that knows where its fault is says so in
+/// the same breath as saying what it is, rather than through a second channel that could
+/// fall out of step with the first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Issue {
+    pub message: String,
+    pub details: Option<String>,
+    pub places: Vec<BoardPlace>,
+    pub fix_at: Option<AppPlace>,
+}
+
+impl Issue {
+    /// An issue with no location, which is most of them.
+    pub fn new(message: impl Into<String>, details: Option<String>) -> Self {
+        Self { message: message.into(), details, ..Self::default() }
+    }
+}
+
+/// One thing a fault marks on the board, in board nm (KiCad's Y-down frame).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoardMark {
+    /// A stretch of copper or edge, as a polyline: drawn along its length.
+    Path(Vec<(i64, i64)>),
+    /// A hole, drawn as a ring round it.
+    Hole { centre: (i64, i64), radius_nm: i64 },
+}
+
+impl BoardMark {
+    /// The mark's extent, `(x0, y0, x1, y1)` in board nm.
+    pub fn bounds(&self) -> Option<(i64, i64, i64, i64)> {
+        match self {
+            Self::Path(points) => points.iter().fold(None, |acc, &(x, y)| {
+                Some(match acc {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                })
+            }),
+            Self::Hole { centre: (x, y), radius_nm: r } => Some((x - r, y - r, x + r, y + r)),
+        }
+    }
+}
+
+/// One place on the board a fault can be shown at: what to mark, and which face it is on.
+///
+/// A fault may have several (the uncut fault names each net it left joined). Each is one stop
+/// when the operator steps through them, so it is grouped the way the fault's own message
+/// counts things, not one per polyline.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardPlace {
+    /// What this place is, said briefly: a net name, a hole size.
+    pub label: String,
+    /// The copper face it is on (`pcb::FRONT_COPPER` / `pcb::BACK_COPPER`), or `None` for
+    /// something that goes through the board, such as a hole or the outline. It decides
+    /// which step is selected to show it, since a step only shows its own face's copper.
+    pub layer: Option<i32>,
+    pub marks: Vec<BoardMark>,
+}
+
+impl BoardPlace {
+    /// The extent of every mark, `(x0, y0, x1, y1)` in board nm: what Show zooms to.
+    pub fn bounds(&self) -> Option<(i64, i64, i64, i64)> {
+        self.marks.iter().filter_map(BoardMark::bounds).reduce(|a, b| {
+            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+        })
+    }
+}
+
+/// Where in the app a fault's cause is fixed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppPlace {
+    pub screen: Screen,
+    /// The Job tab, when `screen` is the Job screen.
+    pub job_view: Option<JobCenterView>,
+    /// The machining step to select, when the fault belongs to one.
+    pub step: Option<usize>,
+}
+
+impl AppPlace {
+    /// A Job tab, for one step.
+    pub fn job(view: JobCenterView, step: usize) -> Self {
+        Self { screen: Screen::Job, job_view: Some(view), step: Some(step) }
+    }
+
+    /// A whole screen. The profile screens keep their open profile to themselves, so a
+    /// fault naming a profile opens the screen and its message names the profile.
+    pub fn screen(screen: Screen) -> Self {
+        Self { screen, job_view: None, step: None }
+    }
+}
+
+/// Where the board sat from the work zero when its programs were last exported.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportedZero {
+    /// The board's name: a different board is a different job, with nothing to compare.
+    pub board: String,
+    /// `(x, y)` in mm — `machining_plan::job_zero_offset`.
+    pub offset: (f64, f64),
+}
+
+/// A request for the Board view to show one place, made by Show in the diagnostics.
+///
+/// On the app state rather than in the view because the request comes from the banner and
+/// the view's zoom and pan are its own. `nonce` makes a second Show of the same place a new
+/// request, so the view zooms back to it after the operator has panned away.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoardFocus {
+    /// `(x0, y0, x1, y1)` in board nm.
+    pub bounds: (i64, i64, i64, i64),
+    pub nonce: u64,
 }
 
 /// Runtime event entry shown in UI notifications.
@@ -143,6 +261,13 @@ pub struct AppState {
     /// so a removed step cannot leave it dangling — and once more at launch
     /// (`hydrate_from_persistence`), which is the one moment no mutation has run.
     pub selected_step: usize,
+    /// The zero offset the last export was written against, for the board it was written
+    /// for. See [`AppState::zero_shift_since_export`]. Held for the session only.
+    pub last_export_zero: Option<ExportedZero>,
+    /// The place Show last asked the Board view to zoom to. See [`BoardFocus`]. Not
+    /// persisted and not part of the regeneration fingerprint: it is how the board is
+    /// being looked at, not something about the job.
+    pub board_focus: Option<BoardFocus>,
     pub unit_system: UserUnitSystem,
     pub theme: Theme,
     pub machines: Vec<MachineProfile>,
@@ -783,9 +908,11 @@ pub fn with_ctx_mut<R>(f: impl FnOnce(&mut AppCtx) -> R) -> R {
     // old→new diff. (Cloning after `f` would compare the mutated state to itself,
     // which silently disabled board re-stitching and the regeneration trigger.)
     let previous_app = guard.app.clone();
+    // Two `Arc`s, so free to keep; compared by identity. See `sync_after_mutation`.
+    let previous_copper = guard.copper.clone();
     let previous_isolation = guard.isolation_epoch;
     let result = f(&mut guard);
-    guard.sync_after_mutation(&previous_app, previous_isolation);
+    guard.sync_after_mutation(&previous_app, &previous_copper, previous_isolation);
     result
 }
 

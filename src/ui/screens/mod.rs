@@ -157,6 +157,7 @@ pub fn AppRoot() -> Element {
             UpdateBanner { state }
 
             DiagnosticsBanner {
+                state,
                 errors: snapshot.errors.clone(),
                 generation_state: snapshot.generation_state,
                 show_error_details,

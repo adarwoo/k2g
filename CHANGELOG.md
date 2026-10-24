@@ -10,6 +10,97 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+### Changed
+- **Setting explanations are tooltips.** The paragraph under each setting has moved into
+  a tooltip: hover the setting, or the ⓘ beside its name, to read it. Forms are much
+  shorter as a result.
+- **A step's operations are shaded alternately**, so it is clear where one operation's
+  settings end and the next begin.
+- **The Board view shows only the face the selected step machines.** A front step shows
+  the front copper, a back step the back copper; the other face is face-down on the bed
+  and is no longer drawn over it. An isolation pass on the other face is left out with it.
+- **A back-face step shows the board turned over**, about the axis set by that step's
+  fixture (*Board flip axis*), so what is on screen is the board as it lies on the bed.
+  The strip above the board says which face is up.
+- The Board view's legend names the copper layers **Front copper (F.Cu)** and **Back
+  copper (B.Cu)**, matching the step's *Board face to machine* setting.
+- **One problem is one error.** A problem that blocks generation, such as copper that
+  cannot be separated, used to bring a second error with it, "Blocking runtime errors
+  present", which said nothing of its own. It is gone; the Code tab still lists the real
+  reason.
+- **Each copper face is drawn as one flat colour.** Where a track ran onto a pad, or a
+  thermal spoke met its pour, the overlap used to show darker or lighter, which is
+  KiCad's business and not the machine's. The copper left standing between nets is the
+  same colour too: it is copper, and the channels are what outline the nets.
+- **Board outline errors say what is wrong and where**, instead of "Open contours
+  detected".
+
+### Added
+- **Preview the setup sheet.** The eye button beside the setup sheet in the Export dialog
+  opens it in your PDF viewer without exporting it, so you can check it, or print it, first.
+- **Operations are added, removed and ordered within a step.** The operation checkboxes
+  are replaced by **+ Add operation**, which lists what the step does not run yet (one
+  another step already has is greyed, with the step named). Each operation's section has
+  **↑ ↓ ✕** to reorder or remove it. The step runs them in the order shown, so engraving
+  can now come **after** the holes, which protects small pads from being torn by the
+  drill. Moves that would make the step unrunnable (holes after the outline, say) are
+  greyed, with the reason in the tooltip. Existing profiles keep the order they had.
+- **Router max depth per pass.** The board outline, interior cutouts and milled holes
+  and slots are now roughed out in several shallower passes instead of one full-depth
+  pass, because the sideways force of a full-depth cut can shift the board on the
+  fixture. One setting per step, next to *Board face* (default 1 mm). The depth is split
+  into equal passes, so a 1.6 mm board with 0.5 mm breakthrough is cut in three passes of
+  0.7 mm. Finishing passes still cut full depth in one go. Set it to 0 to go back to one
+  pass. **Existing profiles get the 1 mm default, so routing takes longer than before.**
+- **+ Add step puts the new step where it can run.** A step added to a profile that
+  already cuts the board outline now goes in before that step instead of after it, where
+  it would have machined a board that had already been cut free.
+- **Setup sheet.** Exporting now also writes a PDF beside the programs (untick it in the
+  Export dialog to leave it out). It covers the board (size, holes, engraving) and gives
+  each step its own page: side, machine and kind of work, operations, setup (fixture,
+  work zero, how the board turns over), the rack with every manual tool change, and the
+  tools in run order with the feeds and speeds the program uses.
+- **Show on board.** An error with a place on the board, such as copper that cannot be
+  separated, a gap in the outline or holes no drill in stock can make, has a *Show on
+  board* button in the diagnostics. It opens the Board view zoomed to the problem, turning
+  to a step that machines that face if needed. An error naming several places steps
+  through them with ‹ ›.
+- **The Board view marks every problem** in red, listed under *Problems* at the top of its
+  legend.
+- Errors that are fixed elsewhere have an *Open* button that goes there: the profile
+  screen, or the Tooling or Code tab for that step.
+
+### Fixed
+- **Milled round holes come out to size.** Locating pins milled for 3.2 mm with a 2 mm
+  router measured 3.0 mm: the finishing lap cuts at full depth with real material in
+  front of it, so the cutter bends away from the wall. After that lap, every milled round
+  hole now gets one more lap on the same wall at a quarter of the feed, then spirals back
+  in to the centre and lifts from there, so the cutter never stops or lifts on the finished
+  wall. All of it is climb milling. Drilling pins with an exact-size drill, when one is
+  stocked, is unchanged.
+- **Exported program names carry the step number**: `panel_step1_Engrave.nc`,
+  `panel_step3_Route outline.nc`. They used to carry the step name alone, so the order to
+  run them in could only be found in the setup sheet. Two steps with the same name no
+  longer have to fall back to bare numbers.
+- **Copper could show darker or hollow where a track ran onto a pad** on a face with no
+  isolation pass, such as an outline step. A track and a pad wound in opposite directions
+  cancelled where they overlapped. They are now always drawn as one.
+- **The Export dialog warns when the work zero has moved** since the board was last
+  exported. Adding a step after others were cut (an outline route, say) moves the board in
+  every program, which used to happen without a word, leaving the last step offset from a
+  board already half made.
+- **Reloading the board after moving tracks kept the old isolation paths.** A reload
+  only counted as a new board when the outline or holes had changed, so after a
+  copper-only edit in KiCad the Board view drew the new copper with the old channels round
+  it, and the program was not regenerated, until k2g was restarted. Every reload now
+  recomputes the isolation and regenerates the program.
+- **Copper clearing could cut a straight line through copper it was meant to leave.** When
+  a piece of free copper wrapped round copper that stays (a U shape, say), its inner
+  passes split into separate arms. The program still went from one arm to the next
+  without lifting, cutting straight across whatever lay between them. A pass now only
+  continues to the next ring without lifting when the move stays on copper being cleared.
+  Otherwise it lifts and plunges again.
+
 ## [0.16.0] — 2026-09-17 — *clearing*
 
 The copper that isolation leaves standing is now taken out, not only cut around.

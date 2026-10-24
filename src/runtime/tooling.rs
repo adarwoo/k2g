@@ -156,6 +156,9 @@ pub enum SlotChange {
 pub struct StepPlan {
     pub name: String,
     pub outcome: StepOutcome,
+    /// The board holes behind a failure, one place per hole group the assigner could not
+    /// cover, so the diagnostic can show them. Empty unless the step failed on its holes.
+    pub fault_places: Vec<crate::runtime::BoardPlace>,
 }
 
 pub enum StepOutcome {
@@ -243,6 +246,11 @@ pub(crate) struct StepRaw {
     /// The distinction matters: the job's coordinate frame grows around the pins, and
     /// only a step that actually has them may grow it.
     pub(crate) pin_diameter: Option<Length>,
+    /// The deepest any router *roughing* pass in this step may cut — the outline, the
+    /// cutouts, and the holes and slots the drill operations mill. Zero means full depth
+    /// in one pass. One for the step because it is about how the board is held, which is
+    /// the step's setup (`router_depth_per_pass` in `machining.yaml`).
+    pub(crate) router_depth_per_pass: Length,
 }
 
 /// What a step machines, asked of its enabled `operations`.
@@ -286,6 +294,22 @@ impl StepRaw {
     /// the board — KiCad has nothing to say about it.
     pub(crate) fn drills_locating_pins(&self) -> bool {
         self.enabled("drill_locating_pins")
+    }
+
+    /// Whether the step lists its engraving **after** its holes — the one place in a
+    /// step's order the operator has a real choice (`order_fault` in
+    /// `data/model/operations.rs` has the rules and the case for each side).
+    ///
+    /// "After" means after *any* hole operation: the rules keep the holes together, so
+    /// after one is after all of them. A step with no holes, or no engraving, answers
+    /// `false`, which is the order every older profile has.
+    pub(crate) fn engraves_after_holes(&self) -> bool {
+        const HOLES: [&str; 3] = ["drill_locating_pins", "drill_pth", "drill_npth"];
+        let at = |key: &str| self.operations.iter().position(|op| op == key);
+        match at("engrave_copper") {
+            Some(engrave) => HOLES.iter().filter_map(|hole| at(hole)).any(|hole| hole < engrave),
+            None => false,
+        }
     }
 
     /// How this step makes an oblong hole (drill the ends, route the slot, or both).
@@ -607,13 +631,15 @@ pub fn plan_tooling(ctx: &AppState, stitched: Option<&pcb::StitchResult>) -> Too
         .into_iter()
         .enumerate()
         .map(|(index, raw)| {
-            let outcome = plan_step(ctx, stitched, &raw);
+            let mut fault_groups = Vec::new();
+            let outcome = plan_step(ctx, stitched, &raw, &mut fault_groups);
             if let StepOutcome::Resolved(resolved) = &outcome {
                 collect_rack_step(ctx, &mut groups, index, &raw, &resolved.tool_ids);
             }
             StepPlan {
                 name: raw.name.clone(),
                 outcome,
+                fault_places: hole_fault_places(ctx, &raw, &fault_groups),
             }
         })
         .collect();
@@ -1041,6 +1067,16 @@ pub struct StepTargets {
     /// The board boundary — the outline band is the step's work only if it routes or
     /// mills it.
     pub outline: bool,
+    /// The step works the back face (`board_face == "back"`). The view shows only the
+    /// copper of the face being machined, since the other one is face-down on the bed.
+    pub back: bool,
+    /// How the board lies turned over, for a back-face step: the step's own fixture's
+    /// `board_flip_axis`, so the drawing is the board as the operator will see it on the bed.
+    ///
+    /// `None` for a front step, and for a back step with no fixture bound — the view then
+    /// draws the board unturned rather than guess an axis, since a guessed flip would be a
+    /// mirrored board presented as the real one.
+    pub flip: Option<crate::gcode::placement::BoardFlip>,
 }
 
 impl StepTargets {
@@ -1068,11 +1104,36 @@ pub fn step_targets(ctx: &AppState, index: usize) -> Option<StepTargets> {
         return None;
     }
     let raw = read_steps(profile_id).into_iter().nth(index)?;
+    let fixture = raw
+        .fixture_id
+        .and_then(|id| ctx.fixtures.iter().find(|f| f.id == id.to_string()));
     Some(StepTargets {
         pth: raw.drills_pth(),
         npth: raw.drills_npth(),
         outline: raw.routes_outline(),
+        back: raw.machines_back,
+        flip: fixture
+            .filter(|_| raw.machines_back)
+            .map(|f| crate::gcode::placement::BoardFlip::from_axis(&f.board_flip_axis)),
     })
+}
+
+/// The step to show a fault on one face with: the selected step when it already machines
+/// that face, else the first step that does. `None` when no step does (or there is no
+/// profile), in which case the caller keeps the step it has.
+pub fn step_for_face(ctx: &AppState, back: bool) -> Option<usize> {
+    let profile_id = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    if !appdata_ready() {
+        return None;
+    }
+    let steps = read_steps(profile_id);
+    if steps.get(ctx.selected_step).is_some_and(|step| step.machines_back == back) {
+        return Some(ctx.selected_step);
+    }
+    steps.iter().position(|step| step.machines_back == back)
 }
 
 /// The isolation pass the Board view draws, and the bit that makes it.
@@ -1308,6 +1369,9 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     machines_back: node_str(root, &format!("/steps/{i}/board_face"))
                         .is_some_and(|face| face.eq_ignore_ascii_case("back")),
                     pin_diameter,
+                    // The schema's default, if the loader somehow did not materialise it.
+                    router_depth_per_pass: node_length(root, &format!("/steps/{i}/router_depth_per_pass"))
+                        .unwrap_or(Length::from_mm(1.0)),
                 }
             })
             .collect()
@@ -1580,8 +1644,79 @@ pub(crate) fn duplicate_operations_reason(steps: &[StepRaw]) -> Option<String> {
     })
 }
 
+/// Every step whose operations are listed in an order it cannot run in, one sentence each.
+///
+/// The editor only offers moves that keep a step valid, so this is for the profiles it
+/// never saw — hand-edited, imported, or written by a build with other rules. Blocking,
+/// not warning: the planner would cut them in an order the list does not say, and the
+/// operator would be reading one program and running another.
+pub(crate) fn operation_order_faults(steps: &[StepRaw]) -> Vec<String> {
+    steps
+        .iter()
+        .enumerate()
+        .filter_map(|(index, step)| {
+            crate::data::model::order_fault(&step.operations).map(|fault| {
+                format!(
+                    "In {}: {fault} Reorder the step's operations.",
+                    crate::data::model::step_reference(index, &step.name),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The board holes in each faulty hole group, as places a diagnostic can show.
+///
+/// The assigner reports a *group* (a kind and a size), not a hole, so the group is mapped back
+/// to the board's holes through [`HoleGroup::from_hole`] — the one classifier, so this cannot
+/// disagree with the plan about which holes are in it. A group with no board holes (locating
+/// pins, which are drilled off the board) gives no place.
+fn hole_fault_places(
+    ctx: &AppState,
+    raw: &StepRaw,
+    faults: &[(String, String)],
+) -> Vec<crate::runtime::BoardPlace> {
+    let Some(board) = ctx.board.as_ref() else {
+        return Vec::new();
+    };
+    faults
+        .iter()
+        .filter_map(|(group_id, label)| {
+            let marks: Vec<crate::runtime::BoardMark> = board
+                .holes
+                .iter()
+                .filter(|hole| {
+                    HoleGroup::from_hole(hole, raw.drills_pth(), raw.drills_npth())
+                        .is_some_and(|group| group.id() == *group_id)
+                })
+                .map(|hole| crate::runtime::BoardMark::Hole {
+                    centre: (hole.position.x.as_nm().round() as i64, hole.position.y.as_nm().round() as i64),
+                    radius_nm: hole
+                        .drill_axes()
+                        .map(|(major, _)| (major.as_nm() / 2.0).round() as i64)
+                        .unwrap_or(0),
+                })
+                .collect();
+            (!marks.is_empty()).then(|| crate::runtime::BoardPlace {
+                label: format!("{label} ({} on the board)", marks.len()),
+                layer: None,
+                marks,
+            })
+        })
+        .collect()
+}
+
 /// Plans one step: builds demands + rack, runs the assigner, formats the outcome.
-fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw) -> StepOutcome {
+///
+/// `fault_groups` receives the hole groups the assigner could not cover, as `(group id,
+/// label)`, so the failure can be shown on the board. An out-parameter because they only
+/// surface in the final match, past a dozen early returns that have none.
+fn plan_step(
+    ctx: &AppState,
+    stitched: Option<&pcb::StitchResult>,
+    raw: &StepRaw,
+    fault_groups: &mut Vec<(String, String)>,
+) -> StepOutcome {
     let has_pth = raw.drills_pth();
     let has_npth = raw.drills_npth();
     let has_route = raw.routes_outline();
@@ -1863,7 +1998,14 @@ fn plan_step(ctx: &AppState, stitched: Option<&pcb::StitchResult>, raw: &StepRaw
                 cnc_name: machine.name.clone(),
             })
         }
-        Err(error) => StepOutcome::Failed(format_error(ctx, &error)),
+        Err(error) => {
+            if let AssignError::UncoverableHoles(faults) = &error {
+                fault_groups.extend(faults.iter().map(|fault| {
+                    (fault.hole_id.clone(), hole_fault_label(ctx, fault))
+                }));
+            }
+            StepOutcome::Failed(format_error(ctx, &error))
+        }
     }
 }
 
@@ -3363,6 +3505,17 @@ fn depth_reason(d: DepthDetail) -> String {
     }
 }
 
+/// How a faulty hole group is named: its kind and size, as the diagnostic line names it.
+fn hole_fault_label(ctx: &AppState, fault: &crate::gcode::assigner::HoleFault) -> String {
+    let kind = match fault.kind {
+        DemandKind::Pth => "PTH",
+        DemandKind::Npth => "NPTH",
+        DemandKind::Locating => "Locating",
+        DemandKind::CornerRelief => "Corner-relief",
+    };
+    format!("{kind} hole ⌀{}", fmt_len(ctx, Length::from_um(fault.target_um as f64)))
+}
+
 /// Formats an assigner error into displayable diagnostic lines.
 fn format_error(ctx: &AppState, error: &AssignError) -> Vec<String> {
     match error {
@@ -4122,7 +4275,39 @@ mod tests {
             engrave_copper: Default::default(),
             machines_back,
             pin_diameter: None,
+            router_depth_per_pass: Length::from_mm(1.0),
         }
+    }
+
+    /// `step_on` with the given operations, in that order.
+    fn step_doing_in_order(operations: &[&str]) -> StepRaw {
+        StepRaw {
+            operations: operations.iter().map(|op| op.to_string()).collect(),
+            ..step_on("Step", false)
+        }
+    }
+
+    /// Engraving moves after the holes only when the step lists it after them; every
+    /// profile written before ordering existed lists it first and keeps that order.
+    #[test]
+    fn the_engraving_runs_where_the_step_lists_it() {
+        assert!(!step_doing_in_order(&["engrave_copper", "drill_pth", "route_board"]).engraves_after_holes());
+        assert!(step_doing_in_order(&["drill_pth", "drill_npth", "engrave_copper"]).engraves_after_holes());
+        assert!(step_doing_in_order(&["drill_locating_pins", "engrave_copper"]).engraves_after_holes());
+        assert!(!step_doing_in_order(&["engrave_copper", "route_board"]).engraves_after_holes(), "no holes");
+        assert!(!step_doing_in_order(&["drill_pth"]).engraves_after_holes(), "no engraving");
+    }
+
+    /// A hand-edited order the step cannot run in is a no-go naming the step; a valid one
+    /// is not.
+    #[test]
+    fn an_order_the_step_cannot_run_in_is_refused_by_step() {
+        let faults = operation_order_faults(&[
+            step_doing_in_order(&["engrave_copper", "drill_pth"]),
+            step_doing_in_order(&["route_board", "drill_pth"]),
+        ]);
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert!(faults[0].starts_with("In step 2 'Step':"), "{faults:?}");
     }
 
     /// A step that drills locating pins, on the face given.
@@ -4324,6 +4509,7 @@ mod tests {
             engrave_copper: Default::default(),
             machines_back: false,
             pin_diameter: None,
+            router_depth_per_pass: Length::from_mm(1.0),
         };
         assert_eq!(
             missing_bindings(&step(true, true, true)),

@@ -291,6 +291,43 @@ finish — so the allowance is dropped, the cut is made to size in one pass, and
 so in its notes. A cutout too tight to stand the cutter one allowance further in is dropped
 the same way: the opening is still cut to its drawn size, only the second pass is missing.
 
+### 5.3¼ Finishing a milled round hole
+
+A round hole milled with a router (a hole no stock drill fits, a locating pin with no
+exact-size drill) is cut by `gcode::routing::spiral_hole` in four parts, all at the one
+depth:
+
+| part | path | feed | direction | job |
+|---|---|---|---|---|
+| clear | Archimedean spiral, centre → wall | table | CCW | removes all the material, no island |
+| finishing lap | one circle at the wall radius | table | CCW (climb) | cuts the wall round, at constant radius |
+| spring lap | one more circle, same radius | ¼ table | CCW (climb) | takes the wall to size |
+| exit spiral | Archimedean spiral, wall → centre, one turn | ¼ table | CCW (climb) | leaves the wall without a mark |
+
+then a rapid straight up **from the centre**.
+
+**Why the spring lap.** The finishing lap is not a light cut. It removes the crescent the
+spiral's last, still-growing turn left, at full depth, so the cutter bends away from the wall
+under it, and a bent cutter cuts a small hole. Locating pins milled for 3.2 mm with a 2 mm
+router measured exactly 3.0 (0.1 mm a side). The spring lap goes round the same radius again
+with almost nothing left to cut, so the cutter straightens and reaches the programmed wall;
+at a quarter of the feed it cuts that last sliver rather than rubbing it. It is **exactly
+one** turn, closing where the finishing lap closed, so it adds no new start or stop on the
+wall.
+
+**Why the exit spiral.** Lifting at the wall, or stopping on it, leaves a witness mark and
+drags the flutes over the finished edge on the way up. Spiralling inward over a turn moves
+the cutter off the wall gradually, in the same climb direction and at the same slow feed, to
+the centre of the hole, which is waste, and the lift happens there.
+
+**How the slow feed is expressed.** A `RouteMove::Feed { fraction }` marker in the move list,
+modal like `F` itself: lateral moves after it run at that fraction of the table feed until the
+end of that hole's moves. Each op's moves are rendered on their own, so the next hole starts
+at the full feed again. Plunges keep the plunge feed.
+
+**Scope.** Round holes only. A slot whose ends coincide *is* a round hole and goes through
+the same function; a true oblong slot is still finished by its single stadium lap.
+
 ### 5.3½ A tab is material, not a gap
 
 `retention.width` is **how much board the tab leaves standing**, and the gap in the toolpath

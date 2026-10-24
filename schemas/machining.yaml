@@ -16,10 +16,6 @@ type: object
 # ---------------------------------------------------------------------------
 
 $defs:
-  # Ordered by how often a step uses them — almost every job drills PTH, most also
-  # drill NPTH, many cut the outline; locating pins and engraving are the exceptions.
-  # The UI shows them in this order and persists the enabled set in it.
-  #
   # ONE CLAIM PER BOARD FACE. Every key here except `drill_locating_pins` may appear
   # in at most one step per face: each removes material the board has once, so a
   # second step claiming it repeats the cut rather than adding work. The rule is per
@@ -32,10 +28,12 @@ $defs:
   # both the editor and the readiness gate consult. Keep the two in step — a test
   # asserts they match, in order.
   # In the order a board is made in, mirroring `MACHINING_OPERATIONS` in
-  # `src/data/model/operations.rs` — which is what the picker shows and what the
-  # planner emits. Engraving first (Z0 is verified against an unmachined
-  # surface), pins before the holes measured from them, holes while the board is
-  # still whole, interior cutouts before the perimeter that releases the part.
+  # `src/data/model/operations.rs`: engraving, pins, PTH, NPTH, cutouts, outline.
+  # That is the DEFAULT order — where an added operation lands — not the only one.
+  # A step's `operations` array is run in its own order, which the operator may
+  # change within the rules in `order_fault` (same file): the outline last, the
+  # cutouts before it, the holes together in this order. The free choice those
+  # rules leave is engraving before the holes or after them.
   operation_key:
     type: string
     enum:
@@ -816,8 +814,62 @@ $defs:
         x-enum-labels: ["Front (component side)", "Back (solder side)"]
         default: front
 
+      # ---------------------------------------------------------------------
+      # router_depth_per_pass — how deep any one router pass may cut.
+      #
+      # A router will cut a board's full thickness in one pass, and its rated
+      # feed assumes it does. (A `routing.multi_pass_max_depth` setting was once
+      # removed on exactly that argument.) What that argument misses is the
+      # BOARD: a full-depth slot puts the whole flute length into the cut, and
+      # the sideways pull is enough to shift a board on its fixture. Tape and
+      # locating pins resist it far less than the cutter can push. A board that
+      # moves mid-cut is scrap.
+      #
+      # ONE PER STEP, covering every router cut in it: the outline, the cutouts,
+      # and the holes and slots the drill operations mill. It is about how the
+      # board is held, which is the step's setup, not about which operation
+      # happens to be cutting. (It was briefly a field on `route_board` and on
+      # `route_cutouts`, which left the milled holes with no limit at all;
+      # `normalize_step_value` lifts an old value up to here.)
+      #
+      # A limit, not a step. The depth is split into as few EQUAL passes as keep
+      # each within it — 2.1mm (1.6mm board + 0.5mm breakthrough) at 1mm is three
+      # of 0.7mm, not 1 + 1 + 0.1. A last sliver of a pass rubs rather than cuts.
+      # The depth counted is the whole cut, breakthrough included: the backboard
+      # loads the cutter as much as the board does.
+      #
+      # ROUGHING ONLY. A finishing pass — the light climb lap on a wall left by
+      # `route_board.finishing`, the laps that finish a milled hole or slot —
+      # cuts once, at full depth. It takes little from the side, so it pulls
+      # little on the board, and one pass down the whole wall leaves one surface
+      # instead of a ridge at every level. A cut with nothing before it (no
+      # finishing allowance, or an opening too tight for one) is a full-width
+      # slot, and is stepped.
+      #
+      # 0 means no limit: one pass straight to depth, for a board held well
+      # enough (a vacuum bed) not to need it.
+      # ---------------------------------------------------------------------
+      router_depth_per_pass:
+        title: Router max depth per pass
+        description: >-
+          The deepest one router pass may cut, for every router cut in this step:
+          the outline, the cutouts, and milled holes and slots. A router can cut
+          right through in one pass, but the sideways force of a full-depth cut
+          can shift the board on the fixture. The depth (board thickness plus
+          breakthrough) is split into equal passes no deeper than this, so a
+          1.6mm board with 0.5mm breakthrough is three passes of 0.7mm at 1mm.
+          Finishing passes still cut full depth in one go: they take little from
+          the side. 0 cuts full depth in one pass.
+        $ref: "units.yaml#/$defs/size"
+        default: 1.0mm
+
+      # Run in the order listed, which the operator sets. Not every order is
+      # runnable, and that cannot be said in JSON Schema — `order_fault` in
+      # src/data/model/operations.rs holds the rules, the editor only offers moves
+      # that keep them, and the readiness gate refuses a hand-edited file that
+      # breaks them.
       operations:
-        description: Primitives run in this step, in order.
+        description: Operations run in this step, in the order listed.
         type: array
         items: { $ref: "#/$defs/operation_key" }
         uniqueItems: true
@@ -849,11 +901,11 @@ $defs:
             title: Pin diameter
             description: >-
               Diameter of the registration pins, and so of the holes drilled for
-              them. 3.2 mm is the default because it takes a 1/8" shank with about
-              25 um of play; 3.175 mm IS 1/8", for a pin ground to size.
+              them. 3.3 mm is the default because it takes a 1/8" shank with about
+              125 um of play; 3.175 mm IS 1/8", for a pin ground to size.
             type: string
-            default: 3.2mm
-            enum: ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"]
+            default: 3.3mm
+            enum: ["2mm", "2.5mm", "3mm", "3.175mm", "3.3mm"]
         required: [pin_diameter]
         additionalProperties: false
 

@@ -249,8 +249,9 @@ In short: use it, change it, share it. If you distribute a modified version, it 
 be GPLv3 and its source must be available.
 
 Bundled third-party components keep their own licences —
-[kicad-ipc-rs](third_party/kicad-ipc-rs) (MIT, vendored fork) and
-[three.js](assets/vendor) (MIT).
+[kicad-ipc-rs](third_party/kicad-ipc-rs) (MIT, vendored fork),
+[three.js](assets/vendor) (MIT), and the [DejaVu Sans](assets/fonts) font the setup sheet
+is set in (Bitstream Vera licence; DejaVu's changes are public domain).
 
 ## Signing key
 

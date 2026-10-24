@@ -376,6 +376,7 @@ fn expand_op(
             z.z_bottom,
             hole_diameter,
             tool_diameter,
+            z.pass_depth,
         )),
         OpKind::RouteSlot { width, from_solid } => runs_from_moves(&routing::slot_route(
             entry,
@@ -385,6 +386,7 @@ fn expand_op(
             width,
             tool_diameter,
             from_solid,
+            z.pass_depth,
         )),
         // A contour span carries its own path; the drop-in and lift-off around it are
         // what make the retaining tabs visible as gaps — except where the span is one
@@ -397,14 +399,18 @@ fn expand_op(
                 // begin on the path's own first point; the connector to it is drawn by
                 // `trace_block`, as the feed move it really is.
                 moves.extend(path.iter().map(|p| RouteMove::Cut { x: p.x, y: p.y, z: z.z_bottom }));
-            } else {
-                if let Some(&first) = path.first() {
-                    moves.push(RouteMove::Rapid { x: first.x, y: first.y, z: z.z_retract });
-                    moves.push(RouteMove::Plunge { x: first.x, y: first.y, z: z.z_bottom });
+            } else if let (Some(&first), Some(&last)) = (path.first(), path.last()) {
+                // One lap per depth level, joined the way `program.rs` joins them: a closed
+                // loop drops in place, an open span lifts and goes back to its start.
+                moves.push(RouteMove::Rapid { x: first.x, y: first.y, z: z.z_retract });
+                for (n, level) in routing::depth_levels(z.z_bottom, z.pass_depth).into_iter().enumerate() {
+                    if n > 0 && last != first {
+                        moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: z.z_retract });
+                        moves.push(RouteMove::Rapid { x: first.x, y: first.y, z: z.z_retract });
+                    }
+                    moves.push(RouteMove::Plunge { x: first.x, y: first.y, z: level });
+                    moves.extend(path.iter().skip(1).map(|p| RouteMove::Cut { x: p.x, y: p.y, z: level }));
                 }
-                moves.extend(
-                    path.iter().skip(1).map(|p| RouteMove::Cut { x: p.x, y: p.y, z: z.z_bottom }),
-                );
             }
             // The lift-off is the *next* op's business as much as this one's: it stays
             // down when the next op continues from here, exactly as `program.rs` does.
@@ -436,7 +442,8 @@ fn runs_from_moves(moves: &[RouteMove]) -> Vec<Polyline> {
             RouteMove::Arc { x, y, i, j, ccw } => {
                 let Some(from) = here else { continue };
                 (MoveKind::Feed, arc_points(from, (x.as_mm(), y.as_mm()), (i.as_mm(), j.as_mm()), ccw))
-            }
+            }            // A feed change moves nothing; the picture does not show feed rates.
+            RouteMove::Feed { .. } => continue,
         };
 
         for point in points {
@@ -519,6 +526,7 @@ mod tests {
             z_bottom: Length::from_mm(-2.0),
             z_retract: Length::from_mm(2.0),
             z_feed: None,
+            pass_depth: None,
         }
     }
 

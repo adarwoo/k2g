@@ -129,15 +129,15 @@ pub struct Clearing {
     /// group's own rings are always contiguous and already outside-in.
     pub paths: Vec<Ring>,
     /// How many of the *next* rings in [`paths`](Self::paths), starting from a running
-    /// offset, belong to one connected piece of copper — one entry per piece, summing to
-    /// `paths.len()`. Pieces that contributed no ring (opened away before the first pass,
-    /// or capped out with nothing to show) are not listed at all, so every entry here is
-    /// non-zero.
+    /// offset, can be cut as one continuous run — one entry per chain, summing to
+    /// `paths.len()`. A chain never spans two pieces of copper, and one piece may need
+    /// several. Every entry is non-zero.
     ///
-    /// What this is *for*: a piece's own rings nest inside one another by construction —
-    /// each pass offsets further into the copper the pass before it left standing — so
-    /// they can be cut as one continuous run with no retract between them, only a short
-    /// hop from one ring to the next. This is the grouping that makes that possible; see
+    /// What this is *for*: a chain's rings are cut with no retract between them, so the hop
+    /// from one ring to the next is cut at depth. `fill` only links two rings when that hop
+    /// stays on ground the tool may cover. Rings of one piece usually nest, but not always:
+    /// a U-shaped piece whose bottom pinches out gives one ring per arm, and a hop between
+    /// the arms would cut whatever stands between them. See
     /// `plan_engrave_spans` in `k2g`'s `machining_plan` module, which is the only reason
     /// this field exists rather than a plain `Vec<Ring>`.
     pub groups: Vec<usize>,
@@ -192,9 +192,13 @@ impl Clearing {
     ///
     /// A closed ring exits exactly where it entered, so the previous ring's *start* is
     /// where the tool is standing when the next one begins — which is why that, and not
-    /// its last vertex, is what the rotation aims at. Nested rings are parallel offsets
-    /// one stepover apart, so the nearest vertex is always a short, bounded hop away,
-    /// never an arbitrary chord across the island.
+    /// its last vertex, is what the rotation aims at.
+    ///
+    /// That the hop is safe to cut is not decided here: `fill` linked the rings into these
+    /// groups only after checking each hop against the tool's ground, using this same
+    /// rotation, and stored each ring already rotated. Rotating again here changes nothing
+    /// for those rings; it is kept so hand-built groups (tests, other callers) still get the
+    /// nearest start.
     ///
     /// Relies on [`groups`](Self::groups) summing to `paths.len()`, which is how [`fill`]
     /// builds the pair.
@@ -606,14 +610,106 @@ fn fill(region: &[Ring], allowed: &[Ring], w_nm: f64, stepover_nm: f64) -> (Vec<
             None => unclaimed.push(ring),
         }
     }
-    let mut groups: Vec<usize> = by_origin.iter().map(Vec::len).filter(|&n| n > 0).collect();
-    let mut paths: Vec<Ring> = by_origin.into_iter().flatten().collect();
-    if !unclaimed.is_empty() {
-        groups.push(unclaimed.len());
-        paths.extend(unclaimed);
+    //
+    // A piece's rings are then linked into chains only where the hop between them is proven
+    // to stay on `base`, the ground the tool centre may cover. A piece's rings do not always
+    // nest: a U-shaped piece whose bottom pinches out leaves one ring per arm at that depth,
+    // and chaining them in pass order cut a straight line across whatever stood between
+    // the arms.
+    let mut groups: Vec<usize> = Vec::new();
+    let mut paths: Vec<Ring> = Vec::new();
+    for rings in by_origin.into_iter().chain(std::iter::once(unclaimed)) {
+        for chain in link_rings(rings, &base) {
+            groups.push(chain.len());
+            paths.extend(chain);
+        }
     }
 
     (paths, groups, missed)
+}
+
+/// One piece's rings, outside-in, linked into chains that can each be cut without a retract.
+///
+/// Each ring joins the chain whose hop to it is shortest, among those whose hop stays inside
+/// `safe`; a ring no chain can reach safely starts its own. The ring is stored already
+/// rotated to the start that hop arrives at, which is the start [`Clearing::chains`] picks
+/// again (the nearest vertex to a ring's own first vertex is that vertex), so the two cannot
+/// disagree about where the connector runs.
+///
+/// Checked against the tool centre's ground rather than assumed from the nesting, because
+/// the nesting is not guaranteed: every ring is `base` at some depth, and `base` can come
+/// apart at depth into pieces with copper between them that this pass never takes.
+fn link_rings(rings: Vec<Ring>, safe: &[Ring]) -> Vec<Vec<Ring>> {
+    let mut chains: Vec<Vec<Ring>> = Vec::new();
+    for ring in rings {
+        let best = chains
+            .iter()
+            .enumerate()
+            .filter_map(|(index, chain)| {
+                let from = *chain.last()?.first()?;
+                let rotated = rotate_to_nearest(&ring, from);
+                let to = *rotated.first()?;
+                let (dx, dy) = ((to.0 - from.0) as i128, (to.1 - from.1) as i128);
+                segment_within(from, to, safe).then_some((dx * dx + dy * dy, index, rotated))
+            })
+            .min_by_key(|(hop, index, _)| (*hop, *index));
+        match best {
+            Some((_, index, rotated)) => chains[index].push(rotated),
+            None => chains.push(vec![ring]),
+        }
+    }
+    chains
+}
+
+/// Whether the straight segment `a`–`b` lies wholly inside `region` (even-odd over its rings).
+///
+/// `a` inside, and the segment meeting no edge at all, is the whole test: a segment that
+/// crosses no boundary cannot leave the region it starts in. Touching an edge counts as
+/// meeting it, so a hop that grazes a wall is refused. That costs at most an extra retract,
+/// which is the cheap side to be wrong on when the other side is cutting copper.
+///
+/// Integer arithmetic in `i128` throughout, so the answer does not depend on rounding.
+fn segment_within(a: (i64, i64), b: (i64, i64), region: &[Ring]) -> bool {
+    let inside = region.iter().filter(|ring| crate::region::point_in_ring(a, ring)).count() % 2 == 1;
+    if !inside {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    !region.iter().any(|ring| {
+        (0..ring.len()).any(|i| segments_meet(a, b, ring[i], ring[(i + 1) % ring.len()]))
+    })
+}
+
+/// Whether two closed segments share any point, touching and collinear overlap included.
+fn segments_meet(p1: (i64, i64), p2: (i64, i64), q1: (i64, i64), q2: (i64, i64)) -> bool {
+    // Cheap rejection first: almost every edge of the region is nowhere near the hop.
+    if p1.0.max(p2.0) < q1.0.min(q2.0)
+        || q1.0.max(q2.0) < p1.0.min(p2.0)
+        || p1.1.max(p2.1) < q1.1.min(q2.1)
+        || q1.1.max(q2.1) < p1.1.min(p2.1)
+    {
+        return false;
+    }
+    let cross = |o: (i64, i64), a: (i64, i64), b: (i64, i64)| -> i128 {
+        (a.0 - o.0) as i128 * (b.1 - o.1) as i128 - (a.1 - o.1) as i128 * (b.0 - o.0) as i128
+    };
+    let (d1, d2) = (cross(q1, q2, p1), cross(q1, q2, p2));
+    let (d3, d4) = (cross(p1, p2, q1), cross(p1, p2, q2));
+    if d1.signum() * d2.signum() < 0 && d3.signum() * d4.signum() < 0 {
+        return true;
+    }
+    // Collinear or touching: an endpoint lying on the other segment. Lying on the line
+    // and inside that segment's own box is lying on the segment.
+    let on = |d: i128, o: (i64, i64), a: (i64, i64), p: (i64, i64)| {
+        d == 0
+            && p.0 >= o.0.min(a.0)
+            && p.0 <= o.0.max(a.0)
+            && p.1 >= o.1.min(a.1)
+            && p.1 <= o.1.max(a.1)
+    };
+    on(d1, q1, q2, p1) || on(d2, q1, q2, p2) || on(d3, p1, p2, q1) || on(d4, p1, p2, q2)
 }
 
 /// Which of `origin`'s pieces `piece` belongs to, by testing one of its own points
@@ -939,6 +1035,50 @@ mod tests {
     /// `groups` is a partition of `paths`, always — whatever the board, however many
     /// passes or pieces it took. If this ever failed, `plan_engrave_spans` downstream
     /// would either panic chunking `paths` by it or silently drop rings past the end.
+    /// **A hop between two rings never leaves the copper being cleared.** A chain is cut
+    /// without a retract, so the straight line from one ring to the next is cut at depth.
+    ///
+    /// The shape that broke this: a U of free copper wrapped round copper that stays
+    /// standing. The thin bottom of the U pinches out on the second pass, so each arm gets
+    /// its own ring at that depth. The rings used to be chained in pass order, and the hop
+    /// from one arm to the other went straight across the standing copper between them,
+    /// cutting it in two.
+    #[test]
+    fn a_hop_between_rings_never_leaves_the_copper_it_clears() {
+        let arm = 6 * W;
+        let bottom = (2.5 * W as f64) as i64;
+        let inner = 10 * W;
+        let (x1, y1) = (2 * arm + inner, 20 * W);
+        let region = vec![vec![
+            (0, 0),
+            (x1, 0),
+            (x1, y1),
+            (x1 - arm, y1),
+            (x1 - arm, bottom),
+            (arm, bottom),
+            (arm, y1),
+            (0, y1),
+        ]];
+        let (paths, groups, _) = fill(&region, &[], W as f64, VBIT_STEPOVER_FRACTION * W as f64);
+        let cleared = Clearing { paths, groups, ..Default::default() };
+
+        // Sampled along each hop, so the check does not share the code it is checking.
+        let inside = |p: (f64, f64)| {
+            let p = (p.0.round() as i64, p.1.round() as i64);
+            region.iter().filter(|ring| crate::region::point_in_ring(p, ring)).count() % 2 == 1
+        };
+        for chain in cleared.chains() {
+            for pair in chain.windows(2) {
+                let (a, b) = (pair[0][0], pair[1][0]);
+                for n in 0..=64 {
+                    let t = n as f64 / 64.0;
+                    let p = (a.0 as f64 + t * (b.0 - a.0) as f64, a.1 as f64 + t * (b.1 - a.1) as f64);
+                    assert!(inside(p), "the hop {a:?} -> {b:?} leaves the copper at {p:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn groups_always_partitions_every_ring_exactly_once() {
         for gap in [4 * W, 2 * W + (2.8 * W as f64) as i64, 8 * W] {

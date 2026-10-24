@@ -116,7 +116,14 @@ the companion documents at the foot of that list open in your browser.
   with a version, red for not connected or not responding.
 - A **diagnostics banner** appears above the work area whenever there are errors
   (red) or warnings (orange). One entry states itself; several summarise. *Show
-  details* expands every entry.
+  details* expands every entry. Each problem is one entry.
+- An entry that has a place on the board has a **Show on board** button. It opens the
+  Board tab and zooms to the problem, turning to a step that machines that face if the
+  problem is on the other one. When an entry points at several places (copper joined on
+  several nets, say), **‹ ›** steps through them, worst first. The Board view also marks
+  every such place in red, under a **Problems** row at the top of its legend.
+- An entry fixed elsewhere has an **Open** button that goes there: the profile screen,
+  or the Tooling or Code tab for that step.
 - Short-lived **toasts** in the corner report actions: saves, ejects, imports,
   KiCad integration changes.
 
@@ -168,17 +175,17 @@ creates, so you can also start from those and edit rather than from nothing.
    that live there permanently and leave the rest *Spare*. On a machine with no ATC,
    a one-slot spare toolset is enough. (§8)
 4. **Machining → Add Machining.** Bind the CNC, fixture and toolset to the step,
-   tick the operations you want (*Drill plated holes*, *Drill non-plated holes*,
-   *Cut board outline* is the usual first set), and set the outline options. (§9)
-   The bundled machining templates are listed below; each one is the same handful of
-   ticks, already in an order that works.
+   add the operations you want with **+ Add operation** (*Drill plated holes*, *Drill
+   non-plated holes*, *Cut board outline* is the usual first set), and set the outline
+   options. (§9) The bundled machining templates are listed below; each one is the same
+   handful of operations, already in an order that works.
 5. **Job → sidebar → Machining profile**: select the profile you just made.
 
 ### The bundled machining templates
 
 Every **Add** dialog opens on **User defined** — the profile the schema's own defaults
 describe — and lists the bundled templates for that kind underneath. Picking one is
-never more than a shortcut: each is a few ticks in the step editor, and every value can
+never more than a shortcut: each is a few operations in the step editor, and every value can
 be changed afterwards. What they carry that a fresh profile does not is the *order*,
 which is where a first job usually goes wrong.
 
@@ -463,12 +470,31 @@ one lands where you are looking); ↑ ↓ reorder; ✕ removes.
 
 | Control | Notes |
 |---|---|
-| **Name** | Only shown with more than one step. An unnamed step is displayed by what it does — "PTH + NPTH + Pins" — so a folded card still identifies itself. |
+| **Name** | Only shown with more than one step. An unnamed step is displayed by what it does — "Pins + PTH + NPTH" — so a folded card still identifies itself. |
 | **CNC / Fixture / Toolset profile** | Exactly one each. A step left without one is not runnable, and the planner says which binding is missing rather than guessing at hardware you may not have. |
-| **Operations** | The checkboxes below. An operation another step already claims *on the same board face* is disabled, with a tooltip naming the step that holds it — the board has each feature once, so cutting it twice is a fault, not a division of labour. Locating pins and engraving are exempt. |
+| **Operations** | One section per operation, **in the order the step runs them**. **+ Add operation** under the last one lists what the step does not run yet; an operation another step already claims *on the same board face* is greyed, naming the step that holds it — the board has each feature once, so cutting it twice is a fault, not a division of labour. Engraving is exempt, and locating pins are claimed once for the whole job. Each section's **↑ ↓ ✕** reorders or removes it; a step keeps at least one operation. |
 | **Board face to machine** | *Front* (component side) or *Back* (solder side). Absent on a step that drills locating pins — pins are drilled before the board is ever turned over, so the face is settled. |
+| **Router max depth per pass** | The deepest one router pass may cut, for every router cut in the step: the outline, the cutouts, and the holes and slots too large or too long to drill. A router can cut right through in one pass, but the sideways force of a full-depth cut can shift the board on the fixture. The full depth (board thickness plus breakthrough) is split into **equal** passes no deeper than this: a 1.6 mm board with 0.5 mm breakthrough is three passes of 0.7 mm at the default 1 mm. Only the *roughing* is stepped: a finishing pass — the light lap the outline's *Finishing* allowance leaves, or the laps that finish a milled hole or slot — cuts once at full depth, since it takes little from the side and one pass leaves one clean wall. An outline span between two tabs starts each pass from the same end, so every pass cuts in the same direction. 0 cuts full depth in one pass. Hidden on a step that only engraves. |
 
-Each ticked operation adds its own foldable configuration section.
+Each operation has its own foldable configuration section, shaded alternately so you can
+see where one ends and the next begins.
+
+**Operation order.** A step runs its operations top to bottom, but not every order is one
+a board can be made in, so ↑ and ↓ only offer moves that keep the step runnable — a
+greyed arrow's tooltip says which rule stops it:
+
+- **Cut board outline is last.** It releases the board.
+- **Route interior cutouts comes after everything but the outline.** An opening weakens
+  the board around it.
+- **The holes stay together, as pins → PTH → NPTH.** They are drilled as one phase,
+  grouped by drill so that a drill both kinds need is loaded once, and the drills decide
+  the order within it (the pins' drill first, then smallest to largest).
+
+That leaves one real choice: **engraving before the holes, or after them.** Before is the
+default and checks Z0 on an untouched surface. After protects the pads: drilled through
+copper that is already isolated, a small annular ring is no longer tied to anything and a
+drill can lift or tear it. Moving engraving down jumps the whole group of holes in one
+press. **+ Add operation** puts a new operation where it belongs in that order.
 
 ### Drill plated holes (PTH) / Drill non-plated holes (NPTH)
 
@@ -481,6 +507,13 @@ Both take the same settings, under **Holes**:
 | **Pilot** (off) | For a hole that is being routed for want of a drill, drill a pilot first with the largest drill bigger than the router bit. |
 | **Oversize / Undersize allowance** | How far a stock drill may differ from the requested finished size, as a fraction of the hole capped by an absolute maximum (defaults: 8% capped at 0.10 mm oversize, 6% capped at 0.08 mm undersize). Applies to *every* hole, round and oblong. Plated holes account for the plating thickness read from the board. |
 | **Oblong hole strategy** | How a slot longer than it is wide is made: `route`, `drill_ends_then_route` (default), `drill_chain`, or `drill_chain_then_route`. Round holes ignore this. |
+
+**How a milled round hole is cut.** The router plunges in the middle and spirals out to the
+wall, then goes round the wall once at full feed. That lap bends the cutter, so it goes
+round **once more at a quarter of the feed**, which takes the hole to its true size. It then
+spirals back in to the middle over one more turn and lifts from there, so it never stops or
+lifts on the finished wall. All of it is climb milling. Locating pins milled this way get
+the same treatment. A drilled hole is unaffected.
 
 ### Cut board outline
 
@@ -674,6 +707,14 @@ the front**, click again to restore the drawing order. Reading the drawing:
   **hatched band**: the hatch is the tool path and its width is the feature's width.
 - Features the *selected step* does not make are ghosted: still drawn, because a
   board is unreadable without its own geometry, but plainly not this step's work.
+- Only the **copper of the face the selected step machines** is drawn — front copper for
+  a front step, back copper for a back step. The other face is face-down on the bed.
+  With no machining profile selected, both faces are drawn.
+- A **back-face step turns the board over** about the axis its fixture's *Board flip
+  axis* names, so the picture is the board the way it lies on the bed: about Y mirrors
+  it left to right, about X near to far. The strip above the board says which face is up.
+  Drill symbols keep their legend shape when turned. A back step with no fixture bound is
+  drawn unturned, and the strip says so.
 
 #### The isolation pass
 
@@ -684,8 +725,9 @@ screen is the board that comes off the machine.
 
 - **The whole face is copper**, not just the traces you drew. Isolation milling starts
   from a board that is entirely copper and removes only the channel, so the field between
-  the nets stays standing — which is why islands exist, and why the view shows it. That
-  faint wash is real copper, and it is on the board when you unclamp it.
+  the nets stays standing — which is why islands exist, and why the view shows it. It is
+  drawn in the same colour as the traces because it is real copper, on the board when you
+  unclamp it; the channels are what outline the nets.
 - **A V-bit shows two tones.** The channel is the groove at the surface, which is what
   removes the copper; the darker band inside it is the flat at the bottom of the V. A
   flat-tipped cutter cuts one width however deep it goes, so it shows one band — which is
@@ -806,10 +848,10 @@ The pill says **Not ready** and the Code tab lists the reasons. The common ones:
 | No machining profile selected | Pick one in the Job sidebar. |
 | Step *n* has no CNC / fixture / toolset | Bind it on the Machining screen. |
 | Referenced CNC / fixture / toolset profile is missing | The profile points at something deleted. Re-bind it. |
-| Open contours detected · Floating island detected · Stitching errors | The board's edge-cut layer does not close into a usable outline. Fix it in KiCad. |
+| The board outline does not close into a usable shape | The board's edge-cut layer has a gap or a shape inside a hole. **Show on board** zooms to it; fix it in KiCad. |
 | Locating-pin faults | See §12. |
-| An operation is claimed by two steps on one face | Untick it in one of them. |
-| Blocking runtime errors present | Open the diagnostics banner. |
+| An operation is claimed by two steps on one face | Remove it (✕) from one of them. |
+| Any error in the diagnostics banner | Copper that cannot be separated, a step with no tooling, and so on. Each is listed by its own message; see the banner. |
 
 ### Exporting
 
@@ -819,14 +861,29 @@ because these are program files leaving k2g; saving is what you do to a project.
 One dialog, whether the job makes one program or ten:
 
 - **The programs.** One row per step that produced one, with its machine and line count,
-  pre-named after the board and the step and carrying that step's own file extension. Tick
-  which to write and adjust any name. A single program needs no ticking and shows none.
+  pre-named after the board, the step's number and the step's name, with that step's own
+  file extension: `panel_step1_Engrave.nc`, `panel_step2_Drill.nc`. The number says which
+  to run first. A one-step job is named for the board alone (`panel.nc`). Tick which to
+  write and adjust any name. A single program needs no ticking and shows none.
+- **The setup sheet (PDF)**, ticked by default and named after the board
+  (`panel-setup.pdf`). Untick it to export the programs alone. The **eye** button beside
+  its name opens the sheet in your PDF viewer as it would be written now, without writing
+  it anywhere (it goes to a temporary folder), whether or not it is ticked. See *The setup
+  sheet* below.
 - **The folder**, already filled in, with **Browse…** beside it if you want another. This
   is the click the flow used to spend asking a question the last export had answered.
 - **Export** writes them. Names are checked first — blank names, path separators and
   clashes (including case-only clashes, which collide on Windows) are refused in the
   dialog rather than halfway through writing — and anything that would be replaced is
   confirmed once, listing the files.
+
+**If the work zero has moved** since this board was last exported, the dialog says by how
+much. Every program is written against one zero, set by the widest thing any step cuts
+outside the board (the locating pins, the depth test cut, the outline router's waste). So
+adding or changing a step after others have been cut, such as adding the outline route at
+the end, moves the board in every program. The new programs are right for the job as it now
+stands, but they will not line up with a board already cut using the earlier ones. Plan the
+whole job before cutting the first step. The comparison lasts until k2g is closed.
 
 **The folder is remembered per drive.** The machine's disk and each USB stick keep their
 own, so plugging a stick in offers the folder that *stick* was last written to instead of
@@ -837,13 +894,41 @@ gives it a new serial, so it starts again from its root, which is what a wiped d
 do. Where nothing is remembered yet: the root of the stick, or your Downloads folder.
 
 **The USB button** opens the same dialog already pointed at the stick, and **ejects it**
-when the export finishes — but only if every file was written, so a partial export leaves
-it mounted to retry. Browsing somewhere off the stick before exporting ejects nothing:
+when the export finishes — but only if every file was written, the setup sheet included,
+so a partial export leaves it mounted to retry. Browsing somewhere off the stick before exporting ejects nothing:
 an eject is something you asked for by pressing that button, not something inferred from
 where a file landed.
 
 Every write is recorded in the security log (file name and byte count; the directory
 is redacted, and the program text never goes near the record).
+
+### The setup sheet
+
+A PDF written beside the programs, for whoever stands at the machine. It describes the
+job the programs were made from, and names the program files as they were exported.
+
+- **The job.** The board, the machining profile, and a table of the steps: face, machine,
+  kind of work and program file.
+- **The board.** Size, thickness, copper; holes by kind and a table of every drill and slot
+  size; the outline and its cut-outs; and, for each step that engraves, the channel width,
+  the isolation length, and anything narrowed, left joined or cleared.
+- **One page per step**, each with:
+  - its **side**, and its **type**: the kind of work, and the machine with whether it
+    changes tools itself;
+  - its **operations**, with the settings worth checking (channel width, outline cutter
+    and tabs, pin size);
+  - its **setup**: CNC, fixture and toolset, where the work zero is and which stored
+    origin it uses, the clearance, and for a back-face step which way the board turns over
+    and the question the program asks before it moves;
+  - its **rack**. On a machine with a tool changer, each slot's tool and what to do to it
+    before the step: load it, it is already loaded, or the toolset fixes it. On one
+    without, the tools in the order the program asks for them. Either way, the count of
+    manual changes;
+  - its **tools** in the order they run, with feed, plunge feed, spindle speed and depth.
+    These are the values in the program, after the machine's own limits are applied;
+  - its **notes**, and its program file and line count.
+
+If the sheet cannot be written, the programs still are, and a message says why.
 
 ---
 

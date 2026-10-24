@@ -329,6 +329,7 @@ pub fn render_step_body(
                         op.z.z_bottom,
                         hole_diameter,
                         block.diameter,
+                        op.z.pass_depth,
                     );
                     out.push_str(&render_moves(coder, render, moves, op.entry, fs)?);
                 }
@@ -352,7 +353,19 @@ pub fn render_step_body(
                     // after tab splitting, so no arc ever has to be cut in half — is what
                     // turns those back into `G2`/`G3`. A run that no arc describes within
                     // tolerance stays exactly the chords it already was.
-                    let mut moves = Vec::with_capacity(path.len() + 2);
+                    //
+                    // A contour with a `pass_depth` is cut at each of its
+                    // [`routing::depth_levels`] in turn. A chained op is not: chains are
+                    // engraving's, which cuts copper-deep in one pass, and the connector
+                    // below reasons about a single depth on each side of the seam.
+                    let last = path[path.len() - 1];
+                    let levels = if op.continues_from_previous {
+                        vec![op.z.z_bottom]
+                    } else {
+                        routing::depth_levels(op.z.z_bottom, op.z.pass_depth)
+                    };
+                    let fitted = arcfit::fit(path, render.curve_tolerance);
+                    let mut moves = Vec::with_capacity((fitted.len() + 3) * levels.len());
                     if op.continues_from_previous {
                         // The connector: travel (if any) plus a depth step (if any), in
                         // one move, only if the tool is not already exactly here — most
@@ -380,26 +393,41 @@ pub fn render_step_body(
                         moves.push(RouteMove::Plunge {
                             x: path[0].x,
                             y: path[0].y,
-                            z: op.z.z_bottom,
+                            z: levels[0],
                         });
                     }
-                    let mut here = path[0];
-                    for seg in arcfit::fit(path, render.curve_tolerance) {
-                        match seg {
-                            arcfit::PathSeg::Line { to } => {
-                                moves.push(RouteMove::Cut { x: to.x, y: to.y, z: op.z.z_bottom });
+                    for (n, &z) in levels.iter().enumerate() {
+                        // Down to the next level. A closed loop has brought the cutter back
+                        // to its start, so it plunges where it stands, into its own channel.
+                        // An open span — the stretch between two tabs — ends at the far tab:
+                        // it lifts and goes back to its start rather than cutting the span
+                        // in reverse, which would turn every other pass from climb into
+                        // conventional milling.
+                        if n > 0 {
+                            if last != path[0] {
+                                moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
+                                moves.push(RouteMove::Rapid { x: path[0].x, y: path[0].y, z: op.z.z_retract });
                             }
-                            arcfit::PathSeg::Arc { to, centre, ccw } => {
-                                moves.push(RouteMove::Arc {
-                                    x: to.x,
-                                    y: to.y,
-                                    i: routing::delta(centre.x, here.x),
-                                    j: routing::delta(centre.y, here.y),
-                                    ccw,
-                                });
-                            }
+                            moves.push(RouteMove::Plunge { x: path[0].x, y: path[0].y, z });
                         }
-                        here = seg.end();
+                        let mut here = path[0];
+                        for seg in &fitted {
+                            match *seg {
+                                arcfit::PathSeg::Line { to } => {
+                                    moves.push(RouteMove::Cut { x: to.x, y: to.y, z });
+                                }
+                                arcfit::PathSeg::Arc { to, centre, ccw } => {
+                                    moves.push(RouteMove::Arc {
+                                        x: to.x,
+                                        y: to.y,
+                                        i: routing::delta(centre.x, here.x),
+                                        j: routing::delta(centre.y, here.y),
+                                        ccw,
+                                    });
+                                }
+                            }
+                            here = seg.end();
+                        }
                     }
                     // Skip the retract when the *next* op continues from this one — the
                     // tool stays down for it, the same way the leading rapid/plunge was
@@ -407,7 +435,6 @@ pub fn render_step_body(
                     let next_continues =
                         block.ops.get(op_index + 1).is_some_and(|next| next.continues_from_previous);
                     if !next_continues {
-                        let last = path[path.len() - 1];
                         moves.push(RouteMove::Rapid { x: last.x, y: last.y, z: op.z.z_retract });
                     }
                     out.push_str(&render_moves(coder, render, moves, path[0], fs)?);
@@ -422,6 +449,7 @@ pub fn render_step_body(
                         width,
                         block.diameter,
                         from_solid,
+                        op.z.pass_depth,
                     );
                     out.push_str(&render_moves(coder, render, moves, op.entry, fs)?);
                 }
@@ -500,8 +528,15 @@ fn render_moves(
     fs: FeedsSpeeds,
 ) -> Result<String, BodyError> {
     let mut out = String::new();
+    // The lateral feed in force, set by `RouteMove::Feed`. Starts at the table feed for every
+    // list, so a slowed finishing pass can never carry over into the next hole.
+    let mut lateral = fs;
     for mv in degrade_moves(moves, from, render) {
-        out.push_str(&render_route_move(coder, render, &mv, fs)?);
+        if let RouteMove::Feed { fraction } = mv {
+            lateral = FeedsSpeeds { table: FeedRate::from_mm_per_min(fs.table.as_mm_per_min() * fraction), ..fs };
+            continue;
+        }
+        out.push_str(&render_route_move(coder, render, &mv, lateral)?);
     }
     Ok(out)
 }
@@ -556,6 +591,7 @@ fn degrade_moves(moves: Vec<RouteMove>, from: Point, render: &StepRender) -> Vec
                     RouteMove::Arc { x, y, .. } => {
                         here = Point::new(x, y);
                     }
+                    RouteMove::Feed { .. } => {}
                 }
                 out.push(other);
             }
@@ -636,6 +672,8 @@ fn render_route_move(
             s.push("xy_feedrate", fs.table);
             render_one(coder, "cut_arc", &render.cut_arc_tpl, &mut s)
         }
+        // Consumed by `render_moves`, which holds the feed it sets; it emits nothing itself.
+        RouteMove::Feed { .. } => Ok(String::new()),
     }
 }
 
@@ -809,6 +847,7 @@ mod tests {
                 z_bottom: Length::from_mm(-2.4),
                 z_retract: Length::from_mm(5.0),
                 z_feed: None,
+                pass_depth: None,
             },
             primitive: "drill",
             source: "h1".to_string(),
@@ -852,6 +891,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_contour",
                     source: "outline".to_string(),
@@ -884,6 +924,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_hole",
                     source: "h1".to_string(),
@@ -1027,6 +1068,7 @@ mod tests {
                 z_bottom: Length::from_mm(-0.12),
                 z_retract: Length::from_mm(5.0),
                 z_feed: None,
+                pass_depth: None,
             },
             primitive: "route_contour",
             source: source.to_string(),
@@ -1244,6 +1286,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_contour",
                     source: "outer#0.span0".to_string(),
@@ -1330,6 +1373,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_hole",
                     source: "h1".to_string(),
@@ -1349,6 +1393,46 @@ mod tests {
         );
         // Spiral: a G3 full circle ending on the wall (reach = (3.2-1.0)/2 = 1.1 → X6.1).
         assert!(body.contains("G3 X6.1 Y5 I-1.1 J0 F600"), "finishing lap on the wall:\n{body}");
+        // Then the spring lap at a quarter of the feed, and the exit spiral ending on the
+        // centre at the same slow feed, before the lift.
+        assert!(body.contains("G3 X6.1 Y5 I-1.1 J0 F150"), "spring lap at a quarter feed:\n{body}");
+        let lift = body.rfind("G0 X5 Y5 Z5").expect("lifts at the centre");
+        let before_lift = body[..lift].trim_end().lines().last().unwrap_or_default();
+        assert!(before_lift.contains("X5 Y5 Z-2.1 F150"), "spirals in to the centre, slow: {before_lift}");
+    }
+
+    /// The slow feed belongs to one hole's finishing pass. The next hole in the same block
+    /// clears and laps at the full feed again.
+    #[test]
+    fn the_finishing_feed_does_not_carry_into_the_next_hole() {
+        let coder = Coder::new();
+        let hole = |x: f64| AtomicOp {
+            phase: Phase::Route,
+            kind: OpKind::RouteHole { hole_diameter: Length::from_mm(3.2) },
+            tool_id: "r1".to_string(),
+            entry: Point::new(Length::from_mm(x), Length::from_mm(5.0)),
+            exit: Point::new(Length::from_mm(x), Length::from_mm(5.0)),
+            z: ZProfile { z_bottom: Length::from_mm(-2.1), z_retract: Length::from_mm(5.0), z_feed: None, pass_depth: None },
+            primitive: "route_hole",
+            source: "h".to_string(),
+            continues_from_previous: false,
+        };
+        let step = StepPlan {
+            index: 0,
+            name: "Route".to_string(),
+            blocks: vec![ToolBlock {
+                tool_id: "r1".to_string(),
+                slot: Some(2),
+                diameter: Length::from_mm(1.0),
+                ops: vec![hole(5.0), hole(15.0)],
+                travel_mm: 0.0,
+                verify_stop: None,
+            }],
+            notes: vec![],
+        };
+        let body = render_step_body(&coder, &step, &render_ctx(true), &router_feed()).expect("routes");
+        assert!(body.contains("G3 X16.1 Y5 I-1.1 J0 F600"), "the second hole's lap is at full feed:\n{body}");
+        assert!(body.contains("G3 X16.1 Y5 I-1.1 J0 F150"), "and it gets its own slow spring lap:\n{body}");
     }
 
     /// A 1 mm router in a 2 mm-wide slot lying along +X from (0,0) to (4,0): the axis
@@ -1373,6 +1457,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_slot",
                     source: "slot1".to_string(),
@@ -1420,6 +1505,7 @@ mod tests {
                         z_bottom: Length::from_mm(-2.1),
                         z_retract: Length::from_mm(5.0),
                         z_feed: None,
+                        pass_depth: None,
                     },
                     primitive: "route_contour",
                     source: "outer#0.span0".to_string(),
@@ -1438,6 +1524,65 @@ mod tests {
         assert_eq!(lines[cut + 2], "G1 X10 Y0 Z-2.1 F600");
         assert_eq!(lines[cut + 3], "G1 X10 Y5 Z-2.1 F600", "every vertex is cut through");
         assert_eq!(lines[cut + 4], "G0 X10 Y5 Z5", "lifts off, leaving the tab uncut");
+    }
+
+    /// `contour_step` with a depth limit: 2.1 mm deep at 1 mm a pass.
+    fn stepped_contour_step(path: Vec<Point>) -> StepPlan {
+        let mut step = contour_step(path);
+        step.blocks[0].ops[0].z.pass_depth = Some(Length::from_mm(1.0));
+        step
+    }
+
+    /// An open span — the stretch between two tabs — is cut in equal passes, and goes back
+    /// to its start for each one rather than cutting back the other way, so every pass
+    /// runs in the same direction. It still lifts off at the end, leaving the tab uncut.
+    #[test]
+    fn a_stepped_span_cuts_each_level_from_its_start() {
+        let path: Vec<Point> = [(1.0, 0.0), (10.0, 0.0), (10.0, 5.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let body = render_step_body(&Coder::new(), &stepped_contour_step(path), &render_ctx(true), &router_feed())
+            .expect("routes");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let start = lines.iter().position(|l| l.starts_with("G0 X1 Y0 Z5")).expect("rapid to the span start");
+        assert_eq!(
+            lines[start..start + 15],
+            [
+                "G0 X1 Y0 Z5",
+                "G1 Z-0.7 F200",
+                "G1 X10 Y0 Z-0.7 F600",
+                "G1 X10 Y5 Z-0.7 F600",
+                "G0 X10 Y5 Z5",
+                "G0 X1 Y0 Z5",
+                "G1 Z-1.4 F200",
+                "G1 X10 Y0 Z-1.4 F600",
+                "G1 X10 Y5 Z-1.4 F600",
+                "G0 X10 Y5 Z5",
+                "G0 X1 Y0 Z5",
+                "G1 Z-2.1 F200",
+                "G1 X10 Y0 Z-2.1 F600",
+                "G1 X10 Y5 Z-2.1 F600",
+                "G0 X10 Y5 Z5",
+            ],
+            "{body}"
+        );
+    }
+
+    /// A closed loop ends where it began, so it steps down where it stands, into its own
+    /// channel, with no lift between laps.
+    #[test]
+    fn a_stepped_closed_loop_drops_in_place_between_laps() {
+        let path: Vec<Point> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]
+            .iter()
+            .map(|&(x, y)| Point::new(Length::from_mm(x), Length::from_mm(y)))
+            .collect();
+        let body = render_step_body(&Coder::new(), &stepped_contour_step(path), &render_ctx(true), &router_feed())
+            .expect("routes");
+        let plunges: Vec<&str> = body.lines().filter(|l| l.starts_with("G1 Z")).collect();
+        assert_eq!(plunges, ["G1 Z-0.7 F200", "G1 Z-1.4 F200", "G1 Z-2.1 F200"], "{body}");
+        let lifts = body.lines().filter(|l| l.starts_with("G0") && l.ends_with("Z5")).count();
+        assert_eq!(lifts, 2, "one rapid in and one lift off, none between laps:\n{body}");
     }
 
     /// A three-op block: an ordinary op, a same-depth chained continuation of it, and an
@@ -1461,6 +1606,7 @@ mod tests {
                 z_bottom: Length::from_mm(z_bottom),
                 z_retract: Length::from_mm(5.0),
                 z_feed: None,
+                pass_depth: None,
             },
             primitive: "route_contour",
             source: source.to_string(),

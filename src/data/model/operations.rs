@@ -65,9 +65,10 @@ pub struct MachiningOperation {
 
 /// The operations, **in the order a board is made in**.
 ///
-/// An operator reading this list is reading the sequence: it is the order the picker
-/// shows, the order a step's blocks come out in, and the order the program runs. One
-/// order to learn rather than three to reconcile.
+/// The default order, not the only one: a step runs its operations in the order it lists
+/// them, and the operator may reorder them within [`order_fault`]'s rules. This is where
+/// an added operation is placed ([`insert_position`]), the order the *Add operation*
+/// overlay offers them in, and what every profile written before ordering existed holds.
 ///
 /// The sequence is not arbitrary — each position is owed to a physical rule:
 ///
@@ -194,11 +195,12 @@ pub fn step_display_name(name: &str, operations: &[String]) -> String {
         return trimmed.to_string();
     }
 
-    // Schema order, not the order they happen to be stored in, so two steps with the same
-    // operations always read the same way round.
-    let parts: Vec<&str> = MACHINING_OPERATIONS
+    // In the order the step runs them. This was schema order once, so that two steps with
+    // the same operations read the same way round — but the order is the operator's now,
+    // and "PTH + Engrave" and "Engrave + PTH" are different programs.
+    let parts: Vec<&str> = operations
         .iter()
-        .filter(|op| operations.iter().any(|key| key == op.key))
+        .filter_map(|key| machining_operation(key))
         .map(|op| op.short_label)
         .collect();
 
@@ -350,9 +352,267 @@ pub fn conflicting_operations<'a>(
     conflicts
 }
 
+/// The operations that make holes. The planner drills them as **one phase**, grouped by
+/// drill, so the order of the three among themselves is the drills' business, not the
+/// list's — see [`order_fault`].
+const HOLE_OPERATIONS: [&str; 3] = ["drill_locating_pins", "drill_pth", "drill_npth"];
+
+/// Why a step's `operations` cannot run in the order given, or `None` when they can.
+///
+/// A step's operations run **in the order they are listed**, within these rules. Each is
+/// physical, not a preference, which is why the editor refuses a move that breaks one
+/// rather than warning about it:
+///
+/// 1. **The outline is last.** It is what releases the part; nothing can be machined
+///    accurately on a board held only by its tabs.
+/// 2. **Cutouts come after everything but the outline.** An opening weakens the board
+///    around it, and the holes and copper near it are cut while it is still whole
+///    (op-planner §4).
+/// 3. **The holes are one block, in their own order.** Every hole the step makes — pins,
+///    PTH, NPTH, and the drilled half of slots and mouse bites — is drilled in one phase
+///    grouped by drill, so a drill both kinds need is loaded once, with the pins' drill
+///    first because the pins are the datum. Nothing can run *between* them, and listing
+///    NPTH before PTH would be a promise the program does not keep.
+///
+/// What is left free is the real choice: **engraving before the holes, or after them**.
+/// Before is the long-standing default — Z0 is checked on an untouched surface, and the
+/// copper is cut on a board with nowhere to lift. After has its own case: drilled after
+/// isolation, a pad's annular ring is an island no longer tied to the copper round it, and
+/// a drill breaking through can lift or tear it.
+///
+/// Unknown keys (a profile from a later build) are ignored rather than refused, as
+/// everywhere else in this module.
+pub fn order_fault(operations: &[String]) -> Option<String> {
+    let known: Vec<&str> = operations
+        .iter()
+        .map(String::as_str)
+        .filter(|key| machining_operation(key).is_some())
+        .collect();
+    if let Some(fault) = routing_fault(&known) {
+        return Some(fault);
+    }
+
+    let holes: Vec<usize> = (0..known.len()).filter(|&i| HOLE_OPERATIONS.contains(&known[i])).collect();
+    if holes.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Some(
+            "The holes are drilled as one phase, so nothing can run between them: they are              grouped by drill, so that a drill both kinds need is loaded once."
+                .to_string(),
+        );
+    }
+    let rank = |key: &str| HOLE_OPERATIONS.iter().position(|hole| *hole == key);
+    if holes.windows(2).any(|pair| rank(known[pair[0]]) > rank(known[pair[1]])) {
+        return Some(
+            "The holes are drilled in the order their drills are loaded — the locating pins'              first, then by size — not in the order listed, so they stay listed as pins, PTH,              NPTH."
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Rules 1 and 2 of [`order_fault`] — the outline last, the cutouts just before it — over
+/// a sequence of known operation keys.
+///
+/// Split out because they hold **across steps** as well as within one: a board released in
+/// step 2 is released for step 3 too, so nothing may follow the outline wherever it is
+/// cut. The hole rules do not carry over — they are about one drill phase in one setup —
+/// which is why [`step_insert_position`] uses these alone.
+fn routing_fault(known: &[&str]) -> Option<String> {
+    let at = |key: &str| known.iter().position(|k| *k == key);
+
+    if at("route_board").is_some_and(|i| i + 1 != known.len()) {
+        return Some(format!(
+            "{} has to be last: it releases the board, and nothing can be machined              accurately on a board held only by its tabs.",
+            operation_label("route_board"),
+        ));
+    }
+    if let Some(i) = at("route_cutouts") {
+        if known[i + 1..].iter().any(|key| *key != "route_board") {
+            return Some(format!(
+                "{} has to come after the holes and the engraving, and before the outline:                  an opening weakens the board around it.",
+                operation_label("route_cutouts"),
+            ));
+        }
+    }
+    None
+}
+
+/// Where the operation at `index` lands if moved one place up (`up`) or down, or why it
+/// cannot move.
+///
+/// "One place" is the next position the rules allow, not the next slot: moving engraving
+/// down past a step's PTH and NPTH has to jump both, since stopping between them is not an
+/// order the step can run in. Without the jump the move would be refused at the first slot
+/// and the order after the holes could never be reached with the arrows at all.
+///
+/// The refusal is the rule the *nearest* slot breaks, which is the one the operator was
+/// trying to reach.
+pub fn move_target(operations: &[String], index: usize, up: bool) -> Result<usize, String> {
+    if index >= operations.len() {
+        return Err("No such operation.".to_string());
+    }
+    let candidates: Vec<usize> = if up {
+        (0..index).rev().collect()
+    } else {
+        (index + 1..operations.len()).collect()
+    };
+    if candidates.is_empty() {
+        return Err(if up { "Already first." } else { "Already last." }.to_string());
+    }
+    let mut first_fault = None;
+    for to in candidates {
+        let mut moved = operations.to_vec();
+        let key = moved.remove(index);
+        moved.insert(to, key);
+        match order_fault(&moved) {
+            None => return Ok(to),
+            Some(fault) => {
+                first_fault.get_or_insert(fault);
+            }
+        }
+    }
+    Err(first_fault.unwrap_or_default())
+}
+
+/// Where adding `key` to `operations` should put it: where the board-making order of
+/// [`MACHINING_OPERATIONS`] would, relative to what the step already lists, or — if the
+/// operator's own order makes that slot invalid — the first slot that is valid. `None`
+/// only if no slot is, which no list the editor can produce reaches.
+///
+/// The default order rather than the end, because "add" means "this step also does X", not
+/// "and then X": a step that drills and routes and gains engraving wants it at the top,
+/// where it has always run, not after the outline where it cannot.
+pub fn insert_position(operations: &[String], key: &str) -> Option<usize> {
+    let rank = |k: &str| MACHINING_OPERATIONS.iter().position(|op| op.key == k).unwrap_or(usize::MAX);
+    let preferred = operations
+        .iter()
+        .position(|existing| rank(existing) > rank(key))
+        .unwrap_or(operations.len());
+    std::iter::once(preferred)
+        .chain(0..=operations.len())
+        .find(|&at| {
+            let mut added = operations.to_vec();
+            added.insert(at, key.to_string());
+            order_fault(&added).is_none()
+        })
+}
+
+/// Where a new step running `operations` goes among a profile's `steps` (each given as its
+/// operations, in step order): **the latest place it can run**, which is the end unless
+/// the end is too late. `None` when there is no such place.
+///
+/// The end is the natural place for "+ Add step", and right for most additions. It is
+/// wrong once a step already cuts the outline: a new step after that one machines a
+/// released board, and appending it there built a profile the operator then had to
+/// reorder by hand — or, if they did not notice, ran. So the steps are read as one
+/// sequence and the new one goes in the latest slot that keeps the routing rules
+/// ([`routing_fault`]): nothing after the outline, only the outline after the cutouts.
+///
+/// The locating pins are held to their own rule as well: a pins step is the first step
+/// (`locating_pin_faults`), so nothing goes in front of one, and a new pins step goes
+/// nowhere else.
+pub fn step_insert_position(steps: &[&[String]], operations: &[String]) -> Option<usize> {
+    let has_pins = |ops: &[String]| ops.iter().any(|op| op == "drill_locating_pins");
+    let positions: Vec<usize> = if has_pins(operations) {
+        vec![0]
+    } else {
+        let floor = usize::from(steps.first().is_some_and(|first| has_pins(first)));
+        (floor..=steps.len()).rev().collect()
+    };
+    positions.into_iter().find(|&at| {
+        let sequence: Vec<&str> = steps[..at]
+            .iter()
+            .flat_map(|ops| ops.iter())
+            .chain(operations)
+            .chain(steps[at..].iter().flat_map(|ops| ops.iter()))
+            .map(String::as_str)
+            .filter(|key| machining_operation(key).is_some())
+            .collect();
+        routing_fault(&sequence).is_none()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default order is a valid one — it is where every existing profile starts.
+    #[test]
+    fn the_board_making_order_is_a_valid_order() {
+        let all: Vec<String> = MACHINING_OPERATIONS.iter().map(|op| op.key.to_string()).collect();
+        assert_eq!(order_fault(&all), None);
+    }
+
+    /// The one real choice: engraving before the holes, or after them.
+    #[test]
+    fn engraving_may_come_before_or_after_the_holes() {
+        assert_eq!(order_fault(&ops(&["engrave_copper", "drill_pth", "drill_npth", "route_board"])), None);
+        assert_eq!(order_fault(&ops(&["drill_pth", "drill_npth", "engrave_copper", "route_board"])), None);
+        assert!(order_fault(&ops(&["drill_pth", "engrave_copper", "drill_npth"])).is_some(), "not between them");
+    }
+
+    /// The outline releases the part, and cutouts weaken it: both are refused anywhere
+    /// but the end.
+    #[test]
+    fn the_routing_stays_at_the_end() {
+        assert!(order_fault(&ops(&["route_board", "drill_pth"])).is_some());
+        assert!(order_fault(&ops(&["route_board", "route_cutouts"])).is_some());
+        assert!(order_fault(&ops(&["route_cutouts", "engrave_copper"])).is_some());
+        assert_eq!(order_fault(&ops(&["drill_pth", "route_cutouts", "route_board"])), None);
+    }
+
+    /// The holes keep the drills' order: a listed NPTH-before-PTH would be a promise the
+    /// drill phase does not keep.
+    #[test]
+    fn the_holes_keep_their_own_order() {
+        assert!(order_fault(&ops(&["drill_npth", "drill_pth"])).is_some());
+        assert!(order_fault(&ops(&["drill_pth", "drill_locating_pins"])).is_some());
+    }
+
+    /// Moving engraving down jumps the whole hole block — stopping inside it is not an
+    /// order — and stops before the routing, which it may not pass.
+    #[test]
+    fn a_move_jumps_to_the_next_valid_place() {
+        let list = ops(&["engrave_copper", "drill_pth", "drill_npth", "route_board"]);
+        assert_eq!(move_target(&list, 0, false), Ok(2));
+        let after = ops(&["drill_pth", "drill_npth", "engrave_copper", "route_board"]);
+        assert_eq!(move_target(&after, 2, true), Ok(0));
+        assert!(move_target(&after, 2, false).is_err(), "the outline stays last");
+        assert!(move_target(&list, 1, false).is_err(), "PTH and NPTH keep the drills' order");
+        assert_eq!(move_target(&list, 0, true), Err("Already first.".to_string()));
+    }
+
+    /// A new step goes at the end unless the end is after the outline; then it goes in the
+    /// latest place that is not — and never in front of a pins step.
+    #[test]
+    fn a_new_step_goes_in_the_latest_place_it_can_run() {
+        let drill = ops(&["drill_pth"]);
+        let cut = ops(&["route_cutouts"]);
+        let outline = ops(&["route_board"]);
+        let pins = ops(&["drill_locating_pins"]);
+        let engrave = ops(&["engrave_copper"]);
+
+        assert_eq!(step_insert_position(&[&drill], &engrave), Some(1), "the end, when it can run there");
+        assert_eq!(step_insert_position(&[&drill, &cut, &outline], &engrave), Some(1), "before the cutouts");
+        assert_eq!(step_insert_position(&[&drill, &outline], &cut), Some(1), "before the outline");
+        assert_eq!(step_insert_position(&[&pins, &outline], &engrave), Some(1), "after the pins");
+        assert_eq!(step_insert_position(&[&drill], &pins), Some(0), "a pins step leads");
+        assert_eq!(
+            step_insert_position(&[&ops(&["drill_pth", "route_board"])], &cut),
+            None,
+            "no place: the step that drills also releases the board"
+        );
+    }
+
+    /// An added operation goes where the board-making order puts it, even in a step the
+    /// operator has reordered.
+    #[test]
+    fn an_added_operation_lands_where_the_board_is_made() {
+        let reordered = ops(&["drill_pth", "engrave_copper", "route_board"]);
+        assert_eq!(insert_position(&reordered, "drill_npth"), Some(1), "with the holes, not after the copper");
+        assert_eq!(insert_position(&reordered, "route_cutouts"), Some(2), "before the outline");
+        assert_eq!(insert_position(&ops(&["drill_pth", "route_board"]), "engrave_copper"), Some(0));
+        assert_eq!(insert_position(&[], "drill_pth"), Some(0));
+    }
 
     fn ops(keys: &[&str]) -> Vec<String> {
         keys.iter().map(|k| k.to_string()).collect()
@@ -426,9 +686,9 @@ mod tests {
         assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["drill_pth"])), "PTH");
         assert_eq!(step_display_name("", &ops(&["route_board"])), "Outline");
         assert_eq!(
-            step_display_name("   ", &ops(&["drill_npth", "drill_pth", "drill_locating_pins"])),
-            "Pins + PTH + NPTH",
-            "the order the board is made in, not the order they were ticked"
+            step_display_name("   ", &ops(&["drill_pth", "drill_npth", "engrave_copper"])),
+            "PTH + NPTH + Engrave",
+            "the order the step runs them in, which is the operator's to choose"
         );
     }
 

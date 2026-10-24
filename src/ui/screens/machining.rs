@@ -6,12 +6,13 @@ use uuid::Uuid;
 use super::profiles_common::{
     slug_file_name, suggested_profile_name, ProfileLifecycleToolbar, ProfileNameDialog,
 };
+use crate::data::model::machining_operation;
 use crate::data::Profile;
 use crate::ui::bindings::{
-    add_step, clone_named, create_named_from_template, export_yaml, import_yaml, machining_operations, move_step,
+    add_step, clone_named, create_named_from_template, export_yaml, import_yaml, move_step,
     remove_profile_result, remove_step, use_conflicting_operations, use_field,
     use_job_machining_profile, use_operations, use_profiles, use_templates, use_step_count, BindingPicker,
-    BoardFacePicker, OperationsEditor, SchemaField, SchemaForm,
+    AddOperationButton, BoardFacePicker, OperationControls, SchemaField, SchemaForm,
 };
 
 /// Machining ("process") profile screen, fully backed by the `AppData` datastore.
@@ -296,17 +297,24 @@ fn MachiningDetail(id: Uuid) -> Element {
                         r#type: "button",
                         class: "add-step-btn",
                         onclick: move |_| {
-                            // Fold the step that was last, so the new card lands where the
-                            // operator is looking. A profile is built by adding a step and
-                            // filling it in, and by the fourth one the form to fill in was
-                            // below a screenful of finished work.
+                            // The new step is not always last: one added after a step that
+                            // cuts the outline goes in before it (`AppData::add_step`). So
+                            // the folds below it shift down first, or they would land on
+                            // the wrong cards.
                             //
-                            // Only the immediately preceding step: the ones above it are
-                            // left as the operator chose to leave them.
-                            if step_count > 0 {
-                                collapsed.write().insert(step_count - 1);
+                            // Then fold the step just above the new card, so it lands where
+                            // the operator is looking. A profile is built by adding a step
+                            // and filling it in, and by the fourth one the form to fill in
+                            // was below a screenful of finished work. Only that one step:
+                            // the others are left as the operator chose to leave them.
+                            if let Some(at) = add_step(id) {
+                                collapsed.with_mut(|folded| {
+                                    *folded = insert_index(folded, at);
+                                    if at > 0 {
+                                        folded.insert(at - 1);
+                                    }
+                                });
                             }
-                            add_step(id);
                         },
                         "+ Add step"
                     }
@@ -314,6 +322,12 @@ fn MachiningDetail(id: Uuid) -> Element {
             }
         }
     }
+}
+
+/// The folded set with a new step inserted at `at`: every fold at or below it moves down
+/// one, so it stays on the card it belonged to.
+fn insert_index(folded: &BTreeSet<usize>, at: usize) -> BTreeSet<usize> {
+    folded.iter().map(|&i| if i >= at { i + 1 } else { i }).collect()
 }
 
 /// Where each folded index lands when the step at `from` is spliced in at `to`.
@@ -503,43 +517,78 @@ fn StepCard(
                 // (the pins step comes first).
                 BoardFacePicker { id, step: index }
 
-                OperationsEditor { id, step: index }
+                // The router depth limit, with the setup rather than in an operation's
+                // section: it covers every router cut in the step — outline, cutouts and the
+                // holes and slots the drills hand over — because it is about how the board
+                // is held. Hidden only for a step that engraves and nothing else, which is
+                // the one step no router ever touches (any drill operation may mill a hole
+                // its drills cannot make).
+                if enabled_ops.iter().any(|op| op != "engrave_copper") {
+                    SchemaField { id, ptr: format!("/steps/{index}/router_depth_per_pass") }
+                }
 
-                // Configuration sections for the currently enabled operations, each one
-                // foldable. A step running three operations is three schema forms deep
-                // enough to bury the one being edited, and they are edited one at a time.
+                // The step's operations, **in the order the step runs them**, each a
+                // foldable section with its own ↑ ↓ ✕ — the order is the operator's now,
+                // within the rules in `order_fault`, so the list has to show it. Added with
+                // the button underneath rather than ticked from a fixed list: a fixed list
+                // could only ever show the one order.
                 //
-                // Folded by key rather than by position: the list is filtered by what the
-                // step enables, so an operation's index changes when a *different* one is
-                // ticked. Keyed by index, unticking PTH would silently fold whatever moved
-                // up into its place.
-                for op in machining_operations().iter() {
-                    if enabled_ops.iter().any(|enabled| enabled == op.key) {
-                        div { class: "schema-section op-section",
-                            div { class: "op-section-header",
-                                button {
-                                    r#type: "button",
-                                    class: "icon-btn",
-                                    title: if folded_ops.read().contains(op.key) { "Expand section" } else { "Collapse section" },
-                                    "aria-expanded": if folded_ops.read().contains(op.key) { "false" } else { "true" },
-                                    onclick: move |_| {
-                                        folded_ops
-                                            .with_mut(|folded| {
-                                                if !folded.remove(op.key) {
-                                                    folded.insert(op.key.to_string());
-                                                }
-                                            });
-                                    },
-                                    if folded_ops.read().contains(op.key) { "▸" } else { "▾" }
+                // Folded by key rather than by position: removing or moving one operation
+                // shifts the positions of the others, and keyed by position the fold would
+                // silently land on whatever moved into its place. Keyed in the DOM by
+                // operation for the same reason, so a moved section's form moves with it.
+                //
+                // Alternate sections are shaded so where one operation's settings end and
+                // the next begin reads at a glance — the headings alone got lost once the
+                // descriptions moved into tooltips and the forms closed up. Done here rather
+                // than with `:nth-child(even of .op-section)`: the sections share a parent
+                // with the name, bindings and face picker, and that selector is newer than
+                // WebKitGTK can be relied on to support.
+                //
+                // An operation this build does not know (a profile from a later one) has no
+                // form to show and is skipped; it still counts for the moves, which work
+                // on the stored list.
+                for (position, op) in enabled_ops
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, key)| machining_operation(key).map(|op| (position, op)))
+                {
+                    {
+                        let class = if position % 2 == 1 {
+                            "schema-section op-section op-section-alt"
+                        } else {
+                            "schema-section op-section"
+                        };
+                        rsx! {
+                            div { key: "{op.key}", class: "{class}",
+                                div { class: "op-section-header",
+                                    button {
+                                        r#type: "button",
+                                        class: "icon-btn",
+                                        title: if folded_ops.read().contains(op.key) { "Expand section" } else { "Collapse section" },
+                                        "aria-expanded": if folded_ops.read().contains(op.key) { "false" } else { "true" },
+                                        onclick: move |_| {
+                                            folded_ops
+                                                .with_mut(|folded| {
+                                                    if !folded.remove(op.key) {
+                                                        folded.insert(op.key.to_string());
+                                                    }
+                                                });
+                                        },
+                                        if folded_ops.read().contains(op.key) { "▸" } else { "▾" }
+                                    }
+                                    h4 { class: "section-title", "{op.label}" }
+                                    OperationControls { id, step: index, index: position }
                                 }
-                                h4 { class: "section-title", "{op.label}" }
-                            }
-                            if !folded_ops.read().contains(op.key) {
-                                SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                                if !folded_ops.read().contains(op.key) {
+                                    SchemaForm { id, ptr: format!("/steps/{index}/{}", op.key) }
+                                }
                             }
                         }
                     }
                 }
+
+                AddOperationButton { id, step: index }
             }
         }
     }
@@ -648,6 +697,15 @@ mod fold_tests {
     #[test]
     fn moving_a_step_onto_itself_changes_nothing() {
         assert_eq!(moved(&[0, 2], 1, 1), [0, 2]);
+    }
+
+    /// A step inserted mid-list pushes the folds at and below it down one, and leaves the
+    /// ones above alone.
+    #[test]
+    fn inserting_a_step_shifts_the_folds_below_it() {
+        let set: BTreeSet<usize> = [0, 1, 3].into_iter().collect();
+        assert_eq!(insert_index(&set, 1).into_iter().collect::<Vec<_>>(), [0, 2, 4]);
+        assert_eq!(insert_index(&set, 4).into_iter().collect::<Vec<_>>(), [0, 1, 3], "at the end");
     }
 
     /// Removing a step drops its fold and closes the gap, so the cards below do not

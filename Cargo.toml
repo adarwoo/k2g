@@ -119,6 +119,15 @@ reqwest = { version = "0.12", default-features = false, features = [
 # Without this the update channel would be a remote-code-execution path, which is
 # worse than shipping no updater at all (EU CRA Annex I Part II (7)).
 minisign-verify = "0.2"
+# Writes the setup sheet PDF (`report`). Pure Rust, MIT/Apache, embeds subset TrueType
+# fonts — needed because the sheet prints ⌀, and the PDF base fonts cannot encode it.
+# Default features off: they are image decoders (PNG/JPEG/GIF/WebP) and a text shaper,
+# none of which a sheet of tables uses. Text is laid out with `skrifa` instead (below).
+krilla = { version = "0.8.2", default-features = false }
+# Font metrics for the setup sheet's layout: the advance widths text is measured *and*
+# drawn with, so a line wrapped to fit a column cannot come out wider than it. The same
+# version krilla itself builds on, so the tree carries one copy.
+skrifa = "0.42"
 # Hands a URL to the system browser. Without it, clicking a link in the About screen
 # navigates the application's *own* WebView — the window has no browser chrome, so the
 # user is left stranded in a web page with no way back to k2g.

@@ -23,6 +23,8 @@ impl AppCtx {
             .as_ref()
             .map(|board| stitch_edge_shapes(&board.edge_shapes));
         let job_references = collect_job_references(&app);
+        // Before the gate: an outline fault holds it shut by being on screen.
+        app.set_outline_errors(stitched_board_data.as_ref());
 
         // Evaluate the readiness gate at startup too, so the pill/banner reflect a
         // board-less or infeasible job from the very first frame — not only after the
@@ -35,12 +37,12 @@ impl AppCtx {
         );
         status.insert(
             STATUS_KEY_GENERATION_NOGO_REASONS.to_string(),
-            readiness.nogo_reasons.join(" | "),
+            readiness.all_reasons().join(" | "),
         );
         // On screen from the first frame, not only once something is edited: an
         // application that opens refusing to work owes the operator the reason
         // immediately, not after they have gone looking for it.
-        app.set_readiness_errors(&readiness.nogo_reasons);
+        app.set_readiness_issues(&readiness.nogo_reasons);
 
         Self {
             app,
@@ -61,9 +63,22 @@ impl AppCtx {
     /// captured *before* the mutation ran (see `with_ctx_mut`), so the diff against
     /// the now-current `self.app` is real — this is what drives board re-stitching
     /// and the regeneration trigger.
-    fn sync_after_mutation(&mut self, previous_app: &AppState, previous_isolation: u64) {
+    ///
+    /// `previous_copper` is the copper held before the mutation. A board counts as changed
+    /// when either its snapshot **or its copper** was replaced. The snapshot alone is the
+    /// outline and the holes, so a reload after moving tracks in KiCad compared equal: the
+    /// epoch stayed put, the isolation contours cached against it still looked current, and
+    /// the Board view drew the new copper with the old channels round it until k2g was
+    /// restarted. Copper compares by identity, and every read is a fresh one, so any reload
+    /// now counts — which is what a reload is for.
+    fn sync_after_mutation(
+        &mut self,
+        previous_app: &AppState,
+        previous_copper: &BoardCopper,
+        previous_isolation: u64,
+    ) {
         let previous_references = self.job_references.clone();
-        let board_changed = previous_app.board != self.app.board;
+        let board_changed = previous_app.board != self.app.board || *previous_copper != self.copper;
 
         // Keep context as the source of truth for lazily-loaded catalogs: if the
         // mutation dropped them (a fresh snapshot with none), refill from before.
@@ -135,6 +150,10 @@ impl AppCtx {
         // Re-run tool selection so an infeasible job raises a blocking error before
         // readiness is judged (a job with no tooling solution must not read as ready).
         self.app.validate_tooling(self.stitched_board_data.as_ref());
+        // The outline's own faults, posted as themselves with where they are. Every
+        // mutation rather than only on a re-stitch: it is a cheap domain replace that
+        // leaves an unchanged set alone, and it cannot then miss the launch case.
+        self.app.set_outline_errors(self.stitched_board_data.as_ref());
 
         let readiness = evaluate_generation_readiness(&self.app, self.stitched_board_data.as_ref());
         self.status.insert(
@@ -143,12 +162,12 @@ impl AppCtx {
         );
         self.status.insert(
             STATUS_KEY_GENERATION_NOGO_REASONS.to_string(),
-            readiness.nogo_reasons.join(" | "),
+            readiness.all_reasons().join(" | "),
         );
         // Republished on every mutation, so the banner tracks the gate as the operator
         // works: each reason disappears the moment the thing it names is fixed, and the
         // banner goes with the last of them.
-        self.app.set_readiness_errors(&readiness.nogo_reasons);
+        self.app.set_readiness_issues(&readiness.nogo_reasons);
 
         // The contours arriving is a change to the plan that no diff of the app state or
         // the references can see — they are worked out on a thread and land on the
@@ -163,6 +182,9 @@ impl AppCtx {
             &self.job_references,
             &change_set,
         )
+        // A reload whose snapshot compared equal (only the copper moved) is still a reload,
+        // and the program must be regenerated from it like any other.
+        .or(board_changed.then_some(GenerationTriggerCause::PcbLoadedOrReloaded))
         .or(isolation_arrived.then_some(GenerationTriggerCause::IsolationContoursReady))
         {
             let modified = change_set.modified_uuid_entries().join(",");
@@ -190,13 +212,13 @@ impl AppCtx {
                 log::warn!(
                     "Generation not started: cause={} nogo_reasons={} modified=[{}]",
                     trigger.cause_key(),
-                    readiness.nogo_reasons.join(" | "),
+                    readiness.all_reasons().join(" | "),
                     modified
                 );
                 self.app.log_event(format!(
                     "Generation trigger detected ({}) but not started: {}",
                     trigger.label(),
-                    readiness.nogo_reasons.join("; ")
+                    readiness.all_reasons().join("; ")
                 ));
             }
         }
@@ -230,7 +252,7 @@ impl AppCtx {
         if !readiness.is_ready {
             log::info!(
                 "Launch generation skipped — job not ready: {}",
-                readiness.nogo_reasons.join("; ")
+                readiness.all_reasons().join("; ")
             );
             return;
         }
@@ -292,7 +314,6 @@ impl AppCtx {
         machine: Option<&MachineProfile>,
         raw: &crate::runtime::tooling::StepRaw,
     ) -> crate::gcode::program::StepRender {
-        use crate::gcode::feeds::{MachineLimits, SpindleRange};
         // Asked of the operator at the top of every back-face program. Symmetric pins of
         // one diameter accept the board unflipped and 180°-rotated just as readily as the
         // right way up, so nothing in the geometry can reject a wrong remount — the prompt
@@ -310,11 +331,7 @@ impl AppCtx {
                 cut_plunge_tpl: m.cut_plunge_tpl.clone(),
                 cut_arc_tpl: m.cut_arc_tpl.clone(),
                 curve_tolerance: m.curve_tolerance,
-                limits: MachineLimits {
-                    spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
-                    max_feed_xy: m.max_feed_xy,
-                    max_feed_z: m.max_feed_z,
-                },
+                limits: machine_limits(machine),
                 is_atc: m.atc_slot_count > 0,
                 measures_tool_length: m.measures_tool_length,
                 opening_prompt,
@@ -332,21 +349,46 @@ impl AppCtx {
                 // The schema's own default, so a step with no resolvable CNC fits curves
                 // the way a freshly created profile would rather than to some other number.
                 curve_tolerance: units::Length::from_mm(0.01),
-                limits: MachineLimits {
-                    spindle: SpindleRange::new(
-                        units::RotationalSpeed::from_rpm(1_000.0),
-                        units::RotationalSpeed::from_rpm(24_000.0),
-                    ),
-                    // The schema's own default, so a step with no resolvable CNC behaves
-                    // like a freshly created profile rather than like an unlimited machine.
-                    max_feed_xy: units::FeedRate::from_mm_per_min(5_000.0),
-                    max_feed_z: units::FeedRate::from_mm_per_min(5_000.0),
-                },
+                limits: machine_limits(None),
                 is_atc: false,
                 measures_tool_length: false,
                 opening_prompt,
             },
         }
+    }
+
+    /// Every stock tool's rated running values, keyed by tool id: what a program's blocks
+    /// resolve their feeds and speed from.
+    ///
+    /// One function because two things read it — the generator, and the setup sheet's tool
+    /// table — and the sheet must print the feeds the program actually emits.
+    pub(crate) fn tool_feed_map(&self) -> std::collections::BTreeMap<String, crate::gcode::program::ToolFeed> {
+        self.app
+            .tools
+            .iter()
+            .map(|tool| {
+                (
+                    tool.id.clone(),
+                    crate::gcode::program::ToolFeed {
+                        name: tool.display_name(),
+                        feeds: crate::gcode::feeds::RatedFeeds::for_tool(
+                            tool.table_feed,
+                            tool.z_feed,
+                            crate::runtime::tooling::tool_mills(tool),
+                        ),
+                        speed: tool.spindle_speed,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The feed and speed limits of the machine a step runs on. See [`machine_limits`].
+    pub(crate) fn step_machine_limits(
+        &self,
+        raw: &crate::runtime::tooling::StepRaw,
+    ) -> crate::gcode::feeds::MachineLimits {
+        machine_limits(raw.cnc_id.and_then(|id| self.app.machines.iter().find(|m| m.id == id.to_string())))
     }
 
     fn build_generation_input(&self) -> GenerationInput {
@@ -390,25 +432,7 @@ impl AppCtx {
                 values
             })
             .unwrap_or_default();
-        let tool_feeds = self
-            .app
-            .tools
-            .iter()
-            .map(|tool| {
-                (
-                    tool.id.clone(),
-                    crate::gcode::program::ToolFeed {
-                        name: tool.display_name(),
-                        feeds: crate::gcode::feeds::RatedFeeds::for_tool(
-                            tool.table_feed,
-                            tool.z_feed,
-                            crate::runtime::tooling::tool_mills(tool),
-                        ),
-                        speed: tool.spindle_speed,
-                    },
-                )
-            })
-            .collect();
+        let tool_feeds = self.tool_feed_map();
 
         GenerationInput {
             process_profile_name,
@@ -600,11 +624,57 @@ impl GenerationTriggerCause {
 /// Phrased as a question the operator has to answer "yes" to, not as an instruction —
 /// "Turn the board over" reads as something already done by the time the program runs,
 /// while a question is answered by looking at the fixture.
-const BACK_FACE_PROMPT: &str = "Board back face up?";
+pub(crate) const BACK_FACE_PROMPT: &str = "Board back face up?";
+
+/// A machine's spindle range and axis feed limits, which clamp every block's feeds.
+///
+/// Falls back to the schema's own defaults when no CNC resolves, so a step with no
+/// resolvable CNC behaves like a freshly created profile rather than like an unlimited
+/// machine. Shared by the program renderer and the setup sheet, so the two cannot clamp
+/// differently.
+fn machine_limits(machine: Option<&MachineProfile>) -> crate::gcode::feeds::MachineLimits {
+    use crate::gcode::feeds::{MachineLimits, SpindleRange};
+    match machine {
+        Some(m) => MachineLimits {
+            spindle: SpindleRange::new(m.spindle_rpm_min, m.spindle_rpm_max),
+            max_feed_xy: m.max_feed_xy,
+            max_feed_z: m.max_feed_z,
+        },
+        None => MachineLimits {
+            spindle: SpindleRange::new(
+                units::RotationalSpeed::from_rpm(1_000.0),
+                units::RotationalSpeed::from_rpm(24_000.0),
+            ),
+            max_feed_xy: units::FeedRate::from_mm_per_min(5_000.0),
+            max_feed_z: units::FeedRate::from_mm_per_min(5_000.0),
+        },
+    }
+}
 
 struct GenerationReadiness {
     is_ready: bool,
-    nogo_reasons: Vec<String>,
+    /// What only the gate knows: no board, no profile, a profile missing fields. Posted to
+    /// the banner as readiness entries, each with the screen it is fixed on.
+    nogo_reasons: Vec<Issue>,
+    /// Errors already on screen from their own source (an isolation fault, a broken
+    /// outline, a step with no tooling) that hold the gate shut. Listed where the gate's
+    /// reasons are listed — the Code tab, the log — but **not** posted to the banner again.
+    ///
+    /// Posting them was the old behaviour, as one entry reading "Blocking runtime errors
+    /// present": a second error for every real one, which told the operator nothing the
+    /// first had not and made one problem read as two.
+    blocked_by: Vec<String>,
+}
+
+impl GenerationReadiness {
+    /// Every reason the gate is shut, as text: its own, then the errors holding it.
+    fn all_reasons(&self) -> Vec<String> {
+        self.nogo_reasons
+            .iter()
+            .map(|reason| reason.message.clone())
+            .chain(self.blocked_by.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -670,53 +740,48 @@ fn evaluate_generation_readiness(
     app: &AppState,
     stitched: Option<&StitchResult>,
 ) -> GenerationReadiness {
+    let nogo_reasons = gate_reasons(app, stitched);
+    let blocked_by: Vec<String> = app
+        .errors
+        .iter()
+        .filter(|error| is_blocking_config_error(error))
+        .map(|error| error.message.clone())
+        .collect();
+    GenerationReadiness {
+        is_ready: nogo_reasons.is_empty() && blocked_by.is_empty(),
+        nogo_reasons,
+        blocked_by,
+    }
+}
+
+/// A gate reason, with the screen it is fixed on.
+fn reason_on(message: impl Into<String>, screen: Screen) -> Issue {
+    Issue { fix_at: Some(AppPlace::screen(screen)), ..Issue::new(message, None) }
+}
+
+/// The reasons only the gate knows. See [`GenerationReadiness::nogo_reasons`].
+///
+/// The board outline's own faults are not here: they are posted as themselves, with where
+/// they are (`AppState::set_outline_errors`), and hold the gate shut from there.
+fn gate_reasons(app: &AppState, stitched: Option<&StitchResult>) -> Vec<Issue> {
     let mut nogo_reasons = Vec::new();
 
     if app.board.is_none() {
-        nogo_reasons.push("PCB data not loaded".to_string());
-    }
-
-    match stitched {
-        Some(stitched_board) => {
-            if stitched_board
-                .errors
-                .iter()
-                .any(|err| err.to_ascii_lowercase().contains("open"))
-            {
-                nogo_reasons.push("Open contours detected".to_string());
-            }
-            if stitched_board
-                .errors
-                .iter()
-                .any(|err| err.to_ascii_lowercase().contains("floating island"))
-            {
-                nogo_reasons.push("Floating island detected".to_string());
-            }
-            if !stitched_board.errors.is_empty()
-                && !nogo_reasons.iter().any(|reason| reason == "Open contours detected")
-                && !nogo_reasons.iter().any(|reason| reason == "Floating island detected")
-            {
-                nogo_reasons.push("Stitching errors detected".to_string());
-            }
-        }
-        None => {
-            nogo_reasons.push("Board stitching data unavailable".to_string());
-        }
+        nogo_reasons.push(Issue::new("PCB data not loaded", None));
+    } else if stitched.is_none() {
+        // Only with a board: without one this is the line above said twice.
+        nogo_reasons.push(Issue::new("Board stitching data unavailable", None));
     }
 
     let Some(profile) = selected_process_profile_from_app(app) else {
-        nogo_reasons.push("No machining profile selected".to_string());
-        return GenerationReadiness {
-            is_ready: false,
-            nogo_reasons,
-        };
+        nogo_reasons.push(Issue::new("No machining profile selected", None));
+        return nogo_reasons;
     };
 
     if !profile.pending_required_fields.is_empty() || !profile.usable {
-        nogo_reasons.push(incomplete_reason(
-            "Machining profile",
-            &profile.name,
-            &profile.pending_required_fields,
+        nogo_reasons.push(reason_on(
+            incomplete_reason("Machining profile", &profile.name, &profile.pending_required_fields),
+            Screen::MachiningProfiles,
         ));
     }
 
@@ -726,14 +791,13 @@ fn evaluate_generation_readiness(
         .find(|machine| machine.id == profile.cnc_profile_id)
     {
         Some(machine) if !machine.pending_required_fields.is_empty() || !machine.usable => {
-            nogo_reasons.push(incomplete_reason(
-                "CNC profile",
-                &machine.name,
-                &machine.pending_required_fields,
+            nogo_reasons.push(reason_on(
+                incomplete_reason("CNC profile", &machine.name, &machine.pending_required_fields),
+                Screen::CncProfiles,
             ));
         }
         None => {
-            nogo_reasons.push("Referenced CNC profile is missing".to_string());
+            nogo_reasons.push(reason_on("Referenced CNC profile is missing", Screen::MachiningProfiles));
         }
         _ => {}
     }
@@ -744,14 +808,13 @@ fn evaluate_generation_readiness(
         .find(|fixture| fixture.id == profile.fixture_profile_id)
     {
         Some(fixture) if !fixture.pending_required_fields.is_empty() || !fixture.usable => {
-            nogo_reasons.push(incomplete_reason(
-                "Fixture profile",
-                &fixture.name,
-                &fixture.pending_required_fields,
+            nogo_reasons.push(reason_on(
+                incomplete_reason("Fixture profile", &fixture.name, &fixture.pending_required_fields),
+                Screen::FixtureProfiles,
             ));
         }
         None => {
-            nogo_reasons.push("Referenced fixture profile is missing".to_string());
+            nogo_reasons.push(reason_on("Referenced fixture profile is missing", Screen::MachiningProfiles));
         }
         _ => {}
     }
@@ -762,14 +825,13 @@ fn evaluate_generation_readiness(
         .find(|toolset| toolset.id == profile.toolset_profile_id)
     {
         Some(toolset) if !toolset.pending_required_fields.is_empty() || !toolset.usable => {
-            nogo_reasons.push(incomplete_reason(
-                "Toolset profile",
-                &toolset.name,
-                &toolset.pending_required_fields,
+            nogo_reasons.push(reason_on(
+                incomplete_reason("Toolset profile", &toolset.name, &toolset.pending_required_fields),
+                Screen::ToolsetProfiles,
             ));
         }
         None => {
-            nogo_reasons.push("Referenced toolset profile is missing".to_string());
+            nogo_reasons.push(reason_on("Referenced toolset profile is missing", Screen::MachiningProfiles));
         }
         _ => {}
     }
@@ -790,23 +852,27 @@ fn evaluate_generation_readiness(
     if crate::data::appdata_ready() {
         if let Ok(profile_id) = Uuid::parse_str(&profile.id) {
             let steps = crate::runtime::tooling::read_steps(profile_id);
-            nogo_reasons.extend(crate::runtime::tooling::locating_pin_faults(&steps));
+            nogo_reasons.extend(
+                crate::runtime::tooling::locating_pin_faults(&steps)
+                    .into_iter()
+                    .map(|fault| reason_on(fault, Screen::MachiningProfiles)),
+            );
             // Two steps cutting the same feature on the same side. The editor cannot
             // produce this, so reaching here means the profile arrived another way.
             if let Some(reason) = crate::runtime::tooling::duplicate_operations_reason(&steps) {
-                nogo_reasons.push(reason);
+                nogo_reasons.push(reason_on(reason, Screen::MachiningProfiles));
             }
+            // A step listing its operations in an order it cannot run in. The editor only
+            // offers valid moves, so this too means the profile arrived another way.
+            nogo_reasons.extend(
+                crate::runtime::tooling::operation_order_faults(&steps)
+                    .into_iter()
+                    .map(|fault| reason_on(fault, Screen::MachiningProfiles)),
+            );
         }
     }
 
-    if has_blocking_config_error(app) {
-        nogo_reasons.push("Blocking runtime errors present".to_string());
-    }
-
-    GenerationReadiness {
-        is_ready: nogo_reasons.is_empty(),
-        nogo_reasons,
-    }
+    nogo_reasons
 }
 
 /// Names an incomplete profile **and the fields it is missing**.
@@ -855,12 +921,14 @@ fn incomplete_reason(kind: &str, name: &str, missing: &BTreeSet<String>) -> Stri
 /// entries *are* this function's own output, published so the operator can see them.
 /// Counting them would close the loop on itself — the gate shuts, publishes a reason,
 /// reads its own reason back as a blocking error, and stays shut no matter what is fixed.
+#[cfg(test)]
 fn has_blocking_config_error(app: &AppState) -> bool {
-    app.errors.iter().any(|error| {
-        error.is_error
-            && error.domain != GENERATION_ERROR_DOMAIN
-            && error.domain != READINESS_ERROR_DOMAIN
-    })
+    app.errors.iter().any(is_blocking_config_error)
+}
+
+/// One entry's answer to [`has_blocking_config_error`], for listing the entries themselves.
+fn is_blocking_config_error(error: &AppError) -> bool {
+    error.is_error && error.domain != GENERATION_ERROR_DOMAIN && error.domain != READINESS_ERROR_DOMAIN
 }
 
 fn detect_generation_trigger(
@@ -1181,6 +1249,90 @@ mod orchestration_tests {
             board_snapshot: None,
             copper: Default::default(),
         })
+    }
+
+    /// **A reload is a new board even when only the copper moved.** The snapshot is the
+    /// outline and the holes, so moving tracks in KiCad and reloading left it equal; the
+    /// epoch stayed put and the old isolation contours were drawn round the new copper until
+    /// k2g was restarted. The epoch is what keys every cache derived from the board.
+    #[test]
+    fn reloading_new_copper_under_the_same_outline_is_a_new_board() {
+        let mut ctx = AppCtx::from_launch(&UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: None,
+            copper: Default::default(),
+        });
+        let epoch = ctx.board_epoch;
+
+        // Same (absent) snapshot, freshly read copper: what Reload PCB does after a track
+        // was moved.
+        let previous_app = ctx.app.clone();
+        let previous_copper = ctx.copper.clone();
+        ctx.copper = BoardCopper {
+            front: Some(std::sync::Arc::new(pcb::CopperSnapshot::default())),
+            back: None,
+        };
+        ctx.sync_after_mutation(&previous_app, &previous_copper, ctx.isolation_epoch);
+        assert_eq!(ctx.board_epoch, epoch + 1, "new copper is a new acquisition");
+
+        // An edit that touches neither is not.
+        let previous_app = ctx.app.clone();
+        let previous_copper = ctx.copper.clone();
+        ctx.sync_after_mutation(&previous_app, &previous_copper, ctx.isolation_epoch);
+        assert_eq!(ctx.board_epoch, epoch + 1, "an unrelated mutation keeps the epoch");
+    }
+
+    /// **One problem is one error.** An error already on screen from its own source holds
+    /// the gate shut without the gate posting a second entry about it. The gate used to add
+    /// "Blocking runtime errors present", so an isolation fault read as two errors, and the
+    /// second one said nothing the first had not.
+    ///
+    /// The fault's own message still reaches the gate's reason list, which is what the Code
+    /// tab shows when there is no program.
+    #[test]
+    fn an_error_on_screen_holds_the_gate_without_being_repeated() {
+        let mut app = empty_app();
+        app.set_isolation_errors(vec![Issue::new("0.42 mm of this board's copper cannot be separated.", None)]);
+
+        let readiness = evaluate_generation_readiness(&app, None);
+
+        assert!(!readiness.is_ready, "the fault still holds the gate shut");
+        assert!(
+            readiness.nogo_reasons.iter().all(|reason| !reason.message.contains("Blocking")),
+            "{:?}",
+            readiness.nogo_reasons
+        );
+        assert!(
+            readiness.all_reasons().iter().any(|reason| reason.contains("cannot be separated")),
+            "the Code tab still says why: {:?}",
+            readiness.all_reasons()
+        );
+    }
+
+    /// An outline fault is posted as itself, with where it is, and holds the gate shut from
+    /// there. It used to become one of three canned labels that dropped the position.
+    #[test]
+    fn an_outline_fault_is_posted_with_its_place_and_blocks() {
+        let mut app = empty_app();
+        let stitched = pcb::stitch_edge_shapes(&[]);
+        let open = pcb::StitchResult {
+            errors: vec!["Open contour: open chain starting at fragment 'a' (3pts, gap 12.0µm)".into()],
+            fault_marks: vec![vec![(0, 0), (12_000, 0)]],
+            ..stitched
+        };
+        app.set_outline_errors(Some(&open));
+
+        let posted: Vec<&AppError> = app.errors.iter().filter(|e| e.domain == OUTLINE_ERROR_DOMAIN).collect();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].places.len(), 1, "the gap can be shown");
+        assert_eq!(posted[0].places[0].bounds(), Some((0, 0, 12_000, 0)));
+        assert!(has_blocking_config_error(&app), "a broken outline holds the gate shut");
+
+        app.set_outline_errors(Some(&pcb::stitch_edge_shapes(&[])));
+        assert!(
+            app.errors.iter().all(|e| e.domain != OUTLINE_ERROR_DOMAIN),
+            "a fixed outline clears itself"
+        );
     }
 
     /// A step's bindings are UUIDs; the header needs what they are called.

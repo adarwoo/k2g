@@ -465,6 +465,7 @@ mod selection_tests {
                 z_bottom: Length::from_mm(-1.8),
                 z_retract: Length::from_mm(2.0),
                 z_feed: None,
+                pass_depth: None,
             },
             primitive: "drill",
             source: "pth#0".into(),

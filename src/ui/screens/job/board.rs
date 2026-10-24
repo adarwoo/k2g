@@ -18,9 +18,10 @@ use std::sync::Arc;
 use pcb::{BoardEdgeShape, BoardSnapshot, Contour, HoleKind};
 use units::Length;
 
+use crate::gcode::placement::BoardFlip;
 use crate::runtime::isolation::Isolation;
 use crate::runtime::tooling::{engrave_target, step_targets, EngraveTarget, StepTargets};
-use crate::runtime::AppCtx;
+use crate::runtime::{AppCtx, BoardMark, BoardPlace};
 use units::user_format as unit_format;
 
 /// Nominal kerf width drawn for the board-outline route, in mm.
@@ -229,6 +230,13 @@ enum BoardLayer {
     Npth,
     OutsideRoute,
     EdgeCut,
+    /// Where the diagnostics say something is wrong.
+    ///
+    /// **Not in [`DEFAULT_DRAW_ORDER`]**, and so not something a legend row can raise: it is
+    /// drawn after every other layer, always. Raising a layer exists to see that layer
+    /// clearly, and that must never bury the one mark saying the board will not come out
+    /// right.
+    Problems,
 }
 
 impl BoardLayer {
@@ -242,6 +250,16 @@ impl BoardLayer {
             HoleKind::PadNpth => Self::Npth,
         }
     }
+
+    /// The copper row for a KiCad copper layer id. Anything that is not the back is taken
+    /// as the front, since those are the only two faces this view draws.
+    fn of_copper(layer_id: i32) -> Self {
+        if layer_id == pcb::BACK_COPPER {
+            Self::CopperBack
+        } else {
+            Self::CopperFront
+        }
+    }
 }
 
 /// Whether `layer` is drawn, given the set the operator has switched off.
@@ -251,6 +269,119 @@ impl BoardLayer {
 fn layer_visible(hidden: &BTreeSet<BoardLayer>, layer: BoardLayer) -> bool {
     !hidden.contains(&layer)
 }
+
+/// The copper face the selected step machines, or `None` when there is no step to ask —
+/// in which case both faces are drawn, as a board with no machining profile should be.
+fn machined_face(targets: Option<&StepTargets>) -> Option<BoardLayer> {
+    targets.map(|t| if t.back { BoardLayer::CopperBack } else { BoardLayer::CopperFront })
+}
+
+/// Whether a layer belongs to the face on screen.
+///
+/// Only the copper layers have a face; everything else (holes, the outline, the edge) goes
+/// right through the board and is drawn whichever side is up. The other face's copper is
+/// left out rather than drawn faint, because during that step it is face-down on the bed:
+/// showing it would put copper in the picture the operator cannot see and the tool will
+/// never touch.
+fn face_shown(face: Option<BoardLayer>, layer: BoardLayer) -> bool {
+    match layer {
+        BoardLayer::CopperFront | BoardLayer::CopperBack => face.is_none_or(|f| f == layer),
+        _ => true,
+    }
+}
+
+/// The mirror a turned-over board is drawn with, as `(x, y)` scale factors.
+///
+/// Turning about Y (a page turn) mirrors X; tumbling about X mirrors Y — the same reading
+/// `BoardFlip::mirrors_x` gives the placement, so the picture and the program turn the board
+/// the same way. Which way is "up" on screen does not matter here: a mirror about a vertical
+/// line is the same mirror in KiCad's Y-down frame and the machine's Y-up one.
+fn flip_scale(flip: Option<BoardFlip>) -> (f64, f64) {
+    match flip {
+        None => (1.0, 1.0),
+        Some(flip) if flip.mirrors_x() => (-1.0, 1.0),
+        Some(_) => (1.0, -1.0),
+    }
+}
+
+/// The SVG transform that turns the drawing over in place, within the `width × height`
+/// board frame, or `""` for a board drawn face-up.
+///
+/// In place — mirrored about the frame's own centre line — so the board stays where the
+/// viewBox expects it, and zoom and pan carry on working over the same content box. That
+/// box is symmetric about the board, so nothing needs to know the drawing was turned.
+fn flip_transform(flip: Option<BoardFlip>, width: f64, height: f64) -> String {
+    match flip_scale(flip) {
+        (sx, _) if sx < 0.0 => format!("matrix(-1 0 0 1 {width} 0)"),
+        (_, sy) if sy < 0.0 => format!("matrix(1 0 0 -1 0 {height})"),
+        _ => String::new(),
+    }
+}
+
+/// Smallest stretch of board, in mm, that Show zooms to.
+///
+/// A fault can be a few microns long: an outline gap, a sliver of joined copper. Zoomed to
+/// fit that alone, the view would fill with one featureless edge and the operator would not
+/// know where on the board they were looking. Five millimetres keeps the pads and tracks
+/// round it in view.
+const FOCUS_MIN_SPAN_MM: f64 = 5.0;
+
+/// The zoom and pan that frame `bounds` in the view.
+///
+/// `bounds` and the content box are in view units. The fault is framed with room to spare
+/// on each side, never closer than `min_span` across, and within the view's own 1–20× zoom
+/// range, so a fault on a very large board may show smaller than the frame. The pan is
+/// relative to the content box's top-left corner, as the view stores it.
+fn focus_view(
+    bounds: (f64, f64, f64, f64),
+    content: (f64, f64, f64, f64),
+    min_span: f64,
+) -> (f64, f64, f64) {
+    let (x0, y0, x1, y1) = bounds;
+    let (cx, cy, cw, ch) = content;
+    let wanted_w = ((x1 - x0) * 1.6).max(min_span);
+    let wanted_h = ((y1 - y0) * 1.6).max(min_span);
+    let zoom = (cw / wanted_w).min(ch / wanted_h).clamp(1.0, 20.0);
+    let viewport_w = (cw / zoom).clamp(10.0, cw);
+    let viewport_h = (ch / zoom).clamp(10.0, ch);
+    let pan_x = ((x0 + x1) / 2.0 - cx - viewport_w / 2.0).clamp(0.0, (cw - viewport_w).max(0.0));
+    let pan_y = ((y0 + y1) / 2.0 - cy - viewport_h / 2.0).clamp(0.0, (ch - viewport_h).max(0.0));
+    (zoom, pan_x, pan_y)
+}
+
+/// A board-nm rectangle in view units, as it appears on screen: scaled into the view, then
+/// turned over the way the drawing is when the step works the back face.
+///
+/// The flip matters here and nowhere else in the focus: the drawing is mirrored by a
+/// transform, but the viewBox the zoom and pan write is not, so a fault on the left of a
+/// board turned about Y has to be looked for on the right.
+fn view_bounds(
+    bounds: (i64, i64, i64, i64),
+    bbox: (f64, f64, f64, f64),
+    view: (f64, f64),
+    flip: Option<BoardFlip>,
+) -> (f64, f64, f64, f64) {
+    let (min_x, min_y, width, height) = bbox;
+    let (view_w, view_h) = (view.0, view.1);
+    let tx = |x: i64| ((x as f64 / 1e6 - min_x) / width) * view_w;
+    let ty = |y: i64| ((y as f64 / 1e6 - min_y) / height) * view_h;
+    let (mut x0, mut y0, mut x1, mut y1) = (tx(bounds.0), ty(bounds.1), tx(bounds.2), ty(bounds.3));
+    let (sx, sy) = flip_scale(flip);
+    if sx < 0.0 {
+        (x0, x1) = (view_w - x1, view_w - x0);
+    }
+    if sy < 0.0 {
+        (y0, y1) = (view_h - y1, view_h - y0);
+    }
+    (x0, y0, x1, y1)
+}
+
+/// The last Show the Board view acted on, as `nonce + 1` (zero is "none yet").
+///
+/// Process-wide rather than in the view, because the view is unmounted whenever another tab
+/// is open: a view-local record would be lost with it, and the next visit to the Board tab
+/// would zoom back to a fault the operator had long since moved away from.
+static LAST_FOCUS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The order the layers are painted in, bottom first.
 ///
@@ -710,11 +841,34 @@ fn copper_layer_svg(
             }
             continue;
         }
+        // Every outline wound the same way before it joins the shared path. Nonzero only
+        // unions overlapping shapes that turn the same way round: a pad KiCad hands over
+        // clockwise and a track anticlockwise *cancel* where they overlap, leaving a hole
+        // shaped like the track's end inside the pad. The field copper drawn under an
+        // isolated face happened to hide it; on a face with no isolation pass it showed.
         for polygon in &feature.polygons {
-            ring(&mut solid, &polygon.outline);
+            if winds_positive(&polygon.outline) {
+                ring(&mut solid, &polygon.outline);
+            } else {
+                let reversed: Vec<(i64, i64)> = polygon.outline.iter().rev().copied().collect();
+                ring(&mut solid, &reversed);
+            }
         }
     }
     CopperLayerSvg { solid, zones }
+}
+
+/// Whether a ring's signed (shoelace) area is positive — which way round it turns.
+///
+/// Exact, in `i128`: board nm squared overflows `i64` on any real board, and a float could
+/// round a sliver's sign the wrong way.
+fn winds_positive(ring: &[(i64, i64)]) -> bool {
+    let twice_area: i128 = ring
+        .iter()
+        .zip(ring.iter().cycle().skip(1))
+        .map(|(&(x0, y0), &(x1, y1))| x0 as i128 * y1 as i128 - x1 as i128 * y0 as i128)
+        .sum();
+    twice_area >= 0
 }
 
 /// Every stretch the pass cut at one width, as one path.
@@ -944,9 +1098,9 @@ fn isolation_legend(
     let len = |length: Length| unit_format::format_length_display(length, unit);
 
     let face = if target.spec.layer_id == pcb::BACK_COPPER {
-        "Bottom copper (B.Cu)"
+        "Back copper (B.Cu)"
     } else {
-        "Top copper (F.Cu)"
+        "Front copper (F.Cu)"
     };
     let label = format!("{face} · {} channel", len(target.achieved));
 
@@ -1090,7 +1244,12 @@ fn arc_svg_path(sx: f64, sy: f64, mx: f64, my: f64, ex: f64, ey: f64) -> String 
 /// Lifted out of the view so the listing can be reordered: the marks are now emitted per
 /// layer and shuffled by which one the reader has brought to the front, and a 150-line
 /// block inlined in the middle of the tree cannot be moved about.
-fn hole_marker_element(idx: usize, marker: &BoardHoleMarker) -> Element {
+///
+/// `counter` is the turned-over board's mirror (see [`flip_scale`]), undone on the symbol
+/// itself. The marker's *position* turns with the board, but its shape is a key into the
+/// drill legend, not geometry: a half-filled square mirrored is a different size class, so
+/// it has to be drawn the way the legend draws it.
+fn hole_marker_element(idx: usize, marker: &BoardHoleMarker, counter: (f64, f64)) -> Element {
     let r = marker.marker_radius;
     let stroke_width = 1.0_f64;
     let symbol_class = hole_marker_class(&marker.kind);
@@ -1101,7 +1260,7 @@ fn hole_marker_element(idx: usize, marker: &BoardHoleMarker) -> Element {
         g {
             key: "hole-marker-{idx}",
             class: if marker.machined { "" } else { "board-step-ghost" },
-            transform: "translate({marker.x} {marker.y}) rotate({marker.rotation_deg})",
+            transform: "translate({marker.x} {marker.y}) scale({counter.0} {counter.1}) rotate({marker.rotation_deg})",
 
             // Base outline.
             if matches!(marker.base, DrillBaseShape::Circle) {
@@ -1263,6 +1422,64 @@ fn slot_element(idx: usize, slot: &BoardSlotFeature) -> Element {
     }
 }
 
+/// The Problems layer: every place the diagnostics point at, marked so it cannot be missed.
+///
+/// Each mark is drawn as itself (the joined copper, the outline gap, the hole) and circled.
+/// The circle is what makes it findable: a fault is often microns long, under a pixel on a
+/// whole-board view, so the halo is never drawn smaller than a fixed size on screen. Strokes
+/// are non-scaling for the same reason, so the marks read the same at every zoom.
+fn problem_marks_element(
+    places: &[BoardPlace],
+    tx: impl Fn(i64) -> f64,
+    ty: impl Fn(i64) -> f64,
+    units_per_mm: f64,
+    zoom: f64,
+) -> Element {
+    // 14 view units across at zoom 1 is roughly 14 screen pixels on a typical window.
+    let min_halo = 14.0 / zoom.max(1.0);
+    rsx! {
+        g { class: "board-problems",
+            for (idx , place) in places.iter().enumerate() {
+                g { key: "problem-{idx}",
+                    for (mark_idx , mark) in place.marks.iter().enumerate() {
+                        match mark {
+                            BoardMark::Path(points) => {
+                                let d = points
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, &(x, y))| format!("{} {:.3} {:.3}", if i == 0 { "M" } else { "L" }, tx(x), ty(y)))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                rsx! { path { key: "mark-{mark_idx}", d: "{d}", class: "board-problem-path" } }
+                            }
+                            BoardMark::Hole { centre, radius_nm } => {
+                                let r = (*radius_nm as f64 / 1e6) * units_per_mm;
+                                rsx! {
+                                    circle {
+                                        key: "mark-{mark_idx}",
+                                        cx: "{tx(centre.0)}",
+                                        cy: "{ty(centre.1)}",
+                                        r: "{r}",
+                                        class: "board-problem-path",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some((x0, y0, x1, y1)) = place.bounds() {
+                        {
+                            let (cx, cy) = ((tx(x0) + tx(x1)) / 2.0, (ty(y0) + ty(y1)) / 2.0);
+                            let half_diagonal = (tx(x1) - tx(x0)).hypot(ty(y1) - ty(y0)) / 2.0;
+                            let r = (half_diagonal * 1.2).max(min_halo);
+                            rsx! { circle { cx: "{cx}", cy: "{cy}", r: "{r}", class: "board-problem-halo" } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn BoardView(state: Signal<AppCtx>) -> Element {
     let snapshot = state.read().clone();
@@ -1271,6 +1488,9 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     // step to be showing.
     let step_targets = step_targets(&snapshot, snapshot.selected_step);
     let routes_outline = step_targets.map(|t| t.outline).unwrap_or(true);
+    // The face the step machines, and how the board lies when that face is the back one.
+    let shown_face = machined_face(step_targets.as_ref());
+    let board_flip = step_targets.and_then(|t| t.flip);
     let board_refresh_status = use_signal(String::new);
     let open_board_filenames = use_signal(Vec::<String>::new);
     let mut selected_board_filename = use_signal(String::new);
@@ -1291,6 +1511,44 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     // it is how the picture is being looked at, not a fact about the job.
     let top_layer = use_signal(|| Option::<BoardLayer>::None);
     let hidden = hidden_layers.read().clone();
+
+    // Show, from the diagnostics: zoom and pan to the place it names. An effect, because it
+    // writes this view's own signals in answer to a change on the context; `state` is read
+    // inside it so it re-runs when that changes. Acted on once per request (see
+    // `LAST_FOCUS`), so panning away afterwards is not undone by the next repaint.
+    use_effect(move || {
+        let ctx = state.read();
+        let Some(focus) = ctx.board_focus.clone() else { return };
+        let Some(bbox) = ctx.board.as_ref().and_then(|board| board.bounding_box.clone()) else {
+            return;
+        };
+        let (width, height) = (bbox.width.as_mm(), bbox.height.as_mm());
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let seen = focus.nonce.wrapping_add(1);
+        if LAST_FOCUS.swap(seen, std::sync::atomic::Ordering::Relaxed) == seen {
+            return;
+        }
+        let flip = crate::runtime::tooling::step_targets(&ctx, ctx.selected_step).and_then(|t| t.flip);
+        drop(ctx);
+
+        let view_h = BOARD_VIEW_WIDTH * (height / width);
+        let units_per_mm = BOARD_VIEW_WIDTH / width;
+        let band = OUTLINE_ROUTE_WIDTH_MM * units_per_mm;
+        let content = (-band, -band, BOARD_VIEW_WIDTH + 2.0 * band, view_h + 2.0 * band);
+        let bounds = view_bounds(
+            focus.bounds,
+            (bbox.x.as_mm(), bbox.y.as_mm(), width, height),
+            (BOARD_VIEW_WIDTH, view_h),
+            flip,
+        );
+        let (zoom, pan_x, pan_y) = focus_view(bounds, content, FOCUS_MIN_SPAN_MM * units_per_mm);
+        board_zoom.set(zoom);
+        board_pan_x.set(pan_x);
+        board_pan_y.set(pan_y);
+    });
+
     let mut board_last_pointer = use_signal(|| (0.0_f64, 0.0_f64));
     let board_view_width = BOARD_VIEW_WIDTH;
     let board_view_height = {
@@ -1484,26 +1742,29 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
             crate::runtime::isolation::request_isolation(input.target.spec.clone());
         }
     }
-    let iso_target = iso_input.as_ref().map(|input| &input.target);
+    // Only a pass on the face on screen: one on the face-down side is another step's business,
+    // and its legend row would describe marks this view no longer draws.
+    let iso_target = iso_input
+        .as_ref()
+        .map(|input| &input.target)
+        .filter(|target| face_shown(shown_face, BoardLayer::of_copper(target.spec.layer_id)));
     let iso_held = iso_input.as_ref().and_then(|input| input.held.as_ref());
     let (isolation_label, isolation_note, isolation_facts) =
         isolation_legend(iso_target, iso_held.map(Arc::as_ref), snapshot.unit_system);
-    let iso_shown = isolation_svg
-        .as_ref()
-        .filter(|_| layer_visible(&hidden, BoardLayer::Isolation));
     // The copper layer whose face the pass cuts. The other face keeps its copper whole — a
     // front channel takes no copper off the back of the board, and painting one opaquely over
     // both is exactly the lie the mask exists to avoid.
-    let iso_face = iso_shown.map(|iso| {
-        if iso.layer_id == pcb::BACK_COPPER {
-            BoardLayer::CopperBack
-        } else {
-            BoardLayer::CopperFront
-        }
-    });
+    let iso_layer = |iso: &IsolationSvg| BoardLayer::of_copper(iso.layer_id);
+    // A pass on the face that is not on screen is not drawn either: its tool marks would sit
+    // over copper the view has just left out, on the side of the board that is face-down.
+    let iso_shown = isolation_svg
+        .as_ref()
+        .filter(|_| layer_visible(&hidden, BoardLayer::Isolation))
+        .filter(|iso| face_shown(shown_face, iso_layer(iso)));
+    let iso_face = iso_shown.map(iso_layer);
 
     // The stitched contours, in view units — the source for the outside-route band, and for
-    // the field-copper wash beneath the isolation pass.
+    // the field copper beneath the isolation pass.
     // Only a clean stitch is usable: with errors the contours are not closed, so there
     // is no reliable inside to keep the band out of.
     let stitched_outline = snapshot
@@ -1529,10 +1790,10 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
     // reader has asked for. Hidden layers build nothing at all rather than building
     // something empty, which keeps the cost of a switched-off copper layer at zero.
     let copper_marks = |which: BoardLayer, class: &'static str, layer: Option<&CopperLayerSvg>| {
-        let layer = layer.filter(|_| layer_visible(&hidden, which))?;
+        let layer = layer.filter(|_| layer_visible(&hidden, which) && face_shown(shown_face, which))?;
         // Isolation milling starts from a face that is **entirely** copper and takes a channel
         // out around each net, so the copper between nets stays standing. Drawing only the
-        // design's copper would be a picture of an etched board — which is why the wash goes on
+        // design's copper would be a picture of an etched board — which is why the field goes on
         // beneath it, cut by the same mask: it is the field the pass leaves behind, and it is
         // what makes every channel edge a visible copper boundary right across the face.
         let cut = iso_face == Some(which);
@@ -1578,7 +1839,7 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                 .enumerate()
                 .filter(|(_, marker)| BoardLayer::of_hole(&marker.kind) == which)
             {
-                {hole_marker_element(idx, marker)}
+                {hole_marker_element(idx, marker, flip_scale(board_flip))}
             }
         })
     };
@@ -1680,6 +1941,32 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
         }
     });
 
+    // Every place the diagnostics name, on the face on screen. A fault on the other face is
+    // left out like that face's copper is; its Show button turns to a step that shows it.
+    let problem_places: Vec<BoardPlace> = snapshot
+        .errors
+        .iter()
+        .flat_map(|error| error.places.iter())
+        .filter(|place| place.layer.is_none_or(|layer| face_shown(shown_face, BoardLayer::of_copper(layer))))
+        .cloned()
+        .collect();
+    let problem_marks = layer_visible(&hidden, BoardLayer::Problems)
+        .then(|| {
+            let bbox = snapshot.board.as_ref()?.bounding_box.as_ref()?;
+            let (min_x, min_y) = (bbox.x.as_mm(), bbox.y.as_mm());
+            let (width, height) = (bbox.width.as_mm(), bbox.height.as_mm());
+            (width > 0.0 && height > 0.0).then(|| {
+                problem_marks_element(
+                    &problem_places,
+                    |x: i64| ((x as f64 / 1e6 - min_x) / width) * board_view_width,
+                    |y: i64| ((y as f64 / 1e6 - min_y) / height) * board_view_height,
+                    units_per_mm,
+                    zoom_value,
+                )
+            })
+        })
+        .flatten();
+
     let layer_marks: Vec<(BoardLayer, Element)> = draw_order(*top_layer.read())
         .into_iter()
         .filter_map(|layer| {
@@ -1694,6 +1981,8 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                 BoardLayer::OutsideRoute => outline_marks.clone(),
                 BoardLayer::EdgeCut => edge_marks.clone(),
                 BoardLayer::Via | BoardLayer::Pth | BoardLayer::Npth => hole_marks(layer),
+                // Drawn after the others, never through the shuffle; see the variant.
+                BoardLayer::Problems => None,
             }?;
             Some((layer, marks))
         })
@@ -1754,6 +2043,26 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 "Reset"
                                             }
                                             span { class: "board-view-status", "Zoom {zoom_percent}%" }
+                                            match (shown_face, board_flip) {
+                                                (Some(BoardLayer::CopperBack), Some(flip)) => rsx! {
+                                                    span { class: "board-view-status",
+                                                        if flip.mirrors_x() {
+                                                            "Back face up · turned over about Y, as the fixture turns it"
+                                                        } else {
+                                                            "Back face up · turned over about X, as the fixture turns it"
+                                                        }
+                                                    }
+                                                },
+                                                (Some(BoardLayer::CopperBack), None) => rsx! {
+                                                    span { class: "board-view-status",
+                                                        "Back face · drawn unturned: the step has no fixture to say which way the board turns over"
+                                                    }
+                                                },
+                                                (Some(_), _) => rsx! {
+                                                    span { class: "board-view-status", "Front face up" }
+                                                },
+                                                (None, _) => rsx! {},
+                                            }
                                             span { class: "board-view-status",
                                                 "{board_hole_markers.len()} drilled · {board_slot_features.len()} routed slots · {board.edge_shapes.len()} edges"
                                                 if !snapshot.copper.is_empty() {
@@ -1947,10 +2256,43 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                     // in document order and honours no z-index, so "bring this to the front" has to
                                                     // mean genuinely last — hence a list of elements that gets shuffled rather than
                                                     // a fixed sequence written out in the tree.
-                                                    {layer_marks.into_iter().map(|(_, marks)| marks)}
+                                                    //
+                                                    // Inside one group that turns the board over for a back-face step,
+                                                    // so every layer turns together. The masks turn with it for free:
+                                                    // a `userSpaceOnUse` mask is read in the user space of the element
+                                                    // that references it, and those are all in here.
+                                                    g { transform: "{flip_transform(board_flip, board_view_width, board_view_height)}",
+                                                        {layer_marks.into_iter().map(|(_, marks)| marks)}
+                                                        // Last, so nothing the reader raises can cover it.
+                                                        {problem_marks}
+                                                    }
                                                 }
                                             }
                                             aside { class: "board-drill-legend-panel",
+                                                // First, and only when there is something to say:
+                                                // it is the one row that means the board will not
+                                                // come out right. A tickbox but no raise — see
+                                                // `BoardLayer::Problems`.
+                                                if !problem_places.is_empty() {
+                                                    h4 { "Problems" }
+                                                    div { class: "board-drill-legend-item is-layer",
+                                                        LegendToggle { layer: BoardLayer::Problems, hidden: hidden_layers }
+                                                        svg { class: "board-drill-legend-icon", view_box: "0 0 24 24",
+                                                            circle { cx: "12", cy: "12", r: "8", class: "board-problem-halo" }
+                                                            path { d: "M 7 12 L 17 12", class: "board-problem-path" }
+                                                        }
+                                                        span {
+                                                            if problem_places.len() == 1 {
+                                                                "1 place the diagnostics point at"
+                                                            } else {
+                                                                "{problem_places.len()} places the diagnostics point at"
+                                                            }
+                                                        }
+                                                    }
+                                                    div { class: "board-drill-legend-note",
+                                                        "Use Show on board in the diagnostics to zoom to each one."
+                                                    }
+                                                }
                                                 h4 { "Drill size legend" }
                                                 if drill_size_legend.is_empty() {
                                                     p { class: "diag-status", "No round drilled holes detected" }
@@ -2247,12 +2589,19 @@ pub fn BoardView(state: Signal<AppCtx>) -> Element {
                                                 if !snapshot.copper.is_empty() {
                                                     h4 { "Copper" }
                                                     div { class: "board-drill-legend-note",
-                                                        "Shaded beneath everything else, as it is on the board. The far side is drawn fainter."
+                                                        if shown_face.is_some() {
+                                                            "Shaded beneath everything else, as it is on the board. Only the face this step machines is shown; the other is face-down on the bed."
+                                                        } else {
+                                                            "Shaded beneath everything else, as it is on the board. The far side is drawn fainter."
+                                                        }
                                                     }
                                                     for (layer , label , swatch) in [
-                                                        (BoardLayer::CopperFront, "Top copper (F.Cu)", "board-copper-front"),
-                                                        (BoardLayer::CopperBack, "Bottom copper (B.Cu)", "board-copper-back"),
-                                                    ] {
+                                                        (BoardLayer::CopperFront, "Front copper (F.Cu)", "board-copper-front"),
+                                                        (BoardLayer::CopperBack, "Back copper (B.Cu)", "board-copper-back"),
+                                                    ]
+                                                        .into_iter()
+                                                        .filter(|(layer, _, _)| face_shown(shown_face, *layer))
+                                                    {
                                                         LegendLayerRow {
                                                             key: "copper-legend-{label}",
                                                             layer,
@@ -2478,7 +2827,8 @@ mod tests {
             edge_shapes: Vec::new(),
             holes: vec![hole(0.8, 0.8, None), npth],
         };
-        let pth_only = StepTargets { pth: true, npth: false, outline: false };
+        let pth_only =
+            StepTargets { pth: true, npth: false, outline: false, back: false, flip: None };
         let features = resolve_board_features(&board, 1000.0, 1000.0, 1.0, Some(&pth_only));
 
         assert_eq!(features.holes.len(), 2, "both holes are still drawn");
@@ -2701,7 +3051,7 @@ mod isolation_tests {
         let target = target(400_000, 0.1, 30.0);
         let (label, note, facts) = isolation_legend(Some(&target), None, UserUnitSystem::Metric);
 
-        assert!(label.contains("Top copper"), "the face is named even before the answer lands");
+        assert!(label.contains("Front copper"), "the face is named even before the answer lands");
         assert!(note.contains("Working out"));
         assert!(facts.is_empty());
     }
@@ -2860,5 +3210,134 @@ mod layer_tests {
         let front_off = hidden(&[BoardLayer::CopperFront]);
         assert!(!layer_visible(&front_off, BoardLayer::CopperFront));
         assert!(layer_visible(&front_off, BoardLayer::CopperBack));
+    }
+
+    /// A step shows only the copper of the face it machines; the other face is face-down
+    /// on the bed. With no step selected, both faces are drawn.
+    #[test]
+    fn only_the_machined_face_shows_its_copper() {
+        let step = |back| StepTargets { pth: true, npth: true, outline: true, back, flip: None };
+
+        let front = machined_face(Some(&step(false)));
+        assert!(face_shown(front, BoardLayer::CopperFront));
+        assert!(!face_shown(front, BoardLayer::CopperBack));
+
+        let back = machined_face(Some(&step(true)));
+        assert!(face_shown(back, BoardLayer::CopperBack));
+        assert!(!face_shown(back, BoardLayer::CopperFront));
+
+        let no_step = machined_face(None);
+        assert!(face_shown(no_step, BoardLayer::CopperFront));
+        assert!(face_shown(no_step, BoardLayer::CopperBack));
+
+        // Through-board features have no face and are drawn whichever side is up.
+        for layer in [BoardLayer::Pth, BoardLayer::Npth, BoardLayer::Via, BoardLayer::EdgeCut] {
+            assert!(face_shown(back, layer));
+        }
+    }
+
+    /// The drawing turns over the way the placement does: about Y mirrors X, about X
+    /// mirrors Y. Getting this backwards draws a board the operator will not find on the bed.
+    #[test]
+    fn the_board_turns_over_about_the_fixture_axis() {
+        assert_eq!(flip_scale(None), (1.0, 1.0));
+        assert_eq!(flip_scale(Some(BoardFlip::AboutY)), (-1.0, 1.0));
+        assert_eq!(flip_scale(Some(BoardFlip::AboutX)), (1.0, -1.0));
+
+        assert_eq!(flip_transform(None, 1000.0, 600.0), "");
+        assert_eq!(flip_transform(Some(BoardFlip::AboutY), 1000.0, 600.0), "matrix(-1 0 0 1 1000 0)");
+        assert_eq!(flip_transform(Some(BoardFlip::AboutX), 1000.0, 600.0), "matrix(1 0 0 -1 0 600)");
+    }
+
+    /// The mirror is about the frame's own centre line, so the board stays inside the
+    /// viewBox: a corner lands on the opposite corner, not off-screen.
+    #[test]
+    fn turning_the_board_over_keeps_it_in_its_frame() {
+        let apply = |(sx, sy): (f64, f64), (x, y): (f64, f64), (w, h): (f64, f64)| {
+            (if sx < 0.0 { w - x } else { x }, if sy < 0.0 { h - y } else { y })
+        };
+        let frame = (1000.0, 600.0);
+        assert_eq!(apply(flip_scale(Some(BoardFlip::AboutY)), (0.0, 0.0), frame), (1000.0, 0.0));
+        assert_eq!(apply(flip_scale(Some(BoardFlip::AboutX)), (0.0, 0.0), frame), (0.0, 600.0));
+    }
+
+    /// Show frames a tiny fault at a useful size: never closer than the minimum span, so a
+    /// microns-long gap still has the board round it, and centred on it.
+    #[test]
+    fn a_tiny_fault_is_framed_with_its_surroundings() {
+        let content = (0.0, 0.0, 1000.0, 500.0);
+        // A 0.1-unit fault in the middle of the right half; a 50-unit minimum span.
+        let (zoom, pan_x, pan_y) = focus_view((750.0, 250.0, 750.1, 250.0), content, 50.0);
+
+        assert!((zoom - 10.0).abs() < 1e-9, "500 / 50 on the short side: {zoom}");
+        let (viewport_w, viewport_h) = (1000.0 / zoom, 500.0 / zoom);
+        let centre = (pan_x + viewport_w / 2.0, pan_y + viewport_h / 2.0);
+        assert!((centre.0 - 750.05).abs() < 1e-6 && (centre.1 - 250.0).abs() < 1e-6, "{centre:?}");
+    }
+
+    /// A fault at the edge of the board pans as far as the view allows, not past it: the
+    /// viewBox never leaves the content box.
+    #[test]
+    fn a_fault_at_the_edge_does_not_pan_off_the_board() {
+        let content = (-20.0, -20.0, 1040.0, 540.0);
+        let (zoom, pan_x, pan_y) = focus_view((0.0, 0.0, 1.0, 1.0), content, 50.0);
+
+        assert_eq!((pan_x, pan_y), (0.0, 0.0), "clamped at the top-left");
+        assert!(zoom <= 20.0);
+    }
+
+    /// The focus turns over with the drawing. The viewBox is not mirrored, the drawing is, so
+    /// a fault on the left of a board turned about Y is on the right of the view.
+    #[test]
+    fn the_focus_follows_the_board_when_it_is_turned_over() {
+        // A 100 × 50 mm board at the origin, drawn 1000 × 500.
+        let bbox = (0.0, 0.0, 100.0, 50.0);
+        let view = (1000.0, 500.0);
+        let fault = (10_000_000, 5_000_000, 20_000_000, 10_000_000); // 10–20 mm, 5–10 mm
+
+        assert_eq!(view_bounds(fault, bbox, view, None), (100.0, 50.0, 200.0, 100.0));
+        assert_eq!(view_bounds(fault, bbox, view, Some(BoardFlip::AboutY)), (800.0, 50.0, 900.0, 100.0));
+        assert_eq!(view_bounds(fault, bbox, view, Some(BoardFlip::AboutX)), (100.0, 400.0, 200.0, 450.0));
+    }
+
+    /// Overlapping copper shapes reach the shared path wound the same way, whichever way
+    /// KiCad wound them — the only way the nonzero fill unions them rather than punching the
+    /// overlap out as a hole.
+    #[test]
+    fn copper_outlines_share_one_winding() {
+        let clockwise = vec![(0, 0), (0, 1_000_000), (1_000_000, 1_000_000), (1_000_000, 0)];
+        let anticlockwise: Vec<(i64, i64)> = clockwise.iter().rev().copied().collect();
+        assert_ne!(winds_positive(&clockwise), winds_positive(&anticlockwise));
+
+        let feature = |outline: Vec<(i64, i64)>| pcb::CopperFeature {
+            net: "N".into(),
+            source: pcb::CopperSource::Track,
+            polygons: vec![pcb::Polygon { outline, holes: Vec::new() }],
+        };
+        let copper = pcb::CopperSnapshot {
+            layer_id: pcb::FRONT_COPPER,
+            features: vec![feature(clockwise), feature(anticlockwise)],
+            warnings: Vec::new(),
+            ..Default::default()
+        };
+        let svg = copper_layer_svg(&copper, |x| x, |y| y);
+
+        // Read the two subpaths back and check they turn the same way.
+        let rings: Vec<Vec<(i64, i64)>> = svg
+            .solid
+            .split('Z')
+            .filter(|sub| !sub.trim().is_empty())
+            .map(|sub| {
+                sub.split(['M', 'L'])
+                    .filter(|p| !p.trim().is_empty())
+                    .map(|p| {
+                        let mut xy = p.split_whitespace().map(|v| (v.parse::<f64>().unwrap() * 1e6) as i64);
+                        (xy.next().unwrap(), xy.next().unwrap())
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(rings.len(), 2);
+        assert_eq!(winds_positive(&rings[0]), winds_positive(&rings[1]), "both wound alike: {:?}", svg.solid);
     }
 }

@@ -340,7 +340,7 @@ fn publish_success(output: GenerationOutput) {
         // Standing diagnostics, one per step that produced nothing — replacing the previous
         // run's, so a step that now succeeds clears its own entry. A partial run reports
         // them too: "3 of 4 steps ready" is still a job the operator cannot run.
-        ctx.app.set_generation_errors(step_failures(&output.steps));
+        ctx.app.set_generation_issues(step_failures(&output.steps));
         ctx.app.programs = output.steps;
         ctx.app.log_event(output.summary);
     });
@@ -351,7 +351,8 @@ fn publish_success(output: GenerationOutput) {
 /// The headline names the step, because a multi-step job's operator needs to know *which*
 /// setup is broken before the message means anything; the detail is the renderer's own
 /// sentence, which for a rejected origin reference is the profile author's wording.
-fn step_failures(steps: &[StepProgram]) -> Vec<(String, Option<String>)> {
+/// One diagnostic per step that rendered no program, each opening that step's Code tab.
+fn step_failures(steps: &[StepProgram]) -> Vec<crate::runtime::Issue> {
     steps
         .iter()
         .filter_map(|step| {
@@ -361,7 +362,13 @@ fn step_failures(steps: &[StepProgram]) -> Vec<(String, Option<String>)> {
             } else {
                 format!("No program for step {} ('{}')", step.index + 1, step.name)
             };
-            Some((headline, Some(failure.to_string())))
+            Some(crate::runtime::Issue {
+                fix_at: Some(crate::runtime::AppPlace::job(
+                    crate::ui::navigation::JobCenterView::Code,
+                    step.index,
+                )),
+                ..crate::runtime::Issue::new(headline, Some(failure.to_string()))
+            })
         })
         .collect()
 }
@@ -524,6 +531,7 @@ mod tests {
                 z_bottom: units::Length::from_mm(-2.4),
                 z_retract: units::Length::from_mm(5.0),
                 z_feed: None,
+                pass_depth: None,
             },
             primitive: "drill",
             source: "h1".to_string(),
@@ -894,6 +902,7 @@ mod tests {
                     z_bottom: units::Length::from_mm(-1.0),
                     z_retract: units::Length::from_mm(2.0),
                     z_feed: None,
+                    pass_depth: None,
                 },
                 primitive: "drill",
                 source: "h".to_string(),
@@ -925,11 +934,16 @@ mod tests {
         let failures = step_failures(&out.steps);
         assert_eq!(failures.len(), 1, "one standing diagnostic, for the one failed step");
         assert!(
-            failures[0].0.contains("step 1"),
+            failures[0].message.contains("step 1"),
             "the headline must name the step: {}",
-            failures[0].0
+            failures[0].message
         );
-        assert!(failures[0].1.is_some(), "and carry the renderer's own reason as the detail");
+        assert!(failures[0].details.is_some(), "and carry the renderer's own reason as the detail");
+        assert_eq!(
+            failures[0].fix_at,
+            Some(crate::runtime::AppPlace::job(crate::ui::navigation::JobCenterView::Code, 0)),
+            "and open that step's Code tab",
+        );
     }
 
     /// A failed generation is a **standing** condition, not a passing notification: with
@@ -950,15 +964,15 @@ mod tests {
         let reason = "primitive 'set_origin': 'XX' is not a valid origin reference for this machine.";
         let failures = step_failures(&[failed(reason)]);
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].1.as_deref(), Some(reason), "the detail is the author's sentence");
+        assert_eq!(failures[0].details.as_deref(), Some(reason), "the detail is the author's sentence");
 
         // A single-step job does not count steps at it — there is only one.
-        assert_eq!(failures[0].0, "No program was generated");
+        assert_eq!(failures[0].message, "No program was generated");
 
         // Applied to the ctx it lands in `errors`, which is what the banner renders from;
         // a later good run replaces the domain and the banner goes away by itself.
         let mut state = bare_app();
-        state.set_generation_errors(failures);
+        state.set_generation_issues(failures);
         assert_eq!(state.errors.len(), 1, "the failure stands in the diagnostics");
         assert!(state.errors[0].is_error);
         assert_eq!(state.errors[0].domain, GENERATION_ERROR_DOMAIN);

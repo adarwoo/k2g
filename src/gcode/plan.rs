@@ -99,6 +99,19 @@ pub struct ZProfile {
     pub z_retract: Length,
     /// Plunge feed; `None` renders with the primitive/template default.
     pub z_feed: Option<FeedRate>,
+    /// The deepest any one pass may cut, for a router cut taken down in steps (the step's
+    /// `router_depth_per_pass`). `None` cuts straight to `z_bottom` in one pass — which is
+    /// what a finishing lap carries, since it is cut once at full depth whatever the limit.
+    /// A routed hole or slot steps its clearing and finishes in one lap
+    /// ([`routing::spiral_hole`](super::routing::spiral_hole)), so it carries the limit and
+    /// applies it to the right part itself.
+    ///
+    /// A limit, not a step: the renderer splits the depth into equal passes no deeper
+    /// than this ([`routing::depth_levels`](super::routing::depth_levels)), so the last
+    /// pass is never a sliver. It exists because a router *can* cut a board's full
+    /// thickness in one go, but a full-depth slot puts a lateral load on the board large
+    /// enough to shift it on the fixture — and a board that moves mid-cut is scrap.
+    pub pass_depth: Option<Length>,
 }
 
 /// One **atomic machining operation** (op-planner §1). Flat: exactly one

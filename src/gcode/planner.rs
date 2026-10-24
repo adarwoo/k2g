@@ -164,6 +164,7 @@ pub fn plan_drilling(
                             z_bottom: Length::from_mm(-p.z_bottom.as_mm()),
                             z_retract: placement.z_retract(),
                             z_feed: None,
+                            pass_depth: None,
                         },
                         primitive: "drill",
                         source: p.source.clone(),
@@ -223,6 +224,7 @@ pub struct RouteTarget {
 pub fn plan_routing(
     targets: &[RouteTarget],
     placement: &Placement,
+    pass_depth: Option<Length>,
     start: Point,
     slots: &BTreeMap<String, u8>,
 ) -> Vec<ToolBlock> {
@@ -291,6 +293,9 @@ pub fn plan_routing(
                             z_bottom: Length::from_mm(-p.z_bottom.as_mm()),
                             z_retract: placement.z_retract(),
                             z_feed: None,
+                            // The step's router limit: the clearing is stepped, the
+                            // finishing laps are not (`routing::spiral_hole`).
+                            pass_depth,
                         },
                         source: p.source.clone(),
                         continues_from_previous: false,
@@ -322,6 +327,16 @@ pub struct OutlineSpan {
     pub source: String,
     /// Cutter-centre polyline in **machine** coordinates.
     pub path: Vec<Point>,
+    /// This span is the light finishing lap on a wall a roughing pass has already opened,
+    /// so it is cut once at full depth whatever the step's depth limit: it takes little
+    /// from the side, so it pulls little on the board, and one pass down the whole wall
+    /// leaves one surface rather than a ridge at every level.
+    ///
+    /// On the span rather than inferred from which pass list it is in, because the
+    /// finishing list is not all finishing: with no allowance it holds the single, full-
+    /// width cut, and a cutout too tight for an allowance lands in it beside cutouts that
+    /// have one. Only the code that decided a contour gets two passes knows.
+    pub finishing: bool,
 }
 
 /// Plans the board-outline phase: one block for the outline router, its spans ordered by
@@ -343,12 +358,18 @@ pub struct OutlineSpan {
 /// Within a pass, span order is a pure travel optimisation and cannot release the board
 /// early: the tabs between spans are what hold it, and they survive until the operator
 /// breaks them.
+///
+/// `pass_depth` is the step's router depth limit ([`ZProfile::pass_depth`]), given to every
+/// span except a [finishing](OutlineSpan::finishing) one. The depth steps happen *inside*
+/// each span when it is rendered, so a stepped span is still one op and the tour above is
+/// unchanged by them.
 pub fn plan_outline(
     passes: &[&[OutlineSpan]],
     tool_id: &str,
     tool_diameter: Length,
     z_bottom: Length,
     z_retract: Length,
+    pass_depth: Option<Length>,
     start: Point,
     slots: &BTreeMap<String, u8>,
 ) -> Option<ToolBlock> {
@@ -374,7 +395,12 @@ pub fn plan_outline(
                 tool_id: tool_id.to_string(),
                 entry: span.path[0],
                 exit: span.path[span.path.len() - 1],
-                z: ZProfile { z_bottom, z_retract, z_feed: None },
+                z: ZProfile {
+                    z_bottom,
+                    z_retract,
+                    z_feed: None,
+                    pass_depth: if span.finishing { None } else { pass_depth },
+                },
                 primitive: "route_contour",
                 source: span.source.clone(),
                 continues_from_previous: false,
@@ -531,7 +557,7 @@ pub fn plan_engrave(
             tool_id: tool_id.to_string(),
             entry: test.path[0],
             exit: test.path[2],
-            z: ZProfile { z_bottom: test.z_bottom, z_retract, z_feed: None },
+            z: ZProfile { z_bottom: test.z_bottom, z_retract, z_feed: None, pass_depth: None },
             primitive: "route_contour",
             source: "Depth test cut".to_string(),
             continues_from_previous: false,
@@ -554,7 +580,7 @@ pub fn plan_engrave(
                 tool_id: tool_id.to_string(),
                 entry: span.path[0],
                 exit,
-                z: ZProfile { z_bottom: span.z_bottom, z_retract, z_feed: None },
+                z: ZProfile { z_bottom: span.z_bottom, z_retract, z_feed: None, pass_depth: None },
                 primitive: "route_contour",
                 source: span.source.clone(),
                 continues_from_previous: member_index > 0,
@@ -944,7 +970,7 @@ mod tests {
             (3.0, 4.0),
             RouteShape::Hole { hole_diameter: Length::from_mm(3.2) },
         )];
-        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        let blocks = plan_routing(&targets, &placement_identity(), None, Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].diameter.as_mm(), 1.0, "block diameter is the router");
         let op = &blocks[0].ops[0];
@@ -968,7 +994,7 @@ mod tests {
                 from_solid: true,
             },
         )];
-        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        let blocks = plan_routing(&targets, &placement_identity(), None, Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
         let op = &blocks[0].ops[0];
         assert_eq!(
             op.kind,
@@ -989,12 +1015,13 @@ mod tests {
                 Point::new(Length::from_mm(from.0), Length::from_mm(from.1)),
                 Point::new(Length::from_mm(to.0), Length::from_mm(to.1)),
             ],
+            finishing: false,
         };
         let spans = vec![
             span("outer#0.span0", (50.0, 0.0), (60.0, 0.0)),
             span("outer#0.span1", (1.0, 0.0), (10.0, 0.0)),
             // A degenerate span is dropped rather than emitted as a zero-length cut.
-            OutlineSpan { source: "outer#0.span2".into(), path: vec![] },
+            OutlineSpan { source: "outer#0.span2".into(), path: vec![], finishing: false },
         ];
         let block = plan_outline(
             &[&spans],
@@ -1002,6 +1029,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
             Length::from_mm(5.0),
+            None,
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             &BTreeMap::new(),
         )
@@ -1033,6 +1061,7 @@ mod tests {
                 Point::new(Length::from_mm(from.0), Length::from_mm(from.1)),
                 Point::new(Length::from_mm(to.0), Length::from_mm(to.1)),
             ],
+            finishing: false,
         };
         let rough = vec![
             span("outer#0.span0.rough", (80.0, 0.0), (90.0, 0.0)),
@@ -1048,6 +1077,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
             Length::from_mm(5.0),
+            None,
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             &BTreeMap::new(),
         )
@@ -1092,6 +1122,7 @@ mod tests {
                 Point::new(Length::from_mm(x), Length::from_mm(0.0)),
                 Point::new(Length::from_mm(x + 1.0), Length::from_mm(0.0)),
             ],
+            finishing: false,
         };
         // The outline sits nearest the origin, so a single travel-ordered pass would cut
         // it first — the failure this guards against, rather than a coincidence of layout.
@@ -1104,6 +1135,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
             Length::from_mm(5.0),
+            None,
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             &BTreeMap::new(),
         )
@@ -1120,6 +1152,41 @@ mod tests {
         assert_eq!(block.op_count(), 4, "and it is still one block, so one tool change");
     }
 
+    /// The step's depth limit reaches every roughing span — and every single-pass span,
+    /// which is a full-width slot — but not a finishing lap, which is cut once at full
+    /// depth. Marked on the span, because one pass list can hold both kinds.
+    #[test]
+    fn a_finishing_lap_is_cut_at_full_depth_in_one_pass() {
+        let span = |source: &str, x: f64, finishing: bool| OutlineSpan {
+            source: source.to_string(),
+            path: vec![
+                Point::new(Length::from_mm(x), Length::from_mm(0.0)),
+                Point::new(Length::from_mm(x + 1.0), Length::from_mm(0.0)),
+            ],
+            finishing,
+        };
+        let rough = vec![span("outer#0.span0.rough", 1.0, false)];
+        // A finish list holding a real finishing lap and a cutout too tight for one.
+        let finish = vec![span("outer#0.span0.finish", 3.0, true), span("cutout#0.span0", 5.0, false)];
+        let limit = Some(Length::from_mm(1.0));
+        let block = plan_outline(
+            &[&rough, &finish],
+            "router",
+            Length::from_mm(2.0),
+            Length::from_mm(-2.1),
+            Length::from_mm(5.0),
+            limit,
+            Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
+            &BTreeMap::new(),
+        )
+        .expect("there is something to cut");
+
+        for op in &block.ops {
+            let want = if op.source.ends_with(".finish") { None } else { limit };
+            assert_eq!(op.z.pass_depth, want, "{}", op.source);
+        }
+    }
+
     /// A pass with nothing in it is skipped rather than ending the block — which is what
     /// a step whose finishing allowance is zero, or whose board is held by nothing, looks
     /// like from here.
@@ -1131,6 +1198,7 @@ mod tests {
                 Point::new(Length::from_mm(1.0), Length::from_mm(0.0)),
                 Point::new(Length::from_mm(9.0), Length::from_mm(0.0)),
             ],
+            finishing: false,
         }];
         let block = plan_outline(
             &[&[], &finish],
@@ -1138,6 +1206,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
             Length::from_mm(5.0),
+            None,
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             &BTreeMap::new(),
         )
@@ -1157,6 +1226,7 @@ mod tests {
             Length::from_mm(2.0),
             Length::from_mm(-2.1),
             Length::from_mm(5.0),
+            None,
             Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
             &BTreeMap::new(),
         )
@@ -1168,6 +1238,7 @@ mod tests {
                 Length::from_mm(2.0),
                 Length::from_mm(-2.1),
                 Length::from_mm(5.0),
+                None,
                 Point::new(Length::from_mm(0.0), Length::from_mm(0.0)),
                 &BTreeMap::new(),
             )
@@ -1192,7 +1263,7 @@ mod tests {
                 },
             ),
         ];
-        let blocks = plan_routing(&targets, &placement_identity(), Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
+        let blocks = plan_routing(&targets, &placement_identity(), None, Point::new(Length::from_mm(0.0), Length::from_mm(0.0)), &BTreeMap::new());
         assert_eq!(blocks.len(), 1, "one router, one block");
         assert_eq!(blocks[0].op_count(), 2);
     }

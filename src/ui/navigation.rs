@@ -21,7 +21,7 @@ pub struct UiLaunchData {
 }
 
 /// Top-level screens available in the application shell.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Job,
     CncProfiles,
@@ -165,7 +165,7 @@ impl StockSortColumn {
 }
 
 /// Sub-views inside the Job screen.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobCenterView {
     Board,
     Machining,
@@ -252,8 +252,8 @@ mod key_codec_tests {
     use super::*;
 
     /// The keys are what the settings file stores, so a variant whose key does not come
-    /// back reopens the application somewhere the user never was. Neither enum derives
-    /// `Debug`, so failures name the key.
+    /// back reopens the application somewhere the user never was. Failures name the key,
+    /// which is what the settings file holds.
     #[test]
     fn every_screen_and_job_view_key_round_trips() {
         for screen in Screen::ALL {

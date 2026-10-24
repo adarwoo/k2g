@@ -395,6 +395,7 @@ pub fn UpdateBanner(state: Signal<crate::runtime::AppCtx>) -> Element {
 
 #[component]
 pub fn DiagnosticsBanner(
+    state: Signal<crate::runtime::AppCtx>,
     errors: Vec<AppError>,
     generation_state: GenerationState,
     show_error_details: Signal<bool>,
@@ -452,11 +453,86 @@ pub fn DiagnosticsBanner(
             if *show_error_details.read() {
                 div { class: "diag-detail-list",
                     for err in errors.iter() {
-                        article { class: if err.is_error { "diag-detail-card is-error" } else { "diag-detail-card is-warning" },
-                            div { class: "diag-detail-title", "{err.message}" }
-                            if let Some(details) = err.details.as_ref() {
-                                div { class: "diag-detail-text", "{details}" }
-                            }
+                        DiagnosticCard { key: "{err.id}", state, error: err.clone() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One diagnostic in the expanded list, with the buttons that take the operator to it.
+///
+/// **Show on board** zooms the Board view to the fault, turning to a step that shows its face.
+/// A fault with several places (the joined-copper fault names each net) steps through them
+/// with ‹ ›, worst first, so each is one click rather than a hunt across the board. **Open**
+/// goes to the screen where a fault with no place on the board is fixed.
+///
+/// Its own component so each card keeps its own position in its places: keyed by the
+/// entry's id, which is stable while the fault stands (the posting side leaves an unchanged
+/// set alone for exactly this reason).
+#[component]
+fn DiagnosticCard(state: Signal<crate::runtime::AppCtx>, error: AppError) -> Element {
+    let mut at = use_signal(|| 0usize);
+    let count = error.places.len();
+    let index = (*at.read()).min(count.saturating_sub(1));
+    let label = error.places.get(index).map(|place| place.label.clone()).unwrap_or_default();
+
+    let places = error.places.clone();
+    let mut show = move |index: usize| {
+        if let Some(place) = places.get(index).cloned() {
+            at.set(index);
+            super::mutate_ctx(state, |ctx| ctx.show_on_board(&place));
+        }
+    };
+    let mut show_prev = show.clone();
+    let mut show_next = show.clone();
+    let fix_at = error.fix_at.clone();
+    let fix_label = fix_at.as_ref().map(|place| match place.job_view {
+        Some(view) => format!("Open {}", view.label()),
+        None => format!("Open {}", place.screen.label()),
+    });
+
+    rsx! {
+        article { class: if error.is_error { "diag-detail-card is-error" } else { "diag-detail-card is-warning" },
+            div { class: "diag-detail-title", "{error.message}" }
+            if let Some(details) = error.details.as_ref() {
+                div { class: "diag-detail-text", "{details}" }
+            }
+            if count > 0 || fix_at.is_some() {
+                div { class: "diag-detail-actions",
+                    if count > 0 {
+                        button {
+                            class: "btn btn-secondary btn-small",
+                            onclick: move |_| show(index),
+                            "Show on board"
+                        }
+                    }
+                    if count > 1 {
+                        button {
+                            class: "btn btn-secondary btn-small",
+                            title: "Previous place",
+                            onclick: move |_| show_prev((index + count - 1) % count),
+                            "‹"
+                        }
+                        span { class: "diag-detail-place", "{index + 1} of {count} · {label}" }
+                        button {
+                            class: "btn btn-secondary btn-small",
+                            title: "Next place",
+                            onclick: move |_| show_next((index + 1) % count),
+                            "›"
+                        }
+                    } else if count == 1 {
+                        span { class: "diag-detail-place", "{label}" }
+                    }
+                    if let (Some(place), Some(text)) = (fix_at.clone(), fix_label.clone()) {
+                        button {
+                            class: "btn btn-secondary btn-small",
+                            onclick: move |_| {
+                                let place = place.clone();
+                                super::mutate_ctx(state, |ctx| ctx.go_to(&place));
+                            },
+                            "{text}"
                         }
                     }
                 }

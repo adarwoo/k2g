@@ -984,6 +984,39 @@ body {
     color: var(--text-subtle);
 }
 
+/* The Board view's Problems layer: what the diagnostics point at. Non-scaling strokes so a
+   fault microns long still reads at whole-board zoom. */
+.board-problem-path {
+    fill: none;
+    stroke: var(--err);
+    stroke-width: 3px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+
+.board-problem-halo {
+    fill: color-mix(in srgb, var(--err) 12%, transparent);
+    stroke: var(--err);
+    stroke-width: 1.5px;
+    stroke-dasharray: 4 3;
+    vector-effect: non-scaling-stroke;
+}
+
+/* The buttons that take the operator to a fault: Show on board, the step-through, Open. */
+.diag-detail-actions {
+    margin-top: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.diag-detail-place {
+    font-size: 11px;
+    color: var(--text-subtle);
+}
+
 .event-toast-stack {
     position: fixed;
     right: 16px;
@@ -2380,6 +2413,20 @@ p {
     opacity: 0.62;
 }
 
+/* The marker that a field has a tooltip (`FieldInfo`): the description is its `title`
+   now, and without a mark nothing says hovering will tell you anything. Quiet enough
+   not to compete with the label, and the help cursor confirms it on the way in. */
+.field-info {
+    margin-left: 5px;
+    font-size: 11px;
+    opacity: 0.5;
+    cursor: help;
+}
+
+.field[title]:not([title=""]) > label {
+    cursor: help;
+}
+
 .field > label > .field-required {
     color: #d64545;
     font-weight: 700;
@@ -2476,6 +2523,22 @@ p {
 /* Folded, the header *is* the section, so the space under it goes too. */
 .op-section:has(> .op-section-header > [aria-expanded="false"]) > .op-section-header {
     margin-bottom: 0;
+}
+
+/* Each operation is a shaded panel, every other one a shade darker, so the boundary
+   between two operations' settings reads at a glance. The class alternates in Rust
+   (`StepCard`), counted over the enabled operations only. Tints of `currentColor`, not
+   theme colours, so all four themes get a step in the right direction without a
+   value each. The panel replaces the rule above the section: one boundary is enough. */
+.op-section {
+    border-top: none;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: color-mix(in srgb, currentColor 3%, transparent);
+}
+
+.op-section.op-section-alt {
+    background: color-mix(in srgb, currentColor 8%, transparent);
 }
 
 /* Multi-step machining editor: each step is a bordered card with reorder/remove
@@ -2658,10 +2721,59 @@ p {
 }
 
 .binding-picker,
-.operations-editor {
+/* An operation's ↑ ↓ ✕, pushed to the far end of its section header so they line up
+   down the step whatever the operation's name. */
+.op-section-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+}
+
+/* *Add operation*, under the last section. Left-aligned with the sections it adds to,
+   not stretched across the grid like a section. */
+.add-operation-btn {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin-top: 10px;
+}
+
+/* The overlay's choices: one full-width row per operation the step does not run yet. A
+   row another step has claimed stays in the list, greyed, with the reason under the
+   name — leaving it out would hide why it cannot be added. */
+.add-operation-dialog:focus {
+    outline: none;
+}
+
+.add-operation-list {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
+}
+
+.add-operation-choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    background: color-mix(in srgb, currentColor 4%, transparent);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.add-operation-choice:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+}
+
+.add-operation-choice:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 /*
@@ -3115,24 +3227,9 @@ p {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
 }
 
-.checkbox-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-}
-
-/*
- * An operation another step has already claimed on this board side. Dimmed rather than
- * hidden: the operator needs to see that the job does drill its plated holes somewhere,
- * and the note beside it says where. `not-allowed` on the label as well as the box, so
- * the whole row answers the click the same way.
- */
-.checkbox-line.is-blocked {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
+/* Why an operation cannot be added: which step already runs it. Under the name in the
+   *Add operation* overlay, so the operator sees that the job does drill its plated holes
+   somewhere, and where. */
 .operation-blocked-note {
     font-size: 11px;
     color: var(--text-subtle);
@@ -3943,6 +4040,13 @@ th {
  *
  * Colour comes from the group and fill from the shape, so one rule paints tracks, pads,
  * vias and pours alike — and the legend swatch takes the same pair for free.
+ *
+ * **Opaque shapes, and the transparency on the group.** A face is drawn as several shapes —
+ * the tracks and pads, each pour, the field below — and when each carried its own
+ * transparency, every overlap stacked: a track running onto a pad came out darker, and a
+ * thermal spoke over its own pour came out lighter. Those overlaps are KiCad's business (two
+ * objects meeting); to a mill copper is there or it is not. Group opacity composites the
+ * face once, as one flat region, so overlaps simply merge.
  */
 .board-copper-fill {
     fill: currentColor;
@@ -3950,11 +4054,13 @@ th {
 }
 
 .board-copper-front {
-    color: color-mix(in srgb, var(--copper-front) 58%, transparent);
+    color: var(--copper-front);
+    opacity: 0.58;
 }
 
 .board-copper-back {
-    color: color-mix(in srgb, var(--copper-back) 38%, transparent);
+    color: var(--copper-back);
+    opacity: 0.38;
 }
 
 /*
@@ -3966,15 +4072,15 @@ th {
  * goes on underneath it: without the field the picture is of an etched board, and the whole
  * question the isolation view answers is what a *milled* one looks like.
  *
- * Colour from the group, like everything else here, so the wash is the face's own colour;
- * the opacity puts it well under the design copper drawn over it, which still has to read as
- * the nets. It is the same shape as the outside-route mask's material region, so the wash
- * stops where the board does — including at the edge of an interior cut-out.
+ * The same colour as the design copper, not a fainter wash: after milling it *is* copper, and
+ * a second tone only drew attention to where KiCad's objects happened to end. The channels the
+ * mask cuts are what outline the nets. It is the same shape as the outside-route mask's
+ * material region, so it stops where the board does — including at the edge of an interior
+ * cut-out.
  */
 .board-copper-field {
     fill: currentColor;
     stroke: none;
-    opacity: 0.32;
 }
 
 /*
@@ -4597,8 +4703,13 @@ th {
 
 /* One program has no checkbox — it cannot be unticked and still exported — so the row
    loses that column rather than leaving a gap where it was. */
-.export-row-single {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+/* The checkbox column is a fixed width, and a row without a checkbox holds it with a
+   spacer, so every row's name box lines up — the setup sheet's row always has a checkbox,
+   even beside a single program that does not. */
+.export-row > input[type="checkbox"],
+.export-check-gap {
+    width: 16px;
+    margin: 0;
 }
 
 .export-step {
@@ -4620,6 +4731,32 @@ th {
 .export-name {
     font-family: var(--mono, Consolas, monospace);
     font-size: 12px;
+}
+
+/* The setup sheet's name box with its preview button beside it, in the one column, so the
+   box's left edge lines up with the programs' above it. */
+.export-name-with-action {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.export-name-with-action > .export-name {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Drawn like the top bar's media icons: stroked in the text colour, so it follows the
+   theme and the button's own hover state. */
+.export-preview-svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 /* Where it is going, and the way to change it. The whole point of the rework: the folder

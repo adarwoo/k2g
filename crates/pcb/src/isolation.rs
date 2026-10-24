@@ -95,6 +95,12 @@ pub struct UncutStretch {
     pub net: String,
     /// Length of contour left uncut, nm.
     pub length_nm: f64,
+    /// The uncut stretches themselves, board nm, as open polylines.
+    ///
+    /// Kept so the fault can be shown where it is. With only a net name and a length, the
+    /// operator was left to hunt for 0.4 mm of joined copper on a whole board, while the
+    /// pass had known exactly where it was and thrown it away.
+    pub spans: Vec<Vec<(i64, i64)>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -269,7 +275,7 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
         let uncut = walk_ladder(net, &others, &rungs, &hint, &mut result);
         let length_nm: f64 = uncut.iter().map(|span| polyline_len_nm(span)).sum();
         if length_nm > 0.0 {
-            result.uncut.push(UncutStretch { net: net.name.clone(), length_nm });
+            result.uncut.push(UncutStretch { net: net.name.clone(), length_nm, spans: uncut });
         }
     }
 
@@ -1721,6 +1727,32 @@ warnings {:?}", result.uncut, result.warnings);
             "the operator has to be told, warnings were {:?}",
             result.warnings
         );
+    }
+
+    /// An uncut stretch keeps where it is, not only how long it is: the operator has to be
+    /// shown the joined copper, and the spans are what the app draws and zooms to. The
+    /// reported length is the spans' own length, so the two cannot disagree.
+    #[test]
+    fn an_uncut_stretch_keeps_its_spans() {
+        let board = snapshot(vec![
+            feature("A", vec![square(0, 0, MM / 2)]),
+            feature("B", vec![square(1_020_000, 0, MM / 2)]),
+        ]);
+        let result = isolate(&board, 400_000, 50_000);
+
+        assert!(!result.uncut.is_empty(), "the 20 µm gap is uncuttable");
+        for stretch in &result.uncut {
+            assert!(!stretch.spans.is_empty(), "{} has a length but nowhere to show it", stretch.net);
+            let measured: f64 = stretch.spans.iter().map(|span| polyline_len_nm(span)).sum();
+            assert!((measured - stretch.length_nm).abs() < 1.0, "{measured} vs {}", stretch.length_nm);
+            // The joined copper is between the two squares, so that is where the spans are.
+            let near_gap = stretch
+                .spans
+                .iter()
+                .flatten()
+                .all(|&(x, _)| (400_000..=1_100_000).contains(&x));
+            assert!(near_gap, "{}: {:?}", stretch.net, stretch.spans);
+        }
     }
 
     /// The ladder always ends at the floor, whatever the step leaves over, and never runs

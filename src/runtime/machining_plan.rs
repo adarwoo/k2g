@@ -208,6 +208,38 @@ fn frame_fixture<'a>(ctx: &'a AppCtx, steps: &[StepRaw]) -> Option<&'a FixturePr
     ctx.fixtures.iter().find(|f| f.id == id.to_string())
 }
 
+/// How far the board sits from the work zero, in mm along X and Y: the job frame's margin on
+/// the two sides the fixture's zero is on. `None` with no profile, no steps or no store.
+///
+/// Every program is written against this, and it is derived from **all** the steps — so a
+/// step added or changed after earlier ones were cut moves the zero under work already done
+/// (an outline route widens it by its kerf). The Export dialog compares it with what the last
+/// export used and says so; see `AppState::zero_shift_since_export`.
+pub fn job_zero_offset(ctx: &AppCtx) -> Option<(f64, f64)> {
+    let profile_id = ctx
+        .selected_process_profile_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())?;
+    if !appdata_ready() {
+        return None;
+    }
+    let steps = read_steps(profile_id);
+    if steps.is_empty() {
+        return None;
+    }
+    let frame = job_frame(&steps, frame_fixture(ctx, &steps));
+    Some(zero_offset(&frame))
+}
+
+/// The frame's margin on the zero's own two sides — the only two that move the board.
+fn zero_offset(frame: &JobFrame) -> (f64, f64) {
+    let margin = frame.margin;
+    (
+        if frame.origin.x_at_right { margin.x_max } else { margin.x_min },
+        if frame.origin.y_at_far { margin.y_max } else { margin.y_min },
+    )
+}
+
 /// What a cached plan was built from.
 ///
 /// Two counters, and no list of the fields the planner happens to read. A key assembled
@@ -1029,11 +1061,11 @@ fn plan_step(
         cutout_spans = passes.finish;
     }
 
-    // The isolation pass, first of all the blocks. `Phase` is never read — block order is
-    // push order — and the copper is engraved while the board is whole, flat and
-    // undrilled: every hole made first is a place the surface can lift or the bit can
-    // catch, and the engraving is the one operation whose quality is a depth tolerance.
-    let mut blocks = Vec::new();
+    // The copper work — isolation, then clearing — built here and placed below, before the
+    // holes or after them as the step lists it (`StepRaw::engraves_after_holes`). `Phase`
+    // is never read: block order is push order, so where `copper_blocks` is appended
+    // *is* when the copper is cut.
+    let mut copper_blocks = Vec::new();
     if let Some(choice) = engraver.as_ref() {
         if let Some(bit) = ctx.tools.iter().find(|t| t.id == choice.tool_id) {
             if copper_assumed {
@@ -1074,7 +1106,7 @@ fn plan_step(
                         .to_string(),
                 );
             }
-            blocks.extend(engraved);
+            copper_blocks.extend(engraved);
 
             // A SEPARATE block: the clearing pass loads its own tool, so it cannot join the
             // isolation block above without claiming a tool change never happens. No test
@@ -1089,13 +1121,28 @@ fn plan_step(
                     start,
                     &slots,
                 );
-                blocks.extend(cleared);
+                copper_blocks.extend(cleared);
             }
         }
     }
 
+    // The copper goes in whole, and in one of exactly two places: before every hole, or
+    // after every hole and before any routing. Before is the default — Z0 checked on an
+    // untouched surface, copper cut on a board with nowhere to lift. After is the operator's
+    // call, for the annular rings a drill can tear out of copper already isolated. The
+    // holes include the routed ones (`plan_routing`): they belong to the drill operations.
+    // Never after the cutouts or the outline, which `order_fault` refuses.
+    // The step's router depth limit, for every router roughing cut below: milled holes and
+    // slots, cutouts and the outline. One for the step — it is about how the board is held.
+    let pass_depth = Some(raw.router_depth_per_pass);
+
+    let mut blocks = Vec::new();
+    if !raw.engraves_after_holes() {
+        blocks.append(&mut copper_blocks);
+    }
     blocks.extend(plan_drilling(&drill_targets, &placement, start, &slots));
-    blocks.extend(plan_routing(&route_targets, &placement, start, &slots));
+    blocks.extend(plan_routing(&route_targets, &placement, pass_depth, start, &slots));
+    blocks.append(&mut copper_blocks);
 
     // The interior openings, on every cutter the outline does not itself use — **before**
     // the outline block, because the perimeter is what releases the part and nothing
@@ -1105,6 +1152,7 @@ fn plan_step(
     //
     // The cutter the outline *does* use is taken out of these maps first and cut inside
     // that block, as its leading passes.
+
     let shared_cutout_rough = routers
         .outline
         .as_deref()
@@ -1140,6 +1188,7 @@ fn plan_step(
             tool.diameter,
             Length::from_mm(-z_bottom.as_mm()),
             placement.z_retract(),
+            pass_depth,
             start,
             &slots,
         ));
@@ -1186,6 +1235,7 @@ fn plan_step(
                 // Negative machine-Z depth (board top is Z0; op-planner §6).
                 Length::from_mm(-z_bottom.as_mm()),
                 placement.z_retract(),
+                pass_depth,
                 start,
                 &slots,
             ));
@@ -2482,6 +2532,7 @@ fn plan_cutout_spans(
                         .push(OutlineSpan {
                             source: format!("{label}#{kind_index}.span{n}{}", PASS_SUFFIX[0]),
                             path: span,
+                            finishing: false,
                         });
                 }
             }
@@ -2505,6 +2556,9 @@ fn plan_cutout_spans(
                 .push(OutlineSpan {
                     source: format!("{label}#{kind_index}.span{n}{suffix}"),
                     path: span,
+                    // Only a lap that follows a roughing pass is a finishing one; a single pass is
+                    // the full-width cut, and is stepped like any other (`OutlineSpan::finishing`).
+                    finishing: two_pass,
                 });
         }
 
@@ -2765,6 +2819,7 @@ fn plan_outline_spans(
                     rough_spans.push(OutlineSpan {
                         source: format!("{label}#{kind_index}.span{n}{}", PASS_SUFFIX[0]),
                         path: span,
+                        finishing: false,
                     });
                 }
             }
@@ -2787,6 +2842,9 @@ fn plan_outline_spans(
             spans.push(OutlineSpan {
                 source: format!("{label}#{kind_index}.span{n}{suffix}"),
                 path: span,
+                // Only a lap that follows a roughing pass is a finishing one; a single pass is
+                // the full-width cut, and is stepped like any other (`OutlineSpan::finishing`).
+                finishing: two_pass,
             });
         }
 
@@ -3610,7 +3668,7 @@ mod engrave_diagnostic_tests {
         let pushed = body.find("Do not run it as it is").expect("and says what it means");
         assert!(check < pushed, "the check has to be what raises the note");
         assert!(
-            check < body.find("blocks.extend(engraved)").expect("the block is added"),
+            check < body.find("copper_blocks.extend(engraved)").expect("the block is added"),
             "checked before it is folded into the plan, while it can still be told apart",
         );
     }
@@ -3732,6 +3790,7 @@ mod job_frame_tests {
             engrave_copper: Default::default(),
             machines_back: false,
             pin_diameter: None,
+            router_depth_per_pass: Length::from_mm(1.0),
         }
     }
 
@@ -3778,6 +3837,27 @@ mod job_frame_tests {
         s.route_board.kerf = Length::from_mm(kerf_mm);
         s.route_board.finishing = Length::from_mm(finishing_mm);
         s
+    }
+
+    /// **Adding an outline route after the first steps moves the zero.** The case behind the
+    /// Export dialog's warning: a front step with pins and a test cut, a back step, then an
+    /// outline route added afterwards. The router's waste is wider than the test cut's band,
+    /// so the board moves away from the zero in X — under steps already cut.
+    #[test]
+    fn adding_an_outline_step_moves_the_zero() {
+        let mut first = step(&["engrave_copper", "drill_locating_pins"]);
+        first.engrave_copper.test_cut = true;
+        first.engrave_copper.width = Length::from_mm(0.127);
+        first.pin_diameter = Some(Length::from_mm(3.2));
+        let mut steps = vec![first, step(&["engrave_copper", "drill_pth"])];
+        let f = fixture(2.0);
+
+        let before = zero_offset(&job_frame(&steps, Some(&f)));
+        steps.push(routing(2.0, 0.1));
+        let after = zero_offset(&job_frame(&steps, Some(&f)));
+
+        assert!(after.0 > before.0 + 1.0, "X moved: {before:?} -> {after:?}");
+        assert!((after.1 - before.1).abs() < 1e-9, "Y kept by the wider pin margin: {before:?} -> {after:?}");
     }
 
     /// **Example 1 — a board that is only engraved sits at the clearance.** Nothing is cut
@@ -3928,65 +4008,60 @@ mod job_frame_tests {
 /// edit reordering the program.
 #[cfg(test)]
 mod block_order_tests {
-    /// The body of `plan_step`, from the engrave block to the end.
+    /// The body of `plan_step`, from the copper blocks to the function's closing brace.
+    ///
+    /// Cut at the brace, not left running to the end of the file: a test that *counts*
+    /// occurrences would otherwise count the needles in its own source as well.
     fn body() -> &'static str {
         let source = include_str!("machining_plan.rs");
-        source
-            .split_once("    let mut blocks = Vec::new();")
-            .expect("plan_step builds its blocks in one place")
-            .1
+        let rest = source
+            .split_once("    let mut copper_blocks = Vec::new();")
+            .expect("plan_step builds its copper blocks in one place")
+            .1;
+        let end = rest.find("\n}\n").into_iter().chain(rest.find("\n}\r\n")).min();
+        &rest[..end.expect("plan_step ends")]
     }
 
     fn at(needle: &str) -> usize {
         body().find(needle).unwrap_or_else(|| panic!("{needle:?} is not in plan_step"))
     }
 
-    /// **Engraving is the first thing in the program.** Z0 is verified against an
-    /// unmachined surface, so the program has to open by selecting the engraving tool —
-    /// which it does by the engrave block being pushed before any other.
+    /// **The copper is cut before the holes or after them — and never after routing.**
     ///
-    /// It is also the right order physically: the copper is cut while the board is whole,
-    /// flat and undrilled, and every hole made first is a place the surface can lift or the
-    /// bit can catch.
+    /// Where engraving runs is the operator's choice (`order_fault` has the case for each
+    /// side), so it is no longer pinned first. What is pinned is that the choice has
+    /// exactly two answers: the copper blocks enter the plan in one of two places, one
+    /// ahead of all drilling and one after the routed holes, and both ahead of the outline
+    /// block that releases the part. Exactly two, so a third placement cannot be added
+    /// without this test being read.
     #[test]
-    fn the_engrave_block_is_pushed_before_any_other() {
-        let engrave = at("blocks.extend(engraved);");
+    fn the_copper_goes_in_before_the_holes_or_after_them() {
+        let placements: Vec<usize> =
+            body().match_indices("blocks.append(&mut copper_blocks);").map(|(at, _)| at).collect();
+        assert_eq!(placements.len(), 2, "two places, before the holes or after them");
 
-        for later in [
-            "blocks.extend(plan_drilling(",
-            "blocks.extend(plan_routing(",
-            "blocks.extend(plan_outline(",
-        ] {
-            assert!(
-                engrave < at(later),
-                "`{later}` is pushed before the engrave block, so the program would not \
-                 open with the engraving tool",
-            );
-        }
+        assert!(at("if !raw.engraves_after_holes()") < placements[0], "the first is the conditional one");
+        assert!(placements[0] < at("blocks.extend(plan_drilling("), "before the holes");
+        assert!(at("blocks.extend(plan_routing(") < placements[1], "or after every hole");
+        assert!(placements[1] < at("blocks.extend(plan_outline("), "and never after routing");
     }
 
-    /// **The clearing pass follows the isolation block, before anything else.** It is a
-    /// second, distinct tool — its own block, not folded into the isolation one — but it
+    /// **The clearing pass follows the isolation block, with nothing between them.** It is
+    /// a second, distinct tool — its own block, not folded into the isolation one — but it
     /// cuts the same copper the isolation bit just opened, so nothing should come between
     /// the two: a hole drilled in between is a place a mill sunk into the same shallow
-    /// copper pass could catch on freshly exposed board.
+    /// copper pass could catch on freshly exposed board. Both go into `copper_blocks`, which enters
+    /// the plan whole, so wherever the copper is cut the two stay together.
     #[test]
     fn the_clearing_block_follows_the_engrave_block_before_any_other() {
-        let engrave = at("blocks.extend(engraved);");
-        let clearing = at("blocks.extend(cleared);");
+        let engrave = at("copper_blocks.extend(engraved);");
+        let clearing = at("copper_blocks.extend(cleared);");
         assert!(clearing > engrave, "the clearing block must come after the isolation block");
-
-        for later in [
-            "blocks.extend(plan_drilling(",
-            "blocks.extend(plan_routing(",
-            "blocks.extend(plan_outline(",
-        ] {
-            assert!(
-                clearing < at(later),
-                "`{later}` is pushed before the clearing block, so the program would not \
-                 finish the shallow copper work before drilling or routing begins",
-            );
-        }
+        assert_eq!(
+            body().matches("copper_blocks.extend(").count(),
+            2,
+            "only the isolation and clearing blocks are copper work",
+        );
     }
 
     /// **Drilling before routing** — a hard constraint, not a preference (op-planner §4.1).

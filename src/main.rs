@@ -27,6 +27,7 @@ mod data;
 mod gcode;
 mod ui;
 mod paths;
+mod report;
 mod version;
 
 use std::io::Write;
