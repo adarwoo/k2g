@@ -86,7 +86,7 @@ serde_yaml = "0.9"
 # plus `rustls-platform-verifier` and the C/assembly `aws-lc-sys`. That is a new
 # native build dependency and a second set of trust decisions, in service of a code
 # path this application has deliberately disabled.
-jsonschema = { version = "0.56", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 log = "0.4"
 image = "0.25"
 base64 = "0.23"
@@ -118,7 +118,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # no key infrastructure beyond a keypair in a CI secret, and small enough to audit.
 # Without this the update channel would be a remote-code-execution path, which is
 # worse than shipping no updater at all (EU CRA Annex I Part II (7)).
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 # Writes the setup sheet PDF (`report`). Pure Rust, MIT/Apache, embeds subset TrueType
 # fonts — needed because the sheet prints ⌀, and the PDF base fonts cannot encode it.
 # Default features off: they are image decoders (PNG/JPEG/GIF/WebP) and a text shaper,
@@ -139,7 +139,7 @@ tempfile = "3"
 # it only verifies (`minisign-verify`). Needed so the update tests can prove the two
 # assertions that matter — that a correctly signed artifact is accepted, and that a
 # single flipped byte is rejected — instead of only testing malformed input.
-minisign = "0.9"
+minisign = "0.10"
 
 # Windows-only: the removable-media (USB key / SD card) detect + eject facility in
 # `src/runtime/removable/win32.rs` — with the 3D mouse below, the only `unsafe` in this crate.
