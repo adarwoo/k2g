@@ -552,8 +552,8 @@ Two holes on the fixture's flip line, so the board can be turned over and land b
 the same place. They go **outside the board**, through the surrounding blank and on into
 the backboard — the board itself is not drilled, and the frame keeps the pins after the
 outline releases it. The only setting is the **pin diameter**, from a fixed list of sizes pins are actually sold in: 2, 2.5, 3,
-3.175 (= ⅛″) and 3.2 mm. 3.2 mm is the default — it takes a ⅛″ shank with about 25 µm
-of play.
+3.175 (= ⅛″), 3.2 and 3.3 mm. 3.3 mm is the default — it takes a ⅛″ shank with about
+125 µm of play; 3.2 mm leaves about 25 µm, for a tighter fit.
 
 This step must be first and must be on the front face; see §12.
 

@@ -3026,13 +3026,13 @@ mod tests {
 
         assert_eq!(
             node.value,
-            NodeValue::Str("3.2mm".to_string()),
-            "3.2mm takes a 1/8\" shank with about 25um of play"
+            NodeValue::Str("3.3mm".to_string()),
+            "3.3mm takes a 1/8\" shank with about 125um of play"
         );
         match &node.meta.kind {
             datastore::FieldKind::Enum(options) => assert_eq!(
                 options.iter().map(|v| v.key.as_str()).collect::<Vec<_>>(),
-                ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm"],
+                ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm", "3.3mm"],
                 "the sizes pin stock actually comes in"
             ),
             other => panic!("must be a fixed list, not {other:?} — a free-text box would let \

@@ -846,7 +846,7 @@ $defs:
       drill_locating_pins:
         type: object
         default:
-          pin_diameter: 3.2mm
+          pin_diameter: 3.3mm
         properties:
           # A fixed catalogue, not a free length, so `enum` rather than a
           # `units.yaml#/$defs/size` `$ref`. Two reasons, and the first is the
@@ -864,10 +864,13 @@ $defs:
             description: >-
               Diameter of the registration pins, and so of the holes drilled for
               them. 3.3 mm is the default because it takes a 1/8" shank with about
-              125 um of play; 3.175 mm IS 1/8", for a pin ground to size.
+              125 um of play; 3.2 mm leaves about 25 um, for a tighter fit; 3.175 mm
+              IS 1/8", for a pin ground to size.
             type: string
             default: 3.3mm
-            enum: ["2mm", "2.5mm", "3mm", "3.175mm", "3.3mm"]
+            # 3.2mm stays on the list after the default moved to 3.3mm, so a profile
+            # saved with it keeps drilling exactly the holes it drilled before.
+            enum: ["2mm", "2.5mm", "3mm", "3.175mm", "3.2mm", "3.3mm"]
         required: [pin_diameter]
         additionalProperties: false
 

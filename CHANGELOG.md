@@ -10,6 +10,11 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-25 — *spacemouse*
+
+Engraving becomes two operations, steps are ordered by hand, routing goes down in passes,
+and a 3D mouse steers the 3D view.
+
 ### Changed
 - **Engraving is now two operations: Isolate traces and Clear copper.** Isolation cuts the
   channels (minimum width, depth test cut); *Clear copper* takes out what they leave,
@@ -96,6 +101,9 @@ name is usually the shorter answer to "what changed".
   screen, or the Tooling or Code tab for that step.
 
 ### Fixed
+- **New machining profiles started with a pin diameter the list no longer offered.** The
+  default is now 3.3 mm throughout, and 3.2 mm stays on the list, so a profile saved with it
+  drills exactly what it did.
 - **The 3D view's "Working out the isolation contours" could spin forever.** At start-up
   it stayed over a finished view until you switched views, and it also showed while
   another step's contours were being worked out. It now shows only while the step on screen
@@ -338,7 +346,8 @@ Job and profile ownership migration, and summary updates.
 
 Processing schema, UI and persistence brought into step.
 
-[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.16.0-clearing...HEAD
+[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.17.0-spacemouse...HEAD
+[0.17.0]: https://github.com/adarwoo/k2g/compare/v0.16.0-clearing...v0.17.0-spacemouse
 [0.16.0]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...v0.16.0-clearing
 [0.15.0]: https://github.com/adarwoo/k2g/compare/v0.14.0-first-board...v0.15.0-templates
 [0.14.0]: https://github.com/adarwoo/k2g/compare/v0.13.0-retention...v0.14.0-first-board
