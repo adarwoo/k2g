@@ -139,7 +139,7 @@ tempfile = "3"
 # it only verifies (`minisign-verify`). Needed so the update tests can prove the two
 # assertions that matter — that a correctly signed artifact is accepted, and that a
 # single flipped byte is rejected — instead of only testing malformed input.
-minisign = "0.9"
+minisign = "0.10"
 
 # Windows-only: the removable-media (USB key / SD card) detect + eject facility in
 # `src/runtime/removable/win32.rs` — with the 3D mouse below, the only `unsafe` in this crate.
