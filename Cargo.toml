@@ -118,7 +118,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 # no key infrastructure beyond a keypair in a CI secret, and small enough to audit.
 # Without this the update channel would be a remote-code-execution path, which is
 # worse than shipping no updater at all (EU CRA Annex I Part II (7)).
-minisign-verify = "0.2"
+minisign-verify = "0.3"
 # Writes the setup sheet PDF (`report`). Pure Rust, MIT/Apache, embeds subset TrueType
 # fonts — needed because the sheet prints ⌀, and the PDF base fonts cannot encode it.
 # Default features off: they are image decoders (PNG/JPEG/GIF/WebP) and a text shaper,
