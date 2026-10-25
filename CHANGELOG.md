@@ -15,6 +15,15 @@ name is usually the shorter answer to "what changed".
 Engraving becomes two operations, steps are ordered by hand, routing goes down in passes,
 and a 3D mouse steers the 3D view.
 
+### Security
+- **The update check uses fixed TLS libraries.** The one connection k2g makes, to ask GitHub
+  whether a newer release exists, now goes through rustls 0.23.46, rustls-webpki 0.103.16 and
+  webpki-roots 1.0.11, which close several published vulnerabilities, including one that
+  could accept a distrusted certificate. tokio is updated for an unsoundness fix.
+- **YAML is read through a maintained library.** Profiles, settings and catalogs were parsed
+  by a library that is no longer maintained (RUSTSEC-2024-0449). They now go through
+  `yaml_serde`, its maintained successor, which reads every file exactly as before.
+
 ### Changed
 - **Engraving is now two operations: Isolate traces and Clear copper.** Isolation cuts the
   channels (minimum width, depth test cut); *Clear copper* takes out what they leave,

@@ -78,7 +78,12 @@ dioxus = { version = "0.7", features = ["desktop"] }
 rhai = "1"
 thiserror = "2"
 serde_json = "1"
-serde_yaml = "0.9"
+# `serde_yaml` is the name the code uses; the crate is `yaml_serde`, the YAML organization's
+# maintained fork of the archived serde_yaml, with the same API (`Value` included). It parses
+# through `libyaml-rs`, which replaced the unmaintained `unsafe-libyaml` (RUSTSEC-2024-0449).
+# Same parser, so every file reads as before; moving to a safe-Rust parser (serde-saphyr) is a
+# separate job, because it changes how YAML is read.
+serde_yaml = { package = "yaml_serde", version = "0.10" }
 # `default-features = false` drops `resolve-http`, which is the feature that would
 # let a `$ref` be fetched over the network — the exact thing `NoRemoteRefs` exists to
 # refuse (`catalog_io::validator`, `datastore::schema`). Leaving it on cost a second

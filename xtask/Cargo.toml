@@ -9,7 +9,8 @@ publish = false
 
 [dependencies]
 anyhow = "1"
-serde_yaml = "0.9"
+# The maintained fork of serde_yaml under its old name — see the workspace Cargo.toml.
+serde_yaml = { package = "yaml_serde", version = "0.10" }
 serde_json = "1"
 regex = "1"
 walkdir = "2"
