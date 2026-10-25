@@ -2856,6 +2856,7 @@ mod isolation_tests {
             width_nm,
             min_width_nm: 150_000,
             remove_islands: true,
+            remove_thin_copper: true,
             clear_narrow_copper: false,
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,

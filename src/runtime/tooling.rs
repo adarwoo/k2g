@@ -446,6 +446,10 @@ pub(crate) struct EngraveConfigRaw {
     /// depth — while leaving it off ships boards with floating conductors on them that
     /// nothing in the design ever drew. See `pcb::islands`.
     pub(crate) remove_islands: bool,
+    /// With `remove_islands`, also take out the thin parts of free copper that is not
+    /// enclosed — the strip between two close channels that runs out into the field. Same
+    /// bit, same bound, same pass. On by default for the same reason. See `pcb::islands`.
+    pub(crate) remove_thin_copper: bool,
     /// Take out free copper up to [`clearing_threshold`](Self::clearing_threshold), with a
     /// dedicated milling bit rather than the isolation V-bit.
     ///
@@ -471,6 +475,7 @@ impl Default for EngraveConfigRaw {
             width: Length::from_mm(0.25),
             test_cut: false,
             remove_islands: true,
+            remove_thin_copper: true,
             clear_narrow_copper: false,
             clearing_threshold: Length::from_mm(2.0),
             clearing_guard_band: Length::from_mm(0.2),
@@ -488,6 +493,8 @@ fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
         test_cut: node_bool(root, &format!("{base}/test_cut")).unwrap_or(default.test_cut),
         remove_islands: node_bool(root, &format!("{base}/remove_islands"))
             .unwrap_or(default.remove_islands),
+        remove_thin_copper: node_bool(root, &format!("{base}/remove_thin_copper"))
+            .unwrap_or(default.remove_thin_copper),
         clear_narrow_copper: node_bool(root, &format!("{base}/clear_narrow_copper"))
             .unwrap_or(default.clear_narrow_copper),
         clearing_threshold: node_length(root, &format!("{base}/clearing_threshold"))

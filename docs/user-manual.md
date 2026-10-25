@@ -657,11 +657,23 @@ Copper on a net is never touched, whatever this is set to. Where the channel bes
 island had to narrow, the bit may not be able to reach all of that island without touching
 the net on the far side — that copper is left and the notes say how much of it there is.
 
-**What it does not do:** copper that runs out into the surrounding field rather than
-closing into a ring is not an island. The strips between the pads of an SO8 on a board with
-no pour are the same copper and want the same treatment, but they are one piece with the
-field around them and are found by a different question — how thin is this *part* of the
-field — which is not built yet.
+Copper that runs out into the surrounding field rather than closing into a ring is not an
+island. That is what the next option is for.
+
+#### Remove thin copper
+
+**On by default**, and offered only while *Remove islands* is on. The strips between the
+pads of an SO8 on a board with no pour, or the sliver a trace's channel leaves beside a
+pad's, are the same danger as an island — thin enough to lift off and lie across two nets —
+but they are one piece with the field around them, so *Remove islands* never finds them.
+This takes the **thin parts** of that copper, wherever they are: anything narrower than
+three channels where it passes between two of them, by the same bit in the same pass. The
+wider copper the strip joins is left standing, and the cut is free to run out into it,
+because it is on no net either.
+
+It adds more cutting than island removal does on a board without a ground pour, because it
+reaches into the field round every component. The step's notes count islands and thin
+strips separately.
 
 ---
 

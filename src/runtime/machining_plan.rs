@@ -1078,8 +1078,19 @@ fn plan_step(
                 ));
             }
             let clearing_bit = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
-            let (spans, clearing_spans, warnings) =
+            let (spans, clearing_spans, ground, warnings) =
                 plan_engrave_spans(ctx, raw, bit, choice, clearing_bit, &placement);
+            // Which hops between cuts may stay down: those whose sweep, at the cutting tool's
+            // own width, lies on ground the step cuts anyway. Asked in board space, where the
+            // ground was computed — `unplace` undoes the placement's flip and scaling.
+            let board_nm = |p: Point| {
+                let at = placement.unplace(&p);
+                ((at.x.as_mm() * 1e6).round() as i64, (at.y.as_mm() * 1e6).round() as i64)
+            };
+            let stays_down_for = |width: Length| {
+                let tool = ground.as_ref().map(|g| g.for_tool((width.as_mm() * 1e6).round() as i64));
+                move |a: Point, b: Point| tool.as_ref().is_some_and(|t| t.holds(board_nm(a), board_nm(b)))
+            };
             notes.extend(warnings);
             let (test_cut, test_notes) =
                 plan_test_cut(ctx, raw, cnc, bit, choice, &placement, frame);
@@ -1092,6 +1103,9 @@ fn plan_step(
                 placement.z_retract(),
                 start,
                 &slots,
+                // The channel the bit was chosen to cut — the widest any of its spans is, since
+                // a narrowed span is a shallower one.
+                &stays_down_for(choice.width),
             );
             // **A step that asks to engrave and produces no engraving is a fault**, not a
             // step that happened to be quiet. Nothing checked this, which is how a program
@@ -1120,6 +1134,7 @@ fn plan_step(
                     placement.z_retract(),
                     start,
                     &slots,
+                    &stays_down_for(clearing_bit.diameter),
                 );
                 copper_blocks.extend(cleared);
             }
@@ -1633,6 +1648,9 @@ pub(crate) fn isolation_spec(
         // pass narrows down to here and reports whatever it still could not fit.
         min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
         remove_islands: raw.engrave_copper.remove_islands,
+        // Only with islands: the editor hides it otherwise, and a hidden setting must not
+        // still be acting.
+        remove_thin_copper: raw.engrave_copper.remove_islands && raw.engrave_copper.remove_thin_copper,
         clear_narrow_copper: raw.engrave_copper.clear_narrow_copper && clearing_mill_diameter.is_some(),
         clearing_threshold_nm: (raw.engrave_copper.clearing_threshold.as_mm() * 1e6).round() as i64,
         clearing_guard_band_nm: (raw.engrave_copper.clearing_guard_band.as_mm() * 1e6).round() as i64,
@@ -1657,10 +1675,10 @@ fn plan_engrave_spans(
     choice: &EngraveChoice,
     clearing_mill: Option<&Tool>,
     placement: &Placement,
-) -> (Vec<EngraveChain>, Vec<EngraveChain>, Vec<String>) {
+) -> (Vec<EngraveChain>, Vec<EngraveChain>, Option<pcb::ClearedGround>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
     let Some(board) = ctx.board.as_ref() else {
-        return (Vec::new(), Vec::new(), warnings);
+        return (Vec::new(), Vec::new(), None, warnings);
     };
     if raw.engrave_copper.clear_narrow_copper && clearing_mill.is_none() {
         warnings.push(no_clearing_mill_reason(raw.engrave_copper.clearing_threshold));
@@ -1690,7 +1708,7 @@ fn plan_engrave_spans(
         // fix and the one that took a board off the machine with its copper untouched.
         log_isolation_miss(&ctx.isolation, &spec);
         crate::runtime::isolation::request_isolation(spec);
-        return (Vec::new(), Vec::new(), warnings);
+        return (Vec::new(), Vec::new(), None, warnings);
     };
 
     warnings.extend(isolation.copper_warnings.iter().cloned());
@@ -1751,9 +1769,9 @@ fn plan_engrave_spans(
     // chains cannot join the isolation bit's own without claiming a tool change never
     // happens. Cut at the same nominal depth — both passes only have to sever the copper at
     // the surface, and the isolation depth already does that. One chain per region this
-    // pass clears, same as the islands above — stitching *this* pass's chains into the
-    // isolation ladder's is the general, cross-feature connector work explicitly deferred
-    // (see the design note).
+    // pass clears, same as the islands above. The tool still need not lift between them:
+    // `plan_engrave` keeps it down across any short hop the step's cleared ground holds
+    // (`pcb::ClearedGround`), which is the cross-feature connector this note once deferred.
     let clearing_chains: Vec<EngraveChain> = ring_chains(
         &isolation.mill_clearing,
         &place,
@@ -1764,7 +1782,19 @@ fn plan_engrave_spans(
         warnings.push(note);
     }
 
-    (chains, clearing_chains, warnings)
+    // Everything this step's engraving removes, for deciding which hops between cuts can
+    // stay down (`pcb::ClearedGround`): the channels, the V-bit's own clearing at the channel
+    // width, and the mill's at its diameter. Built here because this is where the isolation
+    // result is in hand; the plan is cached, so it is built once per plan, not per render.
+    let ground = pcb::ClearedGround::new(
+        &isolation.result.contours,
+        &[
+            (&isolation.clearing, spec.width_nm),
+            (&isolation.mill_clearing, spec.clearing_mill_diameter_nm),
+        ],
+    );
+
+    (chains, clearing_chains, Some(ground), warnings)
 }
 
 /// Builds one chain per group of nested rings [`pcb::Clearing::groups`] identifies —
@@ -2204,20 +2234,34 @@ fn mill_clearing_note(clearing: &pcb::Clearing) -> Option<String> {
 /// and until there is a router to offer, it is the only place a board's stranded copper is
 /// mentioned at all.
 fn clearing_note(clearing: &pcb::Clearing) -> Option<String> {
-    if clearing.removed == 0 && clearing.left == 0 {
+    if clearing.removed == 0 && clearing.thin_removed == 0 && clearing.left == 0 {
         return None;
     }
     let mm2 = |nm2: f64| nm2 / 1e12;
 
-    let mut note = if clearing.removed == 0 {
+    let mut note = if clearing.removed == 0 && clearing.thin_removed == 0 {
         "No copper was left stranded that the engraver could take.".to_string()
     } else {
-        format!(
-            "Removed {} copper island{} ({:.2} mm²) the isolation pass left stranded.",
-            clearing.removed,
-            if clearing.removed == 1 { "" } else { "s" },
-            mm2(clearing.removed_area_nm2),
-        )
+        // Islands and thin copper said apart: the operator ticked them as two things, and
+        // "removed 14 pieces" would not say which of them did the work.
+        let mut taken: Vec<String> = Vec::new();
+        if clearing.removed > 0 {
+            taken.push(format!(
+                "{} copper island{} ({:.2} mm²)",
+                clearing.removed,
+                if clearing.removed == 1 { "" } else { "s" },
+                mm2(clearing.removed_area_nm2),
+            ));
+        }
+        if clearing.thin_removed > 0 {
+            taken.push(format!(
+                "{} thin strip{} of copper ({:.2} mm²)",
+                clearing.thin_removed,
+                if clearing.thin_removed == 1 { "" } else { "s" },
+                mm2(clearing.thin_removed_area_nm2),
+            ));
+        }
+        format!("Removed {} the isolation pass had stranded.", taken.join(" and "))
     };
     if clearing.left > 0 {
         note.push_str(&format!(
@@ -3425,6 +3469,7 @@ mod engrave_diagnostic_tests {
             width_nm,
             min_width_nm: 150_000,
             remove_islands: true,
+            remove_thin_copper: true,
             clear_narrow_copper: false,
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
@@ -3496,6 +3541,14 @@ mod engrave_diagnostic_tests {
         let note = clearing_note(&none).expect("a note");
         assert!(note.starts_with("No copper was left stranded"), "{note}");
         assert!(note.contains("2 more were left standing"), "{note}");
+
+        // Thin copper is said apart from islands, and on its own is still worth a note.
+        let thin = pcb::Clearing { thin_removed: 5, thin_removed_area_nm2: 0.12e12, ..took.clone() };
+        let note = clearing_note(&thin).expect("a note");
+        assert!(note.contains("14 copper islands (0.42 mm²) and 5 thin strips of copper (0.12 mm²)"), "{note}");
+        let only_thin = pcb::Clearing { thin_removed: 1, thin_removed_area_nm2: 0.02e12, ..Default::default() };
+        let note = clearing_note(&only_thin).expect("thin copper alone is worth a note");
+        assert!(note.contains("Removed 1 thin strip of copper"), "{note}");
     }
 
     /// [`mill_clearing_note`]'s own shape: what a dedicated mill took, and the failure mode

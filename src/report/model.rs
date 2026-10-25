@@ -356,7 +356,12 @@ fn describe_operation(key: &str, raw: &StepRaw, len: &dyn Fn(Length) -> String) 
             if e.test_cut {
                 parts.push("depth test cut first".into());
             }
-            parts.push(if e.remove_islands { "islands removed".into() } else { "islands left".into() });
+            parts.push(match (e.remove_islands, e.remove_thin_copper) {
+                (true, true) => "islands and thin copper removed".into(),
+                (true, false) => "islands removed".into(),
+                // Thin copper only ever goes with islands — see `remove_thin_copper`.
+                (false, _) => "islands left".into(),
+            });
             if e.clear_narrow_copper {
                 parts.push(format!("copper narrower than {} cleared", len(e.clearing_threshold)));
             }

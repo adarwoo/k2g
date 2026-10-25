@@ -47,7 +47,7 @@ use pcb::{CopperSnapshot, IsolationResult, KiCad};
 #[cfg(test)]
 use pcb::IsolationContour;
 
-use crate::runtime::{wake_ui, with_ctx_mut};
+use crate::runtime::{wake_ui, with_ctx_mut, AppCtx};
 
 /// Everything that decides what the contours are.
 ///
@@ -77,6 +77,9 @@ pub struct IsolationSpec {
     /// still match after the operator ticked the box, and the islands would never be
     /// computed — the toggle would do nothing at all until the board was reloaded.
     pub remove_islands: bool,
+    /// With `remove_islands`, whether the thin parts of free copper that is *not* enclosed
+    /// are taken as well (`pcb::islands`' `thin`). Part of the question for the same reason.
+    pub remove_thin_copper: bool,
     /// Whether to also clear free copper up to `clearing_threshold_nm` with a dedicated
     /// milling cutter — `false` when the step does not ask for it, or asks but no suitable
     /// mill is in stock, in which case the fields below are meaningless and ignored.
@@ -171,11 +174,6 @@ static ISO_CURRENT_CANCEL: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 /// is what makes the request self-deduplicating, which is the only thing standing between
 /// the ask-on-every-sync pattern and a queue that cancels its own answer forever.
 static ISO_IN_FLIGHT: Mutex<Option<IsolationSpec>> = Mutex::new(None);
-
-/// The question the worker is busy with, for a view that wants to say "working".
-pub fn in_flight() -> Option<IsolationSpec> {
-    ISO_IN_FLIGHT.lock().ok().and_then(|held| held.clone())
-}
 
 /// Start the worker. Called once from `initialize_ctx`, beside the generation service.
 pub fn start_isolation_service() {
@@ -299,13 +297,14 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
     // standing is a question about the channels it just cut.
     let clearing = if spec.remove_islands {
         let started = std::time::Instant::now();
-        let clearing = pcb::islands(&copper, &result.contours, spec.width_nm);
+        let clearing = pcb::islands(&copper, &result.contours, spec.width_nm, spec.remove_thin_copper);
         log::info!(
-            "Cleared layer {} of {} in {:?}: {} island(s) removed, {} left",
+            "Cleared layer {} of {} in {:?}: {} island(s) and {} thin part(s) removed, {} left",
             spec.layer_id,
             spec.board_name,
             started.elapsed(),
             clearing.removed,
+            clearing.thin_removed,
             clearing.left,
         );
         clearing
@@ -412,7 +411,7 @@ const MIN_INTACT_FRACTION: f64 = 1.0 / 3.0;
 /// The joined copper carries **where it is**: one place per net, worst first, on the face the
 /// pass cuts. A length and a net name were all an operator used to get, and finding 0.4 mm
 /// on a whole board from that was the hard half of the fix.
-fn isolation_faults(isolation: &Isolation) -> Vec<crate::runtime::Issue> {
+pub(crate) fn isolation_faults(isolation: &Isolation) -> Vec<crate::runtime::Issue> {
     let result = &isolation.result;
     let mut faults = Vec::new();
 
@@ -478,17 +477,52 @@ fn isolation_faults(isolation: &Isolation) -> Vec<crate::runtime::Issue> {
     faults
 }
 
+/// The isolation faults of the job as it stands: those of each held result that answers an
+/// engraving step of the selected profile, and no other.
+///
+/// **Derived from the job, not from the last publish.** The worker answers one question at
+/// a time and the newest request wins, so the last result in is not necessarily one the job
+/// uses — at start-up it can be an answer to a question already superseded. Its faults then
+/// stood as the board's until something else published, which is how a fault showed at
+/// launch and was gone after clicking another step and back. Asked of the job, a fault
+/// shows exactly while a step that is going to be cut has it.
+///
+/// A step whose contours are still being worked out contributes nothing yet; the plan says
+/// they are pending. Two steps asking the same question (both faces the same, say) report
+/// its faults once.
+pub(crate) fn current_faults(ctx: &AppCtx) -> Vec<crate::runtime::Issue> {
+    let mut faults: Vec<crate::runtime::Issue> = Vec::new();
+    let mut asked: Vec<IsolationSpec> = Vec::new();
+    for index in 0..crate::runtime::tooling::step_headers(&ctx.app).len() {
+        // `engrave_target` falls back to another step's pass for a step that does not
+        // engrave — right for drawing, not for this: that fallback is counted once, as itself.
+        let Some(target) = crate::runtime::tooling::engrave_target(ctx, index) else { continue };
+        if !target.is_selected_step || asked.contains(&target.spec) {
+            continue;
+        }
+        if let Some(held) = ctx.isolation.matching(&target.spec) {
+            faults.extend(isolation_faults(held));
+        }
+        asked.push(target.spec);
+    }
+    faults
+}
+
 /// How many nets the uncut fault names before it gives up and states the total.
 const UNCUT_NETS_NAMED: usize = 5;
 
 fn publish_isolation(isolation: Isolation) {
-    let faults = isolation_faults(&isolation);
-    for fault in &faults {
+    for fault in isolation_faults(&isolation) {
         log::warn!("{}", fault.message);
     }
+    // Not posted from here. This result answers whichever question finished last — at
+    // start-up the plan and the views ask several, and a newer one can cancel an older —
+    // and posting its faults as *the board's* showed a fault for a question nobody was
+    // still asking, until some later publish happened to replace it. `current_faults`
+    // posts them instead, from the questions the job is asking now, on the mutation this
+    // publish is.
     with_ctx_mut(|ctx| {
         ctx.isolation.error = None;
-        ctx.app.set_isolation_errors(faults);
         ctx.isolation.ready.insert(isolation.spec.layer_id, Arc::new(isolation));
         // What tells the regeneration trigger that this happened. It diffs the app state
         // and the job's references, and this is on neither.
@@ -519,6 +553,7 @@ mod tests {
             width_nm,
             min_width_nm: 100_000,
             remove_islands: true,
+            remove_thin_copper: true,
             clear_narrow_copper: false,
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
@@ -757,5 +792,35 @@ mod tests {
             error: Some("KiCad is not reachable".into()),
         };
         assert!(state.matching(&spec(400_000)).is_none());
+    }
+}
+
+/// The isolation faults on screen are the job's, not the last result's.
+#[cfg(test)]
+mod fault_source_tests {
+    /// **A publish does not post its own faults; the job's are derived on every mutation.**
+    /// Posting from the publish showed whichever result landed last — at launch, one for a
+    /// question already superseded — and the fault stood until another publish replaced
+    /// it, which is how a fault shown at start-up went away on clicking step 1 and back.
+    /// Source-scanned because the harm is an ordering one the compiler cannot see.
+    #[test]
+    fn faults_come_from_the_job_and_not_from_the_last_publish() {
+        let isolation = include_str!("isolation.rs");
+        let publish = isolation
+            .split_once("fn publish_isolation(isolation: Isolation) {")
+            .and_then(|(_, rest)| rest.split_once("
+fn "))
+            .map(|(body, _)| body)
+            .expect("publish_isolation is here");
+        assert!(!publish.contains("set_isolation_errors"), "the publish must not post faults");
+
+        let orchestration = include_str!("orchestration.rs");
+        let sync = orchestration
+            .split_once("fn sync_after_mutation(")
+            .map(|(_, rest)| rest)
+            .expect("sync_after_mutation is there");
+        let derived = sync.find("isolation::current_faults(self)").expect("faults are derived from the job");
+        let gate = sync.find("evaluate_generation_readiness(").expect("the gate is judged");
+        assert!(derived < gate, "derived before the readiness gate reads them");
     }
 }

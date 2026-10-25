@@ -515,6 +515,15 @@ pub type EngraveChain = Vec<EngraveSpan>;
 /// A test cut with **no spans** still yields `None`. A program that stops for a depth check
 /// and then engraves nothing is worse than one that never stopped: the operator has answered a
 /// question about a board that is not going to be cut.
+///
+/// ## Staying down between chains
+///
+/// After the tour, each chain's first op is offered the hop from where the tool already is.
+/// If `stays_down` says the straight line between them crosses only ground the step cuts
+/// anyway, and it is no longer than [`MAX_DOWN_HOP_MM`], the op continues from the last one
+/// at depth — a feed move instead of a retract, a rapid and a plunge. Never out of the test
+/// cut: the operator stop follows it, and the tool has to be up for that.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_engrave(
     chains: &[EngraveChain],
     test_cut: Option<TestCut>,
@@ -523,6 +532,7 @@ pub fn plan_engrave(
     z_retract: Length,
     start: Point,
     slots: &BTreeMap<String, u8>,
+    stays_down: &dyn Fn(Point, Point) -> bool,
 ) -> Option<ToolBlock> {
     // Usable members only, per chain — dropping a degenerate (single-point) member keeps
     // the rest of its chain intact rather than discarding the whole thing.
@@ -588,6 +598,20 @@ pub fn plan_engrave(
         }
     }
 
+    // The hops between chains, now that the tour has fixed what follows what. The test cut,
+    // when there is one, is `ops[0]` and is followed by the operator stop, so the first hop
+    // that may stay down is the one *after* the op that follows it.
+    let first_hop = if test_cut.is_some() { 2 } else { 1 };
+    for index in first_hop..ops.len() {
+        if ops[index].continues_from_previous {
+            continue;
+        }
+        let (from, to) = (ops[index - 1].exit, ops[index].entry);
+        if from.distance_mm(&to) <= MAX_DOWN_HOP_MM && stays_down(from, to) {
+            ops[index].continues_from_previous = true;
+        }
+    }
+
     Some(ToolBlock {
         slot: slots.get(tool_id).copied(),
         tool_id: tool_id.to_string(),
@@ -597,6 +621,17 @@ pub fn plan_engrave(
         verify_stop: test_cut.map(|t| t.stop),
     })
 }
+
+/// The longest hop [`plan_engrave`] will cut at depth rather than lift for, mm.
+///
+/// A lift is a retract, a rapid and a plunge — and the plunge comes all the way down from the
+/// retract plane at the plunge rate, which on a fixture retracting 5 mm at a 200 mm/min plunge
+/// is a second and a half before the rapid is counted. A feed move covers 10 mm in about that
+/// at an engraving table feed, so up to here staying down is the quicker of the two on any
+/// ordinary setup; past it the rapid's speed starts to win. A planning constant rather than
+/// a sum over the feeds because the feeds are resolved later, at render (`program.rs`), and
+/// the hops in question are almost all a few millimetres — from one ring to the next.
+pub const MAX_DOWN_HOP_MM: f64 = 10.0;
 
 /// A length quantised to whole micrometres (matches the assigner's precision), for
 /// deterministic diameter ordering.
@@ -1302,6 +1337,15 @@ mod engrave_tests {
     }
 
     fn chained_block(chains: &[EngraveChain], test_cut: Option<TestCut>) -> Option<ToolBlock> {
+        staying_block(chains, test_cut, &|_, _| false)
+    }
+
+    /// [`chained_block`] with a say in which hops between chains may be cut at depth.
+    fn staying_block(
+        chains: &[EngraveChain],
+        test_cut: Option<TestCut>,
+        stays_down: &dyn Fn(Point, Point) -> bool,
+    ) -> Option<ToolBlock> {
         plan_engrave(
             chains,
             test_cut,
@@ -1310,7 +1354,43 @@ mod engrave_tests {
             Length::from_mm(2.0),
             pt(0.0, 0.0),
             &BTreeMap::new(),
+            stays_down,
         )
+    }
+
+    /// Two closed loops, `gap` mm apart along X — two chains, so the tool lifts between
+    /// them unless the hop is cleared.
+    fn two_loops(gap: f64) -> Vec<EngraveChain> {
+        let at = |x: f64| vec![pt(x, 0.0), pt(x + 1.0, 0.0), pt(x + 1.0, 1.0), pt(x, 1.0)];
+        vec![
+            vec![span("a", at(0.0), true, -0.1)],
+            vec![span("b", at(1.0 + gap), true, -0.1)],
+        ]
+    }
+
+    /// **A hop across cleared ground is cut at depth; anything else still lifts.** The
+    /// geometry is not this function's to judge — the predicate says which hops cross only
+    /// ground the step cuts anyway — but the length is: past [`MAX_DOWN_HOP_MM`] a rapid is
+    /// quicker than a feed move, cleared or not.
+    #[test]
+    fn a_short_hop_across_cleared_ground_stays_down() {
+        let stays = staying_block(&two_loops(2.0), None, &|_, _| true).unwrap();
+        assert!(stays.ops[1].continues_from_previous, "cleared and short: no lift");
+
+        let lifts = staying_block(&two_loops(2.0), None, &|_, _| false).unwrap();
+        assert!(!lifts.ops[1].continues_from_previous, "not cleared: lift");
+
+        let far = staying_block(&two_loops(MAX_DOWN_HOP_MM + 5.0), None, &|_, _| true).unwrap();
+        assert!(!far.ops[1].continues_from_previous, "too far for a feed move to win");
+    }
+
+    /// The operator stop follows the test cut, and the tool has to be up for it — so the hop
+    /// out of the test cut always lifts, cleared or not.
+    #[test]
+    fn the_hop_out_of_the_test_cut_always_lifts() {
+        let block = staying_block(&two_loops(2.0), Some(test_cut()), &|_, _| true).unwrap();
+        assert!(!block.ops[1].continues_from_previous, "the first op after the test cut lifts");
+        assert!(block.ops[2].continues_from_previous, "later hops are judged as usual");
     }
 
     /// An L with its corner on the work origin and its legs running towards the board, the

@@ -11,6 +11,13 @@ name is usually the shorter answer to "what changed".
 ## [Unreleased]
 
 ### Changed
+- **Engraving lifts the tool less.** Between two cuts the engraver now stays down and
+  feeds straight across when the way between them is copper the step removes anyway, such
+  as from one clearing ring to the next or from a channel into the island beside it,
+  instead of retracting, travelling and plunging again. Only hops up to 10 mm, where a feed
+  move is quicker than a lift; across copper that stays, the tool still lifts. A thin
+  island round a pad that sits off-centre in its clearance is now cut as one continuous
+  ring, instead of a string of short arcs with a lift between each.
 - **Setting explanations are tooltips.** The paragraph under each setting has moved into
   a tooltip: hover the setting, or the ⓘ beside its name, to read it. Forms are much
   shorter as a result.
@@ -36,6 +43,11 @@ name is usually the shorter answer to "what changed".
   detected".
 
 ### Added
+- **Remove thin copper.** The engraver now also takes out thin copper that runs out into
+  the surrounding copper instead of closing into an island, such as the strip left between
+  two close channels or the sliver beside a pad, which could lift off and short two nets.
+  It uses the same bit and pass as island removal, up to three channels wide. On by default,
+  under *Remove islands*, so existing profiles engrave a little more than before.
 - **3D mouse support (Windows).** A 3Dconnexion SpaceMouse now steers the Machining 3D
   view: slide to pan, push or pull to zoom, twist and tilt to orbit, with the left button
   resetting the view and the right one switching between flat and 3D. It works alongside
@@ -75,6 +87,22 @@ name is usually the shorter answer to "what changed".
   screen, or the Tooling or Code tab for that step.
 
 ### Fixed
+- **The 3D view's "Working out the isolation contours" could spin forever.** At start-up
+  it stayed over a finished view until you switched views, and it also showed while
+  another step's contours were being worked out. It now shows only while the step on screen
+  is waiting for its own, and goes as soon as they arrive.
+- **An isolation error could show for the wrong question.** At start-up the Board view
+  could show "copper cannot be separated" from a result the job was no longer using, and
+  it stayed until switching steps happened to replace it. Isolation errors are now those of
+  the steps the job actually cuts, kept up to date as results arrive.
+- **Thin islands are cut, not just counted.** An island narrower than about 0.8 of the
+  channel was reported as removed but no toolpath was made for it, so the thinnest copper,
+  the most likely to break off, was left on the board. The same went for a thin strip
+  running in from a wider gap, such as between two pads of a chain, which is why one pad
+  could come out clean and its neighbours not.
+- **The copper a round bit leaves in an inside corner is no longer called an island.** Where
+  a trace meets a pad, that small fillet is part of the net; it was counted as an island and
+  reported as copper "too close to a net" to reach.
 - **Milled round holes come out to size.** Locating pins milled for 3.2 mm with a 2 mm
   router measured 3.0 mm: the finishing lap cuts at full depth with real material in
   front of it, so the cutter bends away from the wall. After that lap, every milled round

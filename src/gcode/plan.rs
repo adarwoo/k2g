@@ -137,13 +137,19 @@ pub struct AtomicOp {
     /// lead-in rapid/plunge, and (via the previous op's own lookahead) no lead-out
     /// retract for the shared seam between them.
     ///
-    /// Set only by [`plan_engrave`](super::planner::plan_engrave) for the second and
-    /// later members of a same-net chain (see `machining_plan::plan_engrave_spans`):
-    /// pieces of one net's isolation loop that the ladder split apart only because the
-    /// channel had to narrow, and which meet at an exact, verified-coincident point —
-    /// never guessed, never across nets. Every other op leaves this `false`, which is
-    /// today's independent-retract behaviour and the correct default for anything that
-    /// is not a verified continuation.
+    /// Set only by [`plan_engrave`](super::planner::plan_engrave), in two cases, both
+    /// verified rather than guessed:
+    ///
+    /// - the second and later members of a chain (see `machining_plan::plan_engrave_spans`):
+    ///   pieces of one net's isolation loop the ladder split apart only because the channel
+    ///   had to narrow, which meet at an exact, coincident point, or the nested rings of one
+    ///   clearing whose hop stays on the copper being cleared;
+    /// - the first op of a chain, when the hop to it from wherever the tool already is
+    ///   crosses only ground the step cuts anyway (`pcb::ClearedGround`) and is short enough
+    ///   that a feed move beats a lift ([`MAX_DOWN_HOP_MM`](super::planner::MAX_DOWN_HOP_MM)).
+    ///
+    /// Every other op leaves this `false`: an independent retract, which is the correct
+    /// default for anything that is not a verified continuation.
     pub continues_from_previous: bool,
 }
 

@@ -486,6 +486,7 @@ $defs:
       width: 0.15mm
       test_cut: false
       remove_islands: true
+      remove_thin_copper: true
       clear_narrow_copper: false
       clearing_threshold: 2mm
       clearing_guard_band: 0.2mm
@@ -650,9 +651,44 @@ $defs:
           already running, costing no tool change. Wider copper is left alone,
           and how wide it was is reported in the step notes. Copper that runs
           out into the surrounding field instead of closing into a ring is not
-          an island and is not touched.
+          an island — see Remove thin copper below.
         type: boolean
         default: true
+      # -----------------------------------------------------------------------
+      # remove_thin_copper — the same, for free copper that is not enclosed.
+      #
+      # An island is one shape the danger takes. Free copper that runs out into
+      # the surrounding field can be just as thin where it passes between two
+      # channels — the strip between the pads of an SO8, the sliver a trace's
+      # channel leaves beside a pad's — and a strip that thin lifts off and lies
+      # across two nets as readily as an island does.
+      #
+      # Same bound, same bit, same pass: the THIN PARTS of free copper, wherever
+      # they are, up to three channels wide (`pcb::islands` with `thin`). Wider
+      # copper, and the field the thin part joins, are left standing; the cut is
+      # free to run out into them because they are on no net either.
+      #
+      # Shown only with `remove_islands` on: every island the engraver takes is
+      # thin copper too, so this extends that option rather than standing beside
+      # it, and on its own it would be a second way to ask for the first.
+      #
+      # ON BY DEFAULT for `remove_islands`'s reason — the bit is in the spindle
+      # and the cost is a few more passes — with one difference worth knowing:
+      # it reaches into the field round every component, so it adds more cutting
+      # than island removal does on a board without a ground pour.
+      # -----------------------------------------------------------------------
+      remove_thin_copper:
+        title: Remove thin copper
+        description: >-
+          Also take out free copper that runs out into the surrounding copper
+          instead of closing into an island, wherever it is thin — the strip
+          left between two close channels, the sliver beside a pad. Thin copper
+          can lift off and short two nets as easily as an island. Same bound as
+          for islands (three channels wide) and the same bit, already in the
+          spindle; the wider copper it joins is left standing.
+        type: boolean
+        default: true
+        x-show-when: { remove_islands: [true] }
       # -----------------------------------------------------------------------
       # clear_narrow_copper / clearing_threshold / clearing_guard_band — take out
       # free copper up to an operator-set width, with a dedicated milling cutter.
@@ -961,6 +997,7 @@ $defs:
           width: 0.25mm
           test_cut: false
           remove_islands: true
+          remove_thin_copper: true
           clear_narrow_copper: false
           clearing_threshold: 2mm
           clearing_guard_band: 0.2mm

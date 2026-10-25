@@ -28,16 +28,22 @@
 //!   That is why the tool here can be the one already loaded, and why the choice of a
 //!   better one is a tie-break rather than a requirement.
 //!
+//! # Thin copper
+//!
+//! An island is one shape the danger takes, not the only one. Free copper that runs out
+//! into the background instead of closing into a ring can be just as thin where it passes
+//! between two channels — the strip between the pads of an SO8, the sliver a trace's channel
+//! leaves beside a pad's — and a strip that thin can lift off the board and lie across two
+//! nets. [`islands`] takes those too when asked (`thin`): the **thin parts** of free copper,
+//! wherever they are, found by one morphological opening at the same bound and cleared by
+//! the same bit in the same [`fill`]. It needs no guard band, for the reason island removal
+//! does not: every thin part lies between channels the V-bit has already cut, so the tool
+//! never has to go anywhere it has not been.
+//!
 //! # What is not here
 //!
-//! Two features are shaped for and deliberately absent. A **minimum copper width** — the
-//! *thin parts* of free copper that runs out into the background rather than closing into
-//! an island, which is what cleans between the pads of an SO8 — is a second source of
-//! region for [`fill`], not a second engine. **Drawn clear areas** on the Job view are a
-//! third. Both need a region and a tool width, which is all [`fill`] asks for; what they
-//! also need, and what island removal does not, is a *router* — and with it a guard band
-//! against the half of a channel that faces a net, which the V-bit does not require
-//! because it has already been there.
+//! **Drawn clear areas** on the Job view: a region and a tool width, which is all [`fill`]
+//! asks for, but one the operator draws rather than one the copper implies.
 
 use std::collections::BTreeMap;
 
@@ -106,6 +112,14 @@ const FLAT_MILL_STEPOVER_FRACTION: f64 = 0.8;
 /// error and an order below anything a V-bit could be asked to remove.
 const SLIVER_NM: f64 = 5_000.0;
 
+/// How far inside an unswept piece of copper `fill`'s fallback ring is set, nm — see there.
+///
+/// Half of [`SLIVER_NM`]: `base` has already been opened by `SLIVER_NM`, so every stretch of
+/// it is at least twice that across, and a ring this far in never pinches out — a corridor
+/// of varying width stays one ring however thin it gets. Off the edge itself only so the
+/// offset has something to do; the tool's own width makes the hair irrelevant to coverage.
+const FALLBACK_INSET_NM: f64 = SLIVER_NM / 2.0;
+
 /// How many passes one fill may take before it gives up and reports what is left.
 ///
 /// Not a number the geometry should ever reach — a corridor round a trace takes three — but
@@ -145,6 +159,12 @@ pub struct Clearing {
     pub removed: usize,
     /// Their total area, nm².
     pub removed_area_nm2: f64,
+    /// How many thin parts of free copper were removed — narrower than the bound where
+    /// they pass between channels, but not closed into an island (see the module note).
+    /// Zero unless [`islands`] was asked for them.
+    pub thin_removed: usize,
+    /// Their total area, nm².
+    pub thin_removed_area_nm2: f64,
     /// How many pieces of free copper were left because they are wider than the bound.
     pub left: usize,
     /// The widest of those, nm. Zero when nothing was left.
@@ -248,7 +268,11 @@ fn rotate_to_nearest(ring: &Ring, target: (i64, i64)) -> Ring {
 /// the profile's requested minimum — which is the same rule §5.4 of the operation planner
 /// applies to the contours themselves. A contour that had to narrow is stroked at its own
 /// width, because that is the copper it really removed.
-pub fn islands(copper: &CopperSnapshot, contours: &[IsolationContour], width_nm: i64) -> Clearing {
+///
+/// `thin` adds the thin parts of free copper that is *not* enclosed — see the module note.
+/// They are cut in the same pass, by the same rings, so a step that asks for both pays for
+/// one fill and the islands are not counted twice.
+pub fn islands(copper: &CopperSnapshot, contours: &[IsolationContour], width_nm: i64, thin: bool) -> Clearing {
     let mut out = Clearing::default();
     if width_nm <= 0 || contours.is_empty() {
         return out;
@@ -273,14 +297,20 @@ pub fn islands(copper: &CopperSnapshot, contours: &[IsolationContour], width_nm:
     // The frame is the blank the board is cut from, near enough: wider than the copper by
     // more than any channel, so the background copper outside every net reaches it and the
     // enclosed pieces do not. That is the whole of the enclosure test — see `free` below.
-    let frame = bounds.expand(2 * width_nm);
+    //
+    // Clear of the copper by the bound as well as by a channel, for the thin-copper test:
+    // the strip between the outermost channel and the frame is background, not a neck, and
+    // it has to be wider than the bound for the opening below to leave it alone. Nearer,
+    // it read as thin copper all the way round the board — and since that strip touches
+    // the frame and is thrown out, so would any real neck joined to it.
+    let bound_nm = ISLAND_WIDTH_MULTIPLE * w;
+    let frame = bounds.expand(2 * width_nm + 2 * bound_nm.ceil() as i64);
     let cuts = swept_by(contours);
     let free = difference(&difference(&[frame.ring()], &cuts), &keep);
     if free.is_empty() {
         return out;
     }
 
-    let bound_nm = ISLAND_WIDTH_MULTIPLE * w;
     let mut accepted: Vec<Ring> = Vec::new();
     let mut left_widths: Vec<i64> = Vec::new();
     for piece in components(&free) {
@@ -301,6 +331,9 @@ pub fn islands(copper: &CopperSnapshot, contours: &[IsolationContour], width_nm:
         if offset_group(&piece, -SLIVER_NM).is_empty() {
             continue;
         }
+        if touches(&piece, bbox, &keep) {
+            continue;
+        }
         // Nowhere wider than the bound, tested by erosion — the same question `fit_cutout`
         // asks of a cutout, and the reason neither needs a medial axis, which `isolation`
         // explicitly declines as a large piece of work.
@@ -314,11 +347,48 @@ pub fn islands(copper: &CopperSnapshot, contours: &[IsolationContour], width_nm:
         }
     }
     out.widest_left_nm = left_widths.into_iter().max().unwrap_or(0);
+
+    // The thin parts of everything else: what an opening at the bound takes away from the
+    // free copper is, by definition, where it is narrower than the bound — enclosed or
+    // running into the background alike (`clear_narrow_copper` asks the same question with
+    // a router). The islands just accepted are entirely narrow and are taken out first, so
+    // they are not counted twice; a piece left as too wide may still lose its thin parts
+    // here, which is the point.
+    if thin {
+        let narrow = difference(&free, &open_by(&free, bound_nm / 2.0));
+        let thin_parts = if accepted.is_empty() { narrow } else { difference(&narrow, &accepted) };
+        for piece in components(&thin_parts) {
+            let Some(bbox) = BBox::of(&piece) else { continue };
+            // The frame's own corners, rounded off by the opening — an artefact of the
+            // invented boundary, as in `clear_narrow_copper`.
+            if bbox.x0 <= frame.x0 || bbox.y0 <= frame.y0 || bbox.x1 >= frame.x1 || bbox.y1 >= frame.y1
+            {
+                continue;
+            }
+            if offset_group(&piece, -SLIVER_NM).is_empty() {
+                continue;
+            }
+            if touches(&piece, bbox, &keep) {
+                continue;
+            }
+            out.thin_removed += 1;
+            out.thin_removed_area_nm2 += net_area_nm2(&piece);
+            accepted.extend(piece);
+        }
+    }
     if accepted.is_empty() {
         return out;
     }
 
-    let (paths, groups, missed) = fill(&accepted, &cuts, w, VBIT_STEPOVER_FRACTION * w);
+    // Where a cut may run out past the copper it is taking. An island is walled in by the
+    // channels, so the channels are all it needs. A thin part is not: it opens into the wider
+    // copper it is a neck of, and limited to the channels the tool stopped half a width short
+    // of that mouth, leaving a stub — reported as copper "too close to a net", which it is
+    // not. Any free copper will do instead: it is on no net, so cutting into it forms no edge
+    // that matters, and `fill` still keeps the tool half a width from every net there is,
+    // because what it erodes is everything *but* net copper.
+    let allowed = if out.thin_removed > 0 { union(&free, &cuts) } else { cuts };
+    let (paths, groups, missed) = fill(&accepted, &allowed, w, VBIT_STEPOVER_FRACTION * w);
     out.paths = paths;
     out.groups = groups;
     out.missed_area_nm2 = missed;
@@ -482,6 +552,123 @@ pub fn clear_narrow_copper(
     out
 }
 
+/// The ground a step's engraving removes — every isolation channel and every clearing ring,
+/// swept at the width that cut it — and the one question asked of it: can the tool cross
+/// from here to there at depth without touching copper that stays?
+///
+/// **Why it exists.** Between two cuts the tool used to lift to the retract plane, travel,
+/// and plunge again, every time, whatever lay between them. Most of those lifts are across
+/// copper that has to stay, and are right. But many are not: from one clearing ring to the
+/// next across a channel, from a net's loop into the island beside it, from one strip of
+/// thin copper to its neighbour — the tool would cross nothing but ground it cuts anyway,
+/// and a feed move straight across is quicker than a retract, a rapid and a plunge at the
+/// plunge rate. Going over ground that has no copper left on it changes nothing.
+///
+/// **Order does not matter, and that is deliberate.** The ground is everything the step
+/// removes, not what has been removed by the time of the hop. A hop across a channel not yet
+/// cut takes copper that channel was going to take anyway — waste on both sides, never net
+/// copper and never copper meant to stay.
+#[derive(Clone, Debug, Default)]
+pub struct ClearedGround {
+    region: Vec<Ring>,
+}
+
+impl ClearedGround {
+    /// The ground `contours` cut, plus each `(clearing, width)`'s rings swept at that width.
+    /// Pass the isolation bit's island/thin clearing at its channel width, and a mill's
+    /// clearing at the mill's diameter.
+    pub fn new(contours: &[IsolationContour], cleared: &[(&Clearing, i64)]) -> Self {
+        let mut parts = swept_by(contours);
+        for &(clearing, width_nm) in cleared {
+            if clearing.paths.is_empty() || width_nm <= 0 {
+                continue;
+            }
+            let closed: Vec<Ring> = clearing.paths.iter().map(as_closed_polyline).collect();
+            parts.extend(stroke_open_paths(&closed, width_nm as f64 / 2.0));
+        }
+        Self { region: union(&parts, &[]) }
+    }
+
+    /// Where the centre of a tool `width_nm` across may travel without its edge leaving this
+    /// ground — the ground shrunk by the tool's radius, once, for every hop that tool makes.
+    ///
+    /// **Shrunk once rather than each hop swept and clipped.** A disc moved along a segment
+    /// stays inside a region exactly when the segment stays inside the region eroded by the
+    /// disc's radius, so the two tests agree; but the channels of a whole board union into one
+    /// polygon of thousands of vertices, and clipping every hop's sweep against it costs a
+    /// Clipper call per hop over all of them. Eroded up front, each hop is a parity test and
+    /// an edge-crossing test against the rings near it — integer arithmetic, no allocation.
+    ///
+    /// Short of the full radius by [`SLIVER_NM`]: a channel exactly as wide as the tool erodes
+    /// to nothing at the full radius, and the tool can plainly travel down the middle of it.
+    pub fn for_tool(&self, width_nm: i64) -> ToolGround {
+        if width_nm <= 0 || self.region.is_empty() {
+            return ToolGround::default();
+        }
+        let rings = offset_group(&self.region, -(width_nm as f64 / 2.0 - SLIVER_NM).max(0.0));
+        let boxes = rings
+            .iter()
+            .map(|ring| BBox::of(std::slice::from_ref(ring)).unwrap_or_default())
+            .collect();
+        ToolGround { rings, boxes }
+    }
+}
+
+/// [`ClearedGround`] for one tool: where its centre may go. See [`ClearedGround::for_tool`].
+#[derive(Clone, Debug, Default)]
+pub struct ToolGround {
+    rings: Vec<Ring>,
+    boxes: Vec<BBox>,
+}
+
+impl ToolGround {
+    /// Whether the tool can move in a straight line from `a` to `b` — board nm — touching
+    /// nothing but cleared ground. Touching the boundary counts as leaving it, as in
+    /// [`segment_within`]: the cheap side to be wrong on is a lift.
+    pub fn holds(&self, a: (i64, i64), b: (i64, i64)) -> bool {
+        // Only rings whose boxes meet the segment's can contain `a` or cross the segment.
+        let (x0, x1) = (a.0.min(b.0), a.0.max(b.0));
+        let (y0, y1) = (a.1.min(b.1), a.1.max(b.1));
+        let nearby = self
+            .rings
+            .iter()
+            .zip(&self.boxes)
+            .filter(|(_, r)| r.x0 <= x1 && r.x1 >= x0 && r.y0 <= y1 && r.y1 >= y0)
+            .map(|(ring, _)| ring);
+        segment_within(a, b, nearby)
+    }
+}
+
+/// Whether `piece` (with bounding box `bbox`) touches `copper` — shares an edge with it, or
+/// comes within a chord error of doing so.
+///
+/// **Free copper that touches a net is that net's copper**, not an island and not a strip.
+/// A round bit cannot reach into an inside corner, so wherever a trace meets a pad at an
+/// angle the channel leaves a small fillet standing in the corner, joined to the net along
+/// both edges. It is on no net *in the design*, so it lands in `free`; and being walled in
+/// by the channel it read as an island — four of them on two pads and a trace — which the
+/// tool could not reach without cutting into the net, so each one was also reported as copper
+/// "too close to a net" that was still there. It is not floating, it cannot short anything
+/// the net does not already touch, and taking it would mean cutting the net.
+///
+/// Tested against only the rings whose boxes come near, because `copper` is the whole board
+/// and this runs once per piece. An outline's box contains its holes' boxes, so a hole near
+/// the piece always brings its outline with it, and the subset fills the same way the whole
+/// does there.
+fn touches(piece: &[Ring], bbox: BBox, copper: &[Ring]) -> bool {
+    let near = bbox.expand(2 * SLIVER_NM as i64);
+    let nearby: Vec<Ring> = copper
+        .iter()
+        .filter(|ring| {
+            BBox::of(std::slice::from_ref(*ring)).is_some_and(|b| {
+                b.x0 <= near.x1 && b.x1 >= near.x0 && b.y0 <= near.y1 && b.y1 >= near.y0
+            })
+        })
+        .cloned()
+        .collect();
+    !nearby.is_empty() && !intersect(&offset_group(piece, SLIVER_NM), &nearby).is_empty()
+}
+
 /// The copper the isolation pass removed: each contour swept by the bit that cut it.
 ///
 /// Grouped by width and stroked a group at a time. One call per distinct width rather than
@@ -590,11 +777,60 @@ fn fill(region: &[Ring], allowed: &[Ring], w_nm: f64, stepover_nm: f64) -> (Vec<
         paths.extend(rings);
     }
 
+    // **Copper too thin for the ladder's first rung.** The ladder's first ring is set `inset`
+    // inside the copper, so a piece — or a part of one — narrower than `2·inset` never gets
+    // one, and nothing sweeps it. That is the thinnest copper of all, the sliver most likely
+    // to lift off and short, and it used to be reported removed and left standing: a 0.5·W
+    // island round a pad came back with no rings at all.
+    //
+    // Whatever of `base` is still unswept gets a ring of its own, a hair inside its edge
+    // ([`FALLBACK_INSET_NM`]). The tool sweeps `half` either side of that ring, so a piece
+    // narrower than `W` is covered by the one ring however its width varies: each side of the
+    // piece is within the hair of the ring, and the far side is within `W` of it.
+    //
+    // **A hair, not halfway to the middle.** The ring used to sit at half the piece's deepest
+    // point. That is fine for a strip of even width and wrong for the commonest one — the
+    // corridor round a pad sitting off-centre in its pour clearance, thin on one side and
+    // wide on the other. A ring that deep pinches out wherever the corridor is thinner than
+    // twice it, so one island came back as half a dozen arcs, each found again on the next
+    // round, each its own chain, and the tool lifted between every one. A ring a hair inside
+    // the edge only pinches out where the copper is under twice the hair across.
+    //
+    // **Repeated, because one ring per piece is not always enough**: a piece wider than `W`
+    // somewhere is only swept round its edge, and what that leaves is found on the next round
+    // and given its own ring, nested inside. Each round sweeps what the last left, so it stops
+    // when nothing is left; the cap is only there for the reason `MAX_FILL_PASSES` is.
+    for _ in 0..MAX_FILL_PASSES {
+        let swept = {
+            let closed: Vec<Ring> = paths.iter().map(as_closed_polyline).collect();
+            stroke_open_paths(&closed, half)
+        };
+        let unswept = components(&open_by(&difference(&base, &swept), SLIVER_NM));
+        if unswept.is_empty() {
+            break;
+        }
+        for piece in unswept {
+            let Some(bbox) = BBox::of(&piece) else { continue };
+            let ceiling =
+                (bbox.x1 - bbox.x0).min(bbox.y1 - bbox.y0).max(0) as f64 / 2.0 + WIDTH_TOLERANCE_NM;
+            let depth = inradius_nm(&piece, 0.0, ceiling);
+            let rings = offset_group(&piece, -(depth / 2.0).min(FALLBACK_INSET_NM));
+            // A strip thinner than the bisection can resolve offsets to nothing; its own
+            // outline is then the path, and the tool's width still covers it.
+            paths.extend(if rings.is_empty() { piece } else { rings });
+        }
+    }
+
     // Accounted from the rings themselves rather than from any region they were derived
     // from, so a fill that stopped short — on the pass cap, on a channel too narrow to let
     // the tool near, on anything — shows up here rather than in nobody's report.
+    //
+    // Hairlines are not counted, by the same rule that keeps them out of `base`: copper under
+    // `2·SLIVER_NM` across is below what the geometry can tell from its own error. Counted,
+    // a 10 µm strip where two channels all but meet was reported as copper "too close to a
+    // net" — which sends the operator looking for a problem that is not there.
     let closed: Vec<Ring> = paths.iter().map(as_closed_polyline).collect();
-    let missed = net_area_nm2(&difference(region, &stroke_open_paths(&closed, half)));
+    let missed = net_area_nm2(&open_by(&difference(region, &stroke_open_paths(&closed, half)), SLIVER_NM));
 
     // Regroups the flat, pass-major `paths` above by which of `origin`'s pieces each ring
     // came from — see `Clearing::groups`'s own doc for why. A stable partition over
@@ -612,14 +848,19 @@ fn fill(region: &[Ring], allowed: &[Ring], w_nm: f64, stepover_nm: f64) -> (Vec<
     }
     //
     // A piece's rings are then linked into chains only where the hop between them is proven
-    // to stay on `base`, the ground the tool centre may cover. A piece's rings do not always
+    // to stay on `a`, the ground the tool centre may cover. A piece's rings do not always
     // nest: a U-shaped piece whose bottom pinches out leaves one ring per arm at that depth,
     // and chaining them in pass order cut a straight line across whatever stood between
-    // the arms.
+    // the arms. That copper is in neither the region nor `allowed`, so `a` refuses the hop.
+    //
+    // `a` and not `base`: `base` is the region alone, and a hop that has to pass through the
+    // channel beside it — from one stretch of a thin corridor round a pad to the next, past
+    // a point where the corridor all but closes — was refused, and the tool lifted for a
+    // move across ground already cut.
     let mut groups: Vec<usize> = Vec::new();
     let mut paths: Vec<Ring> = Vec::new();
     for rings in by_origin.into_iter().chain(std::iter::once(unclaimed)) {
-        for chain in link_rings(rings, &base) {
+        for chain in link_rings(rings, &a) {
             groups.push(chain.len());
             paths.extend(chain);
         }
@@ -669,15 +910,20 @@ fn link_rings(rings: Vec<Ring>, safe: &[Ring]) -> Vec<Vec<Ring>> {
 /// which is the cheap side to be wrong on when the other side is cutting copper.
 ///
 /// Integer arithmetic in `i128` throughout, so the answer does not depend on rounding.
-fn segment_within(a: (i64, i64), b: (i64, i64), region: &[Ring]) -> bool {
-    let inside = region.iter().filter(|ring| crate::region::point_in_ring(a, ring)).count() % 2 == 1;
+fn segment_within<'a>(
+    a: (i64, i64),
+    b: (i64, i64),
+    region: impl IntoIterator<Item = &'a Ring, IntoIter: Clone>,
+) -> bool {
+    let region = region.into_iter();
+    let inside = region.clone().filter(|ring| crate::region::point_in_ring(a, ring)).count() % 2 == 1;
     if !inside {
         return false;
     }
     if a == b {
         return true;
     }
-    !region.iter().any(|ring| {
+    !region.into_iter().any(|ring| {
         (0..ring.len()).any(|i| segments_meet(a, b, ring[i], ring[(i + 1) % ring.len()]))
     })
 }
@@ -845,7 +1091,7 @@ mod tests {
             ),
         ]);
         let result = crate::isolate(&copper, W, W);
-        let cleared = islands(&copper, &result.contours, W);
+        let cleared = islands(&copper, &result.contours, W, false);
         (copper, cleared)
     }
 
@@ -1123,7 +1369,7 @@ mod tests {
             ),
         ]);
         let result = crate::isolate(&copper, W, W);
-        let cleared = islands(&copper, &result.contours, W);
+        let cleared = islands(&copper, &result.contours, W, false);
 
         assert_eq!(cleared.removed, 2, "{cleared:?}");
         assert_eq!(cleared.groups.len(), 2, "two disjoint islands, never merged: {cleared:?}");
@@ -1235,7 +1481,7 @@ mod tests {
         // either, because the blank is not a defect.
         let copper = snapshot(vec![feature("A", circle(MM), Vec::new())]);
         let result = crate::isolate(&copper, W, W);
-        let cleared = islands(&copper, &result.contours, W);
+        let cleared = islands(&copper, &result.contours, W, false);
         assert_eq!(cleared.removed, 0, "{cleared:?}");
         assert_eq!(cleared.left, 0);
     }
@@ -1257,7 +1503,7 @@ mod tests {
             feature("B", rect(0, MM + 4 * W, 10 * MM, 2 * MM + 4 * W), Vec::new()),
         ]);
         let result = crate::isolate(&copper, W, W);
-        let cleared = islands(&copper, &result.contours, W);
+        let cleared = islands(&copper, &result.contours, W, false);
         assert_eq!(cleared.removed, 0, "{cleared:?}");
         assert!(cleared.paths.is_empty());
     }
@@ -1366,7 +1612,7 @@ mod tests {
         // not re-cut the same ground when told it was already taken.
         let gap = 4 * W;
         let (copper, contours) = pad_in_pour_contours(gap);
-        let already = islands(&copper, &contours, W);
+        let already = islands(&copper, &contours, W, false);
         assert!(!already.paths.is_empty(), "sanity: islands() clears this on its own");
 
         let cleared = clear_narrow_copper(&copper, &contours, 8 * W, 4 * W, 0, &already.paths, W);
@@ -1380,5 +1626,223 @@ mod tests {
         let once = clear_narrow_copper(&copper, &contours, 10 * W, 4 * W, W, &[], 0);
         let twice = clear_narrow_copper(&copper, &contours, 10 * W, 4 * W, W, &[], 0);
         assert_eq!(once, twice);
+    }
+
+    /// Net copper, as one region — what no clearing cut may touch.
+    fn net_copper(copper: &CopperSnapshot) -> Vec<Ring> {
+        union(
+            &copper
+                .features
+                .iter()
+                .flat_map(|f| f.polygons.iter())
+                .flat_map(polygon_region)
+                .collect::<Vec<Ring>>(),
+            &[],
+        )
+    }
+
+    /// Two parallel traces with `gap` between them, in open field: the strip their two
+    /// channels leave runs out past both ends into the background, so it is never an island.
+    fn traces_in_field(gap: i64) -> (CopperSnapshot, Vec<crate::isolation::IsolationContour>) {
+        let copper = snapshot(vec![
+            feature("A", rect(0, 0, 10 * MM, MM), Vec::new()),
+            feature("B", rect(0, MM + gap, 10 * MM, 2 * MM + gap), Vec::new()),
+        ]);
+        let result = crate::isolate(&copper, W, W);
+        (copper, result.contours)
+    }
+
+    /// **An island thinner than the ladder's first rung is cut, not just counted.** The
+    /// thinnest copper is the most likely to lift off and short, and an island under about
+    /// 0.8·W used to come back as "removed" with no rings at all.
+    #[test]
+    fn a_thin_island_is_cut_not_just_counted() {
+        for gap in [(2.2 * W as f64) as i64, (2.5 * W as f64) as i64] {
+            let (_, cleared) = pad_in_pour(gap);
+            assert_eq!(cleared.removed, 1, "gap {gap}: {cleared:?}");
+            assert!(!cleared.paths.is_empty(), "gap {gap}: counted, and no rings to cut it");
+            assert!(
+                cleared.missed_area_nm2 < 0.01 * cleared.removed_area_nm2,
+                "gap {gap}: {} nm² of {} nm² left standing",
+                cleared.missed_area_nm2,
+                cleared.removed_area_nm2,
+            );
+        }
+    }
+
+    /// The strip between two traces that `islands()` alone cannot find — it runs out into
+    /// the background — is taken when thin copper is asked for, and swept end to end.
+    #[test]
+    fn thin_copper_running_into_the_background_is_cleared_when_asked() {
+        for gap in [(2.5 * W as f64) as i64, 4 * W] {
+            let (copper, contours) = traces_in_field(gap);
+            let off = islands(&copper, &contours, W, false);
+            assert_eq!(off.thin_removed, 0, "not unless asked");
+            let on = islands(&copper, &contours, W, true);
+            assert_eq!(on.removed, 0, "it is not an island: {on:?}");
+            assert!(on.thin_removed > 0, "gap {gap}: {on:?}");
+            assert!(!on.paths.is_empty());
+            assert!(
+                on.missed_area_nm2 < 0.01 * on.thin_removed_area_nm2,
+                "gap {gap}: {} nm² of {} nm² left standing",
+                on.missed_area_nm2,
+                on.thin_removed_area_nm2,
+            );
+        }
+    }
+
+    /// Past the bound it is left, as an island would be: a strip wider than three channels
+    /// is not thin copper, it is copper.
+    #[test]
+    fn copper_wider_than_the_bound_is_not_thin() {
+        let (copper, contours) = traces_in_field(8 * W);
+        let cleared = islands(&copper, &contours, W, true);
+        assert_eq!(cleared.thin_removed, 0, "{cleared:?}");
+        assert!(cleared.paths.is_empty());
+    }
+
+    /// The blank round the board is background, not a neck: a lone pad gets nothing, even
+    /// with thin copper asked for. This is what the frame's margin is for.
+    #[test]
+    fn the_background_around_the_board_is_never_thin_copper() {
+        let copper = snapshot(vec![feature("A", circle(MM), Vec::new())]);
+        let result = crate::isolate(&copper, W, W);
+        let cleared = islands(&copper, &result.contours, W, true);
+        assert_eq!((cleared.removed, cleared.thin_removed), (0, 0), "{cleared:?}");
+        assert!(cleared.paths.is_empty());
+    }
+
+    /// The invariant again, for thin copper: clearing it never cuts a net.
+    #[test]
+    fn no_thin_copper_cut_ever_reaches_copper_that_is_on_a_net() {
+        let boards = [2.2, 2.5, 4.0, 6.0]
+            .map(|k| (k * W as f64) as i64)
+            .into_iter()
+            .flat_map(|gap| [traces_in_field(gap), pad_in_pour_contours(gap)]);
+        for (copper, contours) in boards {
+            let cleared = islands(&copper, &contours, W, true);
+            let closed: Vec<Ring> = cleared.paths.iter().map(as_closed_polyline).collect();
+            let bitten = intersect(&stroke_open_paths(&closed, W as f64 / 2.0), &net_copper(&copper));
+            assert!(
+                net_area_nm2(&bitten) < 1.0,
+                "the thin-copper pass cut {} nm² of net copper",
+                net_area_nm2(&bitten),
+            );
+        }
+    }
+
+    /// Deterministic, like every other pass.
+    #[test]
+    fn thin_copper_gives_the_same_program_twice() {
+        let (copper, contours) = traces_in_field(4 * W);
+        assert_eq!(islands(&copper, &contours, W, true), islands(&copper, &contours, W, true));
+    }
+
+    /// Two pads on one net, `gap` apart, joined by a trace down the middle of the gap — a
+    /// chain of pads, as on a connector footprint. Beside the trace, the gap leaves a pocket
+    /// of free copper walled by three channels and open to the field at the far end: a wide
+    /// mouth outside the pads with a strip running in from it.
+    fn pad_chain(gap: i64) -> (CopperSnapshot, Vec<crate::isolation::IsolationContour>) {
+        let pad = 2 * MM;
+        let copper = snapshot(vec![
+            feature("A", rect(0, 0, pad, pad), Vec::new()),
+            feature("A", rect(0, pad + gap, pad, 2 * pad + gap), Vec::new()),
+            feature("A", rect(pad / 2 - W, pad - W, pad / 2 + W, pad + gap + W), Vec::new()),
+        ]);
+        let result = crate::isolate(&copper, W, W);
+        (copper, result.contours)
+    }
+
+    /// **A thin strip running off a wide mouth is swept to its end.** One ring placed by the
+    /// mouth's depth vanishes before it reaches the strip; the strip has to be found again,
+    /// on its own, and given its own ring. Seen on a real board as the same pad cleaned at
+    /// one end of a chain and not at the others.
+    #[test]
+    fn a_thin_strip_off_a_wide_mouth_is_swept_to_its_end() {
+        for k in [2.05, 2.1, 2.3, 2.6, 3.0] {
+            let (copper, contours) = pad_chain((k * W as f64) as i64);
+            let cleared = islands(&copper, &contours, W, true);
+            assert_eq!(cleared.thin_removed, 2, "{k}·W: one pocket each side of the trace: {cleared:?}");
+            assert!(
+                cleared.missed_area_nm2 < 0.01 * cleared.thin_removed_area_nm2,
+                "{k}·W: {} nm² of {} nm² left standing",
+                cleared.missed_area_nm2,
+                cleared.thin_removed_area_nm2,
+            );
+        }
+    }
+
+    /// **Copper a round bit leaves in an inside corner belongs to the net.** Where the trace
+    /// meets each pad, the channel cannot reach into the corner and a small fillet stands
+    /// there, joined to the net. It is not an island — four of them used to be counted on this
+    /// board, and reported as copper the bit could not reach.
+    #[test]
+    fn copper_left_in_an_inside_corner_belongs_to_the_net() {
+        for k in [2.3, 4.0, 10.0] {
+            let (copper, contours) = pad_chain((k * W as f64) as i64);
+            let cleared = islands(&copper, &contours, W, false);
+            assert_eq!((cleared.removed, cleared.left), (0, 0), "{k}·W: {cleared:?}");
+            assert_eq!(cleared.missed_area_nm2, 0.0, "{k}·W: nothing reported as unreachable");
+        }
+    }
+    /// A hop across ground the step cuts anyway is held; one across copper that stays is not.
+    #[test]
+    fn a_hop_is_held_only_across_ground_the_step_cuts() {
+        // A pad in a pour with a 4·W corridor: the two channels and the island between them
+        // are all cut, so the whole corridor is cleared ground.
+        let (copper, contours) = pad_in_pour_contours(4 * W);
+        let clearing = islands(&copper, &contours, W, false);
+        let ground = ClearedGround::new(&contours, &[(&clearing, W)]);
+        let tool = ground.for_tool(W);
+        let r = 5 * MM + 2 * W; // the middle of the corridor
+
+        // Along the corridor, round a quarter of it in short chords: cleared all the way.
+        let at = |deg: f64| {
+            let t = deg.to_radians();
+            ((r as f64 * t.cos()).round() as i64, (r as f64 * t.sin()).round() as i64)
+        };
+        assert!(tool.holds(at(0.0), at(3.0)), "along the cleared corridor");
+        // Straight across the pad: through net copper.
+        assert!(!tool.holds(at(0.0), at(180.0)), "across the pad");
+        // Out into the pour: copper that stays.
+        assert!(!tool.holds(at(0.0), (r + 3 * W, 0)), "into the pour");
+        // A tool wider than the corridor does not fit, wherever it goes.
+        assert!(!ground.for_tool(6 * W).holds(at(0.0), at(3.0)), "a wider tool grazes the walls");
+    }
+
+    /// Without the island cleared, the channels alone are each only a tool wide, and a hop
+    /// across the copper between them is refused.
+    #[test]
+    fn a_hop_across_copper_left_standing_is_refused() {
+        let (_, contours) = pad_in_pour_contours(4 * W);
+        let tool = ClearedGround::new(&contours, &[]).for_tool(W);
+        let inner = (5 * MM + W / 2, 0);
+        let outer = (5 * MM + 4 * W - W / 2, 0);
+        assert!(!tool.holds(inner, outer), "the island between the channels is still there");
+        assert!(tool.holds(inner, inner), "standing still in the middle of a channel is on cleared ground");
+    }
+
+    /// **An island of varying width is cut as one chain, not a string of arcs.** A pad off
+    /// centre in its pour clearance leaves a corridor thin on one side and wide on the other.
+    /// The fallback ring used to sit by the corridor's widest point and pinch out on its thin
+    /// side, so the island came back as several arcs, each its own chain — and the tool lifted
+    /// between every one of them, on the same pad that came out continuous elsewhere.
+    #[test]
+    fn an_island_of_varying_width_is_one_chain() {
+        for (k_min, k_max) in [(2.1, 2.7), (2.2, 3.4)] {
+            let pad_r = 5 * MM;
+            let hole_r = pad_r + ((k_min + k_max) / 2.0 * W as f64) as i64;
+            let shift = ((k_max - k_min) / 2.0 * W as f64) as i64;
+            let hole: Ring = circle(hole_r).into_iter().map(|(x, y)| (x + shift, y)).collect();
+            let copper = snapshot(vec![
+                feature("SIG", circle(pad_r), Vec::new()),
+                feature("GND", rect(-15 * MM, -15 * MM, 15 * MM, 15 * MM), vec![hole]),
+            ]);
+            let result = crate::isolate(&copper, W, W);
+            let cleared = islands(&copper, &result.contours, W, true);
+            assert_eq!(cleared.removed, 1, "{k_min}..{k_max}·W: {cleared:?}");
+            assert_eq!(cleared.groups.len(), 1, "{k_min}..{k_max}·W: one chain, no lifts: {cleared:?}");
+            assert_eq!(cleared.missed_area_nm2, 0.0, "{k_min}..{k_max}·W: and all of it cut");
+        }
     }
 }

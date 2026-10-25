@@ -154,6 +154,12 @@ impl AppCtx {
         // mutation rather than only on a re-stitch: it is a cheap domain replace that
         // leaves an unchanged set alone, and it cannot then miss the launch case.
         self.app.set_outline_errors(self.stitched_board_data.as_ref());
+        // The isolation faults, likewise every mutation and for the same reason: from the
+        // questions the job is asking now, not from whichever result happened to land last
+        // (see `isolation::current_faults`). A publish is itself a mutation, so a result that
+        // lands is picked up here too.
+        let isolation_faults = isolation::current_faults(self);
+        self.app.set_isolation_errors(isolation_faults);
 
         let readiness = evaluate_generation_readiness(&self.app, self.stitched_board_data.as_ref());
         self.status.insert(

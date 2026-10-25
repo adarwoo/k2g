@@ -1096,16 +1096,27 @@ pub fn Machining3dView(
 
     let legend = payload().legend;
 
-    // Whether the contours this view is waiting on are still being worked out.
+    // Whether the contours *this step* needs are still to come: the step engraves, and no
+    // result for its exact question is held yet. Asked the way the Board view asks it, of
+    // the context, rather than of the worker.
     //
-    // Read **after** the payload, and that order matters: building the payload is what
-    // plans the step, and planning a step whose contours are not in hand is what asks for
-    // them. Read first, this would miss the request it is reporting on and the widget
-    // would appear one render late.
+    // It used to be the worker's in-flight marker, and that was wrong twice over. It said
+    // whether the worker was busy with *anything* — another step's face, the Board view's
+    // fallback — so the spinner showed for work this view was not waiting on. And nothing
+    // re-rendered this component when that marker cleared: it re-renders when its payload
+    // changes, and a result for another question changes nothing here. So at launch the
+    // spinner stayed up over a finished view until switching views forced a render.
     //
-    // It clears without anything watching it: the worker wakes the UI when it publishes,
-    // the context re-syncs, and this renders again with nothing in flight.
-    let working_on = crate::runtime::isolation::in_flight();
+    // Reading `state` here is what subscribes this component to every context refresh, a
+    // publish included, so the spinner goes the moment the result is held. Not shown when
+    // the worker failed: the step's notes say why, and a spinner would claim it is coming.
+    let working_on = {
+        let ctx = state.read();
+        crate::runtime::tooling::engrave_target(&ctx, ctx.selected_step)
+            .filter(|target| target.is_selected_step)
+            .filter(|target| ctx.isolation.matching(&target.spec).is_none() && ctx.isolation.error.is_none())
+            .map(|target| target.spec)
+    };
 
     rsx! {
         div { class: "machining-3d-layout",
@@ -1272,6 +1283,22 @@ mod reactivity_tests {
     /// Read as source, because there is nothing else to read it as: the fault is in *how*
     /// the closure was written, and a virtual DOM would have to be driven through a real
     /// render cycle to catch what a regex catches here for nothing.
+    /// **The busy overlay is this step's, read from the context.** It used to be the
+    /// isolation worker's in-flight marker, read in the body: that showed for any step's
+    /// work, and nothing re-rendered the component when the marker cleared, so at launch it
+    /// spun over a finished view until the operator switched views. Reading `state` is what
+    /// subscribes the component to the publish that ends it.
+    #[test]
+    fn the_busy_overlay_is_derived_from_the_context() {
+        let source = include_str!("machining_3d.rs");
+        let block = source
+            .split_once("let working_on = {")
+            .and_then(|(_, rest)| rest.split_once("};"))
+            .map(|(block, _)| block)
+            .expect("the overlay's condition is one block");
+        assert!(block.contains("state.read()"), "read from the context, which subscribes the view");
+        assert!(block.contains("isolation.matching("), "and asks whether this step's result is held");
+    }
     #[test]
     fn every_scene_input_is_a_signal_read_inside_the_memo() {
         let source = include_str!("machining_3d.rs");
