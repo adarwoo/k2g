@@ -1835,11 +1835,11 @@ const STEP_KEYS: &[&str] = &[
 ];
 
 /// Converts an on-disk `processing_profiles` value into current `machining.yaml`
-/// (schema_version 3) form.
+/// (schema_version 4) form.
 ///
 /// - A **pre-v3 flat** profile (no `steps`, the whole setup at the top level) is
 ///   wrapped into a single-step profile: the [`STEP_KEYS`] are lifted into one
-///   `steps[0]` entry and stamped `schema_version: 3`. This is lossless — the one
+///   `steps[0]` entry and stamped `schema_version: 4`. This is lossless — the one
 ///   setup becomes the profile's only step.
 /// - A **v3 stepped** profile is left structurally intact.
 ///
@@ -1851,7 +1851,10 @@ fn normalize_machining_value(value: &mut Value, file: &str) {
         return;
     };
 
-    obj.insert("schema_version".to_string(), Value::from(3));
+    // Stamped, not checked: every rewrite below is idempotent and runs on every load, so a
+    // file of any earlier version comes out current. v4 split `engrave_copper` — see
+    // `split_engrave_copper`.
+    obj.insert("schema_version".to_string(), Value::from(4));
 
     if !obj.contains_key("steps") {
         // Legacy flat: pull the top-level setup into a single step.
@@ -2098,6 +2101,73 @@ fn rename_side_to_board_face(obj: &mut serde_json::Map<String, Value>) {
     obj.insert("board_face".into(), Value::from(face));
 }
 
+/// Splits the retired `engrave_copper` operation into `isolate_traces` and `clear_copper`
+/// (schema v4).
+///
+/// One operation used to cut the isolation channels *and* carry every copper-clearing
+/// option — islands, thin copper, a milling pass — as checkboxes. They are different work,
+/// set up differently and cut with different tools, so they became two operations.
+///
+/// The settings carry over so the step cuts what it cut before:
+///
+/// - `width` and `test_cut` go to `isolate_traces`, which takes `engrave_copper`'s place in
+///   the operations list.
+/// - A step that cleared anything gains `clear_copper` straight after it. With the milling
+///   pass on, its strategy is `narrower_than` with the old threshold and guard band, and
+///   `mop_up` carries `remove_islands` — the isolation bit took the islands first, as it
+///   still does. Otherwise it is `islands_and_strips`, which is what `remove_islands` did.
+/// - `remove_thin_copper` has no counterpart: thin strips always go with islands now. It
+///   was on by default and never released, so nothing that was in use is lost.
+///
+/// The config block is converted whether or not the operation was enabled — the loader
+/// materialises one in every step, and a setting the operator chose before turning the
+/// operation off should still be there when they turn it back on. Idempotent: a step with
+/// no `engrave_copper` is left alone.
+fn split_engrave_copper(step: &mut serde_json::Map<String, Value>) {
+    let old = step.remove("engrave_copper");
+    let old = old.as_ref().and_then(Value::as_object);
+    let flag = |key: &str, default: bool| {
+        old.and_then(|o| o.get(key)).and_then(Value::as_bool).unwrap_or(default)
+    };
+    let removes_islands = flag("remove_islands", true);
+    let mills = flag("clear_narrow_copper", false);
+
+    if let Some(old) = old {
+        let mut isolate = serde_json::Map::new();
+        for key in ["width", "test_cut"] {
+            if let Some(value) = old.get(key) {
+                isolate.insert(key.to_string(), value.clone());
+            }
+        }
+        step.entry("isolate_traces").or_insert(Value::Object(isolate));
+
+        let mut clear = serde_json::Map::new();
+        clear.insert(
+            "strategy".to_string(),
+            Value::from(if mills { "narrower_than" } else { "islands_and_strips" }),
+        );
+        if let Some(value) = old.get("clearing_threshold") {
+            clear.insert("threshold".to_string(), value.clone());
+        }
+        if let Some(value) = old.get("clearing_guard_band") {
+            clear.insert("guard_band".to_string(), value.clone());
+        }
+        clear.insert("mop_up".to_string(), Value::from(removes_islands));
+        step.entry("clear_copper").or_insert(Value::Object(clear));
+    }
+
+    let Some(operations) = step.get_mut("operations").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(at) = operations.iter().position(|op| op == "engrave_copper") else {
+        return;
+    };
+    operations[at] = Value::from("isolate_traces");
+    if (removes_islands || mills) && !operations.iter().any(|op| op == "clear_copper") {
+        operations.insert(at + 1, Value::from("clear_copper"));
+    }
+}
+
 /// Moves a per-operation `depth_per_pass` up to the step's `router_depth_per_pass`.
 ///
 /// The limit was briefly a field on `route_board` and on `route_cutouts`. That left the
@@ -2148,6 +2218,8 @@ fn normalize_step_value(step: &mut Value, file: &str) {
     obj.remove("routing");
 
     lift_router_depth(obj);
+
+    split_engrave_copper(obj);
 
     rename_side_to_board_face(obj);
 
@@ -2878,7 +2950,7 @@ mod tests {
         // at the end: that is after the outline, on a released board. It goes in the latest
         // place it can run, which is ahead of the cutouts.
         assert_eq!(data.add_step(id), Some(2), "ahead of the cutouts, not after the outline");
-        assert_eq!(operations(&data, 2), vec!["engrave_copper".to_string()]);
+        assert_eq!(operations(&data, 2), vec!["isolate_traces".to_string()]);
         assert_eq!(operations(&data, 3), vec!["route_cutouts".to_string()]);
         assert_eq!(operations(&data, 4), vec!["route_board".to_string()], "the outline is still last");
         assert_eq!(
@@ -2886,7 +2958,7 @@ mod tests {
             Some(3),
             "engraving is repeatable, so it stays available — and goes after the first"
         );
-        assert_eq!(operations(&data, 3), vec!["engrave_copper".to_string()]);
+        assert_eq!(operations(&data, 3), vec!["isolate_traces".to_string()]);
     }
 
     /// **A new step never defaults to a repeatable operation while real work is
@@ -2923,7 +2995,7 @@ mod tests {
 
         assert_ne!(
             keys,
-            vec!["engrave_copper".to_string()],
+            vec!["isolate_traces".to_string()],
             "the first repeatable entry must not become the default for every new step",
         );
         assert_eq!(
@@ -3128,9 +3200,10 @@ mod tests {
 
         let (data, _errors) = AppData::load_from(&data_dir, &dir.path().join("catalogs"));
         let doc = data.get(id).expect("the profile loads");
+        // Moved to `isolate_traces` by the v4 split, and materialised there.
         let node = doc
             .root
-            .get_pointer("/steps/0/engrave_copper/test_cut")
+            .get_pointer("/steps/0/isolate_traces/test_cut")
             .expect("materialised on load, or the machining screen shows no test-cut checkbox");
         assert_eq!(
             node.value,
@@ -3138,10 +3211,10 @@ mod tests {
             "and it is off, so no existing program gains a stop it did not ask for",
         );
 
-        let parent = doc.root.get_pointer("/steps/0/engrave_copper").expect("the op config");
+        let parent = doc.root.get_pointer("/steps/0/isolate_traces").expect("the op config");
         let keys: Vec<&str> = match &parent.value {
             NodeValue::Object(map) => map.keys().map(String::as_str).collect(),
-            other => panic!("engrave_copper should be an object, got {other:?}"),
+            other => panic!("isolate_traces should be an object, got {other:?}"),
         };
         assert!(keys.contains(&"test_cut"), "the form would list: {keys:?}");
         assert!(keys.contains(&"width"), "and the width it was saved with: {keys:?}");
@@ -3206,6 +3279,51 @@ mod tests {
     /// leaves the step cutting no outline at all, and folding it without carrying
     /// `outline.cut` leaves it cutting a contour with the default 2 mm kerf — a different
     /// board, cut by a tool the operator did not choose.
+    /// **An engraving step comes back as isolation plus the clearing it did.** Each of the
+    /// old checkbox combinations, and what it becomes.
+    #[test]
+    fn engrave_copper_splits_into_isolation_and_clearing() {
+        let split = |engrave: Value| {
+            let mut step = serde_json::json!({
+                "name": "Engrave",
+                "operations": ["engrave_copper", "drill_pth"],
+                "engrave_copper": engrave,
+            });
+            normalize_step_value(&mut step, "test.yaml");
+            step
+        };
+
+        let islands = split(serde_json::json!({ "width": "0.2mm", "test_cut": true, "remove_islands": true }));
+        assert_eq!(islands["operations"], serde_json::json!(["isolate_traces", "clear_copper", "drill_pth"]));
+        assert_eq!(islands["isolate_traces"], serde_json::json!({ "width": "0.2mm", "test_cut": true }));
+        assert_eq!(islands["clear_copper"]["strategy"], "islands_and_strips");
+        assert!(islands.get("engrave_copper").is_none());
+
+        let bare = split(serde_json::json!({ "width": "0.2mm", "remove_islands": false }));
+        assert_eq!(bare["operations"], serde_json::json!(["isolate_traces", "drill_pth"]), "nothing cleared, no clearing step");
+
+        let milled = split(serde_json::json!({
+            "remove_islands": false,
+            "clear_narrow_copper": true,
+            "clearing_threshold": "1.5mm",
+            "clearing_guard_band": "0.3mm",
+        }));
+        assert_eq!(milled["operations"], serde_json::json!(["isolate_traces", "clear_copper", "drill_pth"]));
+        assert_eq!(
+            milled["clear_copper"],
+            serde_json::json!({ "strategy": "narrower_than", "threshold": "1.5mm", "guard_band": "0.3mm", "mop_up": false }),
+        );
+
+        // Defaults: an absent `remove_islands` was on.
+        let defaulted = split(serde_json::json!({ "width": "0.2mm" }));
+        assert_eq!(defaulted["operations"][1], "clear_copper");
+
+        // A second load changes nothing.
+        let mut again = milled.clone();
+        normalize_step_value(&mut again, "test.yaml");
+        assert_eq!(again, milled);
+    }
+
     #[test]
     fn a_per_operation_depth_limit_moves_up_to_the_step() {
         let mut step = serde_json::json!({

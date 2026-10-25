@@ -333,7 +333,8 @@ fn kinds_of_work(operations: &[String]) -> String {
     let mut kinds: Vec<&str> = Vec::new();
     for op in operations {
         let kind = match op.as_str() {
-            "engrave_copper" => "Isolation",
+            "isolate_traces" => "Isolation",
+            "clear_copper" => "Copper clearing",
             "drill_locating_pins" => "Locating pins",
             "drill_pth" | "drill_npth" => "Drilling",
             "route_cutouts" | "route_board" => "Routing",
@@ -350,22 +351,22 @@ fn kinds_of_work(operations: &[String]) -> String {
 fn describe_operation(key: &str, raw: &StepRaw, len: &dyn Fn(Length) -> String) -> String {
     let label = operation_label(key).to_string();
     match key {
-        "engrave_copper" => {
-            let e = &raw.engrave_copper;
-            let mut parts = vec![format!("channel at least {}", len(e.width))];
-            if e.test_cut {
+        "isolate_traces" => {
+            let mut parts = vec![format!("channel at least {}", len(raw.isolate.width))];
+            if raw.isolate.test_cut {
                 parts.push("depth test cut first".into());
             }
-            parts.push(match (e.remove_islands, e.remove_thin_copper) {
-                (true, true) => "islands and thin copper removed".into(),
-                (true, false) => "islands removed".into(),
-                // Thin copper only ever goes with islands — see `remove_thin_copper`.
-                (false, _) => "islands left".into(),
-            });
-            if e.clear_narrow_copper {
-                parts.push(format!("copper narrower than {} cleared", len(e.clearing_threshold)));
-            }
             format!("{label}: {}", parts.join(", "))
+        }
+        "clear_copper" => {
+            let mut parts: Vec<String> = Vec::new();
+            if raw.removes_islands() {
+                parts.push("islands and thin strips with the isolation bit".into());
+            }
+            if raw.mills_narrow_copper() {
+                parts.push(format!("copper narrower than {} with a milling bit", len(raw.clear.threshold)));
+            }
+            format!("{label}: {}", parts.join(", then "))
         }
         "route_board" => {
             let edge = &raw.route_board;
@@ -581,7 +582,8 @@ mod tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
-            engrave_copper: Default::default(),
+            isolate: Default::default(),
+            clear: Default::default(),
             machines_back: back,
             pin_diameter: None,
             router_depth_per_pass: Length::from_mm(1.0),
@@ -843,10 +845,10 @@ mod tests {
             hole(HoleKind::PadNpth, 3.2, 3.2),
             hole(HoleKind::PadPth, 2.0, 1.0),
         ]);
-        let mut back = raw(&["engrave_copper", "drill_pth", "drill_npth", "route_board"], true);
+        let mut back = raw(&["isolate_traces", "drill_pth", "drill_npth", "route_board"], true);
         back.name = "Back: isolate, drill and cut out".into();
         back.fixture_id = Some(Uuid::nil());
-        let mut front = raw(&["drill_locating_pins", "engrave_copper"], false);
+        let mut front = raw(&["drill_locating_pins", "isolate_traces"], false);
         front.name = "Front: pins and isolation".into();
         front.pin_diameter = Some(Length::from_mm(3.0));
         front.fixture_id = Some(Uuid::nil());

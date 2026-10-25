@@ -17,7 +17,7 @@ pub use units::UserUnitSystem;
 pub use catalog::{CatalogStockCatalog, CatalogStockSection, CatalogStockTool};
 pub use job::{BoardFace, EdgeTab, JobConfig, ProductionOperation, TabContour};
 pub use operations::{
-    blocking_step, conflicting_operations, insert_position, machining_operation, move_target, operation_scope, order_fault,
+    blocking_step, conflicting_operations, insert_position, machining_operation, moved, operation_label, operation_scope, order_fault, removal_fault,
     step_insert_position,
     step_display_name, step_reference,
     MachiningOperation, OperationConflict, OperationScope, MACHINING_OPERATIONS, UNNAMED_STEP,

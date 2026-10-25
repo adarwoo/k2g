@@ -1,0 +1,38 @@
+===== isolate only =====
+block v30 slot Some(1): 5 ops, GND#3 .. D#1, travel 68.117 mm, plan 2f2054ca2d22226f
+note: Set the work origin 5mm from the board in X and 5mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+===== islands and thin copper =====
+block v30 slot Some(1): 40 ops, island 2#0 .. D#1, travel 80.207 mm, plan e91eb817a4e9e67e
+note: Set the work origin 5mm from the board in X and 5mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+note: Removed 11 thin strips of copper (6.06 mm²) the isolation pass had stranded. 1 more was left standing, the widest 1.19 mm across — too wide for the bit already in the spindle to be worth it.
+===== with test cut =====
+block v30 slot Some(1): 41 ops, Depth test cut .. D#1, travel 127.207 mm, plan b0f37479cd395864
+note: Set the work origin 5.75mm from the board in X and 5.75mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+note: Removed 11 thin strips of copper (6.06 mm²) the isolation pass had stranded. 1 more was left standing, the widest 1.19 mm across — too wide for the bit already in the spindle to be worth it.
+note: A depth test L, 40mm x 30mm, is cut in a 0.75mm band just outside the board. This job does not route its own outline, so that band is opened for the test cut and the work origin moves out by it — re-zero before running, and check the blank reaches that far.
+===== with mill clearing =====
+block v30 slot Some(1): 40 ops, island 2#0 .. D#1, travel 80.207 mm, plan e91eb817a4e9e67e
+block m08 slot Some(2): 4 ops, clearing 1#0 .. clearing 2#0, travel 31.403 mm, plan f3b8e18c0607238e
+note: Set the work origin 5mm from the board in X and 5mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+note: Removed 11 thin strips of copper (6.06 mm²) the isolation pass had stranded. 1 more was left standing, the widest 1.19 mm across — too wide for the bit already in the spindle to be worth it.
+note: The milling pass cleared 2 pieces of free copper (25.60 mm²). 8 pieces narrow enough to qualify were too narrow for the chosen mill to enter, the widest 0.59 mm across — a narrower mill would reach them. 4.50 mm² of that was too close to a net for the mill to reach and is still there.
+===== engrave, drill, route =====
+block v30 slot Some(1): 40 ops, island 2#0 .. D#1, travel 83.168 mm, plan 7b8444810cedee68
+block d10 slot Some(3): 2 ops, P2 .. P1, travel 35.355 mm, plan fb44843c50962059
+block d32 slot Some(4): 1 ops, M1 .. M1, travel 48.740 mm, plan c6586cd0e566dd63
+block r20 slot Some(6): 8 ops, outer#0.span1.rough .. outer#0.span1.finish, travel 180.038 mm, plan 62b4aba6ad3202e8
+note: Set the work origin 7.1mm from the board in X and 7.1mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+note: Removed 11 thin strips of copper (6.06 mm²) the isolation pass had stranded. 1 more was left standing, the widest 1.19 mm across — too wide for the bit already in the spindle to be worth it.
+===== drill, engrave, route =====
+block d10 slot Some(3): 2 ops, P2 .. P1, travel 35.355 mm, plan fb44843c50962059
+block d32 slot Some(4): 1 ops, M1 .. M1, travel 48.740 mm, plan c6586cd0e566dd63
+block v30 slot Some(1): 40 ops, island 2#0 .. D#1, travel 83.168 mm, plan 7b8444810cedee68
+block r20 slot Some(6): 8 ops, outer#0.span1.rough .. outer#0.span1.finish, travel 180.038 mm, plan 62b4aba6ad3202e8
+note: Set the work origin 7.1mm from the board in X and 7.1mm in Y — your 5mm / 5mm work clearance plus the room this job's cuts outside the board need. Nothing is machined nearer the zero than the clearance.
+note: KiCad's stackup states no copper thickness for this face, so 0.035mm (1 oz) was assumed. The isolation depth is that plus the substrate penetration, and the channel width follows from it — set the stackup if the board is not 1 oz.
+note: Removed 11 thin strips of copper (6.06 mm²) the isolation pass had stranded. 1 more was left standing, the widest 1.19 mm across — too wide for the bit already in the spindle to be worth it.

@@ -234,7 +234,8 @@ pub(crate) struct StepRaw {
     pub(crate) drill: DrillConfigRaw,
     pub(crate) route_board: EdgeConfigRaw,
     pub(crate) route_cutouts: CutoutConfigRaw,
-    pub(crate) engrave_copper: EngraveConfigRaw,
+    pub(crate) isolate: IsolateConfigRaw,
+    pub(crate) clear: ClearConfigRaw,
     /// `board_face == "back"`. Read per step rather than taken from the profile
     /// projection (which only carries `steps[0]`), because a later step may be the
     /// back-face one — which is exactly the step whose geometry the placement has to
@@ -284,8 +285,29 @@ impl StepRaw {
     }
 
     /// Isolation engraving: a channel cut round every net so they come apart.
-    pub(crate) fn engraves_copper(&self) -> bool {
-        self.enabled("engrave_copper")
+    pub(crate) fn isolates_traces(&self) -> bool {
+        self.enabled("isolate_traces")
+    }
+
+    /// Copper clearing after the isolation. Only ever with isolation in the same step — it
+    /// clears relative to the channels that pass cut — so a step that lists it without one
+    /// (refused by `order_fault`, but a hand-edited file can) clears nothing.
+    pub(crate) fn clears_copper(&self) -> bool {
+        self.isolates_traces() && self.enabled("clear_copper")
+    }
+
+    /// Whether the isolation bit takes the islands and thin strips: the whole of the
+    /// clearing with `islands_and_strips`, and its first part with `narrower_than` when
+    /// `mop_up` is on. What `engrave_copper.remove_islands` used to answer.
+    pub(crate) fn removes_islands(&self) -> bool {
+        self.clears_copper()
+            && (self.clear.strategy == ClearStrategy::IslandsAndStrips || self.clear.mop_up)
+    }
+
+    /// Whether a milling bit clears free copper up to `clear.threshold`. What
+    /// `engrave_copper.clear_narrow_copper` used to answer.
+    pub(crate) fn mills_narrow_copper(&self) -> bool {
+        self.clears_copper() && self.clear.strategy == ClearStrategy::NarrowerThan
     }
 
     /// Registration pins: two holes on the fixture's flip line, drilled through the
@@ -296,17 +318,19 @@ impl StepRaw {
         self.enabled("drill_locating_pins")
     }
 
-    /// Whether the step lists its engraving **after** its holes — the one place in a
-    /// step's order the operator has a real choice (`order_fault` in
-    /// `data/model/operations.rs` has the rules and the case for each side).
+    /// Whether the step lists its copper work — isolation, and the clearing that follows
+    /// it — **after** its holes: the one place in a step's order the operator has a real
+    /// choice (`order_fault` in `data/model/operations.rs` has the rules and the case for
+    /// each side).
     ///
     /// "After" means after *any* hole operation: the rules keep the holes together, so
-    /// after one is after all of them. A step with no holes, or no engraving, answers
-    /// `false`, which is the order every older profile has.
-    pub(crate) fn engraves_after_holes(&self) -> bool {
+    /// after one is after all of them, and keep the clearing straight after the isolation,
+    /// so the isolation's place is the pair's. A step with no holes, or no isolation,
+    /// answers `false`, which is the order every older profile has.
+    pub(crate) fn copper_after_holes(&self) -> bool {
         const HOLES: [&str; 3] = ["drill_locating_pins", "drill_pth", "drill_npth"];
         let at = |key: &str| self.operations.iter().position(|op| op == key);
-        match at("engrave_copper") {
+        match at("isolate_traces") {
             Some(engrave) => HOLES.iter().filter_map(|hole| at(hole)).any(|hole| hole < engrave),
             None => false,
         }
@@ -430,77 +454,83 @@ fn read_cutout_config(root: &Node, base: &str) -> CutoutConfigRaw {
     }
 }
 
-/// The step's `engrave_copper` config, defaulted when absent.
+/// The step's `isolate_traces` config, defaulted when absent.
 ///
 /// Depth is deliberately not among these: a V-bit cuts as wide as it is deep, so depth follows
 /// from the width and whichever bit the rack can offer.
-pub(crate) struct EngraveConfigRaw {
+pub(crate) struct IsolateConfigRaw {
+    /// The narrowest channel to cut — a floor; the bit and depth are chosen to meet it.
     pub(crate) width: Length,
     /// Cut a throwaway L in the waste and stop, so the operator can verify the depth before the
     /// copper is touched. Nothing else in the program checks that Z0 is the board surface.
     pub(crate) test_cut: bool,
-    /// Take out the copper the isolation pass leaves stranded between two channels.
-    ///
-    /// On by default, unlike `test_cut`, and for the opposite reason: this costs no tool
-    /// change, no rack slot and no stop — the bit is already in the spindle at the right
-    /// depth — while leaving it off ships boards with floating conductors on them that
-    /// nothing in the design ever drew. See `pcb::islands`.
-    pub(crate) remove_islands: bool,
-    /// With `remove_islands`, also take out the thin parts of free copper that is not
-    /// enclosed — the strip between two close channels that runs out into the field. Same
-    /// bit, same bound, same pass. On by default for the same reason. See `pcb::islands`.
-    pub(crate) remove_thin_copper: bool,
-    /// Take out free copper up to [`clearing_threshold`](Self::clearing_threshold), with a
-    /// dedicated milling bit rather than the isolation V-bit.
-    ///
-    /// Off by default, unlike `remove_islands`, and for the opposite reason: this loads a
-    /// genuine milling bit, which costs a real tool change and a rack slot — the different
-    /// question `remove_islands`'s own doc names and declines to answer. See
-    /// `pcb::clear_narrow_copper`.
-    pub(crate) clear_narrow_copper: bool,
-    /// Free copper narrower than this is cleared by the milling pass; wider copper is left.
-    pub(crate) clearing_threshold: Length,
-    /// How close the milling pass may come to net copper, on top of never overlapping it.
-    ///
-    /// Stated rather than inherited: unlike `remove_islands`, which only ever sweeps ground
-    /// the isolation channel already walled off, this pass clears copper independently of
-    /// that channel.
-    pub(crate) clearing_guard_band: Length,
 }
 
-impl Default for EngraveConfigRaw {
+impl Default for IsolateConfigRaw {
     fn default() -> Self {
-        // The schema's own default for `engrave_copper`.
+        // The schema's own step default for `isolate_traces`.
+        Self { width: Length::from_mm(0.25), test_cut: false }
+    }
+}
+
+/// What `clear_copper` takes out, and so which tool takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ClearStrategy {
+    /// Islands and thin strips, by the isolation bit already in the spindle (`pcb::islands`).
+    IslandsAndStrips,
+    /// Free copper narrower than a threshold, by a milling bit (`pcb::clear_narrow_copper`).
+    NarrowerThan,
+}
+
+/// The step's `clear_copper` config, defaulted when absent.
+pub(crate) struct ClearConfigRaw {
+    pub(crate) strategy: ClearStrategy,
+    /// With `NarrowerThan`: free copper narrower than this is milled; wider is left.
+    pub(crate) threshold: Length,
+    /// With `NarrowerThan`: how close the mill may come to net copper, on top of never
+    /// overlapping it. Stated rather than inherited: unlike the isolation bit, which only
+    /// sweeps ground its own channel walled off, the mill clears independently of it.
+    pub(crate) guard_band: Length,
+    /// With `NarrowerThan`: the isolation bit takes the islands and thin strips first — the
+    /// slivers a mill is often too wide to enter — and the mill does the wider copper.
+    pub(crate) mop_up: bool,
+}
+
+impl Default for ClearConfigRaw {
+    fn default() -> Self {
+        // The schema's own default for `clear_copper`.
         Self {
-            width: Length::from_mm(0.25),
-            test_cut: false,
-            remove_islands: true,
-            remove_thin_copper: true,
-            clear_narrow_copper: false,
-            clearing_threshold: Length::from_mm(2.0),
-            clearing_guard_band: Length::from_mm(0.2),
+            strategy: ClearStrategy::IslandsAndStrips,
+            threshold: Length::from_mm(2.0),
+            guard_band: Length::from_mm(0.2),
+            mop_up: true,
         }
     }
 }
 
-/// Read unconditionally, unlike the pin diameter above: every step carries a materialised
-/// `engrave_copper` block whether or not it engraves, but nothing here changes the job's frame,
-/// and both fields are only ever consulted inside `raw.engraves_copper()`.
-fn read_engrave_config(root: &Node, base: &str) -> EngraveConfigRaw {
-    let default = EngraveConfigRaw::default();
-    EngraveConfigRaw {
+/// Read unconditionally, unlike the pin diameter above: every step carries materialised
+/// `isolate_traces` and `clear_copper` blocks whether or not it runs them, but nothing here
+/// changes the job's frame, and the fields are only consulted behind `isolates_traces()` /
+/// `clears_copper()`.
+fn read_isolate_config(root: &Node, base: &str) -> IsolateConfigRaw {
+    let default = IsolateConfigRaw::default();
+    IsolateConfigRaw {
         width: node_length(root, &format!("{base}/width")).unwrap_or(default.width),
         test_cut: node_bool(root, &format!("{base}/test_cut")).unwrap_or(default.test_cut),
-        remove_islands: node_bool(root, &format!("{base}/remove_islands"))
-            .unwrap_or(default.remove_islands),
-        remove_thin_copper: node_bool(root, &format!("{base}/remove_thin_copper"))
-            .unwrap_or(default.remove_thin_copper),
-        clear_narrow_copper: node_bool(root, &format!("{base}/clear_narrow_copper"))
-            .unwrap_or(default.clear_narrow_copper),
-        clearing_threshold: node_length(root, &format!("{base}/clearing_threshold"))
-            .unwrap_or(default.clearing_threshold),
-        clearing_guard_band: node_length(root, &format!("{base}/clearing_guard_band"))
-            .unwrap_or(default.clearing_guard_band),
+    }
+}
+
+/// See [`read_isolate_config`].
+fn read_clear_config(root: &Node, base: &str) -> ClearConfigRaw {
+    let default = ClearConfigRaw::default();
+    ClearConfigRaw {
+        strategy: match node_str(root, &format!("{base}/strategy")).as_deref() {
+            Some("narrower_than") => ClearStrategy::NarrowerThan,
+            _ => default.strategy,
+        },
+        threshold: node_length(root, &format!("{base}/threshold")).unwrap_or(default.threshold),
+        guard_band: node_length(root, &format!("{base}/guard_band")).unwrap_or(default.guard_band),
+        mop_up: node_bool(root, &format!("{base}/mop_up")).unwrap_or(default.mop_up),
     }
 }
 
@@ -1161,7 +1191,7 @@ pub struct EngraveTarget {
     /// screen — but ghosts the tool overlay, the way the outline band ghosts for a step that
     /// does not route it.
     pub is_selected_step: bool,
-    /// The channel the operator asked for: `engrave_copper.width`, a minimum.
+    /// The channel the operator asked for: `isolate_traces.width`, a minimum.
     pub requested: Length,
     /// The channel the chosen bit actually cuts. Contours narrower than this are stretches
     /// the ladder had to squeeze, and the view marks them.
@@ -1216,9 +1246,9 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
     // job runs first rather than whichever happens to be nearest.
     let engraving = steps
         .get(index)
-        .filter(|raw| raw.engraves_copper())
+        .filter(|raw| raw.isolates_traces())
         .map(|raw| (index, raw))
-        .or_else(|| steps.iter().enumerate().find(|(_, raw)| raw.engraves_copper()))?;
+        .or_else(|| steps.iter().enumerate().find(|(_, raw)| raw.isolates_traces()))?;
     let (engrave_index, raw) = engraving;
 
     let toolset = raw
@@ -1228,7 +1258,7 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
     let choice = pick_engraver(
         &ctx.tools,
         toolset,
-        raw.engrave_copper.width,
+        raw.isolate.width,
         copper,
         PenetrationBudget::current(),
     )?;
@@ -1237,8 +1267,8 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
     // Same resolution `plan_step` makes, so a mill the plan cannot find is a pass this
     // draws nothing for either — see `isolation_spec`'s own note on why both callers must
     // agree here.
-    let clearing_mill = raw.engrave_copper.clear_narrow_copper.then(|| {
-        pick_clearing_mill(&ctx.tools, toolset, raw.engrave_copper.clearing_threshold)
+    let clearing_mill = raw.mills_narrow_copper().then(|| {
+        pick_clearing_mill(&ctx.tools, toolset, raw.clear.threshold)
     }).flatten();
     let clearing_mill_tool = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
 
@@ -1251,14 +1281,14 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
             clearing_mill_tool.map(|t| t.diameter),
         ),
         is_selected_step: engrave_index == index,
-        requested: raw.engrave_copper.width,
+        requested: raw.isolate.width,
         achieved: choice.width,
         tip: bit.diameter,
         point_angle: bit.point_angle,
         tool_label: bit.display_name(),
-        removes_islands: raw.engrave_copper.remove_islands,
-        clears_narrow_copper: raw.engrave_copper.clear_narrow_copper,
-        clearing_threshold: raw.engrave_copper.clearing_threshold,
+        removes_islands: raw.removes_islands(),
+        clears_narrow_copper: raw.mills_narrow_copper(),
+        clearing_threshold: raw.clear.threshold,
         clearing_tool_label: clearing_mill_tool.map(|t| t.display_name()),
     })
 }
@@ -1337,8 +1367,8 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     .unwrap_or_default();
                 let route_board = read_edge_config(root, &format!("/steps/{i}/route_board"));
                 let route_cutouts = read_cutout_config(root, &format!("/steps/{i}/route_cutouts"));
-                let engrave_copper =
-                    read_engrave_config(root, &format!("/steps/{i}/engrave_copper"));
+                let isolate = read_isolate_config(root, &format!("/steps/{i}/isolate_traces"));
+                let clear = read_clear_config(root, &format!("/steps/{i}/clear_copper"));
 
                 // Only when the step actually drills pins. The per-operation config
                 // objects are materialised by the loader whether or not their operation
@@ -1372,7 +1402,8 @@ pub(crate) fn read_steps(profile_id: Uuid) -> Vec<StepRaw> {
                     drill,
                     route_board,
                     route_cutouts,
-                    engrave_copper,
+                    isolate,
+                    clear,
                     machines_back: node_str(root, &format!("/steps/{i}/board_face"))
                         .is_some_and(|face| face.eq_ignore_ascii_case("back")),
                     pin_diameter,
@@ -1837,8 +1868,8 @@ fn plan_step(
     // warning, so the shortfall is said by the machining plan, which does.
     let budget = PenetrationBudget::current();
     let (copper, _assumed) = copper_thickness(ctx.board.as_ref(), raw.machines_back);
-    let engraver = if raw.engraves_copper() {
-        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width, copper, budget) {
+    let engraver = if raw.isolates_traces() {
+        match pick_engraver(&ctx.tools, toolset, raw.isolate.width, copper, budget) {
             Some(picked) => Some(picked),
             None => return StepOutcome::Failed(vec![no_engraver_reason()]),
         }
@@ -1952,7 +1983,7 @@ fn plan_step(
                     tools: vec![resolve_engraver_tool(
                         ctx,
                         choice,
-                        raw.engrave_copper.width,
+                        raw.isolate.width,
                         &number_of,
                     )],
                 });
@@ -2738,7 +2769,7 @@ fn pick_slot_router(
 /// cone cuts full width at the surface, same as a flat mill — but `remove_islands` already
 /// covers what a V-bit can clear opportunistically, and the whole point of loading a
 /// dedicated tool for this pass is one built for area clearing rather than for a fine
-/// channel; see the schema's `clear_narrow_copper` note. A toolset-fixed mill that fits
+/// channel; see the schema's `clear_copper` note. A toolset-fixed mill that fits
 /// beats a larger in-stock one, since it costs no rack slot.
 pub(crate) fn pick_clearing_mill(
     tools: &[Tool],
@@ -4279,7 +4310,8 @@ mod tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
-            engrave_copper: Default::default(),
+            isolate: Default::default(),
+            clear: Default::default(),
             machines_back,
             pin_diameter: None,
             router_depth_per_pass: Length::from_mm(1.0),
@@ -4298,11 +4330,11 @@ mod tests {
     /// profile written before ordering existed lists it first and keeps that order.
     #[test]
     fn the_engraving_runs_where_the_step_lists_it() {
-        assert!(!step_doing_in_order(&["engrave_copper", "drill_pth", "route_board"]).engraves_after_holes());
-        assert!(step_doing_in_order(&["drill_pth", "drill_npth", "engrave_copper"]).engraves_after_holes());
-        assert!(step_doing_in_order(&["drill_locating_pins", "engrave_copper"]).engraves_after_holes());
-        assert!(!step_doing_in_order(&["engrave_copper", "route_board"]).engraves_after_holes(), "no holes");
-        assert!(!step_doing_in_order(&["drill_pth"]).engraves_after_holes(), "no engraving");
+        assert!(!step_doing_in_order(&["isolate_traces", "drill_pth", "route_board"]).copper_after_holes());
+        assert!(step_doing_in_order(&["drill_pth", "drill_npth", "isolate_traces"]).copper_after_holes());
+        assert!(step_doing_in_order(&["drill_locating_pins", "isolate_traces"]).copper_after_holes());
+        assert!(!step_doing_in_order(&["isolate_traces", "route_board"]).copper_after_holes(), "no holes");
+        assert!(!step_doing_in_order(&["drill_pth"]).copper_after_holes(), "no engraving");
     }
 
     /// A hand-edited order the step cannot run in is a no-go naming the step; a valid one
@@ -4310,7 +4342,7 @@ mod tests {
     #[test]
     fn an_order_the_step_cannot_run_in_is_refused_by_step() {
         let faults = operation_order_faults(&[
-            step_doing_in_order(&["engrave_copper", "drill_pth"]),
+            step_doing_in_order(&["isolate_traces", "drill_pth"]),
             step_doing_in_order(&["route_board", "drill_pth"]),
         ]);
         assert_eq!(faults.len(), 1, "{faults:?}");
@@ -4513,7 +4545,8 @@ mod tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
-            engrave_copper: Default::default(),
+            isolate: Default::default(),
+            clear: Default::default(),
             machines_back: false,
             pin_diameter: None,
             router_depth_per_pass: Length::from_mm(1.0),
@@ -5183,12 +5216,12 @@ mod engraver_tests {
     /// program in the middle of a job, so defaulting it on would stop a machine nobody is
     /// standing at, on a profile whose author never asked for a stop.
     ///
-    /// The schema half is not ceremony: `engrave_copper.width` already carries two different
+    /// The schema half is not ceremony: `isolate_traces.width` already carries two different
     /// defaults in one file (`0.15mm` in `$defs`, `0.25mm` at the step), which is exactly how
     /// this drifts, and the Rust fallback here silently tracks one of them.
     #[test]
     fn the_test_cut_is_off_in_the_rust_fallback_and_in_the_schema() {
-        assert!(!EngraveConfigRaw::default().test_cut, "the Rust fallback is off");
+        assert!(!IsolateConfigRaw::default().test_cut, "the Rust fallback is off");
 
         // Line-by-line rather than by substring: the schema is a CRLF file, and an anchor that
         // spelled its newlines would pass on one checkout and fail on the next.
@@ -5209,29 +5242,25 @@ mod engraver_tests {
         );
     }
 
-    /// **The milling-clearing pass is off unless it is asked for**, for the same reason and
-    /// checked the same way: unlike `remove_islands`, this costs a real tool change, so a
-    /// profile that never mentions it must not suddenly demand a milling bit in stock.
+    /// **Copper clearing needs no milling bit unless one is asked for**, for the test cut's
+    /// reason and checked the same way: a mill costs a real tool change, so a profile that
+    /// never chose the milling strategy must not suddenly demand one in stock. The default
+    /// strategy is the isolation bit's, in the Rust fallback and in the schema alike.
     #[test]
-    fn clear_narrow_copper_is_off_in_the_rust_fallback_and_in_the_schema() {
-        assert!(!EngraveConfigRaw::default().clear_narrow_copper, "the Rust fallback is off");
+    fn copper_clearing_defaults_to_the_isolation_bit_in_the_rust_fallback_and_in_the_schema() {
+        assert_eq!(ClearConfigRaw::default().strategy, ClearStrategy::IslandsAndStrips, "the Rust fallback");
 
         let lines: Vec<&str> = include_str!("../../schemas/machining.yaml").lines().collect();
         let declared = lines
             .iter()
-            .position(|l| l.trim() == "clear_narrow_copper:")
+            .position(|l| l.trim() == "strategy:")
             .expect("the schema declares the option");
         let default = lines[declared..]
             .iter()
             .take_while(|l| !l.trim().is_empty())
             .find(|l| l.trim().starts_with("default:"))
             .expect("and gives it a default");
-        assert_eq!(
-            default.trim(),
-            "default: false",
-            "the schema default must be off too, or a profile gains a tool change it never \
-             asked for",
-        );
+        assert_eq!(default.trim(), "default: islands_and_strips", "the schema default needs no mill");
     }
 
     /// A V-bit: a tip flat of `tip_mm` on a cone of `angle_deg`.

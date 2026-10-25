@@ -495,8 +495,20 @@ fn sample_steps() -> Vec<StepValue> {
                 ]),
             ),
             (
-                "engrave_copper".into(),
-                StepValue::Map(vec![("width".into(), StepValue::Text("0.25mm".into()))]),
+                "isolate_traces".into(),
+                StepValue::Map(vec![
+                    ("width".into(), StepValue::Text("0.25mm".into())),
+                    ("test_cut".into(), StepValue::Bool(false)),
+                ]),
+            ),
+            (
+                "clear_copper".into(),
+                StepValue::Map(vec![
+                    ("strategy".into(), StepValue::Text("islands_and_strips".into())),
+                    ("threshold".into(), StepValue::Length(Length::from_mm(2.0))),
+                    ("guard_band".into(), StepValue::Length(Length::from_mm(0.2))),
+                    ("mop_up".into(), StepValue::Bool(true)),
+                ]),
             ),
             ("cnc_name".into(), StepValue::Text(cnc.into())),
             ("fixture_name".into(), StepValue::Text("Vacuum bed".into())),

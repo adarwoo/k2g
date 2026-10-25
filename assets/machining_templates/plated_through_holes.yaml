@@ -32,7 +32,7 @@
 # the gap between two runs.
 
 $schema: machining.yaml
-schema_version: 3
+schema_version: 4
 
 name: "Chemically plated — drill, then engrave and cut edges"
 
@@ -47,5 +47,6 @@ steps:
   - name: "After plating — isolation and edges"
     board_face: front
     operations:
-      - engrave_copper
+      - isolate_traces
+      - clear_copper
       - route_board

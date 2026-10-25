@@ -56,7 +56,7 @@ pub fn setup_sheet(ctx: &AppCtx, program_files: &BTreeMap<usize, String>) -> Res
     let engraving = (0..steps.len())
         .map(|index| {
             let raw = steps.get(index)?;
-            if !raw.engraves_copper() {
+            if !raw.isolates_traces() {
                 return None;
             }
             // `engrave_target` falls back to the first engraving step when asked about one

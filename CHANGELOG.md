@@ -11,6 +11,15 @@ name is usually the shorter answer to "what changed".
 ## [Unreleased]
 
 ### Changed
+- **Engraving is now two operations: Isolate traces and Clear copper.** Isolation cuts the
+  channels (minimum width, depth test cut); *Clear copper* takes out what they leave,
+  either islands and thin strips with the isolation bit, or everything narrower than a
+  width with a milling bit (optionally after the isolation bit has taken the slivers).
+  *Clear copper* always comes straight after *Isolate traces*, and the two move together.
+  Existing profiles are converted on load and cut exactly what they cut before. The
+  unreleased *Remove thin copper* switch is gone: thin strips always go with islands.
+  **CNC templates** that read `steps[i].engrave_copper.*` must now read
+  `steps[i].isolate_traces.*` (width, test cut) or `steps[i].clear_copper.*`.
 - **Engraving lifts the tool less.** Between two cuts the engraver now stays down and
   feeds straight across when the way between them is copper the step removes anyway, such
   as from one clearing ring to the next or from a channel into the island beside it,

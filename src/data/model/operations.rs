@@ -72,9 +72,10 @@ pub struct MachiningOperation {
 ///
 /// The sequence is not arbitrary — each position is owed to a physical rule:
 ///
-/// 1. **Engraving** while the board is whole, flat and undrilled. Z0 is verified against
+/// 1. **Isolation** while the board is whole, flat and undrilled. Z0 is verified against
 ///    an unmachined surface, and every hole made first is a place the surface can lift or
 ///    the bit can catch. It is also the one operation whose quality is a depth tolerance.
+///    **Copper clearing** straight after it, with the bit it leaves in the spindle.
 /// 2. **Locating pins** before the rest of the drilling: they are the datum the board is
 ///    registered against, so they want making before anything measured from them.
 /// 3. **The holes** — PTH then NPTH — while the board is still fully attached. The
@@ -91,7 +92,7 @@ pub struct MachiningOperation {
 ///
 /// # Nothing may depend on a position here
 ///
-/// `engrave_copper`'s old placement at the end was load-bearing: `AppData::add_step` took
+/// Engraving's old placement at the end was load-bearing: `AppData::add_step` took
 /// the first operation that was repeatable *or* unclaimed, so a repeatable entry any
 /// earlier became the default for every new step. That is fixed at the source — `add_step`
 /// now asks for the first *unclaimed* operation and falls back to a repeatable one — so
@@ -100,11 +101,21 @@ pub struct MachiningOperation {
 /// different order should say so itself.
 pub const MACHINING_OPERATIONS: &[MachiningOperation] = &[
     // Repeatable: passes at different depths, or over different regions, are all
-    // legitimately engraving.
+    // legitimately isolation. The two halves of what was once one `engrave_copper`
+    // operation — split because cutting the channels and clearing the copper they leave
+    // are different work, set up differently, with different tools.
     MachiningOperation {
-        key: "engrave_copper",
-        label: "Engrave copper isolation",
-        short_label: "Engrave",
+        key: "isolate_traces",
+        label: "Isolate traces",
+        short_label: "Isolate",
+        scope: OperationScope::Repeatable,
+    },
+    // Repeatable for the same reason, and only ever straight after `isolate_traces` in
+    // its own step — see `order_fault`.
+    MachiningOperation {
+        key: "clear_copper",
+        label: "Clear copper",
+        short_label: "Clear",
         scope: OperationScope::Repeatable,
     },
     // Once for the whole profile, on either face. Not a feature of a board face — the
@@ -374,8 +385,12 @@ const HOLE_OPERATIONS: [&str; 3] = ["drill_locating_pins", "drill_pth", "drill_n
 ///    first because the pins are the datum. Nothing can run *between* them, and listing
 ///    NPTH before PTH would be a promise the program does not keep.
 ///
-/// What is left free is the real choice: **engraving before the holes, or after them**.
-/// Before is the long-standing default — Z0 is checked on an untouched surface, and the
+/// 4. **Copper clearing comes straight after the isolation it clears for.** It works from
+///    the channels that pass cut, with the bit it leaves in the spindle, so it needs one in
+///    the same step and nothing between them. The two move together.
+///
+/// What is left free is the real choice: **the copper work before the holes, or after
+/// them**. Before is the long-standing default — Z0 is checked on an untouched surface, and the
 /// copper is cut on a board with nowhere to lift. After has its own case: drilled after
 /// isolation, a pad's annular ring is an island no longer tied to the copper round it, and
 /// a drill breaking through can lift or tear it.
@@ -390,6 +405,16 @@ pub fn order_fault(operations: &[String]) -> Option<String> {
         .collect();
     if let Some(fault) = routing_fault(&known) {
         return Some(fault);
+    }
+    if let Some(clear) = known.iter().position(|key| *key == "clear_copper") {
+        if clear == 0 || known[clear - 1] != "isolate_traces" {
+            return Some(format!(
+                "{} has to come straight after {}: it clears the copper that pass leaves, with \
+                 the bit it leaves in the spindle.",
+                operation_label("clear_copper"),
+                operation_label("isolate_traces"),
+            ));
+        }
     }
 
     let holes: Vec<usize> = (0..known.len()).filter(|&i| HOLE_OPERATIONS.contains(&known[i])).collect();
@@ -436,41 +461,77 @@ fn routing_fault(known: &[&str]) -> Option<String> {
     None
 }
 
-/// Where the operation at `index` lands if moved one place up (`up`) or down, or why it
+/// `operations` with the operation at `index` moved one place up (`up`) or down, or why it
 /// cannot move.
 ///
-/// "One place" is the next position the rules allow, not the next slot: moving engraving
-/// down past a step's PTH and NPTH has to jump both, since stopping between them is not an
-/// order the step can run in. Without the jump the move would be refused at the first slot
-/// and the order after the holes could never be reached with the arrows at all.
+/// "One place" is the next position the rules allow, not the next slot: moving the copper
+/// work down past a step's PTH and NPTH has to jump both, since stopping between them is
+/// not an order the step can run in. Without the jump the move would be refused at the
+/// first slot and the order after the holes could never be reached with the arrows at all.
+///
+/// **An operation moves with what must follow it.** Copper clearing has to sit straight
+/// after its isolation ([`order_fault`]), so moving the isolation moves the pair; moved
+/// alone, the isolation would leave its clearing stranded and every slot would be refused.
+/// The clearing itself cannot move on its own, and says why.
 ///
 /// The refusal is the rule the *nearest* slot breaks, which is the one the operator was
 /// trying to reach.
-pub fn move_target(operations: &[String], index: usize, up: bool) -> Result<usize, String> {
+pub fn moved(operations: &[String], index: usize, up: bool) -> Result<Vec<String>, String> {
     if index >= operations.len() {
         return Err("No such operation.".to_string());
     }
+    let span = unit_len(operations, index);
+    let mut rest = operations.to_vec();
+    let unit: Vec<String> = rest.drain(index..index + span).collect();
     let candidates: Vec<usize> = if up {
         (0..index).rev().collect()
     } else {
-        (index + 1..operations.len()).collect()
+        (index + 1..=rest.len()).collect()
     };
     if candidates.is_empty() {
         return Err(if up { "Already first." } else { "Already last." }.to_string());
     }
     let mut first_fault = None;
     for to in candidates {
-        let mut moved = operations.to_vec();
-        let key = moved.remove(index);
-        moved.insert(to, key);
-        match order_fault(&moved) {
-            None => return Ok(to),
+        let mut candidate = rest.clone();
+        candidate.splice(to..to, unit.iter().cloned());
+        match order_fault(&candidate) {
+            None => return Ok(candidate),
             Some(fault) => {
                 first_fault.get_or_insert(fault);
             }
         }
     }
     Err(first_fault.unwrap_or_default())
+}
+
+/// How many operations starting at `index` move as one: the operation itself, plus a
+/// `clear_copper` straight after an `isolate_traces`.
+fn unit_len(operations: &[String], index: usize) -> usize {
+    let carries_clearing = operations[index] == "isolate_traces"
+        && operations.get(index + 1).is_some_and(|next| next == "clear_copper");
+    if carries_clearing { 2 } else { 1 }
+}
+
+/// Why the operation at `index` cannot be removed from `operations`, or `None` when it can.
+///
+/// A step keeps at least one operation (`minItems: 1`), and taking one out must not leave
+/// the rest in an order the step cannot run — the one case being an isolation with its
+/// copper clearing still after it.
+pub fn removal_fault(operations: &[String], index: usize) -> Option<String> {
+    if operations.len() <= 1 {
+        return Some("A step needs at least one operation — remove the step instead.".to_string());
+    }
+    let mut rest = operations.to_vec();
+    if index < rest.len() {
+        rest.remove(index);
+    }
+    order_fault(&rest).map(|_| {
+        format!(
+            "Remove {} first — it clears the copper this pass leaves.",
+            operation_label("clear_copper"),
+        )
+    })
 }
 
 /// Where adding `key` to `operations` should put it: where the board-making order of
@@ -545,9 +606,9 @@ mod tests {
     /// The one real choice: engraving before the holes, or after them.
     #[test]
     fn engraving_may_come_before_or_after_the_holes() {
-        assert_eq!(order_fault(&ops(&["engrave_copper", "drill_pth", "drill_npth", "route_board"])), None);
-        assert_eq!(order_fault(&ops(&["drill_pth", "drill_npth", "engrave_copper", "route_board"])), None);
-        assert!(order_fault(&ops(&["drill_pth", "engrave_copper", "drill_npth"])).is_some(), "not between them");
+        assert_eq!(order_fault(&ops(&["isolate_traces", "drill_pth", "drill_npth", "route_board"])), None);
+        assert_eq!(order_fault(&ops(&["drill_pth", "drill_npth", "isolate_traces", "route_board"])), None);
+        assert!(order_fault(&ops(&["drill_pth", "isolate_traces", "drill_npth"])).is_some(), "not between them");
     }
 
     /// The outline releases the part, and cutouts weaken it: both are refused anywhere
@@ -556,7 +617,7 @@ mod tests {
     fn the_routing_stays_at_the_end() {
         assert!(order_fault(&ops(&["route_board", "drill_pth"])).is_some());
         assert!(order_fault(&ops(&["route_board", "route_cutouts"])).is_some());
-        assert!(order_fault(&ops(&["route_cutouts", "engrave_copper"])).is_some());
+        assert!(order_fault(&ops(&["route_cutouts", "isolate_traces"])).is_some());
         assert_eq!(order_fault(&ops(&["drill_pth", "route_cutouts", "route_board"])), None);
     }
 
@@ -572,13 +633,56 @@ mod tests {
     /// order — and stops before the routing, which it may not pass.
     #[test]
     fn a_move_jumps_to_the_next_valid_place() {
-        let list = ops(&["engrave_copper", "drill_pth", "drill_npth", "route_board"]);
-        assert_eq!(move_target(&list, 0, false), Ok(2));
-        let after = ops(&["drill_pth", "drill_npth", "engrave_copper", "route_board"]);
-        assert_eq!(move_target(&after, 2, true), Ok(0));
-        assert!(move_target(&after, 2, false).is_err(), "the outline stays last");
-        assert!(move_target(&list, 1, false).is_err(), "PTH and NPTH keep the drills' order");
-        assert_eq!(move_target(&list, 0, true), Err("Already first.".to_string()));
+        let list = ops(&["isolate_traces", "drill_pth", "drill_npth", "route_board"]);
+        let after = ops(&["drill_pth", "drill_npth", "isolate_traces", "route_board"]);
+        assert_eq!(moved(&list, 0, false), Ok(after.clone()));
+        assert_eq!(moved(&after, 2, true), Ok(list.clone()));
+        assert!(moved(&after, 2, false).is_err(), "the outline stays last");
+        assert!(moved(&list, 1, false).is_err(), "PTH and NPTH keep the drills' order");
+        assert_eq!(moved(&list, 0, true), Err("Already first.".to_string()));
+    }
+
+    /// Copper clearing sits straight after the isolation it clears for, in the same step.
+    #[test]
+    fn copper_clearing_follows_its_isolation() {
+        assert_eq!(order_fault(&ops(&["isolate_traces", "clear_copper", "drill_pth"])), None);
+        assert_eq!(order_fault(&ops(&["drill_pth", "isolate_traces", "clear_copper"])), None);
+        assert!(order_fault(&ops(&["clear_copper"])).is_some(), "not without isolation");
+        assert!(order_fault(&ops(&["clear_copper", "isolate_traces"])).is_some(), "not before it");
+        assert!(
+            order_fault(&ops(&["isolate_traces", "drill_pth", "clear_copper"])).is_some(),
+            "not with anything between",
+        );
+    }
+
+    /// The pair moves together, and the clearing cannot be moved away from its isolation.
+    #[test]
+    fn isolation_moves_with_its_clearing() {
+        let before = ops(&["isolate_traces", "clear_copper", "drill_pth", "drill_npth"]);
+        let after = ops(&["drill_pth", "drill_npth", "isolate_traces", "clear_copper"]);
+        assert_eq!(moved(&before, 0, false), Ok(after.clone()), "the pair jumps the holes");
+        assert_eq!(moved(&after, 2, true), Ok(before.clone()), "and back");
+        assert!(moved(&before, 1, false).is_err(), "the clearing alone cannot leave its isolation");
+        assert!(moved(&after, 3, true).is_err());
+    }
+
+    /// The isolation cannot be removed from under its clearing; the clearing can go.
+    #[test]
+    fn isolation_is_not_removed_from_under_its_clearing() {
+        let list = ops(&["isolate_traces", "clear_copper", "drill_pth"]);
+        assert!(removal_fault(&list, 0).is_some(), "the clearing would be stranded");
+        assert_eq!(removal_fault(&list, 1), None);
+        assert_eq!(removal_fault(&list, 2), None);
+        assert!(removal_fault(&ops(&["drill_pth"]), 0).is_some(), "a step keeps one operation");
+    }
+
+    /// Clearing added to a step lands straight after its isolation, and has nowhere to go
+    /// in a step without one.
+    #[test]
+    fn added_clearing_lands_after_isolation_or_nowhere() {
+        let list = ops(&["drill_pth", "isolate_traces", "route_board"]);
+        assert_eq!(insert_position(&list, "clear_copper"), Some(2));
+        assert_eq!(insert_position(&ops(&["drill_pth", "route_board"]), "clear_copper"), None);
     }
 
     /// A new step goes at the end unless the end is after the outline; then it goes in the
@@ -589,7 +693,7 @@ mod tests {
         let cut = ops(&["route_cutouts"]);
         let outline = ops(&["route_board"]);
         let pins = ops(&["drill_locating_pins"]);
-        let engrave = ops(&["engrave_copper"]);
+        let engrave = ops(&["isolate_traces"]);
 
         assert_eq!(step_insert_position(&[&drill], &engrave), Some(1), "the end, when it can run there");
         assert_eq!(step_insert_position(&[&drill, &cut, &outline], &engrave), Some(1), "before the cutouts");
@@ -607,10 +711,10 @@ mod tests {
     /// operator has reordered.
     #[test]
     fn an_added_operation_lands_where_the_board_is_made() {
-        let reordered = ops(&["drill_pth", "engrave_copper", "route_board"]);
+        let reordered = ops(&["drill_pth", "isolate_traces", "route_board"]);
         assert_eq!(insert_position(&reordered, "drill_npth"), Some(1), "with the holes, not after the copper");
         assert_eq!(insert_position(&reordered, "route_cutouts"), Some(2), "before the outline");
-        assert_eq!(insert_position(&ops(&["drill_pth", "route_board"]), "engrave_copper"), Some(0));
+        assert_eq!(insert_position(&ops(&["drill_pth", "route_board"]), "isolate_traces"), Some(0));
         assert_eq!(insert_position(&[], "drill_pth"), Some(0));
     }
 
@@ -686,8 +790,8 @@ mod tests {
         assert_eq!(step_display_name(UNNAMED_STEP, &ops(&["drill_pth"])), "PTH");
         assert_eq!(step_display_name("", &ops(&["route_board"])), "Outline");
         assert_eq!(
-            step_display_name("   ", &ops(&["drill_pth", "drill_npth", "engrave_copper"])),
-            "PTH + NPTH + Engrave",
+            step_display_name("   ", &ops(&["drill_pth", "drill_npth", "isolate_traces"])),
+            "PTH + NPTH + Isolate",
             "the order the step runs them in, which is the operator's to choose"
         );
     }
@@ -709,7 +813,8 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "engrave_copper",       // whole, flat, undrilled — and Z0 is verified here
+                "isolate_traces",       // whole, flat, undrilled — and Z0 is verified here
+                "clear_copper",         // with the bit isolation leaves in the spindle
                 "drill_locating_pins",  // the datum, before anything measured from it
                 "drill_pth",            // holes while the board is still fully attached
                 "drill_npth",
@@ -737,7 +842,7 @@ mod tests {
 
         assert_eq!(
             leading,
-            ["engrave_copper", "drill_locating_pins"],
+            ["isolate_traces", "clear_copper", "drill_locating_pins"],
             "if this changes, check `add_step` still claims work rather than a repeatable",
         );
         // And `add_step`'s fallback names `Repeatable`, so the pins sitting second here
@@ -862,9 +967,9 @@ mod tests {
     /// is left alone rather than constrained by a rule this build invented.
     #[test]
     fn repeatable_and_unknown_operations_are_never_blocked() {
-        let both = ops(&["engrave_copper", "some_future_operation"]);
+        let both = ops(&["isolate_traces", "some_future_operation"]);
         let steps = [("A", false, both.as_slice()), ("B", false, both.as_slice())];
-        assert_eq!(blocking_step(steps, 1, "engrave_copper"), None);
+        assert_eq!(blocking_step(steps, 1, "isolate_traces"), None);
         assert_eq!(blocking_step(steps, 1, "some_future_operation"), None);
     }
 

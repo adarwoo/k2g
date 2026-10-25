@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::data::{with_appdata, with_appdata_mut, appdata_ready};
 use crate::data::model::{
-    blocking_step, conflicting_operations, insert_position, move_target, operation_scope,
+    blocking_step, conflicting_operations, insert_position, moved, operation_label, operation_scope,
+    removal_fault,
     step_reference, MachiningOperation,
     OperationConflict, OperationScope, UserUnitSystem, MACHINING_OPERATIONS,
 };
@@ -823,31 +824,26 @@ pub fn add_operation(id: Uuid, step: usize, key: &str) {
     set_operations(id, step, &operations);
 }
 
-/// Removes the operation at `index` of `step`, unless it is the step's last — the schema
-/// requires one (`minItems: 1`), and a step that does nothing is removed as a step.
-///
-/// Removing never makes a valid order invalid: every rule in `order_fault` is about what
-/// sits next to or after what, and taking one item out of a valid list leaves the rest in
-/// the same relative order.
+/// Removes the operation at `index` of `step`, unless [`removal_fault`] refuses: the step's
+/// last operation (the schema requires one, and a step that does nothing is removed as a
+/// step), or an isolation with its copper clearing still after it.
 pub fn remove_operation(id: Uuid, step: usize, index: usize) {
     let mut operations = read_operations(id, step);
-    if operations.len() <= 1 || index >= operations.len() {
+    if index >= operations.len() || removal_fault(&operations, index).is_some() {
         return;
     }
     operations.remove(index);
     set_operations(id, step, &operations);
 }
 
-/// Moves the operation at `index` of `step` one valid place up or down ([`move_target`])
-/// and re-renders. A move the rules refuse does nothing; the button for it is disabled.
+/// Moves the operation at `index` of `step` one valid place up or down ([`moved`]) —
+/// together with the clearing that must follow it, if it is an isolation — and re-renders.
+/// A move the rules refuse does nothing; the button for it is disabled.
 pub fn move_operation(id: Uuid, step: usize, index: usize, up: bool) {
-    let mut operations = read_operations(id, step);
-    let Ok(to) = move_target(&operations, index, up) else {
-        return;
-    };
-    let key = operations.remove(index);
-    operations.insert(to, key);
-    set_operations(id, step, &operations);
+    let operations = read_operations(id, step);
+    if let Ok(reordered) = moved(&operations, index, up) {
+        set_operations(id, step, &reordered);
+    }
 }
 
 /// Why operation `key` cannot be added to `step` — another step already runs it — in the
@@ -858,6 +854,13 @@ pub fn move_operation(id: Uuid, step: usize, index: usize, up: bool) {
 /// match what the operator sees is worse than none, because it sends them to change the
 /// face.
 fn add_refusal(id: Uuid, step: usize, key: &str) -> Option<String> {
+    // Nowhere in this step's order it can go — copper clearing in a step with no isolation.
+    if insert_position(&read_operations(id, step), key).is_none() {
+        return Some(format!(
+            "Needs {} in this step first: it clears the copper that pass leaves.",
+            operation_label("isolate_traces"),
+        ));
+    }
     let (index, name) = operation_owner(id, step, key)?;
     let owner = step_reference(index, &name);
     Some(match operation_scope(key) {
@@ -877,9 +880,9 @@ fn add_refusal(id: Uuid, step: usize, key: &str) -> Option<String> {
 #[component]
 pub fn OperationControls(id: Uuid, step: usize, index: usize) -> Element {
     let operations = use_operations(id, step);
-    let up = move_target(&operations, index, true);
-    let down = move_target(&operations, index, false);
-    let last_one = operations.len() <= 1;
+    let up = moved(&operations, index, true);
+    let down = moved(&operations, index, false);
+    let removal = removal_fault(&operations, index);
     let up_title = up.as_ref().err().cloned().unwrap_or_else(|| "Move up".to_string());
     let down_title = down.as_ref().err().cloned().unwrap_or_else(|| "Move down".to_string());
     rsx! {
@@ -898,12 +901,8 @@ pub fn OperationControls(id: Uuid, step: usize, index: usize) -> Element {
             }
             button {
                 r#type: "button", class: "icon-btn icon-btn-danger",
-                disabled: last_one,
-                title: if last_one {
-                    "A step needs at least one operation — remove the step instead"
-                } else {
-                    "Remove operation"
-                },
+                disabled: removal.is_some(),
+                title: "{removal.clone().unwrap_or_else(|| \"Remove operation\".to_string())}",
                 onclick: move |_| remove_operation(id, step, index),
                 "✕"
             }

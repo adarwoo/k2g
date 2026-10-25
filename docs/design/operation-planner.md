@@ -375,7 +375,7 @@ bounded by two global settings, `engrave_penetration_min` / `engrave_penetration
 fine tip being driven a third of the way through the board to reach a width it was never
 suited to.
 
-**`engrave_copper.width` is a minimum, not a target.** Exactly one depth hits any given
+**`isolate_traces.width` is a minimum, not a target.** Exactly one depth hits any given
 width, and it is a coincidence when that depth is one the copper and the budget allow.
 Asking for a floor makes the question answerable: a bit qualifies when it reaches the
 minimum inside the budget, and among those the one that **overshoots least** wins, ties
@@ -406,7 +406,7 @@ and no height map anywhere in the product (`validation-plan.md` §L). A Z zero t
 50 µm out therefore produces a board that is entirely wrong and looks entirely right until
 it is finished — nets still joined, or traces undercut into the laminate.
 
-`engrave_copper.test_cut` is the manual check, generated. One boolean; everything else
+`isolate_traces.test_cut` is the manual check, generated. One boolean; everything else
 follows:
 
 - **What.** An L, cut in the waste, at `EngraveChoice::depth` — the *nominal* depth, not a

@@ -171,8 +171,8 @@ fn job_frame(steps: &[StepRaw], fixture: Option<&FixtureProfile>) -> JobFrame {
     // the board is placed.
     let test_band = steps
         .iter()
-        .filter(|step| step.engraves_copper() && step.engrave_copper.test_cut)
-        .map(|step| testcut::band(Length::from_mm(waste), step.engrave_copper.width))
+        .filter(|step| step.isolates_traces() && step.isolate.test_cut)
+        .map(|step| testcut::band(Length::from_mm(waste), step.isolate.width))
         .fold(None::<Length>, |acc, b| {
             Some(acc.map_or(b, |a| if a.as_mm() >= b.as_mm() { a } else { b }))
         });
@@ -353,6 +353,20 @@ pub fn plan_machining(ctx: &AppCtx) -> MachiningPlan {
         .collect();
 
     MachiningPlan { steps, note: None }
+}
+
+/// The job's placed edge tabs, or none while the store is not ready.
+///
+/// Read through here rather than `with_appdata` directly because the store is the one input
+/// to `plan_step` that is not on the context: unguarded, planning a step panicked wherever
+/// it ran without one — which is every test that plans a whole step. In the app the store is
+/// ready long before anything is planned, so this changes nothing there.
+fn placed_edge_tabs() -> Vec<crate::data::model::EdgeTab> {
+    if appdata_ready() {
+        with_appdata(|data| data.job_edge_tabs())
+    } else {
+        Vec::new()
+    }
 }
 
 /// The workpiece as the 3D view draws it: the stitched outline, its interior cutouts and
@@ -686,8 +700,8 @@ fn plan_step(
     let budget = PenetrationBudget::current();
     let (copper, copper_assumed) =
         crate::runtime::tooling::copper_thickness(ctx.board.as_ref(), raw.machines_back);
-    let engraver = if raw.engraves_copper() {
-        match pick_engraver(&ctx.tools, toolset, raw.engrave_copper.width, copper, budget) {
+    let engraver = if raw.isolates_traces() {
+        match pick_engraver(&ctx.tools, toolset, raw.isolate.width, copper, budget) {
             Some(picked) => Some(picked),
             None => {
                 return failed(index, name, vec![crate::runtime::tooling::no_engraver_reason()])
@@ -708,14 +722,14 @@ fn plan_step(
                 copper,
                 budget,
             ));
-        } else if raw.engrave_copper.width.as_mm() + 1e-6 < choice.floor.as_mm() {
+        } else if raw.isolate.width.as_mm() + 1e-6 < choice.floor.as_mm() {
             // The opposite mismatch: the request is narrower than the chosen bit can go
             // even at minimum penetration, so it reached the request trivially rather
             // than by targeting it. A board-fit fault that follows can look exactly like
             // the setting being ignored without this — see `floor_channel_reason`.
             notes.push(crate::runtime::tooling::floor_channel_reason(
                 ctx,
-                raw.engrave_copper.width,
+                raw.isolate.width,
                 choice.floor,
             ));
         }
@@ -727,8 +741,8 @@ fn plan_step(
     // asks for the pass; `None` when it does not, or when nothing in stock is narrow enough
     // — either way a note rather than a step failure, since the pass is additive and off by
     // default.
-    let clearing_mill = if raw.engraves_copper() && raw.engrave_copper.clear_narrow_copper {
-        pick_clearing_mill(&ctx.tools, toolset, raw.engrave_copper.clearing_threshold)
+    let clearing_mill = if raw.isolates_traces() && raw.mills_narrow_copper() {
+        pick_clearing_mill(&ctx.tools, toolset, raw.clear.threshold)
     } else {
         None
     };
@@ -1062,7 +1076,7 @@ fn plan_step(
     }
 
     // The copper work — isolation, then clearing — built here and placed below, before the
-    // holes or after them as the step lists it (`StepRaw::engraves_after_holes`). `Phase`
+    // holes or after them as the step lists it (`StepRaw::copper_after_holes`). `Phase`
     // is never read: block order is push order, so where `copper_blocks` is appended
     // *is* when the copper is cut.
     let mut copper_blocks = Vec::new();
@@ -1152,7 +1166,7 @@ fn plan_step(
     let pass_depth = Some(raw.router_depth_per_pass);
 
     let mut blocks = Vec::new();
-    if !raw.engraves_after_holes() {
+    if !raw.copper_after_holes() {
         blocks.append(&mut copper_blocks);
     }
     blocks.extend(plan_drilling(&drill_targets, &placement, start, &slots));
@@ -1512,7 +1526,7 @@ fn plan_test_cut(
     placement: &Placement,
     frame: &JobFrame,
 ) -> (Option<TestCut>, Vec<String>) {
-    if !raw.engrave_copper.test_cut {
+    if !raw.isolate.test_cut {
         return (None, Vec::new());
     }
     // The frame resolved the band; a step that asks for a test cut always has one, so `None`
@@ -1629,7 +1643,7 @@ fn plan_test_cut(
 /// `clearing_mill_diameter` is the milling-clearing pass's own chosen-bit question, resolved
 /// the same way by both callers (`pick_clearing_mill`) before this is phrased — `None` when
 /// the step does not ask for the pass, or asks and no suitable mill is in stock, either of
-/// which turns the pass off in the spec regardless of `raw.engrave_copper.clear_narrow_copper`.
+/// which turns the pass off in the spec regardless of `raw.mills_narrow_copper()`.
 pub(crate) fn isolation_spec(
     board: &pcb::BoardSnapshot,
     board_epoch: u64,
@@ -1647,13 +1661,13 @@ pub(crate) fn isolation_spec(
         // and one that has only just cleared the copper is already wider than its tip. The
         // pass narrows down to here and reports whatever it still could not fit.
         min_width_nm: (choice.floor.as_mm() * 1e6).round() as i64,
-        remove_islands: raw.engrave_copper.remove_islands,
+        remove_islands: raw.removes_islands(),
         // Only with islands: the editor hides it otherwise, and a hidden setting must not
         // still be acting.
-        remove_thin_copper: raw.engrave_copper.remove_islands && raw.engrave_copper.remove_thin_copper,
-        clear_narrow_copper: raw.engrave_copper.clear_narrow_copper && clearing_mill_diameter.is_some(),
-        clearing_threshold_nm: (raw.engrave_copper.clearing_threshold.as_mm() * 1e6).round() as i64,
-        clearing_guard_band_nm: (raw.engrave_copper.clearing_guard_band.as_mm() * 1e6).round() as i64,
+        remove_thin_copper: raw.removes_islands(),
+        clear_narrow_copper: raw.mills_narrow_copper() && clearing_mill_diameter.is_some(),
+        clearing_threshold_nm: (raw.clear.threshold.as_mm() * 1e6).round() as i64,
+        clearing_guard_band_nm: (raw.clear.guard_band.as_mm() * 1e6).round() as i64,
         clearing_mill_diameter_nm: clearing_mill_diameter
             .map(|d| (d.as_mm() * 1e6).round() as i64)
             .unwrap_or(0),
@@ -1680,8 +1694,8 @@ fn plan_engrave_spans(
     let Some(board) = ctx.board.as_ref() else {
         return (Vec::new(), Vec::new(), None, warnings);
     };
-    if raw.engrave_copper.clear_narrow_copper && clearing_mill.is_none() {
-        warnings.push(no_clearing_mill_reason(raw.engrave_copper.clearing_threshold));
+    if raw.mills_narrow_copper() && clearing_mill.is_none() {
+        warnings.push(no_clearing_mill_reason(raw.clear.threshold));
     }
 
     let spec = isolation_spec(board, ctx.board_epoch, raw, choice, clearing_mill.map(|t| t.diameter));
@@ -2376,7 +2390,7 @@ fn plan_cutout_spans(
         return Passes { rough: rough_by_router, finish: by_router, warnings: notes };
     };
     let cfg = &raw.route_cutouts;
-    let placed_tabs = with_appdata(|data| data.job_edge_tabs());
+    let placed_tabs = placed_edge_tabs();
     let mut corners_skipped = 0usize;
     // Island tabs asked to be perforated that the rack holds no drill for.
     let mut unperforated = 0usize;
@@ -2692,7 +2706,7 @@ fn plan_outline_spans(
     let offsets = pcb::routing_offset(&stitched.contours, radius_nm);
 
     // The job's placements, grouped the way they are stored: by contour kind and index.
-    let placed_tabs = with_appdata(|data| data.job_edge_tabs());
+    let placed_tabs = placed_edge_tabs();
     let edge = &raw.route_board;
 
     // How much wall this step leaves for the finishing pass, and the offsets that rough it
@@ -3840,7 +3854,8 @@ mod job_frame_tests {
             drill: Default::default(),
             route_board: Default::default(),
             route_cutouts: Default::default(),
-            engrave_copper: Default::default(),
+            isolate: Default::default(),
+            clear: Default::default(),
             machines_back: false,
             pin_diameter: None,
             router_depth_per_pass: Length::from_mm(1.0),
@@ -3848,8 +3863,8 @@ mod job_frame_tests {
     }
 
     fn engraving(test_cut: bool) -> StepRaw {
-        let mut s = step(&["engrave_copper"]);
-        s.engrave_copper.test_cut = test_cut;
+        let mut s = step(&["isolate_traces"]);
+        s.isolate.test_cut = test_cut;
         s
     }
 
@@ -3898,11 +3913,11 @@ mod job_frame_tests {
     /// so the board moves away from the zero in X — under steps already cut.
     #[test]
     fn adding_an_outline_step_moves_the_zero() {
-        let mut first = step(&["engrave_copper", "drill_locating_pins"]);
-        first.engrave_copper.test_cut = true;
-        first.engrave_copper.width = Length::from_mm(0.127);
+        let mut first = step(&["isolate_traces", "drill_locating_pins"]);
+        first.isolate.test_cut = true;
+        first.isolate.width = Length::from_mm(0.127);
         first.pin_diameter = Some(Length::from_mm(3.2));
-        let mut steps = vec![first, step(&["engrave_copper", "drill_pth"])];
+        let mut steps = vec![first, step(&["isolate_traces", "drill_pth"])];
         let f = fixture(2.0);
 
         let before = zero_offset(&job_frame(&steps, Some(&f)));
@@ -3956,7 +3971,7 @@ mod job_frame_tests {
     #[test]
     fn a_test_cut_without_edge_routing_opens_its_own_band() {
         let mut engrave = engraving(true);
-        engrave.engrave_copper.width = Length::from_mm(0.25);
+        engrave.isolate.width = Length::from_mm(0.25);
         let frame = job_frame(&[engrave], Some(&fixture(5.0)));
 
         assert_eq!(frame.test_band, Some(Length::from_mm(0.75)));
@@ -4002,12 +4017,12 @@ mod job_frame_tests {
     }
 
     /// **A step with the option set but no engraving claims nothing.** Every step carries a
-    /// materialised `engrave_copper` block whether or not it engraves, so reading the flag
+    /// materialised `isolate_traces` block whether or not it isolates, so reading the flag
     /// without checking the operation would open a band for a job that never cuts copper.
     #[test]
     fn a_step_that_does_not_engrave_cannot_claim_a_test_cut_band() {
         let mut drilling = step(&["drill_pth"]);
-        drilling.engrave_copper.test_cut = true;
+        drilling.isolate.test_cut = true;
         assert!(job_frame(&[drilling], Some(&fixture(2.0))).test_band.is_none());
     }
 
@@ -4093,7 +4108,7 @@ mod block_order_tests {
             body().match_indices("blocks.append(&mut copper_blocks);").map(|(at, _)| at).collect();
         assert_eq!(placements.len(), 2, "two places, before the holes or after them");
 
-        assert!(at("if !raw.engraves_after_holes()") < placements[0], "the first is the conditional one");
+        assert!(at("if !raw.copper_after_holes()") < placements[0], "the first is the conditional one");
         assert!(placements[0] < at("blocks.extend(plan_drilling("), "before the holes");
         assert!(at("blocks.extend(plan_routing(") < placements[1], "or after every hole");
         assert!(placements[1] < at("blocks.extend(plan_outline("), "and never after routing");
@@ -4166,5 +4181,406 @@ mod block_order_tests {
             order.windows(2).all(|w| w[0] < w[1]),
             "the cutout passes must precede the outline passes: {order:?}",
         );
+    }
+}
+
+/// **Whole-step plans, frozen.** A fixed board, a fixed stock and a handful of engraving
+/// steps, planned end to end and compared with what this build planned when the snapshot was
+/// taken.
+///
+/// It exists for refactors that must not move a single cut — splitting `engrave_copper` into
+/// two operations was the first — where the unit tests each pin a piece and nothing pins the
+/// sum. Every engraving step reaches `plan_step` as it would from a profile, with the
+/// isolation contours computed by `pcb` from a synthetic copper layer and held exactly as the
+/// worker would hold them, so the comparison runs the real planner rather than a model of it.
+///
+/// `K2G_BLESS=1 cargo test golden` rewrites the snapshot. Do that only for a change that is
+/// *meant* to move toolpaths, and read the diff before committing it.
+#[cfg(test)]
+mod golden_plan_tests {
+    use super::*;
+    use crate::data::model::{MachineProfile, ToolsetGenerationPolicy, ToolsetProfile};
+    use crate::runtime::isolation::Isolation;
+
+    const MM: i64 = 1_000_000;
+    const CNC: u128 = 0x0190_0000_0000_7000_8000_0000_0000_0001;
+    const FIXTURE: u128 = 0x0190_0000_0000_7000_8000_0000_0000_0002;
+    const TOOLSET: u128 = 0x0190_0000_0000_7000_8000_0000_0000_0003;
+
+    fn at(x_mm: f64, y_mm: f64) -> pcb::BoardPoint {
+        pcb::BoardPoint { x: Length::from_mm(x_mm), y: Length::from_mm(y_mm) }
+    }
+
+    fn hole(id: &str, kind: pcb::HoleKind, x: f64, y: f64, drill: f64) -> pcb::BoardHole {
+        pcb::BoardHole {
+            id: Some(id.into()),
+            plated: Some(kind == pcb::HoleKind::PadPth),
+            kind,
+            position: at(x, y),
+            drill_x: Some(Length::from_mm(drill)),
+            drill_y: Some(Length::from_mm(drill)),
+            orientation_deg: None,
+        }
+    }
+
+    /// 40 × 30 mm, two plated pad holes and one mounting hole.
+    fn board() -> pcb::BoardSnapshot {
+        pcb::BoardSnapshot {
+            name: "golden.kicad_pcb".into(),
+            thickness: Some(Length::from_mm(1.6)),
+            copper_thickness: Default::default(),
+            bounding_box: Some(pcb::BoardBoundingBox {
+                x: Length::from_mm(0.0),
+                y: Length::from_mm(0.0),
+                width: Length::from_mm(40.0),
+                height: Length::from_mm(30.0),
+            }),
+            edge_shapes: vec![pcb::BoardEdgeShape::GraphicRectangle {
+                id: Some("edge".into()),
+                top_left: at(0.0, 0.0),
+                bottom_right: at(40.0, 30.0),
+                corner_radius: None,
+            }],
+            holes: vec![
+                hole("P1", pcb::HoleKind::PadPth, 8.0, 8.0, 1.0),
+                hole("P2", pcb::HoleKind::PadPth, 8.0, 22.0, 1.0),
+                hole("M1", pcb::HoleKind::PadNpth, 32.0, 8.0, 3.2),
+            ],
+        }
+    }
+
+    fn circle(cx: f64, cy: f64, r: f64) -> Vec<(i64, i64)> {
+        (0..64)
+            .map(|n| {
+                let a = std::f64::consts::TAU * n as f64 / 64.0;
+                (((cx + r * a.cos()) * MM as f64) as i64, ((cy + r * a.sin()) * MM as f64) as i64)
+            })
+            .collect()
+    }
+
+    fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(i64, i64)> {
+        let s = |v: f64| (v * MM as f64) as i64;
+        vec![(s(x0), s(y0)), (s(x1), s(y0)), (s(x1), s(y1)), (s(x0), s(y1))]
+    }
+
+    fn feature(net: &str, outline: Vec<(i64, i64)>, holes: Vec<Vec<(i64, i64)>>) -> pcb::CopperFeature {
+        pcb::CopperFeature {
+            net: net.into(),
+            source: pcb::CopperSource::Track,
+            polygons: vec![pcb::Polygon { outline, holes }],
+        }
+    }
+
+    /// Front copper: two pads joined by a trace, in a ground pour whose clearance is a
+    /// rectangle round them — so the corridor between pour and net is uneven, which is what
+    /// leaves islands and thin copper — and, in open field on the right, two traces a little
+    /// under three channels apart, which leaves a thin strip running out into the field.
+    fn copper() -> pcb::CopperSnapshot {
+        pcb::CopperSnapshot {
+            layer_id: pcb::FRONT_COPPER,
+            features: vec![
+                feature("SIG", circle(8.0, 8.0, 0.9), Vec::new()),
+                feature("SIG", circle(8.0, 22.0, 0.9), Vec::new()),
+                feature("SIG", rect(7.8, 8.0, 8.2, 22.0), Vec::new()),
+                feature("GND", rect(2.0, 2.0, 20.0, 28.0), vec![rect(6.4, 6.4, 9.9, 23.6)]),
+                feature("C", rect(24.0, 14.0, 38.0, 14.5), Vec::new()),
+                feature("D", rect(24.0, 15.15, 38.0, 15.65), Vec::new()),
+            ],
+            warnings: Vec::new(),
+            partial: false,
+        }
+    }
+
+    fn tool(id: &str, kind: &str, diameter_mm: f64, angle_deg: f64) -> Tool {
+        Tool {
+            id: id.into(),
+            composite_name: format!("{kind} {diameter_mm}mm"),
+            name: format!("{kind} {diameter_mm}mm"),
+            kind: kind.into(),
+            diameter: Length::from_mm(diameter_mm),
+            catalog_diameter: None,
+            point_angle: units::Angle::from_degrees(angle_deg),
+            catalog_point_angle: None,
+            flute_length: Some(Length::from_mm(12.0)),
+            z_min_depth: None,
+            table_feed: None,
+            catalog_table_feed: None,
+            z_feed: None,
+            catalog_z_feed: None,
+            spindle_speed: None,
+            catalog_spindle_speed: None,
+            status: crate::data::model::ToolStatus::InStock,
+            preference: crate::data::model::ToolPreference::Neutral,
+            source_catalog: "Golden".into(),
+            manufacturer: None,
+            sku: None,
+        }
+    }
+
+    fn tools() -> Vec<Tool> {
+        vec![
+            // Reaches the default 0.25 mm minimum inside the default penetration budget, so
+            // isolation takes it rather than the flat mill below.
+            tool("v30", "V-bit", 0.2, 30.0),
+            tool("m08", "Engraver", 0.8, 180.0),
+            tool("d10", "Drillbit", 1.0, 118.0),
+            tool("d32", "Drillbit", 3.2, 118.0),
+            tool("r10", "Router", 1.0, 180.0),
+            tool("r20", "Router", 2.0, 180.0),
+        ]
+    }
+
+    fn toolset() -> ToolsetProfile {
+        ToolsetProfile {
+            id: Uuid::from_u128(TOOLSET).to_string(),
+            name: "Golden".into(),
+            description: String::new(),
+            generation_policy: ToolsetGenerationPolicy::AllowReload,
+            slots: ["v30", "m08", "d10", "d32", "r10", "r20"]
+                .iter()
+                .enumerate()
+                .map(|(i, id)| {
+                    let slot = crate::data::model::state::RackSlot {
+                        tool_id: Some((*id).to_string()),
+                        locked: true,
+                        disabled: false,
+                    };
+                    (i as u8 + 1, slot)
+                })
+                .collect(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }
+    }
+
+    fn fixture() -> FixtureProfile {
+        FixtureProfile {
+            id: Uuid::from_u128(FIXTURE).to_string(),
+            name: "Golden fixture".into(),
+            backing_board: "clamps".into(),
+            backboard_thickness: Length::from_mm(2.5),
+            bed_clearance: Length::from_mm(0.5),
+            breakthrough: Length::from_mm(0.5),
+            z_retract: Length::from_mm(5.0),
+            z_safe: Length::from_mm(20.0),
+            origin_x0: "left".into(),
+            origin_y0: "near".into(),
+            work_clearance_x: Length::from_mm(5.0),
+            work_clearance_y: Length::from_mm(5.0),
+            board_flip_axis: "y".into(),
+            origin_reference: "G55".into(),
+            pending_required_fields: Default::default(),
+            usable: true,
+        }
+    }
+
+    fn ctx() -> AppCtx {
+        let board = board();
+        let mut ctx = AppCtx::from_launch(&crate::ui::navigation::UiLaunchData {
+            kicad_status: String::new(),
+            board_snapshot: Some(board.clone()),
+            copper: Default::default(),
+        });
+        ctx.app.board = Some(board.clone());
+        ctx.stitched_board_data = Some(crate::runtime::stitch_edge_shapes(&board.edge_shapes));
+        ctx.app.tools = tools();
+        ctx.app.toolsets = vec![toolset()];
+        ctx.app.fixtures = vec![fixture()];
+        ctx.app.machines = vec![MachineProfile {
+            id: Uuid::from_u128(CNC).to_string(),
+            name: "Golden CNC".into(),
+            // A real stop, so the test-cut step plans its test cut.
+            pause_tpl: "`M0".into(),
+            ..Default::default()
+        }];
+        ctx
+    }
+
+    /// A step bound to the golden CNC, fixture and toolset, running `operations` in order.
+    fn step(name: &str, operations: &[&str]) -> StepRaw {
+        StepRaw {
+            name: name.into(),
+            operations: operations.iter().map(|op| op.to_string()).collect(),
+            cnc_id: Some(Uuid::from_u128(CNC)),
+            fixture_id: Some(Uuid::from_u128(FIXTURE)),
+            toolset_id: Some(Uuid::from_u128(TOOLSET)),
+            drill: Default::default(),
+            route_board: Default::default(),
+            route_cutouts: Default::default(),
+            isolate: Default::default(),
+            clear: Default::default(),
+            machines_back: false,
+            pin_diameter: None,
+            router_depth_per_pass: Length::from_mm(1.0),
+        }
+    }
+
+    /// The steps the snapshot covers: isolation alone and with each kind of clearing, the
+    /// test cut, and the copper work before and after the holes in a step that also routes.
+    ///
+    /// Named as they were when the snapshot was taken, under `engrave_copper` — each is the
+    /// same job expressed in the operations that replaced it, which is the point. (The
+    /// snapshot also held an "islands only" case, thin copper switched off; that option did
+    /// not survive the split, and the case was dropped with it.)
+    fn steps() -> Vec<StepRaw> {
+        let plain = step("isolate only", &["isolate_traces"]);
+
+        let islands = step("islands and thin copper", &["isolate_traces", "clear_copper"]);
+
+        let mut test_cut = step("with test cut", &["isolate_traces", "clear_copper"]);
+        test_cut.isolate.test_cut = true;
+
+        let mut mill = step("with mill clearing", &["isolate_traces", "clear_copper"]);
+        mill.clear.strategy = crate::runtime::tooling::ClearStrategy::NarrowerThan;
+        mill.clear.threshold = Length::from_mm(2.0);
+        mill.clear.mop_up = true;
+
+        let before = step(
+            "engrave, drill, route",
+            &["isolate_traces", "clear_copper", "drill_pth", "drill_npth", "route_board"],
+        );
+        let after = step(
+            "drill, engrave, route",
+            &["drill_pth", "drill_npth", "isolate_traces", "clear_copper", "route_board"],
+        );
+
+        vec![plain, islands, test_cut, mill, before, after]
+    }
+
+    /// Holds the contours `raw` will ask for, worked out the way the isolation worker does.
+    fn hold_isolation(ctx: &mut AppCtx, raw: &StepRaw) {
+        if !raw.isolates_traces() {
+            return;
+        }
+        let toolset = ctx.app.toolsets[0].clone();
+        let board = ctx.app.board.clone().unwrap();
+        let (thickness, _) = crate::runtime::tooling::copper_thickness(Some(&board), raw.machines_back);
+        let choice = pick_engraver(
+            &ctx.app.tools,
+            &toolset,
+            raw.isolate.width,
+            thickness,
+            PenetrationBudget::current(),
+        )
+        .expect("the golden stock has a bit for the golden width");
+        let mill = raw
+            .mills_narrow_copper()
+            .then(|| pick_clearing_mill(&ctx.app.tools, &toolset, raw.clear.threshold))
+            .flatten()
+            .and_then(|id| ctx.app.tools.iter().find(|t| t.id == id).map(|t| t.diameter));
+        let spec = isolation_spec(&board, ctx.board_epoch, raw, &choice, mill);
+
+        let copper = copper();
+        let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
+        let clearing = if spec.remove_islands {
+            pcb::islands(&copper, &result.contours, spec.width_nm, spec.remove_thin_copper)
+        } else {
+            pcb::Clearing::default()
+        };
+        let mill_clearing = if spec.clear_narrow_copper && spec.clearing_mill_diameter_nm > 0 {
+            pcb::clear_narrow_copper(
+                &copper,
+                &result.contours,
+                spec.clearing_threshold_nm,
+                spec.clearing_mill_diameter_nm,
+                spec.clearing_guard_band_nm,
+                &clearing.paths,
+                spec.width_nm,
+            )
+        } else {
+            pcb::Clearing::default()
+        };
+        ctx.isolation.ready.insert(
+            spec.layer_id,
+            Arc::new(Isolation {
+                spec,
+                result,
+                copper_warnings: Vec::new(),
+                copper_layer_count: 2,
+                clearing,
+                mill_clearing,
+            }),
+        );
+    }
+
+    /// Every golden step's plan.
+    fn plans() -> Vec<StepPlan> {
+        steps()
+            .iter()
+            .map(|raw| {
+                let mut ctx = ctx();
+                hold_isolation(&mut ctx, raw);
+                let frame = job_frame(std::slice::from_ref(raw), frame_fixture(&ctx, std::slice::from_ref(raw)));
+                plan_step(&ctx, 0, raw, 0.0, &frame)
+            })
+            .collect()
+    }
+
+    /// FNV-1a over `text`: a stable fingerprint, the same on every build and platform, which
+    /// `DefaultHasher` does not promise.
+    fn fingerprint(text: &str) -> u64 {
+        text.bytes()
+            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ byte as u64).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    /// The snapshot: per step, each block's tool, op count, the sources of its first and last
+    /// ops, its travel and a fingerprint of its whole plan; then the step's notes.
+    ///
+    /// A fingerprint rather than the plan itself: the full text is megabytes of coordinates,
+    /// too big to keep in the repository and unreadable as a diff. The summary says *which*
+    /// block moved; `{:#?}` of that block, before and after, says how.
+    fn render() -> String {
+        let mut out = String::new();
+        for plan in plans() {
+            out.push_str(&format!("===== {} =====\n", plan.name));
+            for block in &plan.blocks {
+                out.push_str(&format!(
+                    "block {} slot {:?}: {} ops, {} .. {}, travel {:.3} mm, plan {:016x}\n",
+                    block.tool_id,
+                    block.slot,
+                    block.ops.len(),
+                    block.ops.first().map_or("-", |op| op.source.as_str()),
+                    block.ops.last().map_or("-", |op| op.source.as_str()),
+                    block.travel_mm,
+                    fingerprint(&format!("{block:?}")),
+                ));
+            }
+            for note in &plan.notes {
+                out.push_str(&format!("note: {note}\n"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn golden_step_plans_are_unchanged() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runtime/testdata/golden_plans.txt");
+        let now = render();
+        if std::env::var("K2G_BLESS").is_ok_and(|v| v == "1") || !path.exists() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &now).unwrap();
+            return;
+        }
+        let then = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        if then != now {
+            let line = then.lines().zip(now.lines()).position(|(a, b)| a != b).unwrap_or(0);
+            panic!(
+                "the golden plans moved, first at line {}:\n  was: {}\n  now: {}\n\
+                 Re-bless with K2G_BLESS=1 only if the change is meant to move toolpaths.",
+                line + 1,
+                then.lines().nth(line).unwrap_or("<end>"),
+                now.lines().nth(line).unwrap_or("<end>"),
+            );
+        }
+    }
+
+    /// The fixture has to exercise what it claims to, or a frozen nothing passes forever.
+    #[test]
+    fn the_golden_steps_engrave_clear_and_drill() {
+        let text = render();
+        assert!(text.contains("Depth test cut"), "the test cut step has one");
+        assert!(text.contains("island"), "islands and thin copper are cleared");
+        assert!(text.contains("clearing"), "the mill clears");
+        assert!(text.contains("P1") && text.contains("M1"), "holes are drilled");
     }
 }

@@ -122,7 +122,9 @@ pub enum ProductionOperation {
     DrillNpth,
     RouteBoard,
     RouteCutouts,
-    EngraveCopper,
+    /// `isolate_traces`. Copper clearing has no variant: this projection decides nothing
+    /// about it, and the operation is read from the document wherever it matters.
+    IsolateTraces,
 }
 
 impl ProductionOperation {
@@ -134,7 +136,7 @@ impl ProductionOperation {
             Self::RouteBoard,
             Self::RouteCutouts,
             Self::DrillLocatingPins,
-            Self::EngraveCopper,
+            Self::IsolateTraces,
         ]
     }
 
@@ -145,7 +147,7 @@ impl ProductionOperation {
             Self::DrillNpth => "Drill Non-Plated Through Holes (NPTH)",
             Self::RouteBoard => "Cut Board Outline",
             Self::RouteCutouts => "Route Interior Cutouts",
-            Self::EngraveCopper => "Engrave Copper Isolation",
+            Self::IsolateTraces => "Isolate Traces",
         }
     }
 }

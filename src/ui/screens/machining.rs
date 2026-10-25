@@ -523,7 +523,7 @@ fn StepCard(
                 // is held. Hidden only for a step that engraves and nothing else, which is
                 // the one step no router ever touches (any drill operation may mill a hole
                 // its drills cannot make).
-                if enabled_ops.iter().any(|op| op != "engrave_copper") {
+                if enabled_ops.iter().any(|op| op != "isolate_traces" && op != "clear_copper") {
                     SchemaField { id, ptr: format!("/steps/{index}/router_depth_per_pass") }
                 }
 

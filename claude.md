@@ -129,7 +129,7 @@ Startup in `main.rs`, in order:
 2. The **job** is a singleton (`job.yaml`) that names one **machining profile**.
    - A machining profile is an ordered list of **steps**. Each step is one physical
      setup: exactly one CNC, one fixture and one toolset, plus its operations.
-   - The operations are `engrave_copper`, `drill_locating_pins`, `drill_pth`, `drill_npth`,
+   - The operations are `isolate_traces`, `clear_copper`, `drill_locating_pins`, `drill_pth`, `drill_npth`,
      `route_cutouts` and `route_board`.
    - A step with a missing binding is refused by name, never given a default.
    - The runtime still keeps a step-0 projection (`JobProfile`) for older code paths.

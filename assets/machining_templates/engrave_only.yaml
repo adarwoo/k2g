@@ -5,7 +5,7 @@
 # re-cut because the first came out too shallow, or the copper half of a job whose drilling
 # happens on a press.
 #
-# It is also the profile to prove a V-bit with. `engrave_copper.test_cut` is left at the
+# It is also the profile to prove a V-bit with. `isolate_traces.test_cut` is left at the
 # schema default (off); turning it on cuts a short L in the waste at the exact depth the
 # pass will use and stops, so the channel width can be measured with a loupe before any
 # copper is touched — see `gcode::testcut`. That check is worth more here than anywhere
@@ -22,7 +22,7 @@
 # `AppData::create_from_template`).
 
 $schema: machining.yaml
-schema_version: 3
+schema_version: 4
 
 name: "Single sided — engrave only"
 
@@ -30,4 +30,5 @@ steps:
   - name: "Engrave"
     board_face: front
     operations:
-      - engrave_copper
+      - isolate_traces
+      - clear_copper

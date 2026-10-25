@@ -1,6 +1,6 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 $id: "machining.yaml"
-x-schema-version: 3
+x-schema-version: 4
 type: object
 
 # ---------------------------------------------------------------------------
@@ -28,16 +28,18 @@ $defs:
   # both the editor and the readiness gate consult. Keep the two in step — a test
   # asserts they match, in order.
   # In the order a board is made in, mirroring `MACHINING_OPERATIONS` in
-  # `src/data/model/operations.rs`: engraving, pins, PTH, NPTH, cutouts, outline.
-  # That is the DEFAULT order — where an added operation lands — not the only one.
-  # A step's `operations` array is run in its own order, which the operator may
-  # change within the rules in `order_fault` (same file): the outline last, the
-  # cutouts before it, the holes together in this order. The free choice those
-  # rules leave is engraving before the holes or after them.
+  # `src/data/model/operations.rs`: isolation, copper clearing, pins, PTH, NPTH,
+  # cutouts, outline. That is the DEFAULT order — where an added operation lands —
+  # not the only one. A step's `operations` array is run in its own order, which
+  # the operator may change within the rules in `order_fault` (same file): the
+  # outline last, the cutouts before it, the holes together in this order, and
+  # copper clearing straight after the isolation it clears for. The free choice
+  # those rules leave is the copper work before the holes or after them.
   operation_key:
     type: string
     enum:
-      - engrave_copper
+      - isolate_traces
+      - clear_copper
       - drill_locating_pins
       - drill_pth
       - drill_npth
@@ -419,8 +421,14 @@ $defs:
     additionalProperties: false
 
   # -------------------------------------------------------------------------
-  # engrave_copper — isolation routing: separate the nets by cutting a channel
+  # isolate_traces — isolation routing: separate the nets by cutting a channel
   # round every piece of copper.
+  #
+  # Once half of a single `engrave_copper` operation, which also carried every
+  # copper-clearing option. Split (schema v4) because the two are different
+  # work with different tools: this cuts the channels, `clear_copper` below
+  # takes out copper the channels leave. `normalize_step_value` splits an old
+  # step on load.
   #
   # The board starts as solid copper and this takes a groove out around each
   # net, leaving its traces standing as islands. So the width is the only thing
@@ -480,16 +488,11 @@ $defs:
   # for that face, since a two-ounce front over a one-ounce back is a real
   # board.
   # -------------------------------------------------------------------------
-  engrave_copper:
+  isolate_traces:
     type: object
     default:
       width: 0.15mm
       test_cut: false
-      remove_islands: true
-      remove_thin_copper: true
-      clear_narrow_copper: false
-      clearing_threshold: 2mm
-      clearing_guard_band: 0.2mm
     properties:
       width:
         title: Minimum isolation width
@@ -599,175 +602,98 @@ $defs:
           re-zero after changing it. Needs a CNC profile whose pause really stops.
         type: boolean
         default: false
-      # -----------------------------------------------------------------------
-      # remove_islands — take out the copper the isolation pass leaves stranded.
-      #
-      # The pass cuts a channel round each net and nothing else. Where two nets
-      # sit further apart than twice the channel, the copper between the two
-      # channels survives: a strip on no net that exists on no layer of the
-      # design, which solder will bridge. Fully enclosed by what the pass cut, it
-      # is an ISLAND — and the commonest one by far is the ring of copper the
-      # clearance of a ground pour leaves standing round every trace in it.
-      #
-      # ON BY DEFAULT because it is opportunist and nearly free: the bit is
-      # already in the spindle, already at the right depth, and an island is
-      # bounded to three channels wide, which is three or four more passes of a
-      # tool that has nothing else to do. There is no rack slot to pay and no
-      # tool change. A V-bit is a perfectly good copper-clearing tool at this
-      # size — a cone cuts full width AT THE SURFACE, and copper only exists at
-      # the surface, so two grooves a channel apart leave nothing between them.
-      #
-      # It is only a poor one for LARGE areas, where the pass count is the
-      # problem, and that is a different question with a different answer: a
-      # router, a rack slot, and a threshold at which loading one is worth it.
-      # None of that is asked here. Copper too wide for the bound is left alone
-      # and its width reported in the step notes, which is the number that says
-      # what a router would buy.
-      #
-      # WHAT IT DOES NOT DO: copper that runs out into the surrounding field
-      # rather than closing into a ring is not an island — the strips between the
-      # pads of an SO8 on a board with no pour, for instance. Those are the same
-      # copper and want the same treatment, but they are found by a different
-      # question (how thin is this PART of the field) and that option is not
-      # built yet.
-      #
-      # Net copper is never touched, whatever this is set to: the region is
-      # derived by subtracting every piece of copper the design drew, so it
-      # cannot contain any. Nor does a clearing cut ever form an edge that
-      # matters electrically — every wall that does was already cut by the
-      # channel round it.
-      # -----------------------------------------------------------------------
-      remove_islands:
-        title: Remove islands
+    required: [width]
+    additionalProperties: false
+
+  # -------------------------------------------------------------------------
+  # clear_copper — take out copper the isolation channels leave standing.
+  #
+  # The pass that cuts a channel round each net leaves everything else: the
+  # islands between two channels that never closed, and the thin strips that
+  # run out into the field between two close channels. Copper like that is on
+  # no net and exists on no layer of the design, and a strip thin enough lifts
+  # off and shorts two nets.
+  #
+  # Needs `isolate_traces` in the same step, directly before it: it clears
+  # relative to the channels that pass cut, with the bit that cut them, and the
+  # two move together in the step's order (`order_fault`).
+  #
+  # Net copper is never touched, whatever is set here: the region is derived by
+  # subtracting every piece of copper the design drew, so it cannot contain any.
+  #
+  # TWO STRATEGIES, one per tool:
+  #
+  # `islands_and_strips` — opportunist, with the isolation bit already in the
+  # spindle, at its depth, costing no tool change. Islands, and the thin parts
+  # of copper running into the field, up to three channels wide
+  # (`pcb::islands`). A V-bit is a perfectly good copper-clearing tool at that
+  # size: a cone cuts full width AT THE SURFACE, and copper only exists at the
+  # surface. Wider copper is left and its width reported in the step notes.
+  #
+  # `narrower_than` — a genuine milling bit loaded for the job, clearing free
+  # copper up to `threshold` (`pcb::clear_narrow_copper`). The bit is the
+  # largest milling bit in stock no wider than the threshold; only
+  # `type: engraver` (labelled "Milling") tools are eligible. It keeps
+  # `guard_band` from every net on top of never overlapping one, because unlike
+  # the isolation bit it clears independently of the channel. Cut at the
+  # isolation depth: both only have to sever the copper at the surface.
+  # `mop_up` first lets the isolation bit take the islands and thin strips —
+  # the slivers a mill is often too wide to enter — so the mill only does the
+  # area work. A step that stocks no suitable mill skips the mill pass and says
+  # so, rather than refusing the step.
+  # -------------------------------------------------------------------------
+  clear_copper:
+    type: object
+    default:
+      strategy: islands_and_strips
+      threshold: 2mm
+      guard_band: 0.2mm
+      mop_up: true
+    properties:
+      strategy:
+        title: What to clear
         description: >-
-          Take out the copper the pass leaves stranded between two channels.
-          Cutting a channel round each net leaves everything else standing, so
-          where two nets are further apart than twice the channel the copper
-          between them survives as an island that is on no net and exists on no
-          layer of the design — solder will bridge it. Most often it is the ring
-          a pour clearance leaves round a trace. This removes the ones the
-          engraver can reach cheaply: an island nowhere wider than three
-          channels, cut by the bit already in the spindle at the depth it is
-          already running, costing no tool change. Wider copper is left alone,
-          and how wide it was is reported in the step notes. Copper that runs
-          out into the surrounding field instead of closing into a ring is not
-          an island — see Remove thin copper below.
-        type: boolean
-        default: true
-      # -----------------------------------------------------------------------
-      # remove_thin_copper — the same, for free copper that is not enclosed.
-      #
-      # An island is one shape the danger takes. Free copper that runs out into
-      # the surrounding field can be just as thin where it passes between two
-      # channels — the strip between the pads of an SO8, the sliver a trace's
-      # channel leaves beside a pad's — and a strip that thin lifts off and lies
-      # across two nets as readily as an island does.
-      #
-      # Same bound, same bit, same pass: the THIN PARTS of free copper, wherever
-      # they are, up to three channels wide (`pcb::islands` with `thin`). Wider
-      # copper, and the field the thin part joins, are left standing; the cut is
-      # free to run out into them because they are on no net either.
-      #
-      # Shown only with `remove_islands` on: every island the engraver takes is
-      # thin copper too, so this extends that option rather than standing beside
-      # it, and on its own it would be a second way to ask for the first.
-      #
-      # ON BY DEFAULT for `remove_islands`'s reason — the bit is in the spindle
-      # and the cost is a few more passes — with one difference worth knowing:
-      # it reaches into the field round every component, so it adds more cutting
-      # than island removal does on a board without a ground pour.
-      # -----------------------------------------------------------------------
-      remove_thin_copper:
-        title: Remove thin copper
-        description: >-
-          Also take out free copper that runs out into the surrounding copper
-          instead of closing into an island, wherever it is thin — the strip
-          left between two close channels, the sliver beside a pad. Thin copper
-          can lift off and short two nets as easily as an island. Same bound as
-          for islands (three channels wide) and the same bit, already in the
-          spindle; the wider copper it joins is left standing.
-        type: boolean
-        default: true
-        x-show-when: { remove_islands: [true] }
-      # -----------------------------------------------------------------------
-      # clear_narrow_copper / clearing_threshold / clearing_guard_band — take out
-      # free copper up to an operator-set width, with a dedicated milling cutter.
-      #
-      # `remove_islands` above is opportunist and bounded to three channels wide
-      # because it reuses the V-bit already in the spindle — going wider costs
-      # passes on a tool built for a fine channel, not for area clearing. This is
-      # the different question `remove_islands`'s own note names and declines to
-      # answer: a genuine milling bit, loaded for the job, clearing free copper up
-      # to whatever width the operator judges worth the rack slot.
-      #
-      # OFF BY DEFAULT, unlike `remove_islands`: it costs a real tool change and a
-      # rack slot, where island removal costs neither. A step that turns it on but
-      # stocks no milling bit narrow enough for the threshold simply skips the
-      # pass and says so in the step notes — it does not refuse the step, since
-      # the isolation channel and everything else the step does are unaffected.
-      #
-      # The bit is chosen the way a slot router is: the largest milling bit in
-      # stock no wider than `clearing_threshold`, since among bits that fit, the
-      # largest clears fastest and needs the fewest passes. Only `type: engraver`
-      # (labelled "Milling" — see the catalogue) tools are eligible; a V-bit is
-      # deliberately excluded even though its tip could technically reach, because
-      # the whole point of this pass is a tool built for area clearing rather than
-      # for a fine channel.
-      #
-      # `clearing_guard_band` is the cross-cutting safety margin this pass keeps
-      # from every piece of net copper, ON TOP OF never overlapping it. Unlike
-      # `remove_islands`, which only ever sweeps ground the isolation channel has
-      # already walled off, this pass clears copper independently of that
-      # channel — so its own margin has to be stated rather than inherited. It is
-      # a flat number, not a per-net-class DRC lookup: a single, cross-cutting
-      # clearance the operator sets once, not a rule engine reading the design's
-      # own clearance table. Set it to at least the isolation channel width; a
-      # smaller number gives this pass licence to come closer to a net than the
-      # isolation V-bit itself was trusted to.
-      #
-      # Cut at the SAME depth as the isolation channel, whatever the milling
-      # bit's own rating: both passes only have to sever the copper at the
-      # surface, and the isolation depth already does that reliably. There is no
-      # separate depth to solve for, unlike the V-bit's own width-to-depth
-      # relationship.
-      # -----------------------------------------------------------------------
-      clear_narrow_copper:
-        title: Clear narrow copper with a mill
-        description: >-
-          Take out free copper up to the threshold below, with a dedicated
-          milling cutter rather than the isolation bit. Where `remove_islands` is
-          opportunist and bounded to three channels wide because it reuses the
-          bit already in the spindle, this loads a genuine milling bit and clears
-          up to whatever width is judged worth the rack slot. Off by default
-          because, unlike island removal, it costs a real tool change. A step
-          that stocks no milling bit narrow enough for the threshold skips the
-          pass and says so, rather than refusing the step.
-        type: boolean
-        default: false
-      clearing_threshold:
+          Islands and thin strips: the copper the channels leave stranded, up to
+          three channels wide, cut by the isolation bit already in the spindle at
+          no tool change. Everything narrower than a width: free copper up to the
+          width below, cut by a milling bit from stock, which costs a tool change
+          and a rack slot.
+        type: string
+        enum: [islands_and_strips, narrower_than]
+        x-enum-labels: ["Islands and thin strips", "Everything narrower than a width"]
+        default: islands_and_strips
+      threshold:
         title: Clear copper narrower than
         description: >-
-          Free copper narrower than this is cleared by the milling pass; wider
+          Free copper narrower than this is cleared by the milling bit; wider
           copper is left alone. Set from how much stranded copper is acceptable
-          on the finished board, not from the mill's own diameter — the largest
-          in-stock milling bit no wider than this is chosen automatically, and
-          copper narrower than the threshold but too narrow for that bit to enter
-          is reported rather than silently left.
+          on the finished board, not from the bit's own diameter — the largest
+          milling bit in stock no wider than this is chosen, and copper narrower
+          than the threshold but too narrow for that bit to enter is reported
+          rather than silently left.
         $ref: "units.yaml#/$defs/size"
         default: 2mm
-      clearing_guard_band:
+        x-show-when: { strategy: [narrower_than] }
+      guard_band:
         title: Clearing safety margin
         description: >-
-          How close the milling pass may come to any net copper, on top of never
-          overlapping it. This pass clears copper independently of the isolation
-          channel, so — unlike island removal, which only ever sweeps ground that
-          channel already walled off — its own margin from a net has to be
-          stated rather than inherited. Set it to at least the isolation width;
-          a smaller number lets this pass approach a net more closely than the
-          isolation bit itself was trusted to.
+          How close the milling bit may come to any net copper, on top of never
+          overlapping it. Set it to at least the isolation width; a smaller number
+          lets the mill approach a net more closely than the isolation bit itself
+          was trusted to.
         $ref: "units.yaml#/$defs/size"
         default: 0.2mm
-    required: [width]
+        x-show-when: { strategy: [narrower_than] }
+      mop_up:
+        title: Islands and thin strips with the isolation bit first
+        description: >-
+          Before the milling bit, let the isolation bit — already in the spindle —
+          take the islands and thin strips, which a mill is often too wide to
+          enter. The mill then only does the wider copper.
+        type: boolean
+        default: true
+        x-show-when: { strategy: [narrower_than] }
+    required: [strategy]
     additionalProperties: false
 
   # -------------------------------------------------------------------------
@@ -991,16 +917,19 @@ $defs:
       # it. A CNC template reading `steps[step_index].mill_board.*` must become
       # `.route_board.*`.
 
-      engrave_copper:
-        $ref: "#/$defs/engrave_copper"
+      isolate_traces:
+        $ref: "#/$defs/isolate_traces"
         default:
           width: 0.25mm
           test_cut: false
-          remove_islands: true
-          remove_thin_copper: true
-          clear_narrow_copper: false
-          clearing_threshold: 2mm
-          clearing_guard_band: 0.2mm
+
+      clear_copper:
+        $ref: "#/$defs/clear_copper"
+        default:
+          strategy: islands_and_strips
+          threshold: 2mm
+          guard_band: 0.2mm
+          mop_up: true
 
     # The bindings are deliberately NOT required: absent means "no profile chosen",
     # which is where a freshly added step starts and a state the operator may leave it
@@ -1012,8 +941,8 @@ $defs:
 properties:
   schema_version:
     type: integer
-    const: 3
-    default: 3
+    const: 4
+    default: 4
 
   id:
     description: Unique machining profile ID.

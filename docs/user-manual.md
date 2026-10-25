@@ -557,9 +557,11 @@ of play.
 
 This step must be first and must be on the front face; see §12.
 
-### Engrave copper isolation
+### Isolate traces
 
 Isolation routing: cut a channel around every piece of copper so the nets separate.
+Clearing the copper those channels leave is a separate operation, **Clear copper**,
+below.
 
 The main setting is **isolation width** — an electrical decision, not a tooling one.
 Wider is better isolated and slower to cut. The V-bit is chosen to suit and the depth
@@ -631,49 +633,50 @@ program runs straight past is not a test. Watch out for `M01` — that is an *op
 stop, and a controller with optional-stop switched off runs past it. All the bundled
 profiles use `M0`/`M00`.
 
-#### Remove islands
+### Clear copper
 
-**On by default.** The pass cuts a channel round each net and nothing else, so where two
-nets sit further apart than twice the channel, the copper *between* the two channels
-survives — a strip on no net, which exists on no layer of the design and which solder will
-happily bridge. Enclosed by what the pass cut, it is an **island**. The commonest one by
-far is the ring of copper a ground pour's clearance leaves standing round every trace in
-it: two channels, one either side, and whatever they cannot meet across is left floating.
+Take out the copper the isolation channels leave standing. It has to come **straight after
+Isolate traces** in the same step: it clears relative to the channels that pass cut, with the
+bit it leaves in the spindle. The two move together when you reorder the step, and *Clear
+copper* cannot be added to a step without isolation, nor isolation removed from under it.
 
-This takes them out with the bit already in the spindle, at the depth it is already
-running — no tool change, no rack slot, three or four more passes. That is why it is on by
-default and why it is bounded: an island wider than three channels is left alone, because
-clearing copper at that size is a router's job, and loading a router is a decision with a
-cost. The step's notes say how many were removed and how wide the widest one left was,
-which is the number that says what a router would buy.
+Copper on a net is never touched, whatever is set here.
 
-A V-bit is a perfectly good tool for this at this size. A cone cuts its full width *at the
-surface*, and copper only exists at the surface, so two grooves a channel apart leave
-nothing between them; the ridge they leave stands in the laminate below, where nothing is
-being separated. It is only a poor tool for *large* areas, where the number of passes is
-the problem.
+**What to clear** picks the work, and with it the tool:
 
-Copper on a net is never touched, whatever this is set to. Where the channel beside an
-island had to narrow, the bit may not be able to reach all of that island without touching
-the net on the far side — that copper is left and the notes say how much of it there is.
+#### Islands and thin strips (default)
 
-Copper that runs out into the surrounding field rather than closing into a ring is not an
-island. That is what the next option is for.
+The isolation pass cuts a channel round each net and nothing else, so where two nets sit
+further apart than twice the channel, the copper *between* the two channels survives — a
+strip on no net, which exists on no layer of the design and which solder will happily
+bridge. Enclosed by what the pass cut, it is an **island**; the commonest is the ring a
+ground pour's clearance leaves round every trace in it. Where it runs out into the
+surrounding field instead — the strips between the pads of an SO8 on a board with no pour,
+the sliver beside a pad — it is a **thin strip**, and just as likely to lift off and short
+two nets.
 
-#### Remove thin copper
+This takes both out with the isolation bit already in the spindle, at the depth it is
+already running — no tool change, no rack slot. It is bounded to copper no wider than three
+channels, because clearing more than that is a mill's job. A V-bit is a perfectly good tool
+at this size: a cone cuts its full width *at the surface*, and copper only exists at the
+surface. The step's notes count islands and thin strips separately, and say how wide the
+widest copper left was — the number that says what a mill would buy.
 
-**On by default**, and offered only while *Remove islands* is on. The strips between the
-pads of an SO8 on a board with no pour, or the sliver a trace's channel leaves beside a
-pad's, are the same danger as an island — thin enough to lift off and lie across two nets —
-but they are one piece with the field around them, so *Remove islands* never finds them.
-This takes the **thin parts** of that copper, wherever they are: anything narrower than
-three channels where it passes between two of them, by the same bit in the same pass. The
-wider copper the strip joins is left standing, and the cut is free to run out into it,
-because it is on no net either.
+Where the channel beside an island had to narrow, the bit may not be able to reach all of it
+without touching the net on the far side; that copper is left and the notes say how much.
 
-It adds more cutting than island removal does on a board without a ground pour, because it
-reaches into the field round every component. The step's notes count islands and thin
-strips separately.
+#### Everything narrower than a width
+
+Free copper up to the width you set, cut by a **milling bit** from stock — the largest
+milling bit no wider than that width. It costs a tool change and a rack slot. It keeps the
+**clearing safety margin** from every net, on top of never overlapping one: set that to at
+least the isolation width. Copper narrow enough to qualify but too narrow for the bit to
+enter is reported, not silently left.
+
+**Islands and thin strips with the isolation bit first** (on by default) lets the isolation
+bit — already in the spindle — take the slivers a mill is often too wide to enter, so the
+mill only does the wider copper. A step that stocks no suitable milling bit skips the mill
+pass and says so in its notes.
 
 ---
 

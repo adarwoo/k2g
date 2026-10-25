@@ -23,7 +23,7 @@
 # releases the part last.
 
 $schema: machining.yaml
-schema_version: 3
+schema_version: 4
 
 name: "Single sided — drill and cut edges"
 

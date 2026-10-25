@@ -1,6 +1,6 @@
 # Isolate the copper, drill the holes, then cut the board out — the whole job in one step.
 #
-# The same set as `drill_and_cut_out` with `engrave_copper` added in front. Kept as a
+# The same set as `drill_and_cut_out` with `isolate_traces` and `clear_copper` added in front. Kept as a
 # separate template rather than as the default because it needs something the drill-and-cut
 # profile does not: **a V-bit in stock**. Without one the planner refuses rather than
 # emitting a program that cannot be cut, which is correct but is a poor first experience —
@@ -21,7 +21,7 @@
 # insurance there is — see `gcode::testcut`.
 
 $schema: machining.yaml
-schema_version: 3
+schema_version: 4
 
 name: "Single sided — engrave, drill and cut edges"
 
@@ -29,7 +29,8 @@ steps:
   - name: "Engrave, drill and cut edges"
     board_face: front
     operations:
-      - engrave_copper
+      - isolate_traces
+      - clear_copper
       - drill_pth
       - drill_npth
       - route_board

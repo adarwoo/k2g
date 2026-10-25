@@ -2638,7 +2638,7 @@ fn default_operation_setup_value(op: ProductionOperation) -> Value {
             "island_tab": "4%",
             "drill_sharp_corners": true,
         }),
-        ProductionOperation::EngraveCopper => json!({
+        ProductionOperation::IsolateTraces => json!({
             "enabled": false,
             "width": "0.25mm",
         }),
@@ -2799,7 +2799,7 @@ fn operation_to_key(operation: ProductionOperation) -> &'static str {
         ProductionOperation::DrillNpth => "drill_npth",
         ProductionOperation::RouteBoard => "route_board",
         ProductionOperation::RouteCutouts => "route_cutouts",
-        ProductionOperation::EngraveCopper => "engrave_copper",
+        ProductionOperation::IsolateTraces => "isolate_traces",
     }
 }
 
@@ -2816,7 +2816,10 @@ fn operation_from_key(value: &str) -> Option<ProductionOperation> {
         // operation the board actually gets, rather than resolving to nothing and
         // leaving the profile with an empty operation set.
         "mill_board" => Some(ProductionOperation::RouteBoard),
-        "engrave_copper" => Some(ProductionOperation::EngraveCopper),
+        "isolate_traces" => Some(ProductionOperation::IsolateTraces),
+        // Retired by the v4 split (`split_engrave_copper` rewrites it on load); an alias for
+        // the same reason `mill_board` is one, just above.
+        "engrave_copper" => Some(ProductionOperation::IsolateTraces),
         _ => None,
     }
 }
