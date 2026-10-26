@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Read-only unless a job says otherwise. Without this every job runs with the repository's
+# default token, which may be read-write, and none of these jobs writes anything: a build or
+# a test step compromised through a dependency should not be holding a token that can push.
+# (CodeQL's actions/missing-workflow-permissions.)
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
