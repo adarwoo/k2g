@@ -1766,6 +1766,20 @@ select:disabled {
     background: color-mix(in srgb, var(--err) 14%, var(--bg-elev));
 }
 
+/* Status is a button now — one click flips it — wearing the drop-down's pill, so the
+   column reads the same as preference beside it. A button does not inherit the page font
+   the way a select does, and has no arrow to say it acts, hence the cursor. */
+.stock-status-toggle {
+    font: inherit;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.stock-status-toggle:hover {
+    filter: brightness(1.15);
+}
+
 /* Preference, in the same shape as status beside it. Both classes are named because
    the bare `.status-*` chip rules further down the sheet set colour and background but
    no border — reusing them alone would tint the fill and leave a grey border, and a

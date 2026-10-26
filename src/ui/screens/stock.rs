@@ -926,18 +926,35 @@ pub fn StockScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
                                                     }
                                                 }
                                                 td {
-                                                    select {
-                                                        class: "stock-inline-select {tool.status.class_name()}",
-                                                        value: tool_status_value(tool.status),
-                                                        ondoubleclick: move |evt| evt.stop_propagation(),
-                                                        onchange: move |evt| {
-                                                            crate::ui::bindings::set_stock_availability(
-                                                                row_index,
-                                                                evt.value() == "in-stock",
-                                                            );
-                                                        },
-                                                        option { value: "in-stock", "In stock" }
-                                                        option { value: "out-of-stock", "Out of stock" }
+                                                    // One click flips it. Status has exactly two states,
+                                                    // and a drop-down made the common act — a tool broke,
+                                                    // or a new one arrived — two clicks and a read of a
+                                                    // menu. The button shows the state it is in, in the
+                                                    // same green/red the drop-down was; the tooltip says
+                                                    // what a click will do.
+                                                    {
+                                                        let in_stock = tool.status == ToolStatus::InStock;
+                                                        let hint = if in_stock {
+                                                            "In stock — click to mark it out of stock"
+                                                        } else {
+                                                            "Out of stock — click to mark it in stock"
+                                                        };
+                                                        rsx! {
+                                                            button {
+                                                                r#type: "button",
+                                                                class: "stock-inline-select stock-status-toggle {tool.status.class_name()}",
+                                                                title: "{hint}",
+                                                                "aria-pressed": if in_stock { "true" } else { "false" },
+                                                                // The row's double-click opens the tool; without
+                                                                // this, a quick second click would also open it.
+                                                                ondoubleclick: move |evt| evt.stop_propagation(),
+                                                                onclick: move |evt| {
+                                                                    evt.stop_propagation();
+                                                                    crate::ui::bindings::set_stock_availability(row_index, !in_stock);
+                                                                },
+                                                                "{tool.status.label()}"
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -975,16 +992,9 @@ fn describe_addition(outcome: crate::ui::bindings::StockAddition) -> String {
     }
 }
 
-fn tool_status_value(status: ToolStatus) -> &'static str {
-    match status {
-        ToolStatus::InStock => "in-stock",
-        ToolStatus::OutOfStock => "out-of-stock",
-    }
-}
-
 /// The `<option>` value for a preference — the schema's own storage key, so the value
-/// the DOM carries is the value written. Status has three spellings of one enum
-/// (`in_stock` stored, `in-stock` in the DOM, "In stock" shown); this adds no fourth.
+/// the DOM carries is the value written, and no second spelling of the enum is invented
+/// for the page.
 fn tool_preference_value(preference: ToolPreference) -> &'static str {
     match preference {
         ToolPreference::Preferred => "preferred",

@@ -2713,7 +2713,7 @@ dependencies = [
 
 [[package]]
 name = "k2g"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",

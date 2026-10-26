@@ -10,6 +10,14 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-10-26 — *router-fit*
+
+A router the size of a hole now makes it, and stock status is one click.
+
+### Changed
+- **Stock status toggles with one click.** The *In stock* / *Out of stock* drop-down in the
+  Stock list is now a button: click it to flip the tool to the other state.
+
 ### Fixed
 - **A router the size of a hole now makes it.** A router whose diameter is within a round
   hole's size allowance, the same allowance a drill must meet, now plunges the hole when
@@ -362,7 +370,8 @@ Job and profile ownership migration, and summary updates.
 
 Processing schema, UI and persistence brought into step.
 
-[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.17.0-spacemouse...HEAD
+[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.17.1-router-fit...HEAD
+[0.17.1]: https://github.com/adarwoo/k2g/compare/v0.17.0-spacemouse...v0.17.1-router-fit
 [0.17.0]: https://github.com/adarwoo/k2g/compare/v0.16.0-clearing...v0.17.0-spacemouse
 [0.16.0]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...v0.16.0-clearing
 [0.15.0]: https://github.com/adarwoo/k2g/compare/v0.14.0-first-board...v0.15.0-templates
