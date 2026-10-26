@@ -559,23 +559,43 @@ fn build_candidates<'a>(
             }
         }
 
-        // Router fallback: any router strictly smaller than the hole can helical-mill
-        // it — considered for every routable hole when enabled, but never preferred.
-        if cfg.allow_routing_holes && hole.routable && is_router(tool) && diameter_mm < match_mm - EPS_MM {
-            let z = z_feasibility(diameter_mm, angle, tool.flute_length.map(Length::as_mm), setup);
-            if z.feasible {
-                let tool_um = micron(tool.diameter);
-                // A router interpolates to the exact size, so fit is not a size error.
-                let score = score_candidate(tool, Strategy::Route, 0, match_um, &cfg.weights, reuse_set);
-                candidates.push(Candidate {
-                    tool,
-                    index,
-                    strategy: Strategy::Route,
-                    tool_um,
-                    fit_um: 0,
-                    z_bottom_mm: z.z_bottom_mm,
-                    score,
-                });
+        // Router fallback — considered for every routable hole when enabled, but never
+        // preferred over a drill. Two ways a router makes a round hole:
+        //
+        // - **Strictly smaller than the hole**: it helical-mills it, interpolating to the
+        //   exact size, so there is no size error.
+        // - **Within the hole's size allowance**, the same window a drill has to land in:
+        //   it plunges straight down the middle, as a drill would (`routing::spiral_hole`
+        //   already cuts it that way when there is no room to spiral). The size error is
+        //   then the router's own, exactly as for a drill.
+        //
+        // The second used to be missing, so a router that fitted the hole exactly was the
+        // one router never offered for it: a 0.8 mm hole with a 0.8 mm router and no
+        // matching drill was refused as "routing is unavailable", while a 0.9 mm hole was
+        // routed with the same cutter (GitHub issue #25). Round holes only — a slot's
+        // router is chosen by its width, elsewhere.
+        if cfg.allow_routing_holes && hole.routable && is_router(tool) {
+            let helical = diameter_mm < match_mm - EPS_MM;
+            let plunge = hole.minor_axis.is_none()
+                && !helical
+                && diameter_mm >= lower - EPS_MM
+                && diameter_mm <= upper + EPS_MM;
+            if helical || plunge {
+                let z = z_feasibility(diameter_mm, angle, tool.flute_length.map(Length::as_mm), setup);
+                if z.feasible {
+                    let tool_um = micron(tool.diameter);
+                    let fit_um = if helical { 0 } else { (tool_um - match_um).abs() };
+                    let score = score_candidate(tool, Strategy::Route, fit_um, match_um, &cfg.weights, reuse_set);
+                    candidates.push(Candidate {
+                        tool,
+                        index,
+                        strategy: Strategy::Route,
+                        tool_um,
+                        fit_um,
+                        z_bottom_mm: z.z_bottom_mm,
+                        score,
+                    });
+                }
             }
         }
     }
@@ -1136,6 +1156,56 @@ mod tests {
         let out = assign(&holes, &tools, &config(true), &rack(4), &roomy_setup()).unwrap();
         assert_eq!(out.holes[0].strategy, Strategy::Route);
         assert_eq!(out.holes[0].tool_id, "r");
+    }
+
+    /// **A router that fits the hole plunges it** (GitHub issue #25). A 0.8 mm hole, a
+    /// 0.6 mm drill outside the allowance and a 0.8 mm router: the router used to be
+    /// skipped for not being strictly smaller than the hole, and the hole was refused.
+    #[test]
+    fn a_router_the_size_of_the_hole_plunges_it() {
+        let tools = vec![drill("d06", 0.6), router("r08", 0.8)];
+        let holes = vec![round_hole("h1", 0.8)];
+        let out = assign(&holes, &tools, &config(true), &rack(4), &roomy_setup()).unwrap();
+        assert_eq!(out.holes[0].strategy, Strategy::Route);
+        assert_eq!(out.holes[0].tool_id, "r08");
+        assert_eq!(out.holes[0].fit_error_um, 0);
+    }
+
+    /// Within the allowance the way a drill is — slightly over is accepted and its size
+    /// error reported; past the allowance it is not.
+    #[test]
+    fn a_plunging_router_is_held_to_the_drill_allowance() {
+        let holes = vec![round_hole("h1", 0.8)];
+        let near = assign(&holes, &[router("r", 0.85)], &config(true), &rack(4), &roomy_setup()).unwrap();
+        assert_eq!(near.holes[0].strategy, Strategy::Route);
+        assert_eq!(near.holes[0].fit_error_um, 50, "the size error is the router's own");
+
+        let far = assign(&holes, &[router("r", 0.95)], &config(true), &rack(4), &roomy_setup());
+        assert!(far.is_err(), "0.15 mm over is past the 0.064 mm allowance");
+        let off = assign(&holes, &[router("r", 0.8)], &config(false), &rack(4), &roomy_setup());
+        assert!(off.is_err(), "and never with routing switched off");
+    }
+
+    /// A matching drill still wins over a plunging router, and a smaller router still mills
+    /// to the exact size.
+    #[test]
+    fn a_plunging_router_does_not_displace_a_drill_or_a_helical_mill() {
+        let holes = vec![round_hole("h1", 0.8)];
+        let drilled = assign(&holes, &[router("r", 0.8), drill("d", 0.8)], &config(true), &rack(4), &roomy_setup()).unwrap();
+        assert_eq!(drilled.holes[0].strategy, Strategy::Drill);
+
+        let wide = vec![round_hole("h2", 3.0)];
+        let milled = assign(&wide, &[router("r", 1.0)], &config(true), &rack(4), &roomy_setup()).unwrap();
+        assert_eq!((milled.holes[0].strategy, milled.holes[0].fit_error_um), (Strategy::Route, 0));
+    }
+
+    /// Slots are not plunged: their router is chosen by width elsewhere, and a plunge would
+    /// make a round hole where a slot was drawn.
+    #[test]
+    fn a_slot_is_not_plunged_by_a_router_of_its_width() {
+        let slot = HoleDemand { minor_axis: Some(Length::from_mm(0.8)), target: Length::from_mm(2.0), ..round_hole("s1", 2.0) };
+        let out = assign(&[slot], &[router("r", 0.8)], &config(true), &rack(4), &roomy_setup());
+        assert!(out.is_err(), "no plunge for a slot: {:?}", out.map(|o| o.holes[0].strategy));
     }
 
     #[test]

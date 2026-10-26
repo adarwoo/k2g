@@ -10,6 +10,13 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+### Fixed
+- **A router the size of a hole now makes it.** A router whose diameter is within a round
+  hole's size allowance, the same allowance a drill must meet, now plunges the hole when
+  no drill matches. Before, only a router smaller than the hole was considered, so a 0.8 mm
+  hole with a 0.8 mm router and no 0.8 mm drill was refused as "routing is unavailable"
+  ([#25](https://github.com/adarwoo/k2g/issues/25)).
+
 ## [0.17.0] — 2026-10-25 — *spacemouse*
 
 Engraving becomes two operations, steps are ordered by hand, routing goes down in passes,
