@@ -2861,6 +2861,7 @@ mod isolation_tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            stepover_nm: 0,
         }
     }
 

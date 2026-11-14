@@ -94,6 +94,12 @@ pub struct IsolationSpec {
     /// The diameter of the milling cutter resolved for the clearing pass, nm. Contours cut
     /// by a different mill are a different question — see `width_nm`'s own reasoning.
     pub clearing_mill_diameter_nm: i64,
+    /// Lateral step between isolation passes, nm.
+    ///
+    /// When zero the isolation is a single pass at full `width_nm` (legacy behaviour).
+    /// When positive and smaller than `width_nm` the isolation is split into multiple
+    /// lateral offset passes, each cutting at the stepover width.
+    pub stepover_nm: i64,
 }
 
 /// Contours for one layer, and what was wrong with the copper they came from.
@@ -283,7 +289,7 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
     }
 
     let started = std::time::Instant::now();
-    let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
+    let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm, spec.stepover_nm);
     log::info!(
         "Isolated layer {} of {} in {:?}: {} contour(s), {} narrowed pair(s)",
         spec.layer_id,
@@ -558,6 +564,7 @@ mod tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            stepover_nm: 0,
         }
     }
 

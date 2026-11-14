@@ -6,6 +6,13 @@
 //! — which is as wide as the tool, centred on the path — just grazes the copper the design
 //! asked for and takes everything up to the far side of the channel.
 //!
+//! **Multi-pass lateral offset.** When `stepover_nm` is smaller than `width_nm`, the
+//! isolation is split into several lateral offset passes, each cutting at the stepover
+//! width. The tool centre runs at `stepover/2 + pass·stepover` from the copper edge,
+//! producing equally-spaced paths that together cover the full channel. This is how a
+//! narrow V-bit clears a wide channel — by making several shallow passes side by side
+//! rather than plunging deep.
+//!
 //! **The hard case is a gap narrower than the cut.** Two nets 0.3 mm apart cannot be given
 //! a 0.4 mm channel: the tool would eat into one of them. The remedy is a shallower pass —
 //! a V-bit cuts narrower the less deep it goes — but the width must be reduced *only where
@@ -214,8 +221,19 @@ enum Piece {
 /// `min_width_nm` is the floor of the ladder: the narrowest cut the tool can actually make,
 /// which for a V-bit is its tip. Copper closer together than that cannot be isolated at
 /// all, and is reported rather than quietly skipped.
-pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> IsolationResult {
+/// `min_width_nm` is the floor of the ladder: the narrowest cut the tool can actually make,
+/// which for a V-bit is its tip. Copper closer together than that cannot be isolated at
+/// all, and is reported rather than quietly skipped.
+///
+/// `stepover_nm` is the lateral step between passes (zero for legacy single-pass).
+///
+/// When `stepover_nm` is zero the isolation is a single pass at full `width_nm`. When
+/// positive and smaller than `width_nm` the isolation is split into several lateral offset
+/// passes, each cutting at the stepover width — the mechanism that lets a narrow V-bit
+/// clear a wide channel by running multiple shallow passes side by side.
+pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64, stepover_nm: i64) -> IsolationResult {
     let mut result = IsolationResult { layer_id: copper.layer_id, ..Default::default() };
+
     if width_nm <= 0 {
         result.warnings.push("The isolation width must be greater than zero.".into());
         return result;
@@ -244,11 +262,94 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
         return result;
     }
 
+    // Legacy single-pass: delegate directly.
+    if stepover_nm == 0 || stepover_nm >= width_nm {
+        return isolate_nets(&nets, width_nm, min_width_nm);
+    }
+
+    // Multi-pass: run isolation at stepover width, offsetting the net's territory for
+    // each pass so the contour series lands at equally-spaced lateral positions spanning
+    // the full channel width. The channel extends `width_nm/2` on each side of the
+    // copper edge. For pass `i` (0-indexed) we want the contour at `-width/2 + i·stepover`
+    // from the copper edge. Since the isolation contour is offset by `stepover/2` from
+    // the net's boundary, the net must be shifted by `-width/2 + i·stepover - stepover/2`
+    // relative to the original.
+    let n = ((width_nm as f64) / (stepover_nm as f64)).ceil() as usize;
+    if n <= 1 {
+        return isolate_nets(&nets, width_nm, min_width_nm);
+    }
+
+    let mut multi_result = IsolationResult { layer_id: copper.layer_id, ..Default::default() };
+    let mut narrowed: BTreeMap<(String, String), i64> = BTreeMap::new();
+
+    for pass in 0..n {
+        // The contour position we want from the original copper edge:
+        // pass 0 → -width/2 (outermost left), passing through to +width/2 (outermost right).
+        let target = -width_nm as f64 / 2.0 + stepover_nm as f64 * pass as f64;
+        // The isolation puts the contour at `stepover/2` from the shifted net boundary,
+        // so shift the net by `target - stepover/2`.
+        let shift = target - stepover_nm as f64 / 2.0;
+        let shifted_nets = shift_nets(&nets, shift);
+
+        let sub_min = min_width_nm.min(stepover_nm).max(1);
+        let sub_result = isolate_nets(&shifted_nets, stepover_nm, sub_min);
+
+        // Tag net names with the pass number for traceability.
+        for mut contour in sub_result.contours {
+            if !contour.net.contains("#p") {
+                contour.net = format!("{}#p{pass}", contour.net);
+            }
+            multi_result.contours.push(contour);
+        }
+
+        // Only the first pass reports narrow failures; later passes are easier.
+        if pass == 0 {
+            for pair in sub_result.narrowed {
+                narrowed.insert(pair.nets, pair.width_nm);
+            }
+            multi_result.uncut.extend(sub_result.uncut);
+        }
+    }
+
+    // Merge narrow pairs.
+    for ((a, b), width) in narrowed {
+        if width == 0 {
+            multi_result.warnings.push(format!(
+                "{a} and {b} are closer together than the narrowest cut this tool can make; \
+                 nothing was cut between them and they are not isolated."
+            ));
+        }
+        multi_result.narrowed.push(NarrowedPair { nets: (a, b), width_nm: width });
+    }
+    multi_result.narrowed.sort_by(|l, r| l.width_nm.cmp(&r.width_nm).then(l.nets.cmp(&r.nets)));
+
+    if multi_result.contours.is_empty() && multi_result.warnings.is_empty() {
+        multi_result.warnings.push(
+            "The isolation pass produced no cuts at all for this layer, and cannot say \
+             which part of the board defeated it. The copper will not be separated."
+                .into(),
+        );
+    }
+
+    multi_result
+}
+
+/// Core isolation logic, working directly on net regions.
+///
+/// Extracted from [`isolate`] so the multi-pass loop can call it repeatedly with
+/// shifted net regions.
+fn isolate_nets(nets: &[NetCopper], width_nm: i64, min_width_nm: i64) -> IsolationResult {
+    let mut result = IsolationResult { layer_id: 0, ..Default::default() };
+    if width_nm <= 0 {
+        result.warnings.push("The isolation width must be greater than zero.".into());
+        return result;
+    }
+
     let rungs = ladder(width_nm, min_width_nm.max(1));
     let mut narrowed: BTreeMap<(String, String), i64> = BTreeMap::new();
 
     for (index, net) in nets.iter().enumerate() {
-        let others = neighbouring_copper(&nets, index, width_nm);
+        let others = neighbouring_copper(nets, index, width_nm);
 
         // Nothing near enough to be crowded by the widest cut: the whole net isolates at
         // full width, and none of the ladder work below is worth doing. This is the
@@ -271,7 +372,7 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
             continue;
         }
 
-        let hint = record_narrowed(&nets, index, &intrusion, &rungs, &mut narrowed);
+        let hint = record_narrowed(nets, index, &intrusion, &rungs, &mut narrowed);
         let uncut = walk_ladder(net, &others, &rungs, &hint, &mut result);
         let length_nm: f64 = uncut.iter().map(|span| polyline_len_nm(span)).sum();
         if length_nm > 0.0 {
@@ -331,6 +432,58 @@ pub fn isolate(copper: &CopperSnapshot, width_nm: i64, min_width_nm: i64) -> Iso
     }
     result.narrowed.sort_by(|l, r| l.width_nm.cmp(&r.width_nm).then(l.nets.cmp(&r.nets)));
     result
+}
+
+/// Shift each net's region for multi-pass isolation.
+///
+/// When `shift_nm` is positive the net's region is **expanded** outward by that amount,
+/// pushing the isolation contour further from the net center. When negative the net is
+/// **shrunk** (offset inward), pulling the contour closer to the net center. Each pass
+/// shifts the net by a different amount so the resulting contours span the full channel
+/// from `-width/2` to `+width/2` relative to the copper edge.
+fn shift_nets(nets: &[NetCopper], shift_nm: f64) -> Vec<NetCopper> {
+    use crate::region::BBox;
+    use clipper2_rust::core::Paths64;
+
+    nets.iter()
+        .map(|net| {
+            let region = if shift_nm > 0.0 {
+                // Expand outward: the isolation contour is offset by `stepover/2` from
+                // this expanded boundary, landing further from the net center.
+                let expanded = offset_group(&net.region, shift_nm);
+                if expanded.is_empty() {
+                    net.region.clone()
+                } else {
+                    let paths: Paths64 = expanded
+                        .iter()
+                        .map(|p| p.iter().map(|&(x, y)| clipper2_rust::core::Point64 { x, y }).collect())
+                        .collect();
+                    from_paths(&paths)
+                }
+            } else if shift_nm < 0.0 {
+                // Shrink inward: offset by `-shift_nm` (positive amount) to pull the
+                // contour closer to the net center.
+                let inward = offset_group(&net.region, -shift_nm);
+                if inward.is_empty() {
+                    net.region.clone()
+                } else {
+                    let paths: Paths64 = inward
+                        .iter()
+                        .map(|p| p.iter().map(|&(x, y)| clipper2_rust::core::Point64 { x, y }).collect())
+                        .collect();
+                    from_paths(&paths)
+                }
+            } else {
+                net.region.clone()
+            };
+            let bbox = BBox::of(&region).unwrap_or(net.bbox);
+            NetCopper {
+                name: net.name.clone(),
+                region,
+                bbox,
+            }
+        })
+        .collect()
 }
 
 /// Drops contours whose channel another contour already cuts.
@@ -1272,7 +1425,7 @@ mod tests {
     fn the_reported_board_cuts_its_channel_once() {
         let gap = 254_000;
         let (board, from, to) = two_tracks(gap);
-        let result = isolate(&board, gap, 229_500);
+        let result = isolate(&board, gap, 229_500, 0);
 
         let cuts = cuts_across_gap(&result, from, to);
         assert_eq!(cuts.len(), 1, "expected one pass through the gap, got {cuts:?}");
@@ -1293,7 +1446,7 @@ mod tests {
     fn a_fine_bit_on_the_reported_board_keeps_both_passes() {
         let gap = 254_000;
         let (board, from, to) = two_tracks(gap);
-        let result = isolate(&board, 172_300, 109_600);
+        let result = isolate(&board, 172_300, 109_600, 0);
 
         assert_eq!(cuts_across_gap(&result, from, to).len(), 2);
         assert_eq!(result.collapsed_nm, 0.0);
@@ -1307,7 +1460,7 @@ mod tests {
             feature("A", vec![square(0, 0, 500_000)]),
             feature("B", vec![square(10_000_000, 0, 500_000)]),
         ]);
-        let result = isolate(&board, 254_000, 150_000);
+        let result = isolate(&board, 254_000, 150_000, 0);
 
         assert_eq!(result.contours.len(), 2);
         assert_eq!(result.collapsed_nm, 0.0);
@@ -1340,7 +1493,7 @@ mod tests {
         let board = snapshot(features);
 
         let started = std::time::Instant::now();
-        let result = isolate(&board, 300_000, 150_000);
+        let result = isolate(&board, 300_000, 150_000, 0);
         let elapsed = started.elapsed();
 
         assert!(!result.contours.is_empty(), "the board produced no contours at all");
@@ -1373,7 +1526,7 @@ mod tests {
         let mut short = snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]);
         short.partial = true;
 
-        let result = isolate(&short, 254_000, 150_000);
+        let result = isolate(&short, 254_000, 150_000, 0);
 
         assert!(result.contours.is_empty(), "a short read must produce no toolpath at all");
         assert!(
@@ -1385,7 +1538,7 @@ mod tests {
         // The same copper, read whole, is isolated normally — so the refusal is about the
         // flag and not about the geometry.
         let whole = snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]);
-        assert!(!isolate(&whole, 254_000, 150_000).contours.is_empty());
+        assert!(!isolate(&whole, 254_000, 150_000, 0).contours.is_empty());
     }
 
     /// **An empty result always carries a reason.** Whichever path produced no contours,
@@ -1394,14 +1547,14 @@ mod tests {
     #[test]
     fn a_pass_that_cuts_nothing_always_says_why() {
         let cases: Vec<(&str, IsolationResult)> = vec![
-            ("no copper on the layer", isolate(&snapshot(vec![]), 254_000, 150_000)),
+            ("no copper on the layer", isolate(&snapshot(vec![]), 254_000, 150_000, 0)),
             (
                 "a width of zero",
-                isolate(&snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]), 0, 0),
+                isolate(&snapshot(vec![feature("A", vec![square(0, 0, 500_000)])]), 0, 0, 0),
             ),
             (
                 "copper with no polygons",
-                isolate(&snapshot(vec![feature("A", vec![])]), 254_000, 150_000),
+                isolate(&snapshot(vec![feature("A", vec![])]), 254_000, 150_000, 0),
             ),
         ];
 
@@ -1437,13 +1590,14 @@ mod tests {
                 feature("A", pad_column(0, radius, pitch, 6)),
                 feature("B", pad_column(2 * radius + gap, radius, pitch, 6)),
             ]);
-            let result = isolate(&board, 200_000, 100_000);
+            let result = isolate(&board, 200_000, 100_000, 0);
 
             // The same copper with nothing near it: the whole channel this net needs.
             let alone = isolate(
                 &snapshot(vec![feature("A", pad_column(0, radius, pitch, 6))]),
                 200_000,
                 100_000,
+                0,
             );
             let want = emitted_len(&alone, "A");
             let got = emitted_len(&result, "A");
@@ -1504,7 +1658,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(1_020_000, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         let names: Vec<&str> = result.uncut.iter().map(|u| u.net.as_str()).collect();
         assert_eq!(names, ["A", "B"], "both sides of the gap went uncut");
@@ -1529,7 +1683,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(2 * MM, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         assert!(result.uncut.is_empty(), "{:?}", result.uncut);
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
@@ -1547,7 +1701,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(1_300_000, 0, MM / 2)]), // a 0.3 mm gap
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         let widths: std::collections::BTreeSet<i64> =
             contours_of(&result, "A").iter().map(|c| c.width_nm).collect();
@@ -1566,7 +1720,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(2 * MM, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         assert!(result.narrowed.is_empty(), "a 1 mm gap has room for a 0.4 mm cut");
         for net in ["A", "B"] {
@@ -1587,7 +1741,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(1_300_000, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         assert_eq!(
             result.narrowed,
@@ -1624,7 +1778,7 @@ mod tests {
             feature("BAR", vec![bar]),
             feature("PAD", vec![square(10 * MM, 850_000, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         let bar_contours = contours_of(&result, "BAR");
         let full: f64 = bar_contours
@@ -1653,7 +1807,7 @@ mod tests {
             "",
             vec![square(0, 0, MM / 2), square(2 * MM, 0, MM / 2)],
         )]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         assert_eq!(result.contours.len(), 2, "two islands, two loops");
         let names: std::collections::BTreeSet<&str> =
@@ -1675,7 +1829,7 @@ mod tests {
                 (4 * MM, 6 * MM),
             ]],
         };
-        let result = isolate(&snapshot(vec![feature("GND", vec![zone])]), 400_000, 50_000);
+        let result = isolate(&snapshot(vec![feature("GND", vec![zone])]), 400_000, 50_000, 0);
 
         assert_eq!(result.contours.len(), 2, "the outline and the relief are both cut");
         assert!(result.contours.iter().all(|c| c.closed));
@@ -1700,7 +1854,7 @@ mod tests {
         let track = crate::stitching::stroke_open_path(&[(0, 0), (10 * MM, 0)], 150_000.0);
         let polygons: Vec<Polygon> =
             track.into_iter().map(|outline| Polygon { outline, holes: Vec::new() }).collect();
-        let result = isolate(&snapshot(vec![feature("SIG", polygons)]), 400_000, 50_000);
+        let result = isolate(&snapshot(vec![feature("SIG", polygons)]), 400_000, 50_000, 0);
 
         assert_eq!(result.contours.len(), 1);
         assert!(result.contours[0].closed);
@@ -1717,7 +1871,7 @@ mod tests {
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(1_020_000, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         println!("uncut {:?}
 warnings {:?}", result.uncut, result.warnings);
@@ -1738,7 +1892,7 @@ warnings {:?}", result.uncut, result.warnings);
             feature("A", vec![square(0, 0, MM / 2)]),
             feature("B", vec![square(1_020_000, 0, MM / 2)]),
         ]);
-        let result = isolate(&board, 400_000, 50_000);
+        let result = isolate(&board, 400_000, 50_000, 0);
 
         assert!(!result.uncut.is_empty(), "the 20 µm gap is uncuttable");
         for stretch in &result.uncut {
