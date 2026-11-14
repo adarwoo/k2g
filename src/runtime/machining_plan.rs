@@ -1671,6 +1671,7 @@ pub(crate) fn isolation_spec(
         clearing_mill_diameter_nm: clearing_mill_diameter
             .map(|d| (d.as_mm() * 1e6).round() as i64)
             .unwrap_or(0),
+        stepover_nm: (choice.stepover.as_mm() * 1e6).round() as i64,
     }
 }
 
@@ -3488,6 +3489,7 @@ mod engrave_diagnostic_tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            stepover_nm: 0,
         }
     }
 
@@ -4471,7 +4473,7 @@ mod golden_plan_tests {
         let spec = isolation_spec(&board, ctx.board_epoch, raw, &choice, mill);
 
         let copper = copper();
-        let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
+        let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm, spec.stepover_nm);
         let clearing = if spec.remove_islands {
             pcb::islands(&copper, &result.contours, spec.width_nm, spec.remove_thin_copper)
         } else {

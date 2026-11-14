@@ -2557,6 +2557,13 @@ pub(crate) struct EngraveChoice {
     /// that happen to be in stock. What is not acceptable is machining it *quietly*, so
     /// this exists to be reported rather than to be handled.
     pub(crate) fell_short_of: Option<Length>,
+    /// Lateral step between isolation passes, nm.
+    ///
+    /// For a V-bit this is the cutting width at minimum penetration (just enough to clear
+    /// copper): the bit makes several passes side by side at shallow depth rather than
+    /// plunging deep for a single wide pass. For a flat mill it equals `width` — one pass
+    /// covers the full channel.
+    pub(crate) stepover: Length,
 }
 
 /// The V-bit that cuts an isolation channel of **at least** `min_width`, and how deep.
@@ -2643,11 +2650,16 @@ pub(crate) fn pick_engraver(
         if tool.z_min_depth.is_some_and(|min| depth_mm < min.as_mm()) {
             return None;
         }
+        // The lateral step is the cutting width at minimum penetration for a V-bit — what
+        // the bit removes in one shallow pass. A flat mill (point_angle >= 180°) has one
+        // width regardless of depth, so stepover equals the cut width.
+        let stepover_mm = if k > 0.0 { width_at(pmin) } else { width_at(penetration) };
         Some(EngraveChoice {
             tool_id: tool.id.clone(),
             depth: Length::from_mm(depth_mm),
             width: Length::from_mm(width_at(penetration)),
             floor: Length::from_mm(width_at(pmin)),
+            stepover: Length::from_mm(stepover_mm),
             fell_short_of: None,
         })
     };
@@ -2678,6 +2690,9 @@ pub(crate) fn pick_engraver(
                     return None;
                 }
                 let reach = width_at(pmax);
+                // Stepover is the cutting width at minimum penetration for a V-bit, or the
+                // full width for a flat mill.
+                let stepover_mm = if k > 0.0 { width_at(pmin) } else { reach };
                 Some((
                     (reach * 1e6).round() as i64,
                     tool.id.as_str(),
@@ -2686,6 +2701,7 @@ pub(crate) fn pick_engraver(
                         depth: Length::from_mm(depth_mm),
                         width: Length::from_mm(reach),
                         floor: Length::from_mm(width_at(pmin)),
+                        stepover: Length::from_mm(stepover_mm),
                         fell_short_of: Some(min_width),
                     },
                 ))
