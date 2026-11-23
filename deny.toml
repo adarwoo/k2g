@@ -15,21 +15,6 @@ yanked = "deny"
 # *new* unmaintained crate still turns the workflow red, which is the signal worth
 # having. Re-check when dioxus/wry or rhai make a major move.
 ignore = [
-    # --- The GTK3 stack, on Linux only -------------------------------------------
-    # wry draws the webview with WebKitGTK, which is bound to GTK3, and gtk-rs archived
-    # its GTK3 bindings in favour of gtk4-rs. Nothing k2g does reaches these crates:
-    # they are the toolkit under the window, and they leave when wry moves to GTK4.
-    # Windows (WebView2) and macOS (WKWebView) do not pull them at all.
-    { id = "RUSTSEC-2024-0411", reason = "gdkwayland-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0412", reason = "gdk — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0413", reason = "atk — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0414", reason = "gdkx11-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0415", reason = "gtk — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0416", reason = "atk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0418", reason = "gdk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0419", reason = "gtk3-macros — GTK3 bindings, via wry/WebKitGTK on Linux" },
-    { id = "RUSTSEC-2024-0420", reason = "gtk-sys — GTK3 bindings, via wry/WebKitGTK on Linux" },
-
     # --- Unmaintained utility crates, all transitive ------------------------------
     # None is reachable from k2g's own code; each is an implementation detail of a
     # crate that has not yet replaced it.
