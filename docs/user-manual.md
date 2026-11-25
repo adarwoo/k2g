@@ -667,16 +667,20 @@ without touching the net on the far side; that copper is left and the notes say 
 
 #### Everything narrower than a width
 
-Free copper up to the width you set, cut by a **milling bit** from stock — the largest
-milling bit no wider than that width. It costs a tool change and a rack slot. It keeps the
+Free copper up to the width you set, cut by a flat cutter no wider than that width. A
+**milling bit** is best; an **end mill** comes next, and a **router** is used when there is
+neither. A cutter already in the toolset's rack is chosen before one from stock, and among
+cutters of the same kind the largest wins. It costs a tool change, and a rack slot when the
+cutter is not already racked. It keeps the
 **clearing safety margin** from every net, on top of never overlapping one: set that to at
 least the isolation width. Copper narrow enough to qualify but too narrow for the bit to
 enter is reported, not silently left.
 
 **Islands and thin strips with the isolation bit first** (on by default) lets the isolation
 bit — already in the spindle — take the slivers a mill is often too wide to enter, so the
-mill only does the wider copper. A step that stocks no suitable milling bit skips the mill
-pass and says so in its notes.
+mill only does the wider copper. A step with no cutter narrow enough skips the pass, and
+its notes name the narrowest cutter there is, so you can tell whether to add one or raise
+the width.
 
 ---
 

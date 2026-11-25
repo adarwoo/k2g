@@ -630,10 +630,13 @@ $defs:
   # size: a cone cuts full width AT THE SURFACE, and copper only exists at the
   # surface. Wider copper is left and its width reported in the step notes.
   #
-  # `narrower_than` — a genuine milling bit loaded for the job, clearing free
-  # copper up to `threshold` (`pcb::clear_narrow_copper`). The bit is the
-  # largest milling bit in stock no wider than the threshold; only
-  # `type: engraver` (labelled "Milling") tools are eligible. It keeps
+  # `narrower_than` — a flat cutter loaded for the job, clearing free copper up
+  # to `threshold` (`pcb::clear_narrow_copper`). Only cutters no wider than the
+  # threshold qualify; among them a milling bit (`type: engraver`) is preferred,
+  # then an end mill, then a router, and the largest of the best kind wins. A
+  # cutter already in the rack beats one from stock, whatever its kind
+  # (`pick_clearing_mill`). Routers count since GitHub #41: a toolset with a
+  # router and no milling bit had its clearing silently skipped. It keeps
   # `guard_band` from every net on top of never overlapping one, because unlike
   # the isolation bit it clears independently of the channel. Cut at the
   # isolation depth: both only have to sever the copper at the surface.
@@ -656,8 +659,8 @@ $defs:
           Islands and thin strips: the copper the channels leave stranded, up to
           three channels wide, cut by the isolation bit already in the spindle at
           no tool change. Everything narrower than a width: free copper up to the
-          width below, cut by a milling bit from stock, which costs a tool change
-          and a rack slot.
+          width below, cut by a milling bit, end mill or router, which costs a
+          tool change and, unless it is already in the rack, a rack slot.
         type: string
         enum: [islands_and_strips, narrower_than]
         x-enum-labels: ["Islands and thin strips", "Everything narrower than a width"]
@@ -665,10 +668,11 @@ $defs:
       threshold:
         title: Clear copper narrower than
         description: >-
-          Free copper narrower than this is cleared by the milling bit; wider
-          copper is left alone. Set from how much stranded copper is acceptable
-          on the finished board, not from the bit's own diameter — the largest
-          milling bit in stock no wider than this is chosen, and copper narrower
+          Free copper narrower than this is cleared; wider copper is left alone.
+          Set from how much stranded copper is acceptable on the finished board,
+          not from a bit's own diameter. The cutter is the largest one no wider
+          than this, preferring one already in the rack, and a milling bit over an
+          end mill over a router. Copper narrower
           than the threshold but too narrow for that bit to enter is reported
           rather than silently left.
         $ref: "units.yaml#/$defs/size"
@@ -677,9 +681,9 @@ $defs:
       guard_band:
         title: Clearing safety margin
         description: >-
-          How close the milling bit may come to any net copper, on top of never
+          How close the clearing cutter may come to any net copper, on top of never
           overlapping it. Set it to at least the isolation width; a smaller number
-          lets the mill approach a net more closely than the isolation bit itself
+          lets the cutter approach a net more closely than the isolation bit itself
           was trusted to.
         $ref: "units.yaml#/$defs/size"
         default: 0.2mm
@@ -687,9 +691,9 @@ $defs:
       mop_up:
         title: Islands and thin strips with the isolation bit first
         description: >-
-          Before the milling bit, let the isolation bit — already in the spindle —
-          take the islands and thin strips, which a mill is often too wide to
-          enter. The mill then only does the wider copper.
+          Before the clearing cutter, let the isolation bit — already in the spindle —
+          take the islands and thin strips, which a clearing cutter is often too wide to
+          enter. The cutter then only does the wider copper.
         type: boolean
         default: true
         x-show-when: { strategy: [narrower_than] }
