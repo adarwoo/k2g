@@ -192,7 +192,7 @@ fn try_record(event: Event, outcome: Outcome, detail: Value) -> std::io::Result<
 /// in the middle of.
 fn line_for(event: Event, outcome: Outcome, detail: Value) -> String {
     serde_json::to_string(&json!({
-        "time": chrono::Utc::now().to_rfc3339(),
+        "time": jiff::Timestamp::now().to_string(),
         "kind": event.kind(),
         "outcome": outcome.as_str(),
         "version": env!("CARGO_PKG_VERSION"),

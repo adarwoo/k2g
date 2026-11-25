@@ -89,7 +89,7 @@ pub fn setup_sheet(ctx: &AppCtx, program_files: &BTreeMap<usize, String>) -> Res
         board: ctx.board.as_ref(),
         stitched: ctx.stitched_board_data.as_ref(),
         profile_name: profile.name.clone(),
-        generated: chrono::Local::now().format("%Y-%m-%d %H:%M").to_string(),
+        generated: jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         unit: ctx.unit_system,
         steps: &steps,
