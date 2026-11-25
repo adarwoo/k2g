@@ -49,7 +49,7 @@ use crate::gcode::planner::{
     EngraveSpan, OutlineSpan, RouteShape, RouteTarget, TestCut,
 };
 use crate::gcode::{oblong, outline, pins, scene, testcut};
-use crate::runtime::isolation::IsolationSpec;
+use crate::runtime::isolation::{BoardOutline, IsolationSpec};
 use crate::runtime::tooling::{
     build_rack_spec, build_setup, collect_hole_groups, missing_bindings, pick_clearing_mill,
     pick_engraver, pick_pin_tool, plan_routers, read_steps, EngraveChoice, HoleGroup,
@@ -1093,7 +1093,18 @@ fn plan_step(
             }
             let clearing_bit = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
             let (spans, clearing_spans, ground, warnings) =
-                plan_engrave_spans(ctx, raw, bit, choice, clearing_bit, toolset, &placement);
+                plan_engrave_spans(
+                ctx,
+                raw,
+                bit,
+                choice,
+                clearing_bit,
+                toolset,
+                // `frame.waste` is set exactly when some step routes the outline through,
+                // which is the condition `board_outline` asks about.
+                board_outline(ctx, frame.waste.is_some()),
+                &placement,
+            );
             // Which hops between cuts may stay down: those whose sweep, at the cutting tool's
             // own width, lies on ground the step cuts anyway. Asked in board space, where the
             // ground was computed — `unplace` undoes the placement's flip and scaling.
@@ -1410,6 +1421,13 @@ fn log_isolation_miss(held: &crate::runtime::isolation::IsolationState, wanted: 
                     held.min_width_nm, wanted.min_width_nm
                 ));
             }
+            if held.board_outline != wanted.board_outline {
+                differs.push(format!(
+                    "board outline clip {} != {}",
+                    held.board_outline.is_some(),
+                    wanted.board_outline.is_some(),
+                ));
+            }
             log::info!(
                 "Isolation not ready for layer {}: held answers a different question — {}",
                 wanted.layer_id,
@@ -1644,12 +1662,16 @@ fn plan_test_cut(
 /// the same way by both callers (`pick_clearing_mill`) before this is phrased — `None` when
 /// the step does not ask for the pass, or asks and no suitable mill is in stock, either of
 /// which turns the pass off in the spec regardless of `raw.mills_narrow_copper()`.
+///
+/// `board_outline` is [`board_outline`]'s answer, asked by the caller because whether the
+/// job cuts the board out is a question about the whole profile, not about this step.
 pub(crate) fn isolation_spec(
     board: &pcb::BoardSnapshot,
     board_epoch: u64,
     raw: &StepRaw,
     choice: &EngraveChoice,
     clearing_mill_diameter: Option<Length>,
+    board_outline: Option<BoardOutline>,
 ) -> IsolationSpec {
     IsolationSpec {
         board_name: board.name.clone(),
@@ -1671,7 +1693,35 @@ pub(crate) fn isolation_spec(
         clearing_mill_diameter_nm: clearing_mill_diameter
             .map(|d| (d.as_mm() * 1e6).round() as i64)
             .unwrap_or(0),
+        board_outline,
     }
+}
+
+/// The board edge the isolation cuts are clipped to, when `cuts_board_out`.
+///
+/// `cuts_board_out` is whether any step of the job routes the outline right through
+/// ([`EdgeConfigRaw::cuts_through`](crate::runtime::tooling::EdgeConfigRaw::cuts_through)).
+/// Without it nothing separates the board from the copper beyond its edge, and dropping
+/// a ring there would join a net to that copper, and through it to every other net that
+/// reaches the edge. A score or a V-groove does not count: it parts the board along the
+/// line only later, by hand, and the program cannot know that happens.
+///
+/// Only the **outer** rings. A cutout is a hole the job may or may not route
+/// (`route_cutouts` is its own operation, and an island in one may be kept), so the cuts
+/// inside a cutout are left alone. `None` as well when the edge did not stitch: a board
+/// whose edge is not known has no outside to drop.
+pub(crate) fn board_outline(ctx: &AppCtx, cuts_board_out: bool) -> Option<BoardOutline> {
+    if !cuts_board_out {
+        return None;
+    }
+    let stitched = ctx.stitched_board_data.as_ref().filter(|s| s.errors.is_empty())?;
+    let rings: Vec<Vec<(i64, i64)>> = stitched
+        .contours
+        .iter()
+        .filter(|contour| !contour.is_hole && contour.points.len() >= 3)
+        .map(|contour| contour.points.clone())
+        .collect();
+    (!rings.is_empty()).then(|| Arc::new(rings))
 }
 
 /// The isolation cuts for this step's copper face, and what the operator should know.
@@ -1689,6 +1739,7 @@ fn plan_engrave_spans(
     choice: &EngraveChoice,
     clearing_mill: Option<&Tool>,
     toolset: &crate::data::model::ToolsetProfile,
+    board_outline: Option<BoardOutline>,
     placement: &Placement,
 ) -> (Vec<EngraveChain>, Vec<EngraveChain>, Option<pcb::ClearedGround>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
@@ -1703,7 +1754,14 @@ fn plan_engrave_spans(
         ));
     }
 
-    let spec = isolation_spec(board, ctx.board_epoch, raw, choice, clearing_mill.map(|t| t.diameter));
+    let spec = isolation_spec(
+        board,
+        ctx.board_epoch,
+        raw,
+        choice,
+        clearing_mill.map(|t| t.diameter),
+        board_outline,
+    );
 
     let Some(isolation) = ctx.isolation.matching(&spec) else {
         // **Say so.** This used to return silently, on the argument that work in progress
@@ -1740,6 +1798,9 @@ fn plan_engrave_spans(
         ));
     }
     warnings.extend(narrowing_notes(ctx, &isolation.result.narrowed));
+    if let Some(note) = outside_board_note(ctx, isolation.outside_board_nm) {
+        warnings.push(note);
+    }
 
     let place = |path: &[(i64, i64)]| -> Vec<Point> {
         path.iter()
@@ -1814,6 +1875,21 @@ fn plan_engrave_spans(
     );
 
     (chains, clearing_chains, Some(ground), warnings)
+}
+
+/// What to tell the operator about the isolation dropped beyond the board edge, if any.
+///
+/// Said rather than done quietly: copper poured to the edge used to get a full ring, and
+/// an operator comparing programs would otherwise see the edge ring vanish and think the
+/// net is no longer isolated. Below a micron is the clipper's rounding, not a dropped cut.
+fn outside_board_note(ctx: &AppCtx, outside_board_nm: f64) -> Option<String> {
+    (outside_board_nm >= 1_000.0).then(|| {
+        format!(
+            "{} of isolation runs outside the board edge and is not engraved: the outline \
+             routing cuts that copper away from the board anyway.",
+            fmt_len(ctx, Length::from_mm(outside_board_nm / 1e6)),
+        )
+    })
 }
 
 /// Builds one chain per group of nested rings [`pcb::Clearing::groups`] identifies —
@@ -3477,6 +3553,7 @@ mod engrave_diagnostic_tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            board_outline: None,
         }
     }
 
@@ -3492,6 +3569,7 @@ mod engrave_diagnostic_tests {
                     copper_layer_count: 2,
                     clearing: Default::default(),
                     mill_clearing: Default::default(),
+                    outside_board_nm: 0.0,
                 }),
             );
         }
@@ -3630,6 +3708,16 @@ mod engrave_diagnostic_tests {
             ("mill threshold", IsolationSpec { clearing_threshold_nm: 3_000_000, ..held.clone() }),
             ("mill guard band", IsolationSpec { clearing_guard_band_nm: 300_000, ..held.clone() }),
             ("mill diameter", IsolationSpec { clearing_mill_diameter_nm: 1_000_000, ..held.clone() }),
+            // Turning the outline routing on must recompute: contours held from before
+            // would still engrave the copper beyond the edge, or, turning it off, leave a
+            // net joined to copper nothing now separates.
+            (
+                "board outline",
+                IsolationSpec {
+                    board_outline: Some(Arc::new(vec![vec![(0, 0), (1, 0), (1, 1)]])),
+                    ..held.clone()
+                },
+            ),
         ] {
             assert!(
                 state.matching(&other).is_none(),
@@ -3698,12 +3786,15 @@ mod engrave_diagnostic_tests {
         // Counted on a field rather than on `IsolationSpec {`, which also matches a return
         // type: every construction sets this exactly once, and nothing else mentions it.
         let built = production.matches("min_width_nm:").count();
+        // Whitespace collapsed, so the call may be split over lines however rustfmt likes,
+        // and a Windows checkout's CRLF reads the same as CI's LF.
+        let squashed = production.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert_eq!(built, 1, "`isolation_spec` must be the only place a spec is built");
         assert!(
-            production.contains(
-                "let spec = isolation_spec(board, ctx.board_epoch, raw, choice, \
-                 clearing_mill.map(|t| t.diameter));"
+            squashed.contains(
+                "let spec = isolation_spec( board, ctx.board_epoch, raw, choice, \
+                 clearing_mill.map(|t| t.diameter), board_outline, );"
             ),
             "`plan_engrave_spans` must go through it rather than rebuilding one inline",
         );
@@ -4457,10 +4548,12 @@ mod golden_plan_tests {
             .then(|| pick_clearing_mill(&ctx.app.tools, &toolset, raw.clear.threshold))
             .flatten()
             .and_then(|id| ctx.app.tools.iter().find(|t| t.id == id).map(|t| t.diameter));
-        let spec = isolation_spec(&board, ctx.board_epoch, raw, &choice, mill);
+        // The same condition `plans` gets from the frame it builds over this one step.
+        let outline = board_outline(ctx, raw.routes_outline() && raw.route_board.cuts_through());
+        let spec = isolation_spec(&board, ctx.board_epoch, raw, &choice, mill, outline);
 
         let copper = copper();
-        let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
+        let mut result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
         let clearing = if spec.remove_islands {
             pcb::islands(&copper, &result.contours, spec.width_nm, spec.remove_thin_copper)
         } else {
@@ -4479,6 +4572,7 @@ mod golden_plan_tests {
         } else {
             pcb::Clearing::default()
         };
+        let outside_board_nm = crate::runtime::isolation::drop_cuts_outside_board(&mut result, &spec);
         ctx.isolation.ready.insert(
             spec.layer_id,
             Arc::new(Isolation {
@@ -4488,6 +4582,7 @@ mod golden_plan_tests {
                 copper_layer_count: 2,
                 clearing,
                 mill_clearing,
+                outside_board_nm,
             }),
         );
     }
@@ -4571,5 +4666,50 @@ mod golden_plan_tests {
         assert!(text.contains("island"), "islands and thin copper are cleared");
         assert!(text.contains("clearing"), "the mill clears");
         assert!(text.contains("P1") && text.contains("M1"), "holes are drilled");
+    }
+
+    /// No step cuts the board out, so nothing separates it from the copper beyond its
+    /// edge, and every isolation cut is kept.
+    #[test]
+    fn no_outline_is_clipped_to_unless_the_job_cuts_the_board_out() {
+        assert_eq!(board_outline(&ctx(), false), None);
+    }
+
+    /// The outer edge rings only, exactly as stitched. A cutout is left alone because the
+    /// job may not route it.
+    #[test]
+    fn the_clip_is_the_stitched_outer_edge() {
+        let ctx = ctx();
+        let outline = board_outline(&ctx, true).expect("the golden board stitches");
+        let outer: Vec<Vec<(i64, i64)>> = ctx
+            .stitched_board_data
+            .as_ref()
+            .unwrap()
+            .contours
+            .iter()
+            .filter(|c| !c.is_hole)
+            .map(|c| c.points.clone())
+            .collect();
+        assert_eq!(*outline, outer);
+    }
+
+    /// An edge that did not stitch says nothing about where the board ends, so nothing is
+    /// dropped as being outside it.
+    #[test]
+    fn a_board_edge_that_did_not_stitch_clips_nothing() {
+        let mut ctx = ctx();
+        ctx.stitched_board_data.as_mut().unwrap().errors.push("open contour".into());
+        assert_eq!(board_outline(&ctx, true), None);
+    }
+
+    /// Dropped cuts are reported, so an edge ring that vanished from the program is not
+    /// mistaken for a net that lost its isolation. Clipper's rounding is not reported.
+    #[test]
+    fn dropped_edge_isolation_is_reported_but_rounding_is_not() {
+        let ctx = ctx();
+        assert_eq!(outside_board_note(&ctx, 0.0), None);
+        assert_eq!(outside_board_note(&ctx, 999.0), None, "under a micron is rounding");
+        let note = outside_board_note(&ctx, 8_250_000.0).expect("8.25 mm dropped is said");
+        assert!(note.contains("outside the board edge"), "{note}");
     }
 }

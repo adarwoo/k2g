@@ -60,7 +60,8 @@ pub use copper::{
 };
 pub use clearing::{clear_narrow_copper, islands, ClearedGround, Clearing, ToolGround, ISLAND_WIDTH_MULTIPLE};
 pub use isolation::{
-    isolate, IsolationContour, IsolationResult, NarrowedPair, UncutStretch, LADDER_STEP_NM,
+    clip_to_board, isolate, IsolationContour, IsolationResult, NarrowedPair, UncutStretch,
+    LADDER_STEP_NM,
 };
 pub use stitching::corners::{convex_corners, corner_fillet_area_nm2, Corner, MIN_CORNER_TURN_RAD};
 pub use stitching::{

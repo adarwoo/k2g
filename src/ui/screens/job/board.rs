@@ -2861,6 +2861,7 @@ mod isolation_tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            board_outline: None,
         }
     }
 
@@ -2912,6 +2913,7 @@ mod isolation_tests {
                 ..Default::default()
             },
             mill_clearing: pcb::Clearing::default(),
+            outside_board_nm: 0.0,
         };
         IsolationInput {
             target,

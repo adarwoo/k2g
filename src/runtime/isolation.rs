@@ -94,6 +94,38 @@ pub struct IsolationSpec {
     /// The diameter of the milling cutter resolved for the clearing pass, nm. Contours cut
     /// by a different mill are a different question — see `width_nm`'s own reasoning.
     pub clearing_mill_diameter_nm: i64,
+    /// The board's outer edge, board nm, when the job cuts the board out along it. The
+    /// isolation cuts beyond it are dropped ([`drop_cuts_outside_board`]). `None` when no
+    /// step cuts the board out, or when its edge did not stitch: either way nothing says
+    /// the copper beyond the edge will be separated, so every cut is kept.
+    ///
+    /// Part of the question for the same reason `remove_islands` is: turning the outline
+    /// routing on or off must not match contours clipped, or not clipped, before the change.
+    /// Shared rather than copied, because the spec is rebuilt on every plan, and comparing
+    /// two handles to the same outline is a pointer check rather than a walk of its points.
+    pub board_outline: Option<BoardOutline>,
+}
+
+/// A board's outer edge rings, board nm, as [`IsolationSpec::board_outline`] holds them.
+pub type BoardOutline = Arc<Vec<Vec<(i64, i64)>>>;
+
+/// Drops the isolation cuts that run outside the board, when the spec says the job cuts
+/// it out, and returns how much cut that was, nm.
+///
+/// Runs **after** the islands and the milling clearing are computed, never before. Both
+/// are worked out from the channels, and a channel missing beyond the edge would join
+/// the free copper there to the copper outside the board. Clearing would then count that
+/// waste copper as its own. The dropped stretches are free copper either way.
+///
+/// One function for the worker and the golden-plan fixture, so the fixture cannot drift
+/// from what the worker publishes.
+pub(crate) fn drop_cuts_outside_board(result: &mut IsolationResult, spec: &IsolationSpec) -> f64 {
+    let Some(outline) = spec.board_outline.as_ref() else {
+        return 0.0;
+    };
+    let (kept, dropped_nm) = pcb::clip_to_board(std::mem::take(&mut result.contours), outline);
+    result.contours = kept;
+    dropped_nm
 }
 
 /// Contours for one layer, and what was wrong with the copper they came from.
@@ -123,6 +155,10 @@ pub struct Isolation {
     /// did not ask for it, either because the step has the pass off or because no mill in
     /// stock was narrow enough for the threshold.
     pub mill_clearing: pcb::Clearing,
+    /// How much isolation cut was dropped for running outside a board the job cuts out,
+    /// nm. Zero when nothing was, or the spec gave no outline to clip to. Kept so the plan
+    /// can tell the operator why the copper at the edge has no ring there.
+    pub outside_board_nm: f64,
 }
 
 /// What the context knows about isolation right now.
@@ -283,7 +319,7 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
     }
 
     let started = std::time::Instant::now();
-    let result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
+    let mut result = pcb::isolate(&copper, spec.width_nm, spec.min_width_nm);
     log::info!(
         "Isolated layer {} of {} in {:?}: {} contour(s), {} narrowed pair(s)",
         spec.layer_id,
@@ -339,11 +375,15 @@ fn run_isolation(spec: &IsolationSpec, cancel: &Arc<AtomicBool>) -> Result<Isola
         pcb::Clearing::default()
     };
 
+    // Last, once the clearing above has seen every channel: see the function's own note.
+    let outside_board_nm = drop_cuts_outside_board(&mut result, spec);
+
     Ok(Isolation {
         spec: spec.clone(),
         result,
         clearing,
         mill_clearing,
+        outside_board_nm,
         copper_warnings: copper.warnings,
         copper_layer_count,
     })
@@ -558,6 +598,7 @@ mod tests {
             clearing_threshold_nm: 0,
             clearing_guard_band_nm: 0,
             clearing_mill_diameter_nm: 0,
+            board_outline: None,
         }
     }
 
@@ -578,6 +619,7 @@ mod tests {
                 copper_layer_count: 2,
                 clearing: pcb::Clearing::default(),
                 mill_clearing: pcb::Clearing::default(),
+                outside_board_nm: 0.0,
             }),
         );
     }
@@ -654,6 +696,7 @@ mod tests {
             copper_layer_count: 2,
             clearing: pcb::Clearing::default(),
             mill_clearing: pcb::Clearing::default(),
+            outside_board_nm: 0.0,
         }
     }
 

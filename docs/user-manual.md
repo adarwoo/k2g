@@ -571,6 +571,17 @@ stretch and says which nets it narrowed, in the step's notes; it never widens an
 never cuts into a neighbour. Outer copper only (F.Cu or B.Cu, whichever the step's
 board face names).
 
+When the job cuts the board out (some step routes the board edge right through), no
+channel is cut **outside** the board edge. Copper poured right up to the edge would
+otherwise get a ring running round the outside of it, which only separates the net
+from copper the outline routing removes anyway. The step's notes say how much was left
+out. A score or V-groove edge doesn't count, and neither do the cuts inside a cutout,
+because the program can't tell whether those get separated.
+
+To make use of it, let the copper reach the edge in KiCad. A zone held back from the
+edge by the board's copper-to-edge clearance (0.5 mm by default) leaves a strip of copper
+inside the board, and the ring that separates the zone from that strip is still cut.
+
 The **Board** tab draws the result — the copper this will leave, at the width it will
 really be cut — which is the quickest way to see whether a width suits the board before
 you cut one. See [The isolation pass](#the-isolation-pass).
