@@ -1279,6 +1279,13 @@ pub fn engrave_target(ctx: &crate::runtime::AppCtx, index: usize) -> Option<Engr
             raw,
             &choice,
             clearing_mill_tool.map(|t| t.diameter),
+            // The same fact the plan reads from `JobFrame::waste`, asked of the steps
+            // directly because this view has no frame. Phrased any other way, the preview
+            // would wait on contours the plan never asks for.
+            crate::runtime::machining_plan::board_outline(
+                ctx,
+                steps.iter().any(|step| step.routes_outline() && step.route_board.cuts_through()),
+            ),
         ),
         is_selected_step: engrave_index == index,
         requested: raw.isolate.width,

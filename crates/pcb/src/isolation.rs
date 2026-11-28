@@ -907,6 +907,63 @@ fn neighbouring_copper(nets: &[NetCopper], index: usize, width_nm: i64) -> Vec<R
     intersect(&nearby, &[reach.ring()])
 }
 
+/// The isolation cuts that run inside the board, and how much was dropped for lying
+/// outside it.
+///
+/// For a board the job cuts out along `outline` (its outer edge rings, board nm). Copper
+/// that reaches the edge gets a ring like any other, and the stretch of that ring beyond the
+/// edge separates the net from copper the outline routing is about to remove anyway. It
+/// is time spent engraving waste (GitHub #41).
+///
+/// **The tool centre is the test, not the channel.** A stretch whose centre line is outside
+/// the board is dropped, even though the channel's inner half may reach a little inside.
+/// That is still safe. The kept stretches end exactly on the edge, so the stretches that
+/// approach the edge still cut across to it on either side of the net. Whatever copper
+/// the dropped stretch would have taken inside the board is then enclosed by the net,
+/// those stretches and the edge, and joins only that net. It is never a path to another
+/// one. That holds only if the board really is separated along `outline`, so the caller
+/// passes an outline only when the job cuts the board out.
+///
+/// A loop that lies wholly inside comes back as the same closed loop. A loop that crosses
+/// the edge comes back as open spans, which the planner chains back together by net as
+/// it does the pieces a narrowed channel leaves. An empty `outline` changes nothing.
+pub fn clip_to_board(
+    contours: Vec<IsolationContour>,
+    outline: &[Vec<(i64, i64)>],
+) -> (Vec<IsolationContour>, f64) {
+    let clips: Vec<Ring> = outline.iter().filter(|ring| ring.len() >= 3).cloned().collect();
+    if clips.is_empty() {
+        return (contours, 0.0);
+    }
+
+    let mut kept = Vec::with_capacity(contours.len());
+    let mut dropped_nm = 0.0;
+    // One contour per clip, unlike the copper clips above that batch every piece into one
+    // call: here each surviving piece has to come back carrying its own net and width, and
+    // the clip region is a board edge of a few hundred points rather than the board's
+    // copper, so a call per contour costs little.
+    for contour in contours {
+        let before = contour_len_nm(&contour);
+        let piece = match contour.closed {
+            true => Piece::Closed(contour.path),
+            false => Piece::Open(contour.path),
+        };
+        let mut after = 0.0;
+        for piece in clip_pieces(vec![piece], &clips, ClipType::Intersection) {
+            let (path, closed) = match piece {
+                Piece::Closed(ring) => (ring, true),
+                Piece::Open(span) => (span, false),
+            };
+            let piece =
+                IsolationContour { net: contour.net.clone(), path, closed, width_nm: contour.width_nm };
+            after += contour_len_nm(&piece);
+            kept.push(piece);
+        }
+        dropped_nm += (before - after).max(0.0);
+    }
+    (kept, dropped_nm)
+}
+
 // ---------------------------------------------------------------------------
 // Clipper, kept behind names that say what they are for
 // ---------------------------------------------------------------------------
@@ -1765,5 +1822,79 @@ warnings {:?}", result.uncut, result.warnings);
         assert!(rungs.windows(2).all(|w| w[0] > w[1]), "the ladder only descends");
 
         assert_eq!(ladder(30_000, 50_000), vec![30_000], "a floor above the width is just the width");
+    }
+
+    /// A 20 × 10 mm board edge, as the stitcher hands it over.
+    fn board_edge() -> Vec<Vec<(i64, i64)>> {
+        vec![vec![(0, 0), (20 * MM, 0), (20 * MM, 10 * MM), (0, 10 * MM)]]
+    }
+
+    /// A closed isolation loop on `net` around the box from `lo` to `hi`, 0.25 mm wide.
+    fn ring(net: &str, lo: (i64, i64), hi: (i64, i64)) -> IsolationContour {
+        IsolationContour {
+            net: net.into(),
+            path: vec![lo, (hi.0, lo.1), hi, (lo.0, hi.1)],
+            closed: true,
+            width_nm: 250_000,
+        }
+    }
+
+    /// A loop wholly inside the board is the same closed loop afterwards, and nothing is
+    /// counted as dropped.
+    #[test]
+    fn a_loop_inside_the_board_is_kept_whole() {
+        let inside = ring("SIG", (2 * MM, 2 * MM), (5 * MM, 4 * MM));
+        let (kept, dropped) = clip_to_board(vec![inside.clone()], &board_edge());
+
+        assert_eq!(kept.len(), 1);
+        assert!(kept[0].closed, "still a loop, so the planner may enter it anywhere");
+        assert_eq!(kept[0].net, "SIG");
+        assert_eq!(contour_len_nm(&kept[0]), contour_len_nm(&inside));
+        assert_eq!(dropped, 0.0);
+    }
+
+    /// GitHub #41: a zone poured to the edge gets a ring whose outer side runs beyond the
+    /// board. That side is dropped. What remains stays inside the board, keeps the net and
+    /// the width, and reaches the edge at both ends, so it still closes the net off against
+    /// the edge.
+    #[test]
+    fn the_stretch_of_a_ring_beyond_the_edge_is_dropped() {
+        // A ground pour from 1 mm to the right edge, its ring 0.125 mm out from the copper.
+        let gnd = ring("GND", (10 * MM, MM), (20 * MM + 125_000, 9 * MM));
+        let (kept, dropped) = clip_to_board(vec![gnd], &board_edge());
+
+        assert!(!kept.is_empty());
+        for piece in &kept {
+            assert!(!piece.closed, "a cut loop is open spans");
+            assert_eq!((piece.net.as_str(), piece.width_nm), ("GND", 250_000));
+            for &(x, y) in &piece.path {
+                assert!((0..=20 * MM).contains(&x) && (0..=10 * MM).contains(&y), "({x}, {y}) is off the board");
+            }
+        }
+        let ends: Vec<(i64, i64)> =
+            kept.iter().flat_map(|p| [p.path[0], *p.path.last().unwrap()]).collect();
+        assert!(ends.contains(&(20 * MM, MM)) && ends.contains(&(20 * MM, 9 * MM)), "{ends:?}");
+        // The 8 mm side beyond the edge, plus the two 0.125 mm stubs reaching it.
+        assert!((dropped - 8_250_000.0).abs() < 1_000.0, "dropped {dropped}");
+    }
+
+    /// A loop wholly outside the board is copper the outline routing throws away.
+    #[test]
+    fn a_loop_outside_the_board_is_dropped_entirely() {
+        let outside = ring("NC", (22 * MM, 2 * MM), (24 * MM, 4 * MM));
+        let (kept, dropped) = clip_to_board(vec![outside], &board_edge());
+
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 8.0 * MM as f64);
+    }
+
+    /// No outline (a board edge that did not stitch) means nothing is known about where
+    /// the board ends, so nothing is dropped.
+    #[test]
+    fn no_outline_drops_nothing() {
+        let gnd = ring("GND", (10 * MM, MM), (21 * MM, 9 * MM));
+        let (kept, dropped) = clip_to_board(vec![gnd.clone()], &[]);
+        assert_eq!(kept, vec![gnd]);
+        assert_eq!(dropped, 0.0);
     }
 }

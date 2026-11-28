@@ -18,6 +18,12 @@ name is usually the shorter answer to "what changed".
   and a cutter already in the rack is chosen before one from stock. When nothing is
   narrow enough, the note names the narrowest cutter there is, so you can tell whether to
   add one or raise the width ([#41](https://github.com/adarwoo/k2g/issues/41)).
+- **No isolation is engraved outside a board the job routes out.** Copper poured to the
+  board edge got a full ring, including a stretch running outside the edge that only cut
+  away copper the outline routing removes anyway. When a step routes the board edge right
+  through, isolation stops at the edge and the step's notes say how much was left out.
+  Scored and V-grooved edges, and cutouts, are unchanged
+  ([#41](https://github.com/adarwoo/k2g/issues/41)).
 
 ### Security
 - **Libraries with published advisories are updated.** `url` 2.5.9
