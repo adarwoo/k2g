@@ -10,6 +10,12 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-11-28 — *mill*
+
+Copper clearing works with the cutters you have, and isolation stops at an edge the job
+routes away. 0.17.1 was tagged but never published, so its changes (below) first reach you
+in this release.
+
 ### Fixed
 - **Copper clearing now uses an end mill or a router when there is no milling bit.**
   *Clear copper → Everything narrower than a width* only accepted a milling bit, so a
@@ -396,7 +402,8 @@ Job and profile ownership migration, and summary updates.
 
 Processing schema, UI and persistence brought into step.
 
-[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.17.1-router-fit...HEAD
+[Unreleased]: https://github.com/adarwoo/k2g/compare/v0.17.2-mill...HEAD
+[0.17.2]: https://github.com/adarwoo/k2g/compare/v0.17.1-router-fit...v0.17.2-mill
 [0.17.1]: https://github.com/adarwoo/k2g/compare/v0.17.0-spacemouse...v0.17.1-router-fit
 [0.17.0]: https://github.com/adarwoo/k2g/compare/v0.16.0-clearing...v0.17.0-spacemouse
 [0.16.0]: https://github.com/adarwoo/k2g/compare/v0.15.0-templates...v0.16.0-clearing
