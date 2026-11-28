@@ -31,7 +31,7 @@
 //! assert!(out.contains("G56"));
 //! ```
 
-use chrono::{DateTime, Local};
+use jiff::ZonedDateTime;
 use rhai::{Dynamic, Engine, EvalAltResult, ImmutableString, Map, Scope};
 use thiserror::Error;
 use std::sync::{Arc, RwLock};
@@ -146,7 +146,7 @@ pub enum RenderError {
 }
 
 #[derive(Debug, Clone)]
-struct RhaiDateTime(DateTime<Local>);
+struct RhaiDateTime(ZonedDateTime);
 
 /// Template renderer that evaluates `{...}` blocks using Rhai.
 ///
@@ -170,10 +170,15 @@ impl GcodeTemplateParser {
         let unit_mode = Arc::new(RwLock::new(RenderUnitMode::Raw));
 
         engine.register_type_with_name::<RhaiDateTime>("DateTime");
-        engine.register_fn("now", || RhaiDateTime(Local::now()));
-        engine.register_fn("format", |dt: &mut RhaiDateTime, fmt: &str| -> String {
-            dt.0.format(fmt).to_string()
-        });
+        engine.register_fn("now", || RhaiDateTime(ZonedDateTime::now()));
+        // Fallible on purpose: the format string is the template author's, and a typo in
+        // it must come back as a template error, not panic the thread that renders.
+        engine.register_fn(
+            "format",
+            |dt: &mut RhaiDateTime, fmt: &str| -> Result<String, Box<EvalAltResult>> {
+                jiff::fmt::strtime::format(fmt, &dt.0).map_err(|err| err.to_string().into())
+            },
+        );
 
         engine.register_fn("clamp", |value: f64, min: f64, max: f64| -> f64 {
             value.max(min).min(max)

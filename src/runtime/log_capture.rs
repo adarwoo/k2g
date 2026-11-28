@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
@@ -132,7 +132,7 @@ impl<S: Subscriber> Layer<S> for CaptureLayer {
         event.record(&mut visitor);
 
         push(LogEntry {
-            timestamp: Local::now().format("%H:%M:%S%.3f").to_string(),
+            timestamp: ZonedDateTime::now().strftime("%H:%M:%S%.3f").to_string(),
             level: meta.level().as_str(),
             target: meta.target().to_string(),
             message: visitor.into_message(),

@@ -36,7 +36,7 @@ use std::sync::OnceLock;
 ///
 /// Fields are pre-formatted strings rather than the types they came from: the only
 /// consumers render them, and holding a `SystemTime` here would push the same
-/// `chrono` formatting into each one.
+/// date formatting into each one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildInfo {
     /// `CARGO_PKG_VERSION` — the release this build claims to be.
@@ -81,8 +81,8 @@ pub fn current() -> &'static BuildInfo {
 /// minute ago", and a UTC stamp turns a one-glance check into arithmetic.
 fn built_at(exe: &std::path::Path) -> Option<String> {
     let modified = std::fs::metadata(exe).and_then(|meta| meta.modified()).ok()?;
-    let stamp: chrono::DateTime<chrono::Local> = modified.into();
-    Some(stamp.format("%Y-%m-%d %H:%M:%S").to_string())
+    let stamp = jiff::Timestamp::try_from(modified).ok()?;
+    Some(stamp.to_zoned_datetime(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 /// The block `--version` prints.
