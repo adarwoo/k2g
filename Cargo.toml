@@ -95,7 +95,7 @@ jsonschema = { version = "0.60", default-features = false }
 log = "0.4"
 image = "0.25"
 base64 = "0.23"
-rfd = "0.17"
+rfd = "0.18"
 # Resolves the host's default save location (Windows Downloads known folder,
 # XDG_DOWNLOAD_DIR on Linux) for the first G-code save.
 dirs = "7"
