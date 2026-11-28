@@ -1184,8 +1184,8 @@ fn isolation_legend(
                 }
             }
             None => facts.push(format!(
-                "No milling bit in stock is narrow enough to clear copper below {} — the \
-                 pass is skipped.",
+                "No milling bit, end mill or router of {} or less is in the rack or in \
+                 stock — the pass is skipped. The step's notes name the narrowest one there is.",
                 len(target.clearing_threshold),
             )),
         }

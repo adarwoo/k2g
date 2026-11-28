@@ -2760,43 +2760,122 @@ fn pick_slot_router(
         .map(|t| t.id.clone())
 }
 
-/// The milling bit that clears free copper up to `threshold` across: the **largest**
-/// cutter that still fits, chosen the way [`pick_slot_router`] chooses a slot cutter and
-/// for the same reason — among bits that fit, the largest clears fastest and needs the
-/// fewest passes.
+/// How well a tool suits the milling-clearing pass: lower is better, `None` is never.
 ///
-/// **Only `ToolKind::Milling`, never a V-bit.** A V-bit's tip could technically reach — a
-/// cone cuts full width at the surface, same as a flat mill — but `remove_islands` already
-/// covers what a V-bit can clear opportunistically, and the whole point of loading a
-/// dedicated tool for this pass is one built for area clearing rather than for a fine
-/// channel; see the schema's `clear_copper` note. A toolset-fixed mill that fits
-/// beats a larger in-stock one, since it costs no rack slot.
+/// A milling bit is built for exactly this — a flat bottom that leaves a clean floor —
+/// so it ranks first. An end mill is the same shape by another name. A router ranks last
+/// but is **accepted**: it is flat-ended, its rated feeds are for cutting right through
+/// the board, so a pass that only has to sever the copper is well inside them, and the
+/// finish it leaves on bare substrate does not matter. Refusing it was what left
+/// GitHub #41's copper uncleared: the toolset racked a 0.8 mm router and no milling bit,
+/// so the pass was skipped and only a note said why.
+///
+/// **A V-bit is never a candidate.** Its tip could reach, but the isolation bit already
+/// takes what a cone can clear (`remove_islands`), and this pass exists to load a tool
+/// for area work.
+///
+/// The end mill is matched on its own label, **not** through
+/// [`ToolKind::from_kind_label`]: that falls through to `Endmill` for any kind string it
+/// does not recognise, so going through it would accept a typo or an unknown tool as a
+/// clearing cutter — one that could be a misnamed V-bit.
+fn clearing_rank(tool: &Tool) -> Option<u8> {
+    let kind = tool.kind.to_ascii_lowercase();
+    if kind == "end mill" || kind == ToolKind::Endmill.as_storage_key() {
+        return Some(1);
+    }
+    match ToolKind::from_kind_label(&tool.kind) {
+        ToolKind::Milling => Some(0),
+        ToolKind::Routerbit => Some(2),
+        _ => None,
+    }
+}
+
+/// The cutter that clears free copper up to `threshold` across.
+///
+/// A cutter wider than the threshold cannot enter the copper it is meant to clear, so
+/// fitting is a hard constraint. Among cutters that fit, the kind decides first
+/// ([`clearing_rank`]: milling bit, then end mill, then router), and then the **largest**,
+/// chosen the way [`pick_slot_router`] chooses a slot cutter and for the same reason: it
+/// clears fastest and needs the fewest passes.
+///
+/// A cutter already fixed in the toolset beats any in-stock one, **whatever its kind**: a
+/// racked router clears the copper at no slot and no tool change, where a better-suited
+/// milling bit from stock costs both and may not fit the rack at all. Among the fixed
+/// slots, the kind still decides first and slot order breaks a tie.
 pub(crate) fn pick_clearing_mill(
     tools: &[Tool],
     toolset: &crate::data::model::ToolsetProfile,
     threshold: Length,
 ) -> Option<String> {
-    let is_mill = |t: &Tool| matches!(ToolKind::from_kind_label(&t.kind), ToolKind::Milling);
     let limit_um = micron(threshold);
+    let fits = |t: &&Tool| micron(t.diameter) <= limit_um;
 
-    let mut fixed = toolset
+    let fixed = toolset
         .slots
         .values()
         .filter_map(|slot| slot.tool_id.as_ref())
-        .filter_map(|id| tools.iter().find(|t| &t.id == id));
-    if let Some(tool) = fixed.find(|t| is_mill(t) && micron(t.diameter) <= limit_um) {
+        .filter_map(|id| tools.iter().find(|t| &t.id == id))
+        .filter(fits)
+        .filter_map(|t| clearing_rank(t).map(|rank| (rank, t)))
+        // `min_by_key` keeps the first of equals, so slot order breaks a tie.
+        .min_by_key(|(rank, _)| *rank);
+    if let Some((_, tool)) = fixed {
         return Some(tool.id.clone());
     }
 
     tools
         .iter()
-        .filter(|t| {
-            is_mill(t)
-                && t.status == crate::data::model::ToolStatus::InStock
-                && micron(t.diameter) <= limit_um
-        })
-        .max_by_key(|t| micron(t.diameter))
-        .map(|t| t.id.clone())
+        .filter(|t| t.status == crate::data::model::ToolStatus::InStock)
+        .filter(fits)
+        .filter_map(|t| clearing_rank(t).map(|rank| (rank, t)))
+        .min_by_key(|(rank, t)| (*rank, std::cmp::Reverse(micron(t.diameter))))
+        .map(|(_, t)| t.id.clone())
+}
+
+/// Why no cutter could be found for the milling-clearing pass, as the operator should
+/// read it.
+///
+/// Names the narrowest cutter of a usable kind that the rack or the stock *does* hold,
+/// when there is one, because the usual cause is a cutter that is simply too wide for the
+/// threshold, and "add a milling bit" is the wrong advice to someone who has one. Before
+/// GitHub #41 this said only that no milling bit was in stock, which left an operator
+/// with a 0.8 mm router in the rack unable to tell what was missing.
+///
+/// A note, not a step failure — unlike [`no_engraver_reason`], this pass is additive and
+/// off by default, so a step that cannot run it is still exactly as complete as one that
+/// never asked: the isolation channel and everything else the step does are unaffected.
+pub(crate) fn no_clearing_cutter_reason(
+    tools: &[Tool],
+    toolset: &crate::data::model::ToolsetProfile,
+    threshold: Length,
+) -> String {
+    let racked: Vec<&str> = toolset
+        .slots
+        .values()
+        .filter_map(|slot| slot.tool_id.as_deref())
+        .collect();
+    let usable = |t: &&Tool| {
+        clearing_rank(t).is_some()
+            && (racked.contains(&t.id.as_str()) || t.status == crate::data::model::ToolStatus::InStock)
+    };
+    let narrowest = tools.iter().filter(usable).min_by_key(|t| micron(t.diameter));
+
+    let what = match narrowest {
+        Some(tool) => format!(
+            "The narrowest milling bit, end mill or router available is {} ({}), which \
+             is wider than the {} threshold and could not enter the copper it would \
+             clear.",
+            tool.display_name(),
+            tool.diameter,
+            threshold,
+        ),
+        None => "No milling bit, end mill or router is in the rack or in stock.".to_string(),
+    };
+    format!(
+        "The copper-clearing pass is skipped: it needs a milling bit, end mill or router \
+         no wider than {threshold}. {what} Add one to the stock list, raise the threshold, \
+         or turn the pass off for this step.",
+    )
 }
 
 #[cfg(test)]
@@ -2852,6 +2931,96 @@ mod clearing_mill_tests {
 
         let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
         assert_eq!(chosen.as_deref(), Some("fixed"), "already racked, so it costs no slot");
+    }
+
+    /// A tool of the given kind label, built on the router fixture.
+    fn of_kind(id: &str, kind: &str, diameter_mm: f64) -> Tool {
+        let mut tool = super::tests::router(id, diameter_mm);
+        tool.kind = kind.to_string();
+        tool
+    }
+
+    /// GitHub #41: a fixed toolset of drill, V-bit, 0.8 mm router and 2.5 mm router, with
+    /// clearing below 2 mm asked for. No milling bit anywhere, so the pass used to be
+    /// skipped; the 0.8 mm router is now the cutter, and the 2.5 mm one, too wide to enter
+    /// the copper, is not.
+    #[test]
+    fn a_racked_router_clears_when_no_milling_bit_exists() {
+        let tools = vec![
+            of_kind("drill", "Drill", 0.6),
+            of_kind("vbit", "V-Bit", 0.2),
+            super::tests::router("r0_8", 0.8),
+            super::tests::router("r2_5", 2.5),
+        ];
+        let toolset = super::tests::toolset_with_fixed(&["drill", "vbit", "r0_8", "r2_5"]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("r0_8"));
+    }
+
+    /// The kind decides before the size: a milling bit beats a larger router, and an end
+    /// mill sits between the two.
+    #[test]
+    fn a_milling_bit_beats_an_end_mill_which_beats_a_router() {
+        let router = super::tests::router("router", 1.5);
+        let end_mill = of_kind("end_mill", "End Mill", 1.2);
+        let milling = mill("milling", 0.8);
+        let toolset = super::tests::toolset_with_fixed(&[]);
+        let two = Length::from_mm(2.0);
+
+        let all = vec![router.clone(), end_mill.clone(), milling];
+        assert_eq!(pick_clearing_mill(&all, &toolset, two).as_deref(), Some("milling"));
+        let no_milling = vec![router.clone(), end_mill];
+        assert_eq!(pick_clearing_mill(&no_milling, &toolset, two).as_deref(), Some("end_mill"));
+        assert_eq!(pick_clearing_mill(&[router], &toolset, two).as_deref(), Some("router"));
+    }
+
+    /// The same order holds inside the rack, whatever slot each tool sits in.
+    #[test]
+    fn in_the_rack_a_milling_bit_beats_a_router_in_an_earlier_slot() {
+        let tools = vec![super::tests::router("router", 0.8), mill("milling", 0.8)];
+        let toolset = super::tests::toolset_with_fixed(&["router", "milling"]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("milling"));
+    }
+
+    /// A racked router beats a milling bit that is only in stock: it costs no slot and no
+    /// tool change, and the stock bit might not fit the rack at all.
+    #[test]
+    fn a_racked_router_beats_a_milling_bit_only_in_stock() {
+        let tools = vec![super::tests::router("racked", 0.8), mill("stock", 1.0)];
+        let toolset = super::tests::toolset_with_fixed(&["racked"]);
+
+        let chosen = pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0));
+        assert_eq!(chosen.as_deref(), Some("racked"));
+    }
+
+    /// `ToolKind::from_kind_label` reads any unknown kind as an end mill. That catch-all
+    /// must not reach this pass: a misspelt or unknown kind could be a V-bit.
+    #[test]
+    fn an_unrecognised_kind_is_never_taken_for_an_end_mill() {
+        let tools = vec![of_kind("typo", "Endmil", 1.0), of_kind("odd", "Laser", 1.0)];
+        let toolset = super::tests::toolset_with_fixed(&["typo"]);
+
+        assert_eq!(pick_clearing_mill(&tools, &toolset, Length::from_mm(2.0)), None);
+    }
+
+    /// When nothing fits, the note names the narrowest usable cutter there is, so an
+    /// operator with only a wide router is not told to go and buy a milling bit.
+    #[test]
+    fn the_skip_note_names_the_narrowest_cutter_that_was_too_wide() {
+        let tools = vec![super::tests::router("r2_5", 2.5), super::tests::router("r3_0", 3.0)];
+        let toolset = super::tests::toolset_with_fixed(&["r2_5"]);
+        let two = Length::from_mm(2.0);
+        assert_eq!(pick_clearing_mill(&tools, &toolset, two), None);
+
+        let note = no_clearing_cutter_reason(&tools, &toolset, two);
+        assert!(note.contains(&tools[0].display_name()), "{note}");
+        assert!(note.contains("wider than"), "{note}");
+
+        let none = no_clearing_cutter_reason(&[of_kind("vbit", "V-Bit", 0.2)], &toolset, two);
+        assert!(none.contains("No milling bit, end mill or router"), "{none}");
     }
 }
 

@@ -1093,7 +1093,7 @@ fn plan_step(
             }
             let clearing_bit = clearing_mill.as_ref().and_then(|id| ctx.tools.iter().find(|t| &t.id == id));
             let (spans, clearing_spans, ground, warnings) =
-                plan_engrave_spans(ctx, raw, bit, choice, clearing_bit, &placement);
+                plan_engrave_spans(ctx, raw, bit, choice, clearing_bit, toolset, &placement);
             // Which hops between cuts may stay down: those whose sweep, at the cutting tool's
             // own width, lies on ground the step cuts anyway. Asked in board space, where the
             // ground was computed — `unplace` undoes the placement's flip and scaling.
@@ -1688,6 +1688,7 @@ fn plan_engrave_spans(
     bit: &Tool,
     choice: &EngraveChoice,
     clearing_mill: Option<&Tool>,
+    toolset: &crate::data::model::ToolsetProfile,
     placement: &Placement,
 ) -> (Vec<EngraveChain>, Vec<EngraveChain>, Option<pcb::ClearedGround>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
@@ -1695,7 +1696,11 @@ fn plan_engrave_spans(
         return (Vec::new(), Vec::new(), None, warnings);
     };
     if raw.mills_narrow_copper() && clearing_mill.is_none() {
-        warnings.push(no_clearing_mill_reason(raw.clear.threshold));
+        warnings.push(crate::runtime::tooling::no_clearing_cutter_reason(
+            &ctx.tools,
+            toolset,
+            raw.clear.threshold,
+        ));
     }
 
     let spec = isolation_spec(board, ctx.board_epoch, raw, choice, clearing_mill.map(|t| t.diameter));
@@ -2178,22 +2183,6 @@ mod chain_stitching_tests {
         assert_eq!(chains.len(), 2, "the closed ring stays alone");
         assert!(chains.iter().any(|c| c.len() == 1 && c[0].closed));
     }
-}
-
-/// Why the milling-clearing pass is skipped: the step asks for it but nothing in stock is a
-/// milling bit narrow enough for the threshold.
-///
-/// A note, not a step failure — unlike [`no_engraver_reason`](crate::runtime::tooling::no_engraver_reason),
-/// this pass is additive and off by default, so a step that cannot run it is still exactly
-/// as complete as one that never asked: the isolation channel and everything else the step
-/// does are unaffected.
-fn no_clearing_mill_reason(threshold: Length) -> String {
-    format!(
-        "No milling bit in stock is narrow enough to clear copper below {}, so the \
-         milling-clearing pass is skipped. Add one to the stock list, or raise the \
-         threshold, or turn the pass off for this step.",
-        threshold,
-    )
 }
 
 /// What to tell the operator about the copper the milling pass took out, and what it left.

@@ -10,6 +10,15 @@ name is usually the shorter answer to "what changed".
 
 ## [Unreleased]
 
+### Fixed
+- **Copper clearing now uses an end mill or a router when there is no milling bit.**
+  *Clear copper → Everything narrower than a width* only accepted a milling bit, so a
+  toolset with routers and no milling bit had its clearing quietly skipped, with only a
+  note to say so. Now a milling bit is still preferred, then an end mill, then a router,
+  and a cutter already in the rack is chosen before one from stock. When nothing is
+  narrow enough, the note names the narrowest cutter there is, so you can tell whether to
+  add one or raise the width ([#41](https://github.com/adarwoo/k2g/issues/41)).
+
 ### Security
 - **Libraries with published advisories are updated.** `url` 2.5.9
   ([RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592), #50), `rustix`
