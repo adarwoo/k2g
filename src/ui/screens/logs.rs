@@ -92,10 +92,11 @@ fn security_rows() -> Vec<SecurityRow> {
                     .to_string()
             };
             // Local time for the display; the file keeps UTC.
-            let time = chrono::DateTime::parse_from_rfc3339(&get("time"))
+            let time = get("time")
+                .parse::<jiff::Timestamp>()
                 .map(|when| {
-                    when.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S")
+                    when.to_zoned_datetime(jiff::tz::TimeZone::system())
+                        .strftime("%Y-%m-%d %H:%M:%S")
                         .to_string()
                 })
                 .unwrap_or_else(|_| get("time"));
@@ -312,7 +313,7 @@ pub fn LogsScreen(state: Signal<crate::runtime::AppCtx>) -> Element {
 fn export_security_log() -> Option<Result<String, String>> {
     let default_name = format!(
         "k2g-security-{}.jsonl",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
+        jiff::ZonedDateTime::now().strftime("%Y%m%d-%H%M%S")
     );
     let target = rfd::FileDialog::new()
         .set_file_name(&default_name)

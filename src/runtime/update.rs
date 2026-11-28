@@ -161,7 +161,7 @@ pub fn check_is_due(
     enabled: bool,
     last_check: Option<&str>,
     postponed_until: Option<&str>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> bool {
     if !enabled {
         return false;
@@ -180,14 +180,20 @@ pub fn check_is_due(
         None => true,
         // A stamp in the future means the clock moved backwards. Check now rather
         // than wait for real time to catch up, which could be months.
-        Some(last) => now < last || now - last >= chrono::Duration::hours(CHECK_INTERVAL_HOURS),
+        Some(last) => {
+            now < last
+                || last.duration_until(now) >= jiff::SignedDuration::from_hours(CHECK_INTERVAL_HOURS)
+        }
     }
 }
 
-fn parse_stamp(text: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(text)
-        .ok()
-        .map(|when| when.with_timezone(&chrono::Utc))
+/// A persisted RFC 3339 stamp as an instant, or `None` when it does not parse.
+///
+/// Accepts both spellings of UTC: `…Z`, which k2g writes now, and `…+00:00`, which the
+/// settings files of every release before the move off `chrono` still hold. Rejecting
+/// the old form would silently re-arm every postponed update banner on upgrade.
+fn parse_stamp(text: &str) -> Option<jiff::Timestamp> {
+    text.parse().ok()
 }
 
 fn client(timeout: Duration) -> Result<reqwest::blocking::Client, UpdateError> {
@@ -533,7 +539,7 @@ pub fn start_update_check() {
             enabled,
             last_check.as_deref(),
             postponed.as_deref(),
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
     {
         if !enabled {
@@ -608,8 +614,19 @@ pub fn start_install(update: AvailableUpdate, on_done: impl FnOnce(Result<(), St
 mod tests {
     use super::*;
 
-    fn utc(text: &str) -> chrono::DateTime<chrono::Utc> {
+    fn utc(text: &str) -> jiff::Timestamp {
         parse_stamp(text).unwrap()
+    }
+
+    /// Stamps written by releases that still used `chrono` (`+00:00`, with nanoseconds)
+    /// must keep their meaning after the upgrade, or a postponement the user asked for
+    /// would lapse the moment they install the new build.
+    #[test]
+    fn stamps_written_before_the_move_off_chrono_still_parse() {
+        let old = parse_stamp("2026-11-20T09:15:00.123456789+00:00").unwrap();
+        assert_eq!(old, utc("2026-11-20T09:15:00.123456789Z"));
+        let now = utc("2026-11-21T00:00:00Z");
+        assert!(!check_is_due(true, None, Some("2026-11-27T09:15:00.5+00:00"), now));
     }
 
     #[test]

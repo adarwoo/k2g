@@ -411,7 +411,7 @@ impl AppCtx {
             .collect();
 
         let filename = self.app.board.as_ref().map(|board| board.name.clone()).unwrap_or_default();
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let timestamp = jiff::ZonedDateTime::now().strftime("%Y-%m-%d %H:%M:%S").to_string();
 
         // The resolved drill plan plus one program context per step (`steps[i]` matches
         // `plan.steps[i]`) and the tool→feed/speed lookup. Built here on the main thread;
