@@ -104,7 +104,10 @@ uuid = { version = "1", features = ["v5", "v7"] }
 dioxus-logger = "0.7.9"
 tracing = "0.1.44"
 tracing-subscriber = { version="0.3.23", features = ["env-filter"] }
-chrono = "0.4"
+# Dates and times. `jiff` rather than `chrono`, which is unmaintained (RUSTSEC-2026-0543),
+# and rather than `time`, whose local-offset lookup refuses to answer on Unix once a
+# second thread exists — and k2g shows local times from worker threads and the UI alike.
+jiff = "1"
 synoptic = "2"
 # The update check (`runtime::update`) — the application's only outbound request.
 # `rustls-tls` rather than the default `native-tls`: one TLS stack whose trust

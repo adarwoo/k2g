@@ -214,10 +214,10 @@ pub fn SettingsDialog(
     let last_check = snapshot
         .update_last_check
         .as_deref()
-        .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+        .and_then(|stamp| stamp.parse::<jiff::Timestamp>().ok())
         .map(|when| {
-            when.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d %H:%M")
+            when.to_zoned_datetime(jiff::tz::TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
                 .to_string()
         });
 

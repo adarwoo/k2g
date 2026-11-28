@@ -888,14 +888,17 @@ impl AppState {
     /// on success would make a machine with no network retry on every single launch,
     /// which is both useless and the closest thing to abusive traffic this app can emit.
     pub fn record_update_check_now(&mut self) {
-        self.update_last_check = Some(chrono::Utc::now().to_rfc3339());
+        self.update_last_check = Some(jiff::Timestamp::now().to_string());
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 
     /// Silences *every* update banner for `days` — the "remind me later" action.
     pub fn postpone_update(&mut self, days: i64) {
-        let until = chrono::Utc::now() + chrono::Duration::days(days);
-        self.update_postponed_until = Some(until.to_rfc3339());
+        // Days as 24-hour blocks on an instant: a reminder that comes back an hour
+        // early or late across a DST change is no worse, and an instant has no zone to
+        // count calendar days in.
+        let until = jiff::Timestamp::now() + jiff::SignedDuration::from_hours(days * 24);
+        self.update_postponed_until = Some(until.to_string());
         self.persist_realms(&[PersistRealm::GlobalSettings]);
     }
 

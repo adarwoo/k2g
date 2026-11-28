@@ -25,6 +25,17 @@ name is usually the shorter answer to "what changed".
   Scored and V-grooved edges, and cutouts, are unchanged
   ([#41](https://github.com/adarwoo/k2g/issues/41)).
 
+### Security
+- **Libraries with published advisories are updated.** `url` 2.5.9
+  ([RUSTSEC-2026-0592](https://rustsec.org/advisories/RUSTSEC-2026-0592), #50), `rustix`
+  1.1.6 ([RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486), #43) and
+  `cookie` 0.18.3 ([RUSTSEC-2026-0594](https://rustsec.org/advisories/RUSTSEC-2026-0594)).
+- **Dates and times no longer go through an unmaintained library.** `chrono`
+  ([RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543), #51) is replaced
+  by `jiff`. Nothing changes for you: timestamps already saved in your settings and in
+  the security log still read back, and new ones are written as UTC with a `Z` suffix
+  instead of `+00:00`.
+
 ## [0.17.1] — 2026-10-26 — *router-fit*
 
 A router the size of a hole now makes it, and stock status is one click.
